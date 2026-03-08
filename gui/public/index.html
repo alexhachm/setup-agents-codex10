@@ -1,0 +1,178 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <meta name="theme-color" content="#0d1117">
+  <meta name="description" content="mac10 multi-agent coordination dashboard">
+  <title>mac10 Dashboard</title>
+  <link rel="stylesheet" href="styles.css">
+</head>
+<body>
+  <header role="banner">
+    <h1>mac10</h1>
+    <span id="status-indicator" class="status-dot disconnected" role="status" aria-label="Disconnected"></span>
+    <span id="status-text" aria-live="polite">Connecting...</span>
+  </header>
+
+  <nav id="tab-bar" aria-label="Project tabs">
+    <div id="tab-list" role="tablist"></div>
+    <button id="add-tab-btn" title="Add project" aria-label="Add project">+</button>
+  </nav>
+
+  <main role="main">
+    <section id="setup-panel">
+      <div id="setup-header">
+        <h2>Setup</h2>
+        <span id="setup-status"></span>
+        <button id="setup-toggle" style="display:none" title="Toggle setup panel">&#9660;</button>
+      </div>
+      <div id="setup-body">
+        <div id="setup-form">
+          <div class="setup-field">
+            <label for="preset-select">Preset</label>
+            <div class="preset-row">
+              <select id="preset-select"><option value="">-- New --</option></select>
+              <button id="preset-delete-btn" title="Delete selected preset" disabled>&times;</button>
+            </div>
+          </div>
+          <div class="setup-field">
+            <label for="project-dir">Project Directory</label>
+            <input type="text" id="project-dir" placeholder="/path/to/your-project" />
+          </div>
+          <div class="setup-field">
+            <label for="github-repo">GitHub Repo</label>
+            <input type="text" id="github-repo" placeholder="owner/repo" />
+          </div>
+          <div class="setup-field">
+            <label for="worker-count">Workers</label>
+            <input type="number" id="worker-count" min="1" max="8" value="4" />
+          </div>
+          <div class="setup-buttons">
+            <button id="save-config-btn">Save Config</button>
+            <button id="launch-btn">Launch Full Setup</button>
+          </div>
+          <div id="config-msg" style="display:none"></div>
+        </div>
+        <div id="setup-output" style="display:none">
+          <pre id="setup-log"></pre>
+        </div>
+      </div>
+    </section>
+
+    <section id="request-form" role="search">
+      <input type="text" id="request-input" placeholder="Describe your coding request..." aria-label="Coding request description" />
+      <button id="request-btn">Submit Request</button>
+    </section>
+
+    <section id="masters-panel">
+      <h2>Masters</h2>
+      <div class="masters-grid">
+        <div class="master-card">
+          <div class="master-title">Master-1 <span class="master-model">Fast</span></div>
+          <div class="master-role">Interface</div>
+          <span id="master1-status" class="master-status"></span>
+          <button id="master1-btn" class="master-btn">Launch</button>
+        </div>
+        <div class="master-card">
+          <div class="master-title">Master-2 <span class="master-model">Deep</span></div>
+          <div class="master-role">Architect</div>
+          <span id="architect-status" class="master-status"></span>
+          <button id="architect-btn" class="master-btn">Launch</button>
+        </div>
+        <div class="master-card">
+          <div class="master-title">Master-3 <span class="master-model">Fast</span></div>
+          <div class="master-role">Allocator</div>
+          <span id="master3-status" class="master-status"></span>
+          <button id="master3-btn" class="master-btn">Launch</button>
+        </div>
+      </div>
+    </section>
+
+    <section id="git-panel">
+      <div id="git-header">
+        <h2>Git</h2>
+        <span id="git-repo-label"></span>
+      </div>
+      <div id="git-actions">
+        <button id="git-push-btn" disabled>Push to GitHub</button>
+        <span id="git-push-status"></span>
+      </div>
+      <div id="git-output" style="display:none">
+        <pre id="git-log"></pre>
+      </div>
+    </section>
+
+    <div class="grid">
+      <section id="workers-panel">
+        <div class="panel-header" data-panel="workers"><h2>Workers</h2></div>
+        <div id="workers-list"></div>
+      </section>
+
+      <section id="requests-panel">
+        <div class="panel-header" data-panel="requests"><h2>Requests</h2></div>
+        <div id="requests-list"></div>
+      </section>
+
+      <section id="tasks-panel">
+        <div class="panel-header" data-panel="tasks"><h2>Tasks</h2></div>
+        <div id="tasks-list"></div>
+      </section>
+    </div>
+
+    <section id="log-panel">
+      <div class="panel-header" data-panel="log"><h2>Activity Log</h2></div>
+      <div id="log-list"></div>
+    </section>
+
+    <section id="changes-panel">
+      <div class="panel-header" data-panel="changes">
+        <h2>Changes</h2>
+        <div id="changes-domain-filter">
+          <select id="changes-domain-select">
+            <option value="">All Domains</option>
+          </select>
+        </div>
+      </div>
+      <div id="changes-list"></div>
+    </section>
+
+    <div id="settings-panel" class="settings-panel" style="display:none">
+      <div class="settings-panel-title"></div>
+      <div class="settings-panel-items"></div>
+    </div>
+
+    <div id="add-project-modal" class="modal" style="display:none" role="dialog" aria-modal="true" aria-label="Add project">
+      <div class="modal-content">
+        <h3>Add Project</h3>
+        <div class="modal-field">
+          <label for="modal-preset-select">Preset</label>
+          <select id="modal-preset-select"><option value="">-- New --</option></select>
+        </div>
+        <div class="modal-field">
+          <label for="modal-project-dir">Project Directory</label>
+          <input type="text" id="modal-project-dir" placeholder="/path/to/your-project" />
+        </div>
+        <div class="modal-field">
+          <label for="modal-github-repo">GitHub Repo (optional)</label>
+          <input type="text" id="modal-github-repo" placeholder="owner/repo" />
+        </div>
+        <div class="modal-field">
+          <label for="modal-worker-count">Workers</label>
+          <input type="number" id="modal-worker-count" min="1" max="8" value="4" />
+        </div>
+        <div class="modal-field modal-save-preset-row">
+          <label><input type="checkbox" id="modal-save-preset" checked /> Save as preset</label>
+        </div>
+        <div class="modal-buttons">
+          <button id="modal-launch-btn">Launch</button>
+          <button id="modal-cancel-btn">Cancel</button>
+        </div>
+        <div id="modal-error" style="display:none"></div>
+      </div>
+    </div>
+  </main>
+
+  <script src="app.js"></script>
+</body>
+</html>
