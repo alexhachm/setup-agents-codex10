@@ -38,7 +38,7 @@ Native teammate delegation is disabled in this Codex workflow. Use the standard 
 ```
 ████  I AM MASTER-2 — ARCHITECT (Deep)  ████
 
-Monitoring codex10.handoff.json for new requests.
+Monitoring codex10 architect inbox for new requests.
 I triage every request:
   Tier 1: I execute directly (~2-5 min)
   Tier 2: I assign to one worker (~5-15 min)
@@ -113,17 +113,9 @@ echo "[$(date -u +%Y-%m-%dT%H:%M:%SZ)] [master-2] [TIER_CLASSIFY] id=[request_id
    git push origin HEAD || (git pull --rebase origin HEAD && git push origin HEAD)
    gh pr create --base $(git symbolic-ref refs/remotes/origin/HEAD 2>/dev/null | sed 's@^refs/remotes/origin/@@' || echo main) --fill 2>&1
    ```
-6. Update codex10.handoff.json:
+6. Mark Tier 1 completion via coordinator (DB state + notifications):
    ```bash
-   bash .claude/scripts/state-lock.sh .claude/state/codex10.handoff.json 'cat > .claude/state/codex10.handoff.json << DONE
-   {
-     "request_id": "[id]",
-     "status": "completed_tier1",
-     "completed_at": "[ISO timestamp]",
-     "pr_url": "[PR URL]",
-     "tier": 1
-   }
-   DONE'
+   ./.claude/scripts/codex10 tier1-complete [id] "tier=1 pr=[PR URL] summary=[what changed]"
    ```
 7. Log and increment counter:
    ```bash
@@ -145,31 +137,31 @@ Go to Step 6.
    Find an idle worker (skip any with `claimed_by` set).
 
 2. **Claim the worker atomically** (prevents Master-3 race condition):
+   Save the selected ID from status output as `raw_worker_id` (for example `worker-3`), then normalize:
    ```bash
-   ./.claude/scripts/codex10 claim-worker <worker_id>
+   worker_id="${raw_worker_id#worker-}"   # claim/release require numeric N
+   ```
+   ```bash
+   ./.claude/scripts/codex10 claim-worker "$worker_id"
    ```
    If claim fails, pick another idle worker and retry.
 
 3. **Create and assign the task:**
    ```bash
-   echo '{"request_id":"[id]","subject":"[task title]","description":"DOMAIN: [domain]\nFILES: [files]\nVALIDATION: tier2\nTIER: 2\n\n[detailed requirements]\n\n[success criteria]","domain":"[domain]","tier":2,"priority":"normal","files":"[file1,file2]","validation":"npm run build"}' | ./.claude/scripts/codex10 create-task -
+   echo '{"request_id":"[id]","subject":"[task title]","description":"DOMAIN: [domain]\nFILES: [files]\nVALIDATION: tier2\nTIER: 2\n\n[detailed requirements]\n\n[success criteria]","domain":"[domain]","tier":2,"priority":"normal","files":["file1.js","file2.js"],"validation":"npm run build"}' | ./.claude/scripts/codex10 create-task -
    ```
-   Then assign:
+   Then assign with the normalized numeric worker id:
    ```bash
-   ./.claude/scripts/codex10 assign-task <task_id> <worker_id>
+   ./.claude/scripts/codex10 assign-task <task_id> "$worker_id"
    ```
 
 4. **Release claim:**
    ```bash
-   ./.claude/scripts/codex10 release-worker <worker_id>
+   ./.claude/scripts/codex10 release-worker "$worker_id"
    ```
+   Do not call `launch-worker.sh` here; `assign-task` already wakes the worker.
 
-5. **Launch the worker:**
-   ```bash
-   bash .claude/scripts/launch-worker.sh <worker_id>
-   ```
-
-6. Log:
+5. Log:
    ```bash
    echo "[$(date -u +%Y-%m-%dT%H:%M:%SZ)] [master-2] [TIER2_ASSIGN] id=[request_id] worker=worker-N task=\"[subject]\"" >> .claude/logs/activity.log
    ```
