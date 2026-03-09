@@ -719,15 +719,41 @@ function handleCommand(cmd, conn, handlers) {
         const branchName = `agent-${nextId}`;
         try {
           fs.mkdirSync(wtDir, { recursive: true });
-          // Create branch from main
+          // Create branch from configured/default branch (not current checked-out feature branch).
           const mainBranch = (() => {
+            const configuredPrimary = (db.getConfig('primary_branch') || '').trim();
+            if (configuredPrimary) return configuredPrimary;
+
             try {
               return execFileSync('git', ['symbolic-ref', '--short', 'HEAD'], { cwd: projDir, encoding: 'utf8' }).trim();
             } catch { return 'main'; }
           })();
           try {
             execFileSync('git', ['branch', branchName, mainBranch], { cwd: projDir, encoding: 'utf8' });
-          } catch {} // branch may already exist
+          } catch (branchError) {
+            const stderr = String(branchError?.stderr || '').trim();
+            const stdout = String(branchError?.stdout || '').trim();
+            const details = [stderr, stdout].filter(Boolean).join(' ').trim();
+            const message = String(branchError?.message || '').trim();
+            const combined = [message, details].filter(Boolean).join(' ').trim();
+
+            if (/already exists/i.test(combined)) {
+              // Existing branch is expected during retries/restarts.
+            } else if (
+              /not a commit/i.test(combined) ||
+              /not a valid object name/i.test(combined) ||
+              /unknown revision/i.test(combined) ||
+              /ambiguous argument/i.test(combined) ||
+              /bad revision/i.test(combined)
+            ) {
+              throw new Error(
+                `Cannot create worker branch '${branchName}' from base '${mainBranch}': base ref is invalid or cannot be resolved. ` +
+                `Set 'primary_branch' to a valid ref (for example: main) and retry.`
+              );
+            } else {
+              throw branchError;
+            }
+          }
           execFileSync('git', ['worktree', 'add', wtPath, branchName], { cwd: projDir, encoding: 'utf8' });
 
           // Copy .claude structure to worktree
@@ -905,6 +931,7 @@ function handleCommand(cmd, conn, handlers) {
         const ALLOWED_KEYS = [
           'watchdog_warn_sec', 'watchdog_nudge_sec', 'watchdog_triage_sec', 'watchdog_terminate_sec',
           'watchdog_interval_ms', 'allocator_interval_ms', 'max_workers',
+          'primary_branch',
         ];
         if (!ALLOWED_KEYS.includes(key)) {
           respond(conn, { error: `Key '${key}' is not configurable. Allowed: ${ALLOWED_KEYS.join(', ')}` });
