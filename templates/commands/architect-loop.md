@@ -53,14 +53,12 @@ Then begin the loop.
 
 **Repeat these steps forever:**
 
-### Step 1: Wait for signal and check inbox
+### Step 1: Wait on inbox and check status
+Block on architect inbox first (primary wait gate):
 ```bash
-bash .claude/scripts/signal-wait.sh .claude/signals/.codex10.handoff-signal 15
+./.claude/scripts/codex10 inbox architect --block
 ```
-Then check for new requests via codex10 CLI (source of truth — never read JSON files directly):
-```bash
-./.claude/scripts/codex10 inbox architect
-```
+This catches architect-relevant mail like `new_request`, `clarification_reply`, `task_completed`, and `task_failed` even when no handoff signal file is touched.
 
 If no pending requests, also check overall status:
 ```bash
@@ -242,13 +240,8 @@ If `commits_since >= 20` or changes span >50% of domains: full reset (Step 7).
 
 ### Step 6: Wait and repeat
 
-Adaptive signal timeout based on activity:
-```bash
-# If you just processed a request → shorter timeout (stay responsive)
-# If nothing happened → longer timeout (save resources)
-bash .claude/scripts/signal-wait.sh .claude/signals/.codex10.handoff-signal 15
-```
-Use 5s timeout if `last_activity` was < 30s ago. Use 15s otherwise.
+Do not wait on `.claude/signals/.codex10.handoff-signal` here. Architect-relevant events can be inbox-only.
+Step 1 handles blocking wait via `./.claude/scripts/codex10 inbox architect --block`.
 
 Go back to Step 1.
 
