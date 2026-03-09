@@ -64,6 +64,17 @@ function init(projectDir) {
       db.exec("ALTER TABLE requests ADD COLUMN loop_id INTEGER REFERENCES loops(id)");
     }
   }
+  if (existingTables.includes('merge_queue')) {
+    const mergeCols = db.prepare("PRAGMA table_info(merge_queue)").all().map(c => c.name);
+    if (!mergeCols.includes('updated_at')) {
+      db.exec("ALTER TABLE merge_queue ADD COLUMN updated_at TEXT");
+    }
+    if (mergeCols.includes('created_at')) {
+      db.exec("UPDATE merge_queue SET updated_at = COALESCE(updated_at, created_at, datetime('now')) WHERE updated_at IS NULL");
+    } else {
+      db.exec("UPDATE merge_queue SET updated_at = COALESCE(updated_at, datetime('now')) WHERE updated_at IS NULL");
+    }
+  }
 
   // Now safe to run full schema (CREATE TABLE IF NOT EXISTS + indexes)
   const schema = fs.readFileSync(path.join(__dirname, 'schema.sql'), 'utf8');
@@ -357,6 +368,7 @@ function updateMerge(id, fields) {
     sets.push(`${k} = ?`);
     vals.push(v);
   }
+  sets.push("updated_at = datetime('now')");
   vals.push(id);
   getDb().prepare(`UPDATE merge_queue SET ${sets.join(', ')} WHERE id = ?`).run(...vals);
 }

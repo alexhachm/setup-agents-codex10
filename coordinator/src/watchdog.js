@@ -292,8 +292,9 @@ function recoverStaleIntegrations(now) {
     // Check for merges stuck in 'merging' for > 5 minutes and route as recoverable conflicts.
     // Use updated_at (when status changed to 'merging'), not created_at (when enqueued)
     for (const m of merges) {
-      if (m.status === 'merging' && (m.updated_at || m.created_at)) {
-        const mergeAge = (now - new Date(m.updated_at || m.created_at).getTime()) / 1000;
+      const statusAnchor = m.updated_at || m.created_at;
+      if (m.status === 'merging' && statusAnchor) {
+        const mergeAge = (now - new Date(statusAnchor).getTime()) / 1000;
         if (mergeAge > MERGE_TIMEOUT_SEC) {
           db.updateMerge(m.id, { status: 'conflict', error: MERGE_TIMEOUT_ERROR });
           db.sendMail('allocator', 'merge_failed', {

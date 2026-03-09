@@ -84,6 +84,7 @@ CREATE TABLE IF NOT EXISTS merge_queue (
     CHECK (status IN ('pending','ready','merging','merged','conflict','failed')),
   priority INTEGER NOT NULL DEFAULT 0,  -- higher = merge first
   created_at TEXT NOT NULL DEFAULT (datetime('now')),
+  updated_at TEXT NOT NULL DEFAULT (datetime('now')),
   merged_at TEXT,
   error TEXT
 );
