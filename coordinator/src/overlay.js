@@ -46,6 +46,56 @@ function resolveDomainKnowledgePath(domain, knowledgeDir) {
   return filePath;
 }
 
+function normalizeValidationInstructions(rawValidation) {
+  if (rawValidation == null) return [];
+
+  let parsedValidation = rawValidation;
+  if (typeof parsedValidation === 'string') {
+    try {
+      parsedValidation = JSON.parse(parsedValidation);
+    } catch {
+      parsedValidation = parsedValidation.trim();
+    }
+  }
+
+  if (!parsedValidation) return [];
+
+  if (typeof parsedValidation === 'string') {
+    const cmd = parsedValidation.trim();
+    return cmd ? [`- Command: \`${cmd}\``] : [];
+  }
+
+  if (Array.isArray(parsedValidation)) {
+    return parsedValidation
+      .map((entry) => (typeof entry === 'string' ? entry.trim() : ''))
+      .filter(Boolean)
+      .map((cmd) => `- Command: \`${cmd}\``);
+  }
+
+  if (typeof parsedValidation !== 'object') return [];
+
+  const lines = [];
+  if (parsedValidation.build_cmd) {
+    lines.push(`- Build: \`${parsedValidation.build_cmd}\``);
+  }
+  if (parsedValidation.test_cmd) {
+    lines.push(`- Test: \`${parsedValidation.test_cmd}\``);
+  }
+  if (parsedValidation.lint_cmd) {
+    lines.push(`- Lint: \`${parsedValidation.lint_cmd}\``);
+  }
+  if (Array.isArray(parsedValidation.custom)) {
+    for (const customEntry of parsedValidation.custom) {
+      if (typeof customEntry === 'string' && customEntry.trim()) {
+        lines.push(`- Custom: ${customEntry.trim()}`);
+      }
+    }
+  } else if (typeof parsedValidation.custom === 'string' && parsedValidation.custom.trim()) {
+    lines.push(`- Custom: ${parsedValidation.custom.trim()}`);
+  }
+  return lines;
+}
+
 function buildTaskOverlay(task, worker, projectDir) {
   const lines = [
     '# Current Task',
@@ -77,17 +127,11 @@ function buildTaskOverlay(task, worker, projectDir) {
   }
 
   if (task.validation) {
-    let val;
-    try {
-      val = typeof task.validation === 'string' ? JSON.parse(task.validation) : task.validation;
-    } catch { val = null; }
-    if (val) {
+    const validationLines = normalizeValidationInstructions(task.validation);
+    if (validationLines.length > 0) {
       lines.push('## Validation');
       lines.push('');
-      if (val.build_cmd) lines.push(`- Build: \`${val.build_cmd}\``);
-      if (val.test_cmd) lines.push(`- Test: \`${val.test_cmd}\``);
-      if (val.lint_cmd) lines.push(`- Lint: \`${val.lint_cmd}\``);
-      if (val.custom) lines.push(`- Custom: ${val.custom}`);
+      lines.push(...validationLines);
       lines.push('');
     }
   }
