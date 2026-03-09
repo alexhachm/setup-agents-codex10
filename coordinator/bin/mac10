@@ -318,29 +318,23 @@ function resolveCompleteTaskBranch(requestedBranch, rawWorkerId) {
   const canonicalWorkerBranch = getCanonicalWorkerBranch(rawWorkerId);
   const currentBranch = readCurrentBranch();
 
-  if (currentBranch && WORKER_BRANCH_RE.test(currentBranch)) {
-    if (normalizedRequested && normalizedRequested !== currentBranch) {
-      console.error(`[mac10] complete-task branch mismatch: "${normalizedRequested}" != current "${currentBranch}", using "${currentBranch}"`);
-    }
-    return currentBranch;
-  }
-
-  if (normalizedRequested && WORKER_BRANCH_RE.test(normalizedRequested)) {
-    return normalizedRequested;
-  }
-
+  // Worker ID is authoritative. Always prefer agent-<worker_id> when available.
   if (canonicalWorkerBranch) {
+    if (currentBranch && WORKER_BRANCH_RE.test(currentBranch) && currentBranch !== canonicalWorkerBranch) {
+      console.error(`[mac10] complete-task current branch mismatch: "${currentBranch}" != canonical "${canonicalWorkerBranch}", using "${canonicalWorkerBranch}"`);
+    }
     if (normalizedRequested && normalizedRequested !== canonicalWorkerBranch) {
       console.error(`[mac10] complete-task branch mismatch: "${normalizedRequested}" != canonical "${canonicalWorkerBranch}", using "${canonicalWorkerBranch}"`);
     }
     return canonicalWorkerBranch;
   }
 
+  // Without a valid worker ID, don't trust caller-provided/current branch values.
   if (normalizedRequested) {
-    console.error(`[mac10] complete-task branch ignored: "${normalizedRequested}" is not a worker branch`);
+    console.error(`[mac10] complete-task branch ignored: "${normalizedRequested}" (unable to resolve canonical worker branch)`);
   }
-  if (currentBranch && !WORKER_BRANCH_RE.test(currentBranch)) {
-    console.error(`[mac10] complete-task current branch ignored: "${currentBranch}" is not a worker branch`);
+  if (currentBranch) {
+    console.error(`[mac10] complete-task current branch ignored: "${currentBranch}" (unable to resolve canonical worker branch)`);
   }
   return '';
 }
@@ -815,13 +809,27 @@ async function main() {
         } else console.error(result.error);
         break;
 
-      case 'integrate':
+      case 'integrate': {
+        if (!argv[1]) { console.error('Usage: mac10 integrate <request_id> [--retry-terminal]'); process.exit(1); }
+        const options = argv.slice(2);
+        let retryTerminal = false;
+        for (const option of options) {
+          if (option === '--retry-terminal' || option === '--force-retry') {
+            retryTerminal = true;
+            continue;
+          }
+          console.error('Usage: mac10 integrate <request_id> [--retry-terminal]');
+          process.exit(1);
+        }
         result = await send(socketPath, 'integrate', {
           request_id: argv[1],
+          retry_terminal: retryTerminal,
+          force_retry: retryTerminal,
         });
         if (result.ok) console.log(`Integration triggered for ${result.request_id}: ${result.merges_queued} merge(s) queued.`);
         else console.error(result.error);
         break;
+      }
 
       // SYSTEM
       case 'register-worker':
@@ -1071,7 +1079,8 @@ ALLOCATOR:
   worker-status                  Show all workers
   check-completion <request_id>  Check if all tasks for request are done
   check-overlaps <request_id>   Show file overlaps between tasks
-  integrate <request_id>         Trigger worktree merge/integration
+  integrate <request_id> [--retry-terminal]
+                                 Trigger worktree merge/integration (optionally retry terminal merge rows)
 
 WORKER:
   my-task <worker_id>            Get current assigned task
