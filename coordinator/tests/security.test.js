@@ -9,6 +9,7 @@ const net = require('net');
 
 const db = require('../src/db');
 const cliServer = require('../src/cli-server');
+const overlay = require('../src/overlay');
 
 let tmpDir;
 
@@ -155,6 +156,52 @@ describe('SQL column whitelist enforcement', () => {
 
 // ---- 3. CLI server: command validation + payload limit ----
 
+describe('Overlay domain path safety', () => {
+  it('should include domain knowledge for safe domains', () => {
+    const knowledgeDir = path.join(tmpDir, '.claude', 'knowledge');
+    const domainDir = path.join(knowledgeDir, 'domain');
+    fs.mkdirSync(domainDir, { recursive: true });
+    fs.writeFileSync(path.join(knowledgeDir, 'mistakes.md'), '', 'utf8');
+    fs.writeFileSync(path.join(domainDir, 'backend.md'), 'safe-domain-knowledge', 'utf8');
+
+    const content = overlay.buildTaskOverlay({
+      id: 1,
+      request_id: 'req-1',
+      subject: 'Safe task',
+      tier: 2,
+      priority: 'normal',
+      description: 'desc',
+      domain: 'backend',
+    }, { id: 1, branch: 'agent-1', worktree_path: '/wt-1' }, tmpDir);
+
+    assert.ok(content.includes('## Domain Knowledge'));
+    assert.ok(content.includes('safe-domain-knowledge'));
+  });
+
+  it('should ignore traversal and separator tokens in domain knowledge lookup', () => {
+    const knowledgeDir = path.join(tmpDir, '.claude', 'knowledge');
+    const domainDir = path.join(knowledgeDir, 'domain');
+    fs.mkdirSync(domainDir, { recursive: true });
+    fs.writeFileSync(path.join(knowledgeDir, 'mistakes.md'), '', 'utf8');
+    fs.writeFileSync(path.join(knowledgeDir, 'secret.md'), 'top-secret-marker', 'utf8');
+
+    for (const badDomain of ['../secret', '..\\secret', 'domain/../../secret']) {
+      const content = overlay.buildTaskOverlay({
+        id: 1,
+        request_id: 'req-1',
+        subject: 'Unsafe task',
+        tier: 2,
+        priority: 'normal',
+        description: 'desc',
+        domain: badDomain,
+      }, { id: 1, branch: 'agent-1', worktree_path: '/wt-1' }, tmpDir);
+
+      assert.ok(!content.includes('## Domain Knowledge'));
+      assert.ok(!content.includes('top-secret-marker'));
+    }
+  });
+});
+
 describe('CLI server security', () => {
   let server;
   let socketPath;
@@ -252,6 +299,22 @@ describe('CLI server security', () => {
     const task = db.getTask(result.task_id);
     assert.ok(task);
     assert.strictEqual(task.subject, 'Task');
+  });
+
+  it('should reject unsafe domain values for create-task', async () => {
+    const reqResult = await sendCommand('request', { description: 'Test' });
+    const badDomains = ['../mistakes', '..\\mistakes', 'domain/../../x'];
+
+    for (const domain of badDomains) {
+      const result = await sendCommand('create-task', {
+        request_id: reqResult.request_id,
+        subject: 'Task',
+        description: 'Do thing',
+        domain,
+      });
+      assert.ok(result.error);
+      assert.ok(result.error.includes('Invalid domain'));
+    }
   });
 
   it('should reject missing command field', async () => {
