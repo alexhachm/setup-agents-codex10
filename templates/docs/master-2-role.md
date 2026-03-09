@@ -23,9 +23,9 @@ Do not invoke raw `mac10` in this codex10 runtime.
 | Complete Tier 1 directly | `./.claude/scripts/codex10 tier1-complete <request_id> "result"` |
 | Ask user for clarification | `./.claude/scripts/codex10 ask-clarification <request_id> "question"` |
 | View workers | `./.claude/scripts/codex10 worker-status` |
-| Claim a worker (Tier 2) | `./.claude/scripts/codex10 claim-worker <worker_id>` |
-| Release a worker | `./.claude/scripts/codex10 release-worker <worker_id>` |
-| Assign task to worker | `./.claude/scripts/codex10 assign-task <task_id> <worker_id>` |
+| Claim a worker (Tier 2) | `./.claude/scripts/codex10 claim-worker <worker_number>` |
+| Release a worker | `./.claude/scripts/codex10 release-worker <worker_number>` |
+| Assign task to worker | `./.claude/scripts/codex10 assign-task <task_id> <worker_number>` |
 | View activity log | `./.claude/scripts/codex10 log 20` |
 | Ping coordinator | `./.claude/scripts/codex10 ping` |
 
@@ -44,7 +44,7 @@ Before doing ANY work, classify the request:
 - Single domain, 2-5 files, clear scope
 - Requires real implementation work but no parallel execution
 - Examples: "fix the popout theme sync", "add input validation to login form"
-- YOU claim an idle worker via `./.claude/scripts/codex10 claim-worker`, create task via `./.claude/scripts/codex10 create-task`, assign via `./.claude/scripts/codex10 assign-task`, then launch that worker
+- YOU claim an idle worker via `./.claude/scripts/codex10 claim-worker`, create task via `./.claude/scripts/codex10 create-task`, assign via `./.claude/scripts/codex10 assign-task`, and let assign-task wake/spawn the worker
 
 **Tier 3 — "Full pipeline":**
 - Multi-domain OR requires parallel work
@@ -65,13 +65,14 @@ Before doing ANY work, classify the request:
 **Tier 1 context budget:** Track how many Tier 1 executions you've done this session. After 4 Tier 1 executions, trigger a reset — implementation details pollute your architect context.
 
 ## Tier 2 Direct Assignment Protocol
-1. Check workers: `./.claude/scripts/codex10 worker-status` to find an idle worker
-2. Claim atomically: `./.claude/scripts/codex10 claim-worker <worker_id>`
-3. Create task: `echo '{"request_id":"...","subject":"...","description":"...","domain":"...","tier":2,"priority":"normal","files":"file1.js,file2.js","validation":"npm run build"}' | ./.claude/scripts/codex10 create-task -`
-4. Assign task: `./.claude/scripts/codex10 assign-task <task_id> <worker_id>`
-5. Release claim: `./.claude/scripts/codex10 release-worker <worker_id>`
-6. Launch worker terminal: `bash .claude/scripts/launch-worker.sh <worker_id>`
-7. Log: `[TIER2_ASSIGN] request=[id] worker=[worker-N] task=[subject]`
+1. Check workers: `./.claude/scripts/codex10 worker-status` to find an idle worker and capture `raw_worker_id` (for example `worker-3`).
+2. Normalize to numeric for claim/assign/release: `worker_id="${raw_worker_id#worker-}"`.
+3. Claim atomically: `./.claude/scripts/codex10 claim-worker "$worker_id"`.
+4. Create task: `echo '{"request_id":"...","subject":"...","description":"...","domain":"...","tier":2,"priority":"normal","files":["file1.js","file2.js"],"validation":"npm run build"}' | ./.claude/scripts/codex10 create-task -`.
+5. Assign task with numeric worker ID: `./.claude/scripts/codex10 assign-task <task_id> "$worker_id"`.
+6. Release claim: `./.claude/scripts/codex10 release-worker "$worker_id"`.
+7. Do not run `launch-worker.sh` after assignment; `assign-task` already wakes/spawns the worker.
+8. Log: `[TIER2_ASSIGN] request=[id] worker=[worker-N] task=[subject]`
 
 ## Signal Files
 Watch: `.claude/signals/.codex10.handoff-signal` (new requests)

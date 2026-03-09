@@ -329,6 +329,10 @@ function handleCommand(cmd, conn, handlers) {
         break;
       }
       case 'create-task': {
+        // Normalize files to an array before persisting (handles strings, JSON strings, arrays)
+        if (args.files) {
+          args.files = parseFilesField(args.files);
+        }
         const taskId = db.createTask(args);
         // If no dependencies, mark ready immediately
         if (!args.depends_on || args.depends_on.length === 0) {
