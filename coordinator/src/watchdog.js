@@ -97,15 +97,15 @@ function tick(projectDir) {
 
     // Skip workers just launched (grace period)
     if (worker.launched_at) {
-      const launchedAgo = (now - new Date(worker.launched_at).getTime()) / 1000;
-      if (launchedAgo < getThresholds().warn) continue;
+      const launchedAgo = db.coordinatorAgeSeconds(worker.launched_at, now);
+      if (launchedAgo !== null && launchedAgo < getThresholds().warn) continue;
     }
 
     // Assigned workers can wedge forever if launch succeeded but start-task never runs.
     // Reuse existing death/reassignment flow once assignment exceeds timeout.
     if (worker.status === 'assigned' && worker.launched_at && !worker.last_heartbeat) {
-      const assignedSec = (now - new Date(worker.launched_at).getTime()) / 1000;
-      if (assignedSec >= getThresholds().terminate) {
+      const assignedSec = db.coordinatorAgeSeconds(worker.launched_at, now);
+      if (assignedSec !== null && assignedSec >= getThresholds().terminate) {
         db.log('coordinator', 'watchdog_assigned_timeout', {
           worker_id: worker.id,
           stale_sec: assignedSec,
@@ -117,16 +117,19 @@ function tick(projectDir) {
 
     // Heartbeat freshness check
     if (worker.last_heartbeat && (worker.status === 'running' || worker.status === 'busy')) {
-      const staleSec = (now - new Date(worker.last_heartbeat).getTime()) / 1000;
-      escalate(worker, staleSec, projectDir);
+      const staleSec = db.coordinatorAgeSeconds(worker.last_heartbeat, now);
+      if (staleSec !== null) {
+        escalate(worker, staleSec, projectDir);
+      }
     }
 
     // Check completed_task workers that haven't been reset
     if (worker.status === 'completed_task') {
       const completedAgo = worker.last_heartbeat
-        ? (now - new Date(worker.last_heartbeat).getTime()) / 1000
+        ? db.coordinatorAgeSeconds(worker.last_heartbeat, now)
         : getThresholds().terminate;
-      if (completedAgo > 30) {
+      const completedAgoSec = completedAgo === null ? getThresholds().terminate : completedAgo;
+      if (completedAgoSec > 30) {
         // Reset to idle so allocator can reuse
         db.updateWorker(worker.id, { status: 'idle', current_task_id: null });
         db.log('coordinator', 'worker_auto_reset', { worker_id: worker.id });
@@ -158,7 +161,7 @@ function tick(projectDir) {
     }
     // Purge old activity log entries (>30 days)
     const logPurged = db.getDb().prepare(
-      "DELETE FROM activity_log WHERE created_at < datetime('now', '-30 days')"
+      "DELETE FROM activity_log WHERE created_at < strftime('%Y-%m-%dT%H:%M:%fZ','now', '-30 days')"
     ).run();
     if (logPurged.changes > 0) {
       db.log('coordinator', 'activity_log_purged', { count: logPurged.changes });
@@ -226,7 +229,7 @@ function handleDeath(worker, reason) {
   // Uses a single conditional UPDATE to avoid TOCTOU race with worker's complete-task
   if (worker.current_task_id) {
     const result = db.getDb().prepare(
-      "UPDATE tasks SET status='ready', assigned_to=NULL, updated_at=datetime('now') WHERE id=? AND status NOT IN ('completed','failed')"
+      "UPDATE tasks SET status='ready', assigned_to=NULL, updated_at=strftime('%Y-%m-%dT%H:%M:%fZ','now') WHERE id=? AND status NOT IN ('completed','failed')"
     ).run(worker.current_task_id);
     if (result.changes > 0) {
       db.log('coordinator', 'task_reassigned', {
@@ -273,7 +276,12 @@ function releaseStaleClaimsCheck(now) {
       db.log('coordinator', 'stale_claim_released', { worker_id: worker.id, reason: 'no_timestamp' });
       continue;
     }
-    const staleSec = (now - new Date(claimTime).getTime()) / 1000;
+    const staleSec = db.coordinatorAgeSeconds(claimTime, now);
+    if (staleSec === null) {
+      db.releaseWorker(worker.id);
+      db.log('coordinator', 'stale_claim_released', { worker_id: worker.id, reason: 'invalid_timestamp' });
+      continue;
+    }
     if (staleSec > 120) {
       db.releaseWorker(worker.id);
       db.log('coordinator', 'stale_claim_released', { worker_id: worker.id, stale_sec: staleSec });
@@ -387,8 +395,8 @@ function recoverStaleIntegrations(now, options = {}) {
 
     // Case 1: No merge_queue entries and integrating > 15 minutes → complete (e.g. tier1 tasks)
     if (merges.length === 0) {
-      const integratingAge = (now - new Date(req.updated_at).getTime()) / 1000;
-      if (integratingAge > 900) { // 15 minutes
+      const integratingAge = db.coordinatorAgeSeconds(req.updated_at, now);
+      if (integratingAge !== null && integratingAge > 900) { // 15 minutes
         db.updateRequest(req.id, {
           status: 'completed',
           completed_at: new Date().toISOString(),
@@ -411,8 +419,8 @@ function recoverStaleIntegrations(now, options = {}) {
     for (const m of merges) {
       const statusAnchor = m.updated_at || m.created_at;
       if (m.status === 'merging' && statusAnchor) {
-        const mergeAge = (now - new Date(statusAnchor).getTime()) / 1000;
-        if (mergeAge > MERGE_TIMEOUT_SEC) {
+        const mergeAge = db.coordinatorAgeSeconds(statusAnchor, now);
+        if (mergeAge !== null && mergeAge > MERGE_TIMEOUT_SEC) {
           // Timeouts are recoverable; route them through the conflict grace/fix-task flow.
           db.updateMerge(m.id, { status: 'conflict', error: MERGE_TIMEOUT_ERROR });
 
@@ -484,8 +492,9 @@ function recoverStaleIntegrations(now, options = {}) {
       const oldestConflict = freshMerges
         .filter(m => m.status === 'conflict')
         .reduce((oldest, m) => {
-          const age = now - new Date(m.updated_at || m.created_at).getTime();
-          return age > oldest ? age : oldest;
+          const ageMs = db.coordinatorAgeMs(m.updated_at || m.created_at, now);
+          if (ageMs === null) return oldest;
+          return ageMs > oldest ? ageMs : oldest;
         }, 0);
       const conflictAgeSec = oldestConflict / 1000;
 
@@ -586,8 +595,8 @@ function monitorLoops(projectDir) {
 
     // Log warning for stale heartbeats (>5 min) but don't terminate — sentinel auto-restarts
     if (loop.last_heartbeat) {
-      const staleSec = (now - new Date(loop.last_heartbeat).getTime()) / 1000;
-      if (staleSec > LOOP_STALE_LOG_START_SEC) {
+      const staleSec = db.coordinatorAgeSeconds(loop.last_heartbeat, now);
+      if (staleSec !== null && staleSec > LOOP_STALE_LOG_START_SEC) {
         const staleBucket = Math.floor(staleSec / LOOP_STALE_LOG_STEP_SEC);
         const prev = loopStaleLogState.get(loop.id);
         const crossedThreshold = !prev || staleBucket > prev.bucket;

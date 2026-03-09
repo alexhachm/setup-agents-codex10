@@ -12,8 +12,8 @@ CREATE TABLE IF NOT EXISTS requests (
   tier INTEGER,  -- 1, 2, or 3 (set after triage)
   status TEXT NOT NULL DEFAULT 'pending'
     CHECK (status IN ('pending','triaging','executing_tier1','decomposed','in_progress','integrating','completed','failed')),
-  created_at TEXT NOT NULL DEFAULT (datetime('now')),
-  updated_at TEXT NOT NULL DEFAULT (datetime('now')),
+  created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now')),
+  updated_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now')),
   completed_at TEXT,
   result TEXT,  -- summary of outcome
   loop_id INTEGER REFERENCES loops(id)
@@ -37,8 +37,8 @@ CREATE TABLE IF NOT EXISTS tasks (
   branch TEXT,
   validation TEXT,  -- JSON: what checks to run
   overlap_with TEXT,  -- JSON array of task IDs sharing files
-  created_at TEXT NOT NULL DEFAULT (datetime('now')),
-  updated_at TEXT NOT NULL DEFAULT (datetime('now')),
+  created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now')),
+  updated_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now')),
   started_at TEXT,
   completed_at TEXT,
   result TEXT  -- outcome summary
@@ -60,7 +60,7 @@ CREATE TABLE IF NOT EXISTS workers (
   last_heartbeat TEXT,
   launched_at TEXT,
   tasks_completed INTEGER NOT NULL DEFAULT 0,
-  created_at TEXT NOT NULL DEFAULT (datetime('now'))
+  created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now'))
 );
 
 -- Mail (replaces ALL signal files + IPC)
@@ -70,7 +70,7 @@ CREATE TABLE IF NOT EXISTS mail (
   type TEXT NOT NULL,  -- 'new_request','triage_result','task_assigned','task_completed','heartbeat','clarification_ask','clarification_reply','nudge','terminate'
   payload TEXT NOT NULL DEFAULT '{}',  -- JSON
   consumed INTEGER NOT NULL DEFAULT 0,
-  created_at TEXT NOT NULL DEFAULT (datetime('now'))
+  created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now'))
 );
 
 -- Merge queue (new in mac10)
@@ -83,8 +83,8 @@ CREATE TABLE IF NOT EXISTS merge_queue (
   status TEXT NOT NULL DEFAULT 'pending'
     CHECK (status IN ('pending','ready','merging','merged','conflict','failed')),
   priority INTEGER NOT NULL DEFAULT 0,  -- higher = merge first
-  created_at TEXT NOT NULL DEFAULT (datetime('now')),
-  updated_at TEXT NOT NULL DEFAULT (datetime('now')),
+  created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now')),
+  updated_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now')),
   merged_at TEXT,
   error TEXT
 );
@@ -95,7 +95,7 @@ CREATE TABLE IF NOT EXISTS activity_log (
   actor TEXT NOT NULL,  -- 'coordinator','architect','worker-N','user'
   action TEXT NOT NULL,
   details TEXT,  -- JSON
-  created_at TEXT NOT NULL DEFAULT (datetime('now'))
+  created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now'))
 );
 
 -- Config (coordinator settings)
@@ -111,8 +111,8 @@ CREATE TABLE IF NOT EXISTS presets (
   project_dir TEXT NOT NULL,
   github_repo TEXT NOT NULL DEFAULT '',
   num_workers INTEGER NOT NULL DEFAULT 4,
-  created_at TEXT NOT NULL DEFAULT (datetime('now')),
-  updated_at TEXT NOT NULL DEFAULT (datetime('now'))
+  created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now')),
+  updated_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now'))
 );
 
 -- Changes tracking (toggleable changelog items)
@@ -126,7 +126,7 @@ CREATE TABLE IF NOT EXISTS changes (
   enabled INTEGER NOT NULL DEFAULT 1,  -- toggle on/off (1=on, 0=off)
   status TEXT NOT NULL DEFAULT 'active'
     CHECK (status IN ('active','pending_user_action')),
-  created_at TEXT NOT NULL DEFAULT (datetime('now'))
+  created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now'))
 );
 
 -- Persistent autonomous loops
@@ -141,8 +141,8 @@ CREATE TABLE IF NOT EXISTS loops (
   tmux_window TEXT,
   pid INTEGER,
   last_heartbeat TEXT,
-  created_at TEXT NOT NULL DEFAULT (datetime('now')),
-  updated_at TEXT NOT NULL DEFAULT (datetime('now')),
+  created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now')),
+  updated_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now')),
   stopped_at TEXT
 );
 
@@ -173,7 +173,8 @@ INSERT OR IGNORE INTO config (key, value) VALUES
   ('watchdog_interval_ms', '10000'),
   ('allocator_interval_ms', '2000'),
   ('model_flagship', 'gpt-5.3-codex'),
-  ('model_spark', 'spark'),
+  ('model_codex_spark', 'gpt-5.3-codex-spark'),
+  ('model_spark', 'gpt-5.3-codex-spark'),
   ('model_mini', 'gpt-5.1-codex-mini'),
   ('reasoning_xhigh', 'xhigh'),
   ('reasoning_high', 'high'),

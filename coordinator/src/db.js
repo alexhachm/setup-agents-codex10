@@ -10,6 +10,10 @@ const NAMESPACE = process.env.MAC10_NAMESPACE || 'mac10';
 const SQL_NOW_UTC_ISO = "strftime('%Y-%m-%dT%H:%M:%fZ','now')";
 const SQLITE_UTC_TIMESTAMP_RE = /^(\d{4}-\d{2}-\d{2}) (\d{2}:\d{2}:\d{2})(\.\d+)?$/;
 const ISO_TIMESTAMP_WITHOUT_ZONE_RE = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d+)?$/;
+const REQUEST_TERMINAL_STATUSES = new Set(['completed', 'failed']);
+const LOOP_SUPERSEDE_PREFIX_RE = /^\s*Supersede(?:\s+malformed)?\s+(req-[A-Za-z0-9][A-Za-z0-9_-]*)\b/i;
+const CODEX_SPARK_CANONICAL_MODEL = 'gpt-5.3-codex-spark';
+const LEGACY_SPARK_MODEL_ALIASES = new Set(['spark', 'codex-spark']);
 
 const VALID_COLUMNS = Object.freeze({
   requests: new Set(['description', 'tier', 'status', 'result', 'completed_at', 'loop_id']),
@@ -99,6 +103,31 @@ function ensureMergeQueueUpdatedAt() {
   }
 }
 
+function shouldNormalizeSparkModel(value) {
+  if (value === undefined || value === null) return true;
+  const normalized = String(value).trim().toLowerCase();
+  if (!normalized) return true;
+  return LEGACY_SPARK_MODEL_ALIASES.has(normalized);
+}
+
+function ensureSparkModelConfig() {
+  if (!db) return;
+  const upsert = db.prepare(`
+    INSERT INTO config(key, value)
+    VALUES (?, ?)
+    ON CONFLICT(key) DO UPDATE SET value = excluded.value
+  `);
+  const normalizeKey = (key) => {
+    const row = db.prepare('SELECT value FROM config WHERE key = ?').get(key);
+    if (shouldNormalizeSparkModel(row ? row.value : null)) {
+      upsert.run(key, CODEX_SPARK_CANONICAL_MODEL);
+    }
+  };
+
+  normalizeKey('model_codex_spark');
+  normalizeKey('model_spark');
+}
+
 function init(projectDir) {
   if (db) return db;
   const dbPath = getDbPath(projectDir);
@@ -137,6 +166,7 @@ function init(projectDir) {
 
   // Store project dir in config
   db.prepare('UPDATE config SET value = ? WHERE key = ?').run(projectDir, 'project_dir');
+  ensureSparkModelConfig();
   return db;
 }
 
@@ -156,7 +186,8 @@ function createRequest(description) {
   const id = 'req-' + crypto.randomBytes(4).toString('hex');
   const txn = getDb().transaction(() => {
     getDb().prepare(`
-      INSERT INTO requests (id, description) VALUES (?, ?)
+      INSERT INTO requests (id, description, created_at, updated_at)
+      VALUES (?, ?, ${SQL_NOW_UTC_ISO}, ${SQL_NOW_UTC_ISO})
     `).run(id, description);
     sendMail('architect', 'new_request', { request_id: id, description });
     sendMail('master-1', 'request_acknowledged', { request_id: id, description });
@@ -387,8 +418,8 @@ function checkAndPromoteTasks() {
 
 function registerWorker(id, worktreePath, branch) {
   getDb().prepare(`
-    INSERT OR REPLACE INTO workers (id, worktree_path, branch, status)
-    VALUES (?, ?, ?, 'idle')
+    INSERT OR REPLACE INTO workers (id, worktree_path, branch, status, created_at)
+    VALUES (?, ?, ?, 'idle', ${SQL_NOW_UTC_ISO})
   `).run(id, worktreePath, branch);
 }
 
@@ -617,6 +648,44 @@ function checkRequestCompletion(requestId) {
   };
 }
 
+function getRequestLatestCompletedTaskTimestamp(requestId) {
+  const rows = getDb().prepare(`
+    SELECT completed_at, updated_at, created_at
+    FROM tasks
+    WHERE request_id = ?
+      AND status = 'completed'
+  `).all(requestId);
+
+  let latestMs = null;
+  for (const row of rows) {
+    const candidate =
+      parseCoordinatorTimestamp(row.completed_at) ||
+      parseCoordinatorTimestamp(row.updated_at) ||
+      parseCoordinatorTimestamp(row.created_at);
+    if (!candidate) continue;
+    const candidateMs = candidate.getTime();
+    if (latestMs === null || candidateMs > latestMs) {
+      latestMs = candidateMs;
+    }
+  }
+
+  return latestMs === null ? null : new Date(latestMs).toISOString();
+}
+
+function hasRequestCompletedTaskProgressSince(requestId, checkpointTimestamp, latestCompletedTimestamp = undefined) {
+  const latestCompletedAt = parseCoordinatorTimestamp(
+    latestCompletedTimestamp === undefined
+      ? getRequestLatestCompletedTaskTimestamp(requestId)
+      : latestCompletedTimestamp
+  );
+  if (!latestCompletedAt) return false;
+
+  const checkpointAt = parseCoordinatorTimestamp(checkpointTimestamp);
+  if (!checkpointAt) return true;
+
+  return latestCompletedAt.getTime() > checkpointAt.getTime();
+}
+
 // --- Mail helpers ---
 
 function sendMail(recipient, type, payload = {}) {
@@ -683,8 +752,8 @@ function checkMailBlocking(recipient, timeoutMs = 300000, pollMs = 1000) {
 function enqueueMerge({ request_id, task_id, pr_url, branch, priority }) {
   // Atomic dedup+insert: prevents TOCTOU race between SELECT and INSERT
   const result = getDb().prepare(`
-    INSERT INTO merge_queue (request_id, task_id, pr_url, branch, priority)
-    SELECT ?, ?, ?, ?, ?
+    INSERT INTO merge_queue (request_id, task_id, pr_url, branch, priority, created_at, updated_at)
+    SELECT ?, ?, ?, ?, ?, ${SQL_NOW_UTC_ISO}, ${SQL_NOW_UTC_ISO}
     WHERE NOT EXISTS (SELECT 1 FROM merge_queue WHERE pr_url = ?)
   `).run(request_id, task_id, pr_url, branch, priority || 0, pr_url);
   return {
@@ -1004,25 +1073,204 @@ function stopLoop(id) {
 
 // --- Loop-request helpers ---
 
-function createLoopRequest(description, loopId) {
+function parseSupersededLoopRequestTargetId(description) {
+  if (typeof description !== 'string') return null;
+  const match = description.match(LOOP_SUPERSEDE_PREFIX_RE);
+  if (!match) return null;
+  return String(match[1]).toLowerCase();
+}
+
+function parseRequestResultMetadata(resultText) {
+  if (typeof resultText !== 'string' || resultText.trim().length === 0) return null;
+  try {
+    const parsed = JSON.parse(resultText);
+    return parsed && typeof parsed === 'object' ? parsed : null;
+  } catch {
+    return null;
+  }
+}
+
+function terminalizeSupersededRequestByReplacementTxn(d, {
+  targetRequestId,
+  replacementRequestId,
+  replacementDescription,
+  sourceLoopId,
+  source,
+}) {
+  const target = d.prepare(`
+    SELECT id, status, result
+    FROM requests
+    WHERE id = ?
+  `).get(targetRequestId);
+  if (!target) {
+    return {
+      request_id: targetRequestId,
+      exists: false,
+      status: 'missing',
+      terminalized: false,
+      already_terminal: false,
+      replaced_by: replacementRequestId || null,
+    };
+  }
+
+  const existingMetadata = parseRequestResultMetadata(target.result);
+  const existingReplacedBy = existingMetadata && typeof existingMetadata.replaced_by === 'string'
+    ? existingMetadata.replaced_by
+    : null;
+
+  if (REQUEST_TERMINAL_STATUSES.has(target.status)) {
+    return {
+      request_id: target.id,
+      exists: true,
+      status: target.status,
+      terminalized: false,
+      already_terminal: true,
+      replaced_by: existingReplacedBy || replacementRequestId || null,
+    };
+  }
+
+  const supersedeResult = {
+    reason: 'superseded_by_loop_request',
+    status: 'superseded_failed',
+    source: source || 'loop-request',
+    superseded_by_description: replacementDescription,
+    superseded_by_loop_id: sourceLoopId,
+    replaced_by: replacementRequestId,
+    superseded_at: new Date().toISOString(),
+  };
+
+  const terminalizeResult = d.prepare(`
+    UPDATE requests
+    SET status = 'failed',
+        result = ?,
+        completed_at = COALESCE(completed_at, ${SQL_NOW_UTC_ISO}),
+        updated_at = ${SQL_NOW_UTC_ISO}
+    WHERE id = ?
+      AND status NOT IN ('completed', 'failed')
+  `).run(JSON.stringify(supersedeResult), target.id);
+
+  const refreshed = d.prepare(`
+    SELECT id, status, result
+    FROM requests
+    WHERE id = ?
+  `).get(target.id);
+  const refreshedMetadata = parseRequestResultMetadata(refreshed ? refreshed.result : null);
+  const refreshedReplacedBy = refreshedMetadata && typeof refreshedMetadata.replaced_by === 'string'
+    ? refreshedMetadata.replaced_by
+    : null;
+
+  return {
+    request_id: target.id,
+    exists: true,
+    status: refreshed ? refreshed.status : target.status,
+    terminalized: terminalizeResult.changes === 1,
+    already_terminal: terminalizeResult.changes === 0 && !!refreshed && REQUEST_TERMINAL_STATUSES.has(refreshed.status),
+    replaced_by: refreshedReplacedBy || existingReplacedBy || replacementRequestId || null,
+  };
+}
+
+function backfillSupersededLoopRequests() {
   const d = getDb();
   const txn = d.transaction(() => {
-    // Check for active (non-completed/failed) request from same loop with same description
-    const existing = d.prepare(`
-      SELECT id FROM requests
-      WHERE loop_id = ? AND description = ? AND status NOT IN ('completed', 'failed')
-    `).get(loopId, description);
-    if (existing) {
-      return { id: existing.id, deduplicated: true };
+    const supersedingRows = d.prepare(`
+      SELECT id, loop_id, description
+      FROM requests
+      WHERE loop_id IS NOT NULL
+      ORDER BY datetime(created_at) ASC, id ASC
+    `).all();
+
+    const stats = {
+      inspected: 0,
+      repaired: 0,
+      already_terminal: 0,
+      missing_target: 0,
+    };
+
+    for (const row of supersedingRows) {
+      const targetRequestId = parseSupersededLoopRequestTargetId(row.description);
+      if (!targetRequestId) continue;
+      stats.inspected += 1;
+      const target = terminalizeSupersededRequestByReplacementTxn(d, {
+        targetRequestId,
+        replacementRequestId: row.id,
+        replacementDescription: row.description,
+        sourceLoopId: row.loop_id,
+        source: 'loop-request-backfill',
+      });
+      if (!target.exists) {
+        stats.missing_target += 1;
+      } else if (target.terminalized) {
+        stats.repaired += 1;
+      } else if (target.already_terminal) {
+        stats.already_terminal += 1;
+      }
     }
+
+    return stats;
+  });
+  return txn();
+}
+
+function createLoopRequest(description, loopId) {
+  const d = getDb();
+  const supersededTargetRequestId = parseSupersededLoopRequestTargetId(description);
+  const txn = d.transaction(() => {
+    // Supersession requests are idempotent across repeats, including terminal replacements.
+    const existing = supersededTargetRequestId
+      ? d.prepare(`
+        SELECT id
+        FROM requests
+        WHERE loop_id = ? AND description = ?
+        ORDER BY CASE WHEN status IN ('completed', 'failed') THEN 1 ELSE 0 END ASC,
+                 datetime(created_at) DESC,
+                 id DESC
+        LIMIT 1
+      `).get(loopId, description)
+      : d.prepare(`
+        SELECT id
+        FROM requests
+        WHERE loop_id = ? AND description = ? AND status NOT IN ('completed', 'failed')
+      `).get(loopId, description);
+    if (existing) {
+      const supersededTarget = supersededTargetRequestId
+        ? terminalizeSupersededRequestByReplacementTxn(d, {
+          targetRequestId: supersededTargetRequestId,
+          replacementRequestId: existing.id,
+          replacementDescription: description,
+          sourceLoopId: loopId,
+          source: 'loop-request-repeat',
+        })
+        : null;
+      return { id: existing.id, deduplicated: true, superseded_target: supersededTarget };
+    }
+
     const id = 'req-' + crypto.randomBytes(4).toString('hex');
     d.prepare(`
-      INSERT INTO requests (id, description, loop_id) VALUES (?, ?, ?)
+      INSERT INTO requests (id, description, loop_id, created_at, updated_at)
+      VALUES (?, ?, ?, ${SQL_NOW_UTC_ISO}, ${SQL_NOW_UTC_ISO})
     `).run(id, description, loopId);
+
+    const supersededTarget = supersededTargetRequestId
+      ? terminalizeSupersededRequestByReplacementTxn(d, {
+        targetRequestId: supersededTargetRequestId,
+        replacementRequestId: id,
+        replacementDescription: description,
+        sourceLoopId: loopId,
+        source: 'loop-request-create',
+      })
+      : null;
+
     sendMail('architect', 'new_request', { request_id: id, description, loop_id: loopId });
     sendMail('master-1', 'request_acknowledged', { request_id: id, description, loop_id: loopId });
-    log('loop', 'loop_request_created', { request_id: id, loop_id: loopId, description });
-    return { id, deduplicated: false };
+    log('loop', 'loop_request_created', {
+      request_id: id,
+      loop_id: loopId,
+      description,
+      superseded_target: supersededTargetRequestId,
+      superseded_target_status: supersededTarget ? supersededTarget.status : null,
+      superseded_target_terminalized: supersededTarget ? supersededTarget.terminalized : false,
+    });
+    return { id, deduplicated: false, superseded_target: supersededTarget };
   });
   return txn();
 }
@@ -1038,7 +1286,7 @@ module.exports = {
   createTask, getTask, updateTask, listTasks, getReadyTasks, checkAndPromoteTasks,
   registerWorker, getWorker, updateWorker, getIdleWorkers, getAllWorkers, claimWorker, releaseWorker,
   startTaskForWorker, completeTaskForWorker, failTaskForWorker,
-  checkRequestCompletion,
+  checkRequestCompletion, getRequestLatestCompletedTaskTimestamp, hasRequestCompletedTaskProgressSince,
   sendMail, checkMail, checkMailBlocking, purgeOldMail,
   enqueueMerge, getNextMerge, updateMerge,
   log, getLog, getRequestHistory,
@@ -1048,5 +1296,5 @@ module.exports = {
   findOverlappingTasks, getOverlapsForRequest, hasOverlappingMergedTasks,
   createChange, getChange, listChanges, updateChange,
   createLoop, getLoop, updateLoop, listLoops, stopLoop,
-  createLoopRequest, listLoopRequests,
+  createLoopRequest, listLoopRequests, backfillSupersededLoopRequests,
 };
