@@ -59,17 +59,11 @@ function buildTaskOverlay(task, worker, projectDir) {
   }
 
   if (task.validation) {
-    let val;
-    try {
-      val = typeof task.validation === 'string' ? JSON.parse(task.validation) : task.validation;
-    } catch { val = null; }
-    if (val) {
+    const validationLines = formatValidation(task.validation);
+    if (validationLines.length > 0) {
       lines.push('## Validation');
       lines.push('');
-      if (val.build_cmd) lines.push(`- Build: \`${val.build_cmd}\``);
-      if (val.test_cmd) lines.push(`- Test: \`${val.test_cmd}\``);
-      if (val.lint_cmd) lines.push(`- Lint: \`${val.lint_cmd}\``);
-      if (val.custom) lines.push(`- Custom: ${val.custom}`);
+      lines.push(...validationLines);
       lines.push('');
     }
   }
@@ -121,6 +115,46 @@ function buildTaskOverlay(task, worker, projectDir) {
   lines.push('');
 
   return lines.join('\n');
+}
+
+function formatValidation(validation) {
+  let value = validation;
+  if (typeof value === 'string') {
+    const trimmed = value.trim();
+    if (!trimmed) return [];
+    try {
+      value = JSON.parse(trimmed);
+    } catch {
+      value = trimmed;
+    }
+  }
+
+  if (typeof value === 'string') {
+    return [`- \`${value}\``];
+  }
+
+  if (Array.isArray(value)) {
+    const commands = value
+      .map((entry) => typeof entry === 'string' ? entry.trim() : '')
+      .filter(Boolean);
+    return commands.map((cmd) => `- \`${cmd}\``);
+  }
+
+  if (value && typeof value === 'object') {
+    const lines = [];
+    if (value.build_cmd) lines.push(`- Build: \`${value.build_cmd}\``);
+    if (value.test_cmd) lines.push(`- Test: \`${value.test_cmd}\``);
+    if (value.lint_cmd) lines.push(`- Lint: \`${value.lint_cmd}\``);
+    if (Array.isArray(value.commands)) {
+      for (const cmd of value.commands) {
+        if (typeof cmd === 'string' && cmd.trim()) lines.push(`- \`${cmd.trim()}\``);
+      }
+    }
+    if (value.custom) lines.push(`- Custom: ${value.custom}`);
+    return lines;
+  }
+
+  return [];
 }
 
 function resolveDomainKnowledgePath(domainKnowledgeDir, domainToken) {
