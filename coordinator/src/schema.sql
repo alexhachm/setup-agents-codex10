@@ -84,6 +84,7 @@ CREATE TABLE IF NOT EXISTS merge_queue (
     CHECK (status IN ('pending','ready','merging','merged','conflict','failed')),
   priority INTEGER NOT NULL DEFAULT 0,  -- higher = merge first
   created_at TEXT NOT NULL DEFAULT (datetime('now')),
+  updated_at TEXT NOT NULL DEFAULT (datetime('now')),
   merged_at TEXT,
   error TEXT
 );
@@ -171,6 +172,14 @@ INSERT OR IGNORE INTO config (key, value) VALUES
   ('heartbeat_timeout_s', '60'),
   ('watchdog_interval_ms', '10000'),
   ('allocator_interval_ms', '2000'),
+  ('model_flagship', 'gpt-5.3-codex'),
+  ('model_spark', 'spark'),
+  ('model_mini', 'gpt-5.1-codex-mini'),
+  ('reasoning_xhigh', 'xhigh'),
+  ('reasoning_high', 'high'),
+  ('reasoning_mid', 'mid'),
+  ('reasoning_spark', 'low'),
+  ('reasoning_mini', 'low'),
   ('merge_validation', 'true'),
   ('project_dir', ''),
   ('coordinator_version', '1.0.0');

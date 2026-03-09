@@ -11,12 +11,64 @@ const instanceRegistry = require('./instance-registry');
 
 const REPO_RE = /^(https?:\/\/github\.com\/)?[a-zA-Z0-9._-]+\/[a-zA-Z0-9._-]+(\.git)?$/;
 const SAFE_PATH_RE = /^(?:\/|[A-Za-z]:[\\/])[a-zA-Z0-9._\\/: -]+$/;
+const WORKER_LIMIT_MIN = 1;
+const WORKER_LIMIT_MAX = 8;
+const DEFAULT_WORKERS = 4;
+const LEGACY_MAX_WORKERS_DEFAULT = 8;
 
 let server = null;
 let wss = null;
 let setupProcess = null;
 let broadcastIntervalId = null;
 let pingIntervalId = null;
+
+function hasConfigValue(value) {
+  return value !== undefined && value !== null && String(value).trim() !== '';
+}
+
+function clampWorkerLimit(value, fallback = DEFAULT_WORKERS) {
+  const parsed = parseInt(value, 10);
+  const normalized = Number.isInteger(parsed) ? parsed : fallback;
+  return Math.min(Math.max(normalized, WORKER_LIMIT_MIN), WORKER_LIMIT_MAX);
+}
+
+function resolveWorkerLimit(rawMaxWorkers, rawNumWorkers) {
+  const hasMaxWorkers = hasConfigValue(rawMaxWorkers);
+  const hasNumWorkers = hasConfigValue(rawNumWorkers);
+  const maxWorkers = hasMaxWorkers ? clampWorkerLimit(rawMaxWorkers) : null;
+  const numWorkers = hasNumWorkers ? clampWorkerLimit(rawNumWorkers) : null;
+
+  if (hasMaxWorkers && hasNumWorkers) {
+    if (maxWorkers !== numWorkers) {
+      if (maxWorkers === LEGACY_MAX_WORKERS_DEFAULT && numWorkers !== LEGACY_MAX_WORKERS_DEFAULT) {
+        return numWorkers;
+      }
+      return maxWorkers;
+    }
+    return maxWorkers;
+  }
+  if (hasMaxWorkers) return maxWorkers;
+  if (hasNumWorkers) return numWorkers;
+  return DEFAULT_WORKERS;
+}
+
+function persistCanonicalWorkerLimit(value) {
+  const workers = clampWorkerLimit(value);
+  const workerString = String(workers);
+  db.setConfig('max_workers', workerString);
+  db.setConfig('num_workers', workerString);
+  return workers;
+}
+
+function readCanonicalWorkerLimit() {
+  const rawMaxWorkers = db.getConfig('max_workers');
+  const rawNumWorkers = db.getConfig('num_workers');
+  const workers = resolveWorkerLimit(rawMaxWorkers, rawNumWorkers);
+  const workerString = String(workers);
+  if (rawMaxWorkers !== workerString) db.setConfig('max_workers', workerString);
+  if (rawNumWorkers !== workerString) db.setConfig('num_workers', workerString);
+  return workers;
+}
 
 function start(projectDir, port = 3100, scriptDir = null, handlers = {}) {
   const app = express();
@@ -43,7 +95,7 @@ function start(projectDir, port = 3100, scriptDir = null, handlers = {}) {
     const origin = req.headers.origin;
     if (origin && /^https?:\/\/(localhost|127\.0\.0\.1)(:\d+)?$/.test(origin)) {
       res.setHeader('Access-Control-Allow-Origin', origin);
-      res.setHeader('Access-Control-Allow-Methods', 'GET, POST, DELETE, OPTIONS');
+      res.setHeader('Access-Control-Allow-Methods', 'GET, POST, PATCH, DELETE, OPTIONS');
       res.setHeader('Access-Control-Allow-Headers', 'Content-Type');
     }
     if (req.method === 'OPTIONS') return res.sendStatus(204);
@@ -131,12 +183,12 @@ function start(projectDir, port = 3100, scriptDir = null, handlers = {}) {
   app.get('/api/config', (req, res) => {
     try {
       const storedDir = db.getConfig('project_dir');
-      const storedWorkers = db.getConfig('num_workers');
+      const workers = readCanonicalWorkerLimit();
       const storedRepo = db.getConfig('github_repo');
       const setupDone = db.getConfig('setup_complete');
       res.json({
         projectDir: storedDir || projectDir || '',
-        numWorkers: storedWorkers ? parseInt(storedWorkers) : 4,
+        numWorkers: workers,
         githubRepo: storedRepo || '',
         setupComplete: setupDone === '1',
         scriptDir: resolvedScriptDir,
@@ -162,18 +214,17 @@ function start(projectDir, port = 3100, scriptDir = null, handlers = {}) {
         }
         db.setConfig('github_repo', githubRepo);
       }
-      if (numWorkers !== undefined) {
-        db.setConfig('num_workers', String(Math.min(Math.max(parseInt(numWorkers) || 4, 1), 8)));
-      }
+      const workers = numWorkers !== undefined
+        ? persistCanonicalWorkerLimit(numWorkers)
+        : readCanonicalWorkerLimit();
       // Auto-save as preset when both project dir and repo are set
       const dir = newDir || db.getConfig('project_dir');
       const repo = githubRepo !== undefined ? githubRepo : db.getConfig('github_repo');
-      const workers = numWorkers !== undefined ? Math.min(Math.max(parseInt(numWorkers) || 4, 1), 8) : parseInt(db.getConfig('num_workers') || '4');
       if (dir && repo) {
         const presetName = repo || path.basename(dir);
         db.savePreset(presetName, dir, repo, workers);
       }
-      db.log('gui', 'config_updated', { projectDir: newDir, githubRepo, numWorkers });
+      db.log('gui', 'config_updated', { projectDir: newDir, githubRepo, numWorkers: workers });
       res.json({ ok: true, message: 'Config saved. Relaunch masters to apply.' });
     } catch (e) {
       res.status(500).json({ ok: false, error: e.message });
@@ -238,13 +289,13 @@ function start(projectDir, port = 3100, scriptDir = null, handlers = {}) {
       return res.status(409).json({ ok: false, error: 'Setup is already running' });
     }
 
-    const workers = Math.min(Math.max(parseInt(numWorkers) || 4, 1), 8);
+    const workers = clampWorkerLimit(numWorkers);
     const setupScript = path.join(resolvedScriptDir, 'setup.sh');
 
     // Save config
     try {
       db.setConfig('project_dir', reqProjectDir);
-      db.setConfig('num_workers', String(workers));
+      persistCanonicalWorkerLimit(workers);
       db.setConfig('setup_complete', '0');
       if (githubRepo) {
         db.setConfig('github_repo', githubRepo);
@@ -309,7 +360,7 @@ function start(projectDir, port = 3100, scriptDir = null, handlers = {}) {
           // Auto-save as preset on successful setup
           const dir = db.getConfig('project_dir');
           const repo = db.getConfig('github_repo');
-          const w = parseInt(db.getConfig('num_workers') || '4');
+          const w = readCanonicalWorkerLimit();
           if (dir && repo) {
             db.savePreset(repo || path.basename(dir), dir, repo, w);
           }
@@ -558,7 +609,7 @@ function start(projectDir, port = 3100, scriptDir = null, handlers = {}) {
       const configBody = JSON.stringify({
         projectDir: reqDir,
         githubRepo: githubRepo || '',
-        numWorkers: parseInt(numWorkers) || 4,
+        numWorkers: clampWorkerLimit(numWorkers),
       });
       try {
         await new Promise((resolve, reject) => {

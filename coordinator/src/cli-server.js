@@ -12,6 +12,10 @@ let server = null;
 let tcpServer = null;
 let _projectDir = null; // Set on start()
 const NAMESPACE = process.env.MAC10_NAMESPACE || 'mac10';
+const WORKER_LIMIT_MIN = 1;
+const WORKER_LIMIT_MAX = 8;
+const DEFAULT_WORKERS = 4;
+const LEGACY_MAX_WORKERS_DEFAULT = 8;
 
 function namespacedFile(defaultName, namespacedName) {
   return NAMESPACE === 'mac10' ? defaultName : namespacedName;
@@ -21,6 +25,46 @@ function hintFromRoutingClass(routingClass) {
   if (routingClass === 'xhigh' || routingClass === 'high') return 'complex';
   if (routingClass === 'mid') return 'moderate';
   return 'simple';
+}
+
+function hasConfigValue(value) {
+  return value !== undefined && value !== null && String(value).trim() !== '';
+}
+
+function clampWorkerLimit(value, fallback = DEFAULT_WORKERS) {
+  const parsed = parseInt(value, 10);
+  const normalized = Number.isInteger(parsed) ? parsed : fallback;
+  return Math.min(Math.max(normalized, WORKER_LIMIT_MIN), WORKER_LIMIT_MAX);
+}
+
+function resolveWorkerLimit(rawMaxWorkers, rawNumWorkers) {
+  const hasMaxWorkers = hasConfigValue(rawMaxWorkers);
+  const hasNumWorkers = hasConfigValue(rawNumWorkers);
+  const maxWorkers = hasMaxWorkers ? clampWorkerLimit(rawMaxWorkers) : null;
+  const numWorkers = hasNumWorkers ? clampWorkerLimit(rawNumWorkers) : null;
+
+  if (hasMaxWorkers && hasNumWorkers) {
+    if (maxWorkers !== numWorkers) {
+      if (maxWorkers === LEGACY_MAX_WORKERS_DEFAULT && numWorkers !== LEGACY_MAX_WORKERS_DEFAULT) {
+        return numWorkers;
+      }
+      return maxWorkers;
+    }
+    return maxWorkers;
+  }
+  if (hasMaxWorkers) return maxWorkers;
+  if (hasNumWorkers) return numWorkers;
+  return DEFAULT_WORKERS;
+}
+
+function readCanonicalMaxWorkers() {
+  const rawMaxWorkers = db.getConfig('max_workers');
+  const rawNumWorkers = db.getConfig('num_workers');
+  const maxWorkers = resolveWorkerLimit(rawMaxWorkers, rawNumWorkers);
+  const workerString = String(maxWorkers);
+  if (rawMaxWorkers !== workerString) db.setConfig('max_workers', workerString);
+  if (rawNumWorkers !== workerString) db.setConfig('num_workers', workerString);
+  return maxWorkers;
 }
 
 // Write a request entry to handoff.json so the architect (which reads that file) can triage it.
@@ -500,8 +544,11 @@ function handleCommand(cmd, conn, handlers) {
       }
       case 'start-task': {
         const { worker_id, task_id } = args;
-        db.updateTask(task_id, { status: 'in_progress', started_at: new Date().toISOString() });
-        db.updateWorker(worker_id, { status: 'busy', last_heartbeat: new Date().toISOString() });
+        const startResult = db.startTaskForWorker(worker_id, task_id, new Date().toISOString());
+        if (!startResult.ok) {
+          respond(conn, { ok: false, error: startResult.reason });
+          break;
+        }
         db.log(`worker-${worker_id}`, 'task_started', { task_id });
         respond(conn, { ok: true });
         break;
@@ -513,25 +560,24 @@ function handleCommand(cmd, conn, handlers) {
       }
       case 'complete-task': {
         const { worker_id, task_id, pr_url, result, branch } = args;
-        db.updateTask(task_id, {
-          status: 'completed',
+        const completeResult = db.completeTaskForWorker(worker_id, task_id, {
           pr_url: pr_url || null,
           branch: branch || null,
           result: result || null,
           completed_at: new Date().toISOString(),
         });
-        // Increment tasks_completed counter on worker
-        const workerRow = db.getWorker(worker_id);
-        const tasksCompleted = (workerRow ? workerRow.tasks_completed : 0) + 1;
-        db.updateWorker(worker_id, {
-          status: 'completed_task',
-          current_task_id: null,
-          tasks_completed: tasksCompleted,
-        });
+        if (!completeResult.ok) {
+          respond(conn, { ok: false, error: completeResult.reason });
+          break;
+        }
+
+        const completedTask = completeResult.task;
+        const completedWorker = completeResult.worker;
+        const tasksCompleted = completedWorker ? completedWorker.tasks_completed : null;
+
         // Enqueue merge if PR exists (must be a valid URL, not a status string like "already_merged")
-        const completedTask = db.getTask(task_id);
         const isValidPrUrl = pr_url && /^https:\/\//.test(pr_url);
-        if (isValidPrUrl) {
+        if (isValidPrUrl && completedTask) {
           db.enqueueMerge({
             request_id: completedTask.request_id,
             task_id,
@@ -542,14 +588,14 @@ function handleCommand(cmd, conn, handlers) {
         }
         db.sendMail('allocator', 'task_completed', {
           worker_id, task_id,
-          request_id: completedTask.request_id,
+          request_id: completedTask ? completedTask.request_id : null,
           pr_url,
           tasks_completed: tasksCompleted,
         });
         // Notify architect so it has visibility into Tier 2 outcomes
         db.sendMail('architect', 'task_completed', {
           worker_id, task_id,
-          request_id: completedTask.request_id,
+          request_id: completedTask ? completedTask.request_id : null,
           pr_url,
           result,
         });
@@ -561,7 +607,13 @@ function handleCommand(cmd, conn, handlers) {
       }
       case 'fail-task': {
         const { worker_id: wid, task_id: tid, error } = args;
-        const failedTask = db.getTask(tid);
+        const failResult = db.failTaskForWorker(wid, tid, error, new Date().toISOString());
+        if (!failResult.ok) {
+          respond(conn, { ok: false, error: failResult.reason });
+          break;
+        }
+
+        const failedTask = failResult.task;
         const routingMeta = failedTask ? {
           subject: failedTask.subject,
           description: failedTask.description,
@@ -570,8 +622,6 @@ function handleCommand(cmd, conn, handlers) {
           tier: failedTask.tier,
           assigned_to: failedTask.assigned_to,
         } : null;
-        db.updateTask(tid, { status: 'failed', result: error, completed_at: new Date().toISOString() });
-        db.updateWorker(wid, { status: 'idle', current_task_id: null });
         db.sendMail('allocator', 'task_failed', {
           worker_id: wid,
           task_id: tid,
@@ -862,7 +912,7 @@ function handleCommand(cmd, conn, handlers) {
       }
 
       case 'add-worker': {
-        const maxWorkers = parseInt(db.getConfig('max_workers')) || 8;
+        const maxWorkers = readCanonicalMaxWorkers();
         const allWorkers = db.getAllWorkers();
         if (allWorkers.length >= maxWorkers) {
           respond(conn, { ok: false, error: `Already at max workers (${maxWorkers})` });
@@ -1140,9 +1190,18 @@ function handleCommand(cmd, conn, handlers) {
           respond(conn, { error: `Key '${key}' is not configurable. Allowed: ${ALLOWED_KEYS.join(', ')}` });
           break;
         }
-        db.getDb().prepare("INSERT INTO config(key, value) VALUES(?,?) ON CONFLICT(key) DO UPDATE SET value=excluded.value").run(key, value);
-        db.log('coordinator', 'config_set', { key, value });
-        respond(conn, { ok: true, key, value });
+        const dbConn = db.getDb();
+        const upsertConfig = dbConn.prepare('INSERT INTO config(key, value) VALUES(?,?) ON CONFLICT(key) DO UPDATE SET value=excluded.value');
+        let storedValue = String(value);
+        if (key === 'max_workers') {
+          storedValue = String(clampWorkerLimit(value));
+          upsertConfig.run('max_workers', storedValue);
+          upsertConfig.run('num_workers', storedValue);
+        } else {
+          upsertConfig.run(key, storedValue);
+        }
+        db.log('coordinator', 'config_set', { key, value: storedValue });
+        respond(conn, { ok: true, key, value: storedValue });
         break;
       }
       case 'loop-prompt': {
