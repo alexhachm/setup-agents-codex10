@@ -16,6 +16,8 @@ const WORKER_LIMIT_MIN = 1;
 const WORKER_LIMIT_MAX = 8;
 const DEFAULT_WORKERS = 4;
 const LEGACY_MAX_WORKERS_DEFAULT = 8;
+const BRANCH_RE = /^[a-zA-Z0-9._\/-]+$/;
+const WORKER_BRANCH_RE = /^agent-\d+$/;
 
 function namespacedFile(defaultName, namespacedName) {
   return NAMESPACE === 'mac10' ? defaultName : namespacedName;
@@ -257,6 +259,67 @@ function normalizeOverlapIdsField(overlapWith, selfId = null) {
     normalized.push(id);
   }
   return normalized;
+}
+
+function sanitizeBranchName(rawBranch) {
+  if (typeof rawBranch !== 'string') return '';
+  const trimmed = rawBranch.trim();
+  if (!trimmed || !BRANCH_RE.test(trimmed)) return '';
+  return trimmed;
+}
+
+function parseWorkerId(rawWorkerId) {
+  const parsed = parseInt(rawWorkerId, 10);
+  if (!Number.isInteger(parsed) || parsed <= 0) return null;
+  return parsed;
+}
+
+function canonicalBranchForWorkerId(rawWorkerId) {
+  const workerId = parseWorkerId(rawWorkerId);
+  if (workerId === null) return '';
+  return `agent-${workerId}`;
+}
+
+function readWorkerBranchFromWorktree(worker) {
+  const worktreePath = worker && worker.worktree_path ? String(worker.worktree_path).trim() : '';
+  if (!worktreePath) return '';
+  try {
+    const branch = sanitizeBranchName(execFileSync('git', ['branch', '--show-current'], {
+      encoding: 'utf8',
+      cwd: worktreePath,
+      stdio: ['ignore', 'pipe', 'ignore'],
+    }));
+    return WORKER_BRANCH_RE.test(branch) ? branch : '';
+  } catch {
+    return '';
+  }
+}
+
+function resolveWorkerBranch(worker, fallbackWorkerId = null) {
+  const workerBranch = sanitizeBranchName(worker && worker.branch ? String(worker.branch) : '');
+  if (WORKER_BRANCH_RE.test(workerBranch)) return workerBranch;
+
+  const worktreeBranch = readWorkerBranchFromWorktree(worker);
+  if (worktreeBranch) return worktreeBranch;
+
+  const workerId = worker && worker.id !== undefined && worker.id !== null
+    ? worker.id
+    : fallbackWorkerId;
+  return canonicalBranchForWorkerId(workerId);
+}
+
+function resolveCompletionBranch(worker, reportedBranch, fallbackWorkerId = null) {
+  const workerBranch = resolveWorkerBranch(worker, fallbackWorkerId);
+  const requestedBranch = sanitizeBranchName(reportedBranch);
+
+  if (!requestedBranch) return { branch: workerBranch || null, mismatch: false, requestedBranch: null, workerBranch };
+  if (!workerBranch) return { branch: requestedBranch, mismatch: false, requestedBranch, workerBranch: null };
+
+  if (requestedBranch !== workerBranch) {
+    return { branch: workerBranch, mismatch: true, requestedBranch, workerBranch };
+  }
+
+  return { branch: requestedBranch, mismatch: false, requestedBranch, workerBranch };
 }
 
 function validateCommand(cmd) {
@@ -534,7 +597,11 @@ function handleCommand(cmd, conn, handlers) {
       // === WORKER commands ===
       case 'my-task': {
         const worker = db.getWorker(args.worker_id);
-        if (!worker || !worker.current_task_id) {
+        if (!worker) {
+          respond(conn, { ok: false, error: 'Worker not found' });
+          break;
+        }
+        if (!worker.current_task_id) {
           respond(conn, { ok: true, task: null });
           break;
         }
@@ -554,15 +621,41 @@ function handleCommand(cmd, conn, handlers) {
         break;
       }
       case 'heartbeat': {
-        db.updateWorker(args.worker_id, { last_heartbeat: new Date().toISOString() });
+        const worker = db.getWorker(args.worker_id);
+        if (!worker) {
+          respond(conn, { ok: false, error: 'Worker not found' });
+          break;
+        }
+
+        const heartbeatTs = new Date().toISOString();
+        const updateResult = db.getDb().prepare(`
+          UPDATE workers
+          SET last_heartbeat = ?
+          WHERE id = ?
+        `).run(heartbeatTs, args.worker_id);
+        if (updateResult.changes !== 1) {
+          respond(conn, { ok: false, error: 'Worker not found' });
+          break;
+        }
+
         respond(conn, { ok: true });
         break;
       }
       case 'complete-task': {
         const { worker_id, task_id, pr_url, result, branch } = args;
+        const worker = db.getWorker(worker_id);
+        const resolvedBranch = resolveCompletionBranch(worker, branch, worker_id);
+        if (resolvedBranch.mismatch) {
+          db.log('coordinator', 'complete_task_branch_overridden', {
+            worker_id,
+            task_id,
+            requested_branch: resolvedBranch.requestedBranch,
+            worker_branch: resolvedBranch.workerBranch,
+          });
+        }
         const completeResult = db.completeTaskForWorker(worker_id, task_id, {
           pr_url: pr_url || null,
-          branch: branch || null,
+          branch: resolvedBranch.branch,
           result: result || null,
           completed_at: new Date().toISOString(),
         });
@@ -582,7 +675,7 @@ function handleCommand(cmd, conn, handlers) {
             request_id: completedTask.request_id,
             task_id,
             pr_url,
-            branch: branch || '',
+            branch: resolvedBranch.branch || '',
             priority: completedTask.priority === 'urgent' ? 10 : 0,
           });
         }
@@ -830,12 +923,17 @@ function handleCommand(cmd, conn, handlers) {
         const tasks = db.listTasks({ request_id: reqId, status: 'completed' });
         let queued = 0;
         for (const task of tasks) {
-          if (task.pr_url && task.branch) {
+          const worker = task.assigned_to ? db.getWorker(task.assigned_to) : null;
+          const resolvedBranch = resolveCompletionBranch(worker, task.branch, task.assigned_to);
+          if (task.pr_url && resolvedBranch.branch) {
+            if (resolvedBranch.mismatch || task.branch !== resolvedBranch.branch) {
+              db.updateTask(task.id, { branch: resolvedBranch.branch });
+            }
             try {
               db.enqueueMerge({
                 request_id: reqId,
                 task_id: task.id,
-                branch: task.branch,
+                branch: resolvedBranch.branch,
                 pr_url: task.pr_url,
               });
               queued++;
@@ -1127,8 +1225,13 @@ function handleCommand(cmd, conn, handlers) {
 
       // === LOOP commands ===
       case 'loop': {
-        const loopId = db.createLoop(args.prompt);
-        if (handlers.onLoopCreated) handlers.onLoopCreated(loopId, args.prompt);
+        const prompt = args.prompt;
+        if (prompt.trim().length === 0) {
+          respond(conn, { ok: false, error: 'prompt must be a non-empty string' });
+          break;
+        }
+        const loopId = db.createLoop(prompt);
+        if (handlers.onLoopCreated) handlers.onLoopCreated(loopId, prompt);
         respond(conn, { ok: true, loop_id: loopId });
         break;
       }
