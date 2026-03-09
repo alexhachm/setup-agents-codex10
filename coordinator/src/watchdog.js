@@ -2,9 +2,11 @@
 
 const db = require('./db');
 const tmux = require('./tmux');
+const recovery = require('./recovery');
 
 let intervalId = null;
 let lastMailPurge = 0;
+let startupRecoverySweepPending = true;
 // Track last escalation level per worker to avoid duplicate nudge/triage mails
 const lastEscalationLevel = new Map();
 
@@ -33,6 +35,8 @@ function getThresholds() {
 function start(projectDir) {
   const intervalMs = parseInt(db.getConfig('watchdog_interval_ms')) || 10000;
 
+  runStartupRecoverySweep();
+
   intervalId = setInterval(() => {
     try {
       tick(projectDir);
@@ -46,7 +50,20 @@ function start(projectDir) {
 
 function stop() {
   if (intervalId) { clearInterval(intervalId); intervalId = null; }
+  startupRecoverySweepPending = true;
   lastEscalationLevel.clear();
+}
+
+function runStartupRecoverySweep() {
+  if (!startupRecoverySweepPending) return;
+  const repairedRequests = recoverStaleIntegrations(Date.now(), { source: 'startup_repair_sweep' });
+  startupRecoverySweepPending = false;
+  if (repairedRequests > 0) {
+    db.log('coordinator', 'integration_repair_sweep', {
+      source: 'startup',
+      repaired_requests: repairedRequests,
+    });
+  }
 }
 
 function tick(projectDir) {
@@ -258,15 +275,29 @@ function recoverOrphanTasks() {
   }
 }
 
-function recoverStaleIntegrations(now) {
+function recoverStaleIntegrations(now, options = {}) {
+  const source = options.source || 'watchdog_tick';
   const integratingRequests = db.getDb().prepare(
     "SELECT * FROM requests WHERE status = 'integrating'"
   ).all();
+  let repairedRequests = 0;
 
   for (const req of integratingRequests) {
     const merges = db.getDb().prepare(
       'SELECT * FROM merge_queue WHERE request_id = ?'
     ).all(req.id);
+
+    // Immediate repair path for stranded no-merge requests that are already complete.
+    if (merges.length === 0 && recovery.isNoMergeTerminalIntegratingRequest(req)) {
+      db.updateRequest(req.id, { status: 'completed' });
+      repairedRequests += 1;
+      db.log('coordinator', 'stale_integration_recovered', {
+        request_id: req.id,
+        reason: 'no_merge_terminal_repair',
+        source,
+      });
+      continue;
+    }
 
     // Case 1: No merge_queue entries and integrating > 15 minutes → complete (e.g. tier1 tasks)
     if (merges.length === 0) {
@@ -399,6 +430,8 @@ function recoverStaleIntegrations(now) {
       });
     }
   }
+
+  return repairedRequests;
 }
 
 function monitorLoops(projectDir) {
