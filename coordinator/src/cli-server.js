@@ -399,8 +399,9 @@ function queueMergeWithRecovery({
 }) {
   const normalizedPriority = Number.isInteger(priority) ? priority : 0;
   const latestCheckpoint = latest_completion_timestamp === undefined
-    ? db.getRequestLatestCompletedTaskTimestamp(request_id)
+    ? db.getRequestLatestCompletedTaskCursor(request_id)
     : latest_completion_timestamp;
+
   const enqueueResult = db.enqueueMerge({
     request_id,
     task_id,
@@ -438,7 +439,7 @@ function queueMergeWithRecovery({
   const hasFreshCompletionProgress = isTerminalRetryStatus && db.hasRequestCompletedTaskProgressSince(
     request_id,
     existing.completion_checkpoint,
-    latestCheckpoint
+    latestCheckpoint,
   );
   const shouldRetry = isTerminalRetryStatus && (force_retry || hasFreshCompletionProgress);
   const desiredStatus = shouldRetry ? 'pending' : existing.status;
@@ -1115,7 +1116,7 @@ function handleCommand(cmd, conn, handlers) {
         }
         // Queue merges for each completed task's branch/PR
         const tasks = db.listTasks({ request_id: reqId, status: 'completed' });
-        const latestCompletedTaskTimestamp = db.getRequestLatestCompletedTaskTimestamp(reqId);
+        const latestCompletedTaskState = db.getRequestLatestCompletedTaskCursor(reqId);
         let queued = 0;
         for (const task of tasks) {
           const worker = task.assigned_to ? db.getWorker(task.assigned_to) : null;
@@ -1132,7 +1133,7 @@ function handleCommand(cmd, conn, handlers) {
                 pr_url: task.pr_url,
                 priority: task.priority === 'urgent' ? 10 : 0,
                 force_retry: forceRetry,
-                latest_completion_timestamp: latestCompletedTaskTimestamp,
+                latest_completion_timestamp: latestCompletedTaskState,
               });
               if (queueResult.queued) queued++;
               if (queueResult.refreshed) {
