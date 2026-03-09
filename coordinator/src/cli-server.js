@@ -332,6 +332,70 @@ function resolveCompletionBranch(worker, reportedBranch, fallbackWorkerId = null
   return { branch: requestedBranch, mismatch: false, requestedBranch, workerBranch };
 }
 
+function queueMergeWithRecovery({ request_id, task_id, pr_url, branch, priority = 0 }) {
+  const normalizedPriority = Number.isInteger(priority) ? priority : 0;
+  const enqueueResult = db.enqueueMerge({
+    request_id,
+    task_id,
+    pr_url,
+    branch,
+    priority: normalizedPriority,
+  });
+  if (enqueueResult.inserted) {
+    return { queued: true, inserted: true, refreshed: false, retried: false };
+  }
+
+  const existing = db.getDb().prepare(`
+    SELECT id, request_id, task_id, branch, status, priority
+    FROM merge_queue
+    WHERE pr_url = ?
+    ORDER BY id DESC
+    LIMIT 1
+  `).get(pr_url);
+
+  if (!existing) {
+    return { queued: false, inserted: false, refreshed: false, retried: false, reason: 'missing_existing_entry' };
+  }
+  if (existing.status === 'merged' || existing.status === 'merging') {
+    return { queued: false, inserted: false, refreshed: false, retried: false, reason: `status_${existing.status}` };
+  }
+
+  const currentPriority = Number.isInteger(existing.priority) ? existing.priority : 0;
+  const desiredPriority = Math.max(currentPriority, normalizedPriority);
+  const shouldRetry = existing.status === 'failed' || existing.status === 'conflict';
+  const desiredStatus = shouldRetry ? 'pending' : existing.status;
+  const needsRefresh =
+    String(existing.request_id) !== String(request_id) ||
+    Number(existing.task_id) !== Number(task_id) ||
+    existing.branch !== branch ||
+    currentPriority !== desiredPriority ||
+    existing.status !== desiredStatus;
+
+  if (!needsRefresh) {
+    return { queued: false, inserted: false, refreshed: false, retried: false, reason: 'already_current' };
+  }
+
+  db.getDb().prepare(`
+    UPDATE merge_queue
+    SET request_id = ?,
+        task_id = ?,
+        branch = ?,
+        priority = ?,
+        status = ?,
+        error = NULL
+    WHERE id = ?
+  `).run(request_id, task_id, branch, desiredPriority, desiredStatus, existing.id);
+
+  return {
+    queued: shouldRetry,
+    inserted: false,
+    refreshed: true,
+    retried: shouldRetry,
+    previous_status: existing.status,
+    merge_id: existing.id,
+  };
+}
+
 function validateCommand(cmd) {
   const { command, args } = cmd;
   if (typeof command !== 'string') {
@@ -679,15 +743,25 @@ function handleCommand(cmd, conn, handlers) {
         const tasksCompleted = completedWorker ? completedWorker.tasks_completed : null;
 
         // Enqueue merge if PR exists (must be a valid URL, not a status string like "already_merged")
-        const isValidPrUrl = pr_url && /^https:\/\//.test(pr_url);
-        if (isValidPrUrl && completedTask) {
-          db.enqueueMerge({
+        if (isValidGitHubPrUrl(pr_url) && completedTask && resolvedBranch.branch) {
+          const queueResult = queueMergeWithRecovery({
             request_id: completedTask.request_id,
             task_id,
             pr_url,
             branch: resolvedBranch.branch || '',
             priority: completedTask.priority === 'urgent' ? 10 : 0,
           });
+          if (queueResult.refreshed) {
+            db.log('coordinator', 'merge_queue_entry_refreshed', {
+              request_id: completedTask.request_id,
+              task_id,
+              pr_url,
+              branch: resolvedBranch.branch,
+              retried: queueResult.retried,
+              previous_status: queueResult.previous_status || null,
+              merge_id: queueResult.merge_id || null,
+            });
+          }
         }
         db.sendMail('allocator', 'task_completed', {
           worker_id, task_id,
@@ -940,15 +1014,27 @@ function handleCommand(cmd, conn, handlers) {
               db.updateTask(task.id, { branch: resolvedBranch.branch });
             }
             try {
-              const enqueueResult = db.enqueueMerge({
+              const queueResult = queueMergeWithRecovery({
                 request_id: reqId,
                 task_id: task.id,
                 branch: resolvedBranch.branch,
                 pr_url: task.pr_url,
+                priority: task.priority === 'urgent' ? 10 : 0,
               });
-              if (enqueueResult.inserted) queued++;
+              if (queueResult.queued) queued++;
+              if (queueResult.refreshed) {
+                db.log('coordinator', 'merge_queue_entry_refreshed', {
+                  request_id: reqId,
+                  task_id: task.id,
+                  pr_url: task.pr_url,
+                  branch: resolvedBranch.branch,
+                  retried: queueResult.retried,
+                  previous_status: queueResult.previous_status || null,
+                  merge_id: queueResult.merge_id || null,
+                });
+              }
             } catch (e) {
-              // Already queued or other error — skip
+              // Invalid merge metadata or transient DB error — skip this task entry
             }
           }
         }

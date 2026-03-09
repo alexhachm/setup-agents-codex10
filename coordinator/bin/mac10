@@ -643,10 +643,20 @@ async function main() {
 
       case 'complete-task':
         if (argv.length < 3) { console.error('Usage: mac10 complete-task <worker_id> <task_id> [pr_url] [branch] [result]'); process.exit(1); }
+        const parsedWorkerId = parseWorkerId(argv[1]);
+        if (parsedWorkerId === null) {
+          console.error('Error: worker_id must be a positive integer');
+          process.exit(1);
+        }
+        const parsedTaskId = parseInt(argv[2], 10);
+        if (!Number.isInteger(parsedTaskId) || parsedTaskId <= 0) {
+          console.error('Error: task_id must be a positive integer');
+          process.exit(1);
+        }
         const completionBranch = resolveCompleteTaskBranch(argv[4], argv[1]);
         result = await send(socketPath, 'complete-task', {
-          worker_id: argv[1],
-          task_id: parseInt(argv[2], 10),
+          worker_id: String(parsedWorkerId),
+          task_id: parsedTaskId,
           pr_url: argv[3] || '',
           branch: completionBranch || '',
           result: argv.slice(5).join(' ') || '',
