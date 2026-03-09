@@ -63,6 +63,19 @@ function findConnectionTarget() {
   process.exit(1);
 }
 
+function getTransportTimeoutMs(command, args) {
+  if (command === 'inbox-block') {
+    const requestedTimeout = Number(args && args.timeout);
+    // Match caller intent for blocking inbox timeout and add a small buffer
+    // so the server can send its final empty response at deadline.
+    if (Number.isFinite(requestedTimeout) && requestedTimeout > 0) {
+      return requestedTimeout + 2000;
+    }
+    return 302000;
+  }
+  return 30000;
+}
+
 function send(target, command, args) {
   return new Promise((resolve, reject) => {
     let settled = false;
@@ -100,11 +113,10 @@ function send(target, command, args) {
       // Connection closed without a complete response
       settle(reject, new Error('Connection closed before receiving a complete response'));
     });
-    // Timeout for blocking commands
-    const timeout = command === 'inbox-block' ? 600000 : 30000;
+    const timeout = getTransportTimeoutMs(command, args);
     conn.setTimeout(timeout, () => {
       conn.end();
-      settle(resolve, { ok: true, messages: [] }); // timeout returns empty for blocking inbox
+      settle(reject, new Error(`Transport timeout for command "${command}" after ${timeout}ms`));
     });
   });
 }
@@ -183,6 +195,35 @@ function getPidFilePath(projectDir) {
   return path.join(projectDir, '.claude', 'state', base);
 }
 
+function findProjectRoot(startDir = process.cwd()) {
+  let dir = path.resolve(startDir);
+  while (dir !== path.dirname(dir)) {
+    if (fs.existsSync(path.join(dir, '.claude', 'state'))) {
+      return dir;
+    }
+    dir = path.dirname(dir);
+  }
+  return path.resolve(startDir);
+}
+
+function cleanupNamespaceEndpoints(projectDir) {
+  const stateDir = path.join(projectDir, '.claude', 'state');
+  const pointerNames = ['mac10.sock.path', 'mac10.sock', 'mac10.tcp.port', 'mac10.pipe'];
+  for (const baseName of pointerNames) {
+    for (const name of namespacedCandidates(baseName)) {
+      const pointer = path.join(stateDir, name);
+      if (!fs.existsSync(pointer)) continue;
+      if (baseName === 'mac10.sock.path') {
+        try {
+          const sockPath = fs.readFileSync(pointer, 'utf8').trim();
+          if (sockPath) fs.unlinkSync(sockPath);
+        } catch {}
+      }
+      try { fs.unlinkSync(pointer); } catch {}
+    }
+  }
+}
+
 function isPidAlive(pid) {
   if (!Number.isInteger(pid) || pid <= 0) return false;
   try {
@@ -197,6 +238,32 @@ function formatDetails(details) {
   if (details === undefined || details === null) return '';
   if (typeof details === 'string') return details;
   try { return JSON.stringify(details); } catch { return String(details); }
+}
+
+function isUnsupportedRpcError(message) {
+  if (!message) return false;
+  return /unknown command|unsupported|not implemented|invalid command/i.test(String(message));
+}
+
+function detailsMatchRequest(details, requestId) {
+  if (details === undefined || details === null) return false;
+  if (typeof details === 'string') {
+    if (details.includes(requestId)) return true;
+    try {
+      const parsed = JSON.parse(details);
+      return detailsMatchRequest(parsed, requestId);
+    } catch {
+      return false;
+    }
+  }
+  if (Array.isArray(details)) {
+    return details.some((entry) => detailsMatchRequest(entry, requestId));
+  }
+  if (typeof details === 'object') {
+    if (details.request_id === requestId || details.requestId === requestId) return true;
+    return Object.values(details).some((value) => detailsMatchRequest(value, requestId));
+  }
+  return false;
 }
 
 async function main() {
@@ -286,10 +353,34 @@ async function main() {
   }
 
   if (cmd === 'stop') {
-    const socketPath = findConnectionTarget();
-    // Just remove the socket — coordinator watches for this
-    try { fs.unlinkSync(socketPath); } catch {}
-    console.log('Coordinator stopped.');
+    const projectDir = projectOverride
+      ? path.resolve(projectOverride)
+      : (argv[1] ? path.resolve(argv[1]) : findProjectRoot(process.cwd()));
+    const pidFile = getPidFilePath(projectDir);
+
+    let pid = NaN;
+    try {
+      pid = parseInt(fs.readFileSync(pidFile, 'utf8').trim(), 10);
+    } catch {}
+
+    if (isPidAlive(pid)) {
+      try { process.kill(pid, 'SIGTERM'); } catch {}
+      const deadline = Date.now() + 10000;
+      while (Date.now() < deadline && isPidAlive(pid)) {
+        await new Promise(r => setTimeout(r, 200));
+      }
+      if (isPidAlive(pid)) {
+        try { process.kill(pid, 'SIGKILL'); } catch {}
+      }
+    }
+
+    try { fs.unlinkSync(pidFile); } catch {}
+    cleanupNamespaceEndpoints(projectDir);
+    if (isPidAlive(pid)) {
+      console.error(`Failed to stop coordinator for namespace "${NAMESPACE}" (PID ${pid})`);
+      process.exit(1);
+    }
+    console.log(`Coordinator stopped for namespace "${NAMESPACE}"${Number.isInteger(pid) ? ` (PID ${pid})` : ''}.`);
     process.exit(0);
   }
 
@@ -343,14 +434,28 @@ async function main() {
         if (!argv[1]) { console.error('Usage: mac10 history|request-history <request_id> [limit]'); process.exit(1); }
         const requestId = argv[1];
         const limit = parseInt(argv[2], 10) || 500;
-        result = await send(socketPath, 'log', { limit });
-        if (!result.ok) {
+        result = await send(socketPath, 'request-history', { request_id: requestId, limit });
+
+        let rows = [];
+        if (result.ok) {
+          rows = (result.logs || []).reverse();
+        } else if (isUnsupportedRpcError(result.error)) {
+          // Rolling upgrade compatibility: emulate request-scoped history from legacy log RPC.
+          const legacyLimit = Math.max(limit * 5, 2000);
+          const legacyResult = await send(socketPath, 'log', { limit: legacyLimit });
+          if (!legacyResult.ok) {
+            console.error(legacyResult.error || result.error);
+            break;
+          }
+          rows = (legacyResult.logs || [])
+            .filter((entry) => detailsMatchRequest(entry.details, requestId))
+            .slice(0, limit)
+            .reverse();
+        } else {
           console.error(result.error);
           break;
         }
-        const rows = result.logs
-          .filter((entry) => `${entry.action || ''} ${formatDetails(entry.details)}`.includes(requestId))
-          .reverse();
+
         if (rows.length === 0) {
           const statusRes = await send(socketPath, 'status', {});
           if (statusRes.ok) {
@@ -485,13 +590,19 @@ async function main() {
         break;
 
       case 'inbox': {
-        if (!argv[1]) { console.error('Usage: mac10 inbox <recipient> [--block] [--peek]'); process.exit(1); }
+        if (!argv[1]) { console.error('Usage: mac10 inbox <recipient> [--block] [--peek] [--timeout=ms]'); process.exit(1); }
         const recipient = argv[1];
         const block = argv.includes('--block');
         const peek = argv.includes('--peek');
-        const timeout = parseInt(argv.find(a => a.startsWith('--timeout='))?.split('=')[1], 10) || 300000;
+        const timeoutArg = argv.find(a => a.startsWith('--timeout='));
+        const parsedTimeout = timeoutArg ? parseInt(timeoutArg.split('=')[1], 10) : NaN;
+        if (timeoutArg && (!Number.isFinite(parsedTimeout) || parsedTimeout <= 0)) {
+          console.error('Error: --timeout must be a positive integer in milliseconds');
+          process.exit(1);
+        }
+        const timeout = Number.isFinite(parsedTimeout) ? parsedTimeout : 300000;
         if (block) {
-          result = await send(socketPath, 'inbox-block', { recipient, timeout });
+          result = await send(socketPath, 'inbox-block', { recipient, timeout, peek });
         } else {
           result = await send(socketPath, 'inbox', { recipient, peek });
         }
@@ -821,7 +932,7 @@ ARCHITECT:
   create-task <json>             Create task (JSON from stdin with -)
   tier1-complete <request_id> [result]
   ask-clarification <request_id> <question>
-  inbox <recipient> [--block] [--peek]
+  inbox <recipient> [--block] [--peek] [--timeout=ms]
 
 ALLOCATOR:
   ready-tasks                    List tasks ready for assignment
@@ -857,7 +968,7 @@ CHANGES:
 
 SYSTEM:
   start [project_dir]            Start coordinator
-  stop                           Stop coordinator
+  stop [project_dir]             Stop coordinator
   repair                         Fix stuck state
   add-worker                     Create a new worker worktree (up to max_workers)
   merge-status [request_id]      Show merge queue entries

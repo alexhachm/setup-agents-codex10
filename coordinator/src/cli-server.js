@@ -6,6 +6,7 @@ const path = require('path');
 const crypto = require('crypto');
 const { execFileSync } = require('child_process');
 const db = require('./db');
+const modelRouter = require('./model-router');
 
 let server = null;
 let tcpServer = null;
@@ -14,6 +15,12 @@ const NAMESPACE = process.env.MAC10_NAMESPACE || 'mac10';
 
 function namespacedFile(defaultName, namespacedName) {
   return NAMESPACE === 'mac10' ? defaultName : namespacedName;
+}
+
+function hintFromRoutingClass(routingClass) {
+  if (routingClass === 'xhigh' || routingClass === 'high') return 'complex';
+  if (routingClass === 'mid') return 'moderate';
+  return 'simple';
 }
 
 // Write a request entry to handoff.json so the architect (which reads that file) can triage it.
@@ -39,12 +46,23 @@ function bridgeToHandoff(requestId, description, type = 'bug-fix') {
     if (!Array.isArray(arr)) arr = [];
     // Skip if already present
     if (arr.some(e => e.request_id === requestId)) return;
+    const route = modelRouter.routeTask({
+      subject: description,
+      description,
+      tier: 2,
+      priority: type === 'fix' ? 'high' : 'normal',
+    }, { getConfig: db.getConfig });
     arr.push({
       request_id: requestId,
       timestamp: new Date().toISOString(),
       type,
       description,
-      complexity_hint: 'simple',
+      complexity_hint: hintFromRoutingClass(route.routing_class),
+      routing_class: route.routing_class,
+      routing_model: route.model,
+      routing_reasoning_effort: route.reasoning_effort,
+      routing_reason: route.reason,
+      routing_updated_at: new Date().toISOString(),
       status: 'pending_decomposition',
     });
     fs.writeFileSync(handoffPath, JSON.stringify(arr, null, 2));
@@ -67,6 +85,7 @@ const COMMAND_SCHEMAS = {
   'status':            { required: [], types: {} },
   'clarify':           { required: ['request_id', 'message'], types: { request_id: 'string', message: 'string' } },
   'log':               { required: [], types: { limit: 'number', actor: 'string' } },
+  'request-history':   { required: ['request_id'], types: { request_id: 'string', limit: 'number' } },
   'triage':            { required: ['request_id', 'tier'], types: { request_id: 'string', tier: 'number', reasoning: 'string' } },
   'create-task':       {
     required: ['request_id', 'subject', 'description'],
@@ -82,7 +101,7 @@ const COMMAND_SCHEMAS = {
   'fail-task':         { required: ['worker_id', 'task_id', 'error'], types: { worker_id: 'string', error: 'string' } },
   'distill':           { required: ['worker_id'], types: { worker_id: 'string' } },
   'inbox':             { required: ['recipient'], types: { recipient: 'string' } },
-  'inbox-block':       { required: ['recipient'], types: { recipient: 'string', timeout: 'number' } },
+  'inbox-block':       { required: ['recipient'], types: { recipient: 'string', timeout: 'number', peek: 'boolean' } },
   'ready-tasks':       { required: [], types: {} },
   'assign-task':       { required: ['task_id', 'worker_id'], types: { task_id: 'number', worker_id: 'number' } },
   'claim-worker':      { required: ['worker_id', 'claimer'], types: { worker_id: 'number', claimer: 'string' } },
@@ -117,11 +136,83 @@ const COMMAND_SCHEMAS = {
 
 /** Parse a files field into an array. Handles arrays, JSON strings, and comma-separated strings. */
 function parseFilesField(files) {
-  if (Array.isArray(files)) return files;
+  if (files === null || files === undefined) return null;
+  if (Array.isArray(files)) return db.normalizeTaskFiles(files);
   if (typeof files === 'string') {
-    try { return JSON.parse(files); } catch { return files.split(',').map(f => f.trim()); }
+    const trimmed = files.trim();
+    if (!trimmed) return [];
+    try {
+      const parsed = JSON.parse(trimmed);
+      if (Array.isArray(parsed)) return db.normalizeTaskFiles(parsed);
+    } catch {}
+    return db.normalizeTaskFiles(trimmed.split(','));
   }
   return null;
+}
+
+/**
+ * Parse reset-worker ownership context from args.
+ * Backward compatible formats:
+ * - worker_id="7"
+ * - worker_id="7|123|2026-03-09T01:23:45.678Z"
+ */
+function parseResetOwnership(args) {
+  const rawWorker = String(args.worker_id || '');
+  const [rawWorkerId, rawTaskId = '', rawAssignmentToken = ''] = rawWorker.split('|', 3);
+  const worker_id = rawWorkerId.trim();
+
+  const candidateTaskId = args.expected_task_id !== undefined
+    ? args.expected_task_id
+    : rawTaskId.trim();
+  const parsedTaskId = parseInt(candidateTaskId, 10);
+  const expected_task_id = Number.isInteger(parsedTaskId) ? parsedTaskId : null;
+
+  const expected_assignment_token = (typeof args.assignment_token === 'string' && args.assignment_token.trim())
+    ? args.assignment_token.trim()
+    : (rawAssignmentToken.trim() || null);
+
+  return { worker_id, expected_task_id, expected_assignment_token };
+}
+
+/** Parse depends_on into an array of task ids. Accepts arrays or JSON-array strings. */
+function parseDependsOnField(dependsOn) {
+  if (dependsOn === null || dependsOn === undefined) return null;
+  if (Array.isArray(dependsOn)) return dependsOn;
+  if (typeof dependsOn === 'string') {
+    try {
+      const parsed = JSON.parse(dependsOn);
+      if (!Array.isArray(parsed)) {
+        throw new Error('depends_on JSON must be an array');
+      }
+      return parsed;
+    } catch (e) {
+      throw new Error(`Invalid depends_on: ${e.message}`);
+    }
+  }
+  throw new Error('Invalid depends_on: expected an array of task ids');
+}
+
+function normalizeOverlapIdsField(overlapWith, selfId = null) {
+  if (!overlapWith) return [];
+  let ids = overlapWith;
+  if (typeof ids === 'string') {
+    try { ids = JSON.parse(ids); } catch { return []; }
+  }
+  if (!Array.isArray(ids)) return [];
+  const parsedSelfId = Number(selfId);
+  const hasSelfId = Number.isInteger(parsedSelfId) && parsedSelfId > 0;
+
+  const normalized = [];
+  const seen = new Set();
+  for (const rawId of ids) {
+    const id = Number(rawId);
+    if (!Number.isInteger(id) || id <= 0) continue;
+    if (hasSelfId && id === parsedSelfId) continue;
+    if (seen.has(id)) continue;
+    seen.add(id);
+    normalized.push(id);
+  }
+  return normalized;
 }
 
 function validateCommand(cmd) {
@@ -316,6 +407,14 @@ function handleCommand(cmd, conn, handlers) {
         respond(conn, { ok: true, logs });
         break;
       }
+      case 'request-history': {
+        const requestId = args.request_id;
+        const rawLimit = args.limit || 500;
+        const limit = Math.max(1, Math.min(rawLimit, 10000));
+        const logs = db.getRequestHistory(requestId, limit);
+        respond(conn, { ok: true, request_id: requestId, logs });
+        break;
+      }
 
       // === ARCHITECT commands ===
       case 'triage': {
@@ -330,9 +429,8 @@ function handleCommand(cmd, conn, handlers) {
       }
       case 'create-task': {
         // Normalize files to an array before persisting (handles strings, JSON strings, arrays)
-        if (args.files) {
-          args.files = parseFilesField(args.files);
-        }
+        args.files = parseFilesField(args.files);
+        args.depends_on = parseDependsOnField(args.depends_on);
         const taskId = db.createTask(args);
         // If no dependencies, mark ready immediately
         if (!args.depends_on || args.depends_on.length === 0) {
@@ -340,23 +438,25 @@ function handleCommand(cmd, conn, handlers) {
         }
         // Detect file overlaps with other tasks in the same request
         let overlaps = [];
-        const taskFiles = parseFilesField(args.files);
-        if (taskFiles && taskFiles.length > 0) {
-          overlaps = db.findOverlappingTasks(args.request_id, taskFiles);
-          if (overlaps.length > 0) {
+        const taskFiles = Array.isArray(args.files) ? args.files : [];
+        if (taskFiles.length > 0) {
+          overlaps = db.findOverlappingTasks(args.request_id, taskFiles, taskId)
+            .filter((o) => Number(o.task_id) !== taskId);
+          const overlapIds = normalizeOverlapIdsField(overlaps.map((o) => o.task_id), taskId);
+          if (overlapIds.length > 0) {
             // Set overlap_with on the new task
-            const overlapIds = overlaps.map(o => o.task_id);
             db.updateTask(taskId, { overlap_with: JSON.stringify(overlapIds) });
             // Update existing overlapping tasks to include the new task
-            for (const o of overlaps) {
-              const existing = db.getTask(o.task_id);
-              let existingOverlaps = [];
-              if (existing && existing.overlap_with) {
-                try { existingOverlaps = JSON.parse(existing.overlap_with); } catch {}
-              }
+            for (const overlapId of overlapIds) {
+              const existing = db.getTask(overlapId);
+              const existingOverlaps = normalizeOverlapIdsField(existing && existing.overlap_with, overlapId);
+              let shouldUpdate = !!existing;
               if (!existingOverlaps.includes(taskId)) {
                 existingOverlaps.push(taskId);
-                db.updateTask(o.task_id, { overlap_with: JSON.stringify(existingOverlaps) });
+                shouldUpdate = true;
+              }
+              if (shouldUpdate) {
+                db.updateTask(overlapId, { overlap_with: JSON.stringify(existingOverlaps) });
               }
             }
             db.log('coordinator', 'overlap_detected', {
@@ -462,6 +562,14 @@ function handleCommand(cmd, conn, handlers) {
       case 'fail-task': {
         const { worker_id: wid, task_id: tid, error } = args;
         const failedTask = db.getTask(tid);
+        const routingMeta = failedTask ? {
+          subject: failedTask.subject,
+          description: failedTask.description,
+          domain: failedTask.domain,
+          files: failedTask.files,
+          tier: failedTask.tier,
+          assigned_to: failedTask.assigned_to,
+        } : null;
         db.updateTask(tid, { status: 'failed', result: error, completed_at: new Date().toISOString() });
         db.updateWorker(wid, { status: 'idle', current_task_id: null });
         db.sendMail('allocator', 'task_failed', {
@@ -469,6 +577,12 @@ function handleCommand(cmd, conn, handlers) {
           task_id: tid,
           request_id: failedTask ? failedTask.request_id : null,
           error,
+          subject: routingMeta ? routingMeta.subject : null,
+          domain: routingMeta ? routingMeta.domain : null,
+          files: routingMeta ? routingMeta.files : null,
+          tier: routingMeta ? routingMeta.tier : null,
+          assigned_to: routingMeta ? routingMeta.assigned_to : null,
+          original_task: routingMeta,
         });
         // Also notify architect so it has visibility into failures
         db.sendMail('architect', 'task_failed', {
@@ -476,6 +590,7 @@ function handleCommand(cmd, conn, handlers) {
           task_id: tid,
           request_id: failedTask ? failedTask.request_id : null,
           error,
+          original_task: routingMeta,
         });
         db.log(`worker-${wid}`, 'task_failed', { task_id: tid, error });
         respond(conn, { ok: true });
@@ -497,6 +612,7 @@ function handleCommand(cmd, conn, handlers) {
         // Async blocking inbox check — polls without freezing the event loop
         const recipient = args.recipient;
         const timeoutMs = args.timeout || 300000;
+        const consume = !args.peek;
         const pollMs = 1000;
         const deadline = Date.now() + timeoutMs;
         let cancelled = false;
@@ -508,7 +624,7 @@ function handleCommand(cmd, conn, handlers) {
         const poll = () => {
           if (cancelled) return;
           try {
-            const msgs = db.checkMail(recipient);
+            const msgs = db.checkMail(recipient, consume);
             if (msgs.length > 0) {
               respond(conn, { ok: true, messages: msgs });
               return;
@@ -557,8 +673,34 @@ function handleCommand(cmd, conn, handlers) {
           break;
         }
 
-        // Send mail to worker
         const assignedTask = db.getTask(assignTaskId);
+        const assignedWorker = db.getWorker(assignWorkerId);
+        const routingDecision = modelRouter.routeTask(assignedTask, { getConfig: db.getConfig });
+
+        // Trigger tmux spawn via handler — revert assignment on failure
+        if (handlers.onAssignTask) {
+          try {
+            handlers.onAssignTask(assignedTask, assignedWorker, routingDecision);
+          } catch (spawnErr) {
+            db.getDb().transaction(() => {
+              db.updateTask(assignTaskId, {
+                status: assignResult.task.status,
+                assigned_to: assignResult.task.assigned_to,
+              });
+              db.updateWorker(assignWorkerId, {
+                status: assignResult.worker.status,
+                current_task_id: assignResult.worker.current_task_id,
+                domain: assignResult.worker.domain,
+                claimed_by: assignResult.worker.claimed_by,
+                launched_at: assignResult.worker.launched_at,
+              });
+            })();
+            db.log('coordinator', 'assign_handler_failed', { task_id: assignTaskId, worker_id: assignWorkerId, error: spawnErr.message });
+            respond(conn, { ok: false, error: `Failed to spawn worker: ${spawnErr.message}` });
+            break;
+          }
+        }
+
         db.sendMail(`worker-${assignWorkerId}`, 'task_assigned', {
           task_id: assignTaskId,
           subject: assignedTask.subject,
@@ -568,23 +710,35 @@ function handleCommand(cmd, conn, handlers) {
           tier: assignedTask.tier,
           request_id: assignedTask.request_id,
           validation: assignedTask.validation,
+          assignment_token: assignedWorker ? assignedWorker.launched_at : null,
+          routing_class: routingDecision.routing_class,
+          model: routingDecision.model,
+          reasoning_effort: routingDecision.reasoning_effort,
+          routing_reason: routingDecision.reason,
         });
-        db.log('allocator', 'task_assigned', { task_id: assignTaskId, worker_id: assignWorkerId, domain: assignedTask.domain });
+        db.log('allocator', 'task_assigned', {
+          task_id: assignTaskId,
+          worker_id: assignWorkerId,
+          domain: assignedTask.domain,
+          assignment_token: assignedWorker ? assignedWorker.launched_at : null,
+          routing_class: routingDecision.routing_class,
+          model: routingDecision.model,
+          reasoning_effort: routingDecision.reasoning_effort,
+          routing_reason: routingDecision.reason,
+        });
 
-        // Trigger tmux spawn via handler — revert assignment on failure
-        if (handlers.onAssignTask) {
-          try {
-            handlers.onAssignTask(assignedTask, db.getWorker(assignWorkerId));
-          } catch (spawnErr) {
-            db.updateTask(assignTaskId, { status: 'ready', assigned_to: null });
-            db.updateWorker(assignWorkerId, { status: 'idle', current_task_id: null, launched_at: null });
-            db.log('coordinator', 'assign_handler_failed', { task_id: assignTaskId, worker_id: assignWorkerId, error: spawnErr.message });
-            respond(conn, { ok: false, error: `Failed to spawn worker: ${spawnErr.message}` });
-            break;
-          }
-        }
-
-        respond(conn, { ok: true, task_id: assignTaskId, worker_id: assignWorkerId });
+        respond(conn, {
+          ok: true,
+          task_id: assignTaskId,
+          worker_id: assignWorkerId,
+          routing: {
+            class: routingDecision.routing_class,
+            model: routingDecision.model,
+            reasoning_effort: routingDecision.reasoning_effort,
+            reason: routingDecision.reason,
+          },
+          assignment_token: assignedWorker ? assignedWorker.launched_at : null,
+        });
         break;
       }
       case 'claim-worker': {
@@ -657,10 +811,47 @@ function handleCommand(cmd, conn, handlers) {
         break;
       }
       case 'repair': {
-        // Reset stuck states
+        // Reset stuck states. Treat NULL heartbeat workers as stale when their launch/create
+        // timestamp is older than the cutoff so phantom assignments can be recovered.
         const cutoff = new Date(Date.now() - 3 * 60 * 1000).toISOString();
-        const stuck = db.getDb().prepare("UPDATE workers SET status = 'idle', current_task_id = NULL WHERE status IN ('assigned','running','busy') AND last_heartbeat < ?").run(cutoff);
-        const orphaned = db.getDb().prepare("UPDATE tasks SET status = 'ready', assigned_to = NULL WHERE status IN ('assigned','in_progress') AND assigned_to IN (SELECT id FROM workers WHERE status = 'idle')").run();
+        const dbConn = db.getDb();
+        const staleWorkers = dbConn.prepare(`
+          SELECT id
+          FROM workers
+          WHERE status IN ('assigned', 'running', 'busy')
+            AND datetime(COALESCE(last_heartbeat, launched_at, created_at)) < datetime(?)
+        `).all(cutoff);
+
+        let stuck = { changes: 0 };
+        let orphaned = { changes: 0 };
+
+        if (staleWorkers.length > 0) {
+          const staleIds = staleWorkers.map((row) => row.id);
+          const placeholders = staleIds.map(() => '?').join(', ');
+          const updateTasks = dbConn.prepare(`
+            UPDATE tasks
+            SET status = 'ready',
+                assigned_to = NULL
+            WHERE status IN ('assigned', 'in_progress')
+              AND assigned_to IN (${placeholders})
+          `);
+          const updateWorkers = dbConn.prepare(`
+            UPDATE workers
+            SET status = 'idle',
+                current_task_id = NULL,
+                claimed_by = NULL
+            WHERE id IN (${placeholders})
+          `);
+          const tx = dbConn.transaction((ids) => {
+            const orphanedResult = updateTasks.run(...ids);
+            const stuckResult = updateWorkers.run(...ids);
+            return { stuckResult, orphanedResult };
+          });
+          const txResult = tx(staleIds);
+          stuck = txResult.stuckResult;
+          orphaned = txResult.orphanedResult;
+        }
+
         db.log('coordinator', 'repair', { reset_workers: stuck.changes, orphaned_tasks: orphaned.changes });
         respond(conn, { ok: true, reset_workers: stuck.changes, orphaned_tasks: orphaned.changes });
         break;
@@ -694,11 +885,34 @@ function handleCommand(cmd, conn, handlers) {
         const branchName = `agent-${nextId}`;
         try {
           fs.mkdirSync(wtDir, { recursive: true });
-          // Create branch from main
+          // Create branch from configured/default branch (not current checked-out feature branch).
           const mainBranch = (() => {
+            const configuredPrimary = (db.getConfig('primary_branch') || '').trim();
+            if (configuredPrimary) return configuredPrimary;
+
             try {
-              return execFileSync('git', ['symbolic-ref', '--short', 'HEAD'], { cwd: projDir, encoding: 'utf8' }).trim();
-            } catch { return 'main'; }
+              const remoteHead = execFileSync(
+                'git',
+                ['symbolic-ref', '--short', 'refs/remotes/origin/HEAD'],
+                { cwd: projDir, encoding: 'utf8' },
+              ).trim();
+              if (remoteHead.startsWith('origin/')) {
+                return remoteHead.slice('origin/'.length);
+              }
+            } catch {}
+
+            try {
+              const abbrevRemoteHead = execFileSync(
+                'git',
+                ['rev-parse', '--abbrev-ref', 'origin/HEAD'],
+                { cwd: projDir, encoding: 'utf8' },
+              ).trim();
+              if (abbrevRemoteHead.startsWith('origin/')) {
+                return abbrevRemoteHead.slice('origin/'.length);
+              }
+            } catch {}
+
+            return 'main';
           })();
           try {
             execFileSync('git', ['branch', branchName, mainBranch], { cwd: projDir, encoding: 'utf8' });
@@ -760,13 +974,47 @@ function handleCommand(cmd, conn, handlers) {
       }
 
       case 'reset-worker': {
-        // Called by sentinel when Claude exits — resets worker to idle
-        const resetWid = args.worker_id;
+        // Called by sentinel when Claude exits — ownership checks prevent stale
+        // sentinels from clearing a newer assignment.
+        const { worker_id: resetWid, expected_task_id: expectedTaskId, expected_assignment_token: expectedToken } = parseResetOwnership(args);
+        if (!resetWid) {
+          respond(conn, { ok: false, error: 'Missing worker_id' });
+          break;
+        }
         const resetWorker = db.getWorker(resetWid);
         if (!resetWorker) {
           respond(conn, { ok: false, error: 'Worker not found' });
           break;
         }
+
+        if (
+          expectedTaskId !== null &&
+          resetWorker.current_task_id !== null &&
+          resetWorker.current_task_id !== expectedTaskId
+        ) {
+          db.log(`worker-${resetWid}`, 'sentinel_reset_skipped', {
+            reason: 'task_mismatch',
+            expected_task_id: expectedTaskId,
+            current_task_id: resetWorker.current_task_id,
+          });
+          respond(conn, { ok: true, skipped: true, reason: 'task_mismatch' });
+          break;
+        }
+
+        if (
+          expectedToken &&
+          resetWorker.launched_at &&
+          resetWorker.launched_at !== expectedToken
+        ) {
+          db.log(`worker-${resetWid}`, 'sentinel_reset_skipped', {
+            reason: 'assignment_mismatch',
+            expected_assignment_token: expectedToken,
+            current_assignment_token: resetWorker.launched_at,
+          });
+          respond(conn, { ok: true, skipped: true, reason: 'assignment_mismatch' });
+          break;
+        }
+
         // Only reset if worker isn't already idle (avoid clobbering a fresh assignment)
         if (resetWorker.status !== 'idle') {
           db.updateWorker(resetWid, {
@@ -774,7 +1022,11 @@ function handleCommand(cmd, conn, handlers) {
             current_task_id: null,
             last_heartbeat: new Date().toISOString(),
           });
-          db.log(`worker-${resetWid}`, 'sentinel_reset', { previous_status: resetWorker.status });
+          db.log(`worker-${resetWid}`, 'sentinel_reset', {
+            previous_status: resetWorker.status,
+            expected_task_id: expectedTaskId,
+            expected_assignment_token: expectedToken,
+          });
         }
         respond(conn, { ok: true });
         break;
@@ -880,6 +1132,9 @@ function handleCommand(cmd, conn, handlers) {
         const ALLOWED_KEYS = [
           'watchdog_warn_sec', 'watchdog_nudge_sec', 'watchdog_triage_sec', 'watchdog_terminate_sec',
           'watchdog_interval_ms', 'allocator_interval_ms', 'max_workers',
+          'model_flagship', 'model_spark', 'model_mini',
+          'model_xhigh', 'model_high', 'model_mid',
+          'reasoning_xhigh', 'reasoning_high', 'reasoning_mid', 'reasoning_spark', 'reasoning_mini',
         ];
         if (!ALLOWED_KEYS.includes(key)) {
           respond(conn, { error: `Key '${key}' is not configurable. Allowed: ${ALLOWED_KEYS.join(', ')}` });
