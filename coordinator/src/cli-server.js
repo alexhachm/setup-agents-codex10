@@ -124,6 +124,25 @@ function parseFilesField(files) {
   return null;
 }
 
+const SAFE_TASK_DOMAIN_RE = /^[A-Za-z0-9_-]+$/;
+
+function normalizeTaskDomain(domain) {
+  if (domain === undefined || domain === null) return null;
+  if (typeof domain !== 'string') {
+    throw new Error('Invalid domain: must be a string');
+  }
+
+  const trimmed = domain.trim();
+  if (!trimmed) return null;
+  if (trimmed.includes('/') || trimmed.includes('\\') || trimmed.includes('..')) {
+    throw new Error('Invalid domain: path separators and traversal tokens are not allowed');
+  }
+  if (!SAFE_TASK_DOMAIN_RE.test(trimmed)) {
+    throw new Error('Invalid domain: only letters, numbers, "-" and "_" are allowed');
+  }
+  return trimmed;
+}
+
 function validateCommand(cmd) {
   const { command, args } = cmd;
   if (typeof command !== 'string') {
@@ -150,6 +169,12 @@ function validateCommand(cmd) {
         delete args[key];
       }
     }
+  }
+
+  if (command === 'create-task' && Object.prototype.hasOwnProperty.call(a, 'domain')) {
+    const normalizedDomain = normalizeTaskDomain(a.domain);
+    if (normalizedDomain) a.domain = normalizedDomain;
+    else delete a.domain;
   }
 }
 

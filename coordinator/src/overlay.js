@@ -27,6 +27,25 @@ function generateOverlay(task, worker, projectDir) {
   return base + '\n\n' + overlay;
 }
 
+const SAFE_DOMAIN_RE = /^[A-Za-z0-9_-]+$/;
+
+function isSafeDomainSlug(domain) {
+  if (typeof domain !== 'string') return false;
+  const trimmed = domain.trim();
+  if (!trimmed) return false;
+  if (trimmed.includes('/') || trimmed.includes('\\') || trimmed.includes('..')) return false;
+  return SAFE_DOMAIN_RE.test(trimmed);
+}
+
+function resolveDomainKnowledgePath(domain, knowledgeDir) {
+  if (!isSafeDomainSlug(domain)) return null;
+  const domainDir = path.resolve(knowledgeDir, 'domain');
+  const filePath = path.resolve(domainDir, `${domain.trim()}.md`);
+  const rel = path.relative(domainDir, filePath);
+  if (!rel || rel.startsWith('..') || path.isAbsolute(rel)) return null;
+  return filePath;
+}
+
 function buildTaskOverlay(task, worker, projectDir) {
   const lines = [
     '# Current Task',
@@ -75,11 +94,10 @@ function buildTaskOverlay(task, worker, projectDir) {
 
   // Add knowledge context if available
   const knowledgeDir = path.join(projectDir, '.claude', 'knowledge');
-  if (task.domain && fs.existsSync(path.join(knowledgeDir, 'domain', `${task.domain}.md`))) {
+  const domainKnowledgePath = resolveDomainKnowledgePath(task.domain, knowledgeDir);
+  if (domainKnowledgePath && fs.existsSync(domainKnowledgePath)) {
     try {
-      const domainKnowledge = fs.readFileSync(
-        path.join(knowledgeDir, 'domain', `${task.domain}.md`), 'utf8'
-      );
+      const domainKnowledge = fs.readFileSync(domainKnowledgePath, 'utf8');
       if (domainKnowledge.trim()) {
         lines.push('## Domain Knowledge');
         lines.push('');
