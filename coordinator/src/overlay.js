@@ -2,6 +2,7 @@
 
 const fs = require('fs');
 const path = require('path');
+const DOMAIN_TOKEN_PATTERN = /^[a-z0-9._-]+$/;
 
 /**
  * Generate per-task instruction overlay for a worker.
@@ -75,11 +76,15 @@ function buildTaskOverlay(task, worker, projectDir) {
 
   // Add knowledge context if available
   const knowledgeDir = path.join(projectDir, '.claude', 'knowledge');
-  if (task.domain && fs.existsSync(path.join(knowledgeDir, 'domain', `${task.domain}.md`))) {
+  const domainKnowledgeDir = path.resolve(knowledgeDir, 'domain');
+  const domainKnowledgePath = resolveDomainKnowledgePath(domainKnowledgeDir, task.domain);
+  if (task.domain && !domainKnowledgePath) {
+    console.warn(`[overlay] Invalid task domain "${task.domain}"; skipping domain knowledge.`);
+  }
+
+  if (domainKnowledgePath && fs.existsSync(domainKnowledgePath)) {
     try {
-      const domainKnowledge = fs.readFileSync(
-        path.join(knowledgeDir, 'domain', `${task.domain}.md`), 'utf8'
-      );
+      const domainKnowledge = fs.readFileSync(domainKnowledgePath, 'utf8');
       if (domainKnowledge.trim()) {
         lines.push('## Domain Knowledge');
         lines.push('');
@@ -116,6 +121,19 @@ function buildTaskOverlay(task, worker, projectDir) {
   lines.push('');
 
   return lines.join('\n');
+}
+
+function resolveDomainKnowledgePath(domainKnowledgeDir, domainToken) {
+  if (typeof domainToken !== 'string') return null;
+  if (!DOMAIN_TOKEN_PATTERN.test(domainToken)) return null;
+
+  const candidatePath = path.resolve(domainKnowledgeDir, `${domainToken}.md`);
+  const relativePath = path.relative(domainKnowledgeDir, candidatePath);
+  if (relativePath.startsWith('..') || path.isAbsolute(relativePath)) {
+    return null;
+  }
+
+  return candidatePath;
 }
 
 function writeOverlay(task, worker, projectDir) {
