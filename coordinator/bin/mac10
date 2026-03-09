@@ -328,8 +328,13 @@ function resolveCompleteTaskBranch(requestedBranch, rawWorkerId) {
     return canonicalWorkerBranch;
   }
 
-  if (!normalizedRequested) return currentBranch;
-  return normalizedRequested;
+  if (normalizedRequested) {
+    console.error(`[mac10] complete-task branch ignored: "${normalizedRequested}" is not a worker branch`);
+  }
+  if (currentBranch && !WORKER_BRANCH_RE.test(currentBranch)) {
+    console.error(`[mac10] complete-task current branch ignored: "${currentBranch}" is not a worker branch`);
+  }
+  return '';
 }
 
 async function main() {
@@ -971,10 +976,22 @@ async function main() {
         } else console.error(result.error);
         break;
 
-      case 'loop-requests':
-        if (!argv[1]) { console.error('Usage: mac10 loop-requests <loop_id>'); process.exit(1); }
+      case 'loop-requests': {
+        if (!argv[1]) { console.error('Usage: mac10 loop-requests <loop_id> [--json]'); process.exit(1); }
+        const options = argv.slice(2);
+        let jsonMode = false;
+        for (const option of options) {
+          if (option === '--json') {
+            jsonMode = true;
+            continue;
+          }
+          console.error('Usage: mac10 loop-requests <loop_id> [--json]');
+          process.exit(1);
+        }
         result = await send(socketPath, 'loop-requests', { loop_id: parseInt(argv[1], 10) });
-        if (result.ok) {
+        if (jsonMode) {
+          console.log(JSON.stringify(result, null, 2));
+        } else if (result.ok) {
           if (result.requests.length === 0) {
             console.log('No requests for this loop.');
           } else {
@@ -982,8 +999,11 @@ async function main() {
               console.log(`  ${r.id} [${r.status}] ${r.tier ? `T${r.tier}` : '  '} ${r.description.slice(0, 60)}`);
             }
           }
-        } else console.error(result.error);
+        } else {
+          console.error(result.error);
+        }
         break;
+      }
 
       default:
         console.error(`Unknown command: ${cmd}`);
@@ -1042,7 +1062,7 @@ LOOPS:
   set-config <key> <value>        Set coordinator config at runtime (no restart needed)
   loop-prompt <id>               Get loop prompt + checkpoint for sentinel
   loop-request <id> <desc>       Submit request from loop (dedup-aware)
-  loop-requests <id>             List all requests for a loop
+  loop-requests <id> [--json]    List all requests for a loop
 
 CHANGES:
   log-change <desc> [--domain X] [--file Y] [--fn Z] [--tooltip T]

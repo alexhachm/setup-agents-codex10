@@ -17,6 +17,7 @@ const WORKER_LIMIT_MAX = 8;
 const DEFAULT_WORKERS = 4;
 const LEGACY_MAX_WORKERS_DEFAULT = 8;
 const BRANCH_RE = /^[a-zA-Z0-9._\/-]+$/;
+const PR_URL_RE = /^https:\/\/github\.com\/[a-zA-Z0-9._-]+\/[a-zA-Z0-9._-]+\/pull\/\d+$/;
 const WORKER_BRANCH_RE = /^agent-\d+$/;
 
 function namespacedFile(defaultName, namespacedName) {
@@ -268,6 +269,10 @@ function sanitizeBranchName(rawBranch) {
   return trimmed;
 }
 
+function isValidGitHubPrUrl(value) {
+  return typeof value === 'string' && PR_URL_RE.test(value);
+}
+
 function parseWorkerId(rawWorkerId) {
   const parsed = parseInt(rawWorkerId, 10);
   if (!Number.isInteger(parsed) || parsed <= 0) return null;
@@ -313,7 +318,12 @@ function resolveCompletionBranch(worker, reportedBranch, fallbackWorkerId = null
   const requestedBranch = sanitizeBranchName(reportedBranch);
 
   if (!requestedBranch) return { branch: workerBranch || null, mismatch: false, requestedBranch: null, workerBranch };
-  if (!workerBranch) return { branch: requestedBranch, mismatch: false, requestedBranch, workerBranch: null };
+  if (!workerBranch) {
+    if (WORKER_BRANCH_RE.test(requestedBranch)) {
+      return { branch: requestedBranch, mismatch: false, requestedBranch, workerBranch: null };
+    }
+    return { branch: null, mismatch: true, requestedBranch, workerBranch: null };
+  }
 
   if (requestedBranch !== workerBranch) {
     return { branch: workerBranch, mismatch: true, requestedBranch, workerBranch };
@@ -925,27 +935,29 @@ function handleCommand(cmd, conn, handlers) {
         for (const task of tasks) {
           const worker = task.assigned_to ? db.getWorker(task.assigned_to) : null;
           const resolvedBranch = resolveCompletionBranch(worker, task.branch, task.assigned_to);
-          if (task.pr_url && resolvedBranch.branch) {
+          if (isValidGitHubPrUrl(task.pr_url) && resolvedBranch.branch) {
             if (resolvedBranch.mismatch || task.branch !== resolvedBranch.branch) {
               db.updateTask(task.id, { branch: resolvedBranch.branch });
             }
             try {
-              db.enqueueMerge({
+              const enqueueResult = db.enqueueMerge({
                 request_id: reqId,
                 task_id: task.id,
                 branch: resolvedBranch.branch,
                 pr_url: task.pr_url,
               });
-              queued++;
+              if (enqueueResult.inserted) queued++;
             } catch (e) {
               // Already queued or other error — skip
             }
           }
         }
-        db.updateRequest(reqId, { status: 'integrating' });
+        if (queued > 0) {
+          db.updateRequest(reqId, { status: 'integrating' });
+        }
         db.log('coordinator', 'integration_triggered', { request_id: reqId, merges_queued: queued });
         // Trigger merger immediately
-        if (handlers.onIntegrate) handlers.onIntegrate(reqId);
+        if (queued > 0 && handlers.onIntegrate) handlers.onIntegrate(reqId);
         respond(conn, { ok: true, request_id: reqId, merges_queued: queued });
         break;
       }
