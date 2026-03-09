@@ -7,6 +7,7 @@ const db = require('./db');
 
 const BRANCH_RE = /^[a-zA-Z0-9._\/-]+$/;
 const PR_URL_RE = /^https:\/\/github\.com\/[a-zA-Z0-9._-]+\/[a-zA-Z0-9._-]+\/pull\/\d+$/;
+const MERGE_TIMEOUT_ERROR_PREFIX = 'Merge timed out after';
 
 function validateEntry(entry) {
   if (entry.branch && !BRANCH_RE.test(entry.branch)) {
@@ -47,20 +48,27 @@ function onTaskCompleted(taskId) {
   const incomplete = allTasks.filter(t => t.status !== 'completed' && t.status !== 'failed');
 
   if (incomplete.length === 0) {
-    // Check for conflict merges that should be retried — fix tasks may have resolved them
-    const conflictMerges = db.getDb().prepare(
-      "SELECT id FROM merge_queue WHERE request_id = ? AND status = 'conflict'"
+    // Check for recoverable merges that should be retried — fix tasks may have resolved them.
+    // Include legacy timeout rows that were previously marked as failed.
+    const recoverableMerges = db.getDb().prepare(
+      `SELECT id
+         FROM merge_queue
+        WHERE request_id = ?
+          AND (
+            status = 'conflict'
+            OR (status = 'failed' AND error LIKE '${MERGE_TIMEOUT_ERROR_PREFIX}%')
+          )`
     ).all(task.request_id);
 
-    if (conflictMerges.length > 0) {
-      // Reset conflict merges to pending so the merger retries them
-      for (const m of conflictMerges) {
+    if (recoverableMerges.length > 0) {
+      // Reset recoverable merges to pending so the merger retries them
+      for (const m of recoverableMerges) {
         db.updateMerge(m.id, { status: 'pending', error: null });
       }
       db.updateRequest(task.request_id, { status: 'integrating' });
-      db.log('coordinator', 'conflict_merges_retried', {
+      db.log('coordinator', 'recoverable_merges_retried', {
         request_id: task.request_id,
-        merge_ids: conflictMerges.map(m => m.id),
+        merge_ids: recoverableMerges.map(m => m.id),
       });
       return; // Let merger retry — don't complete yet
     }

@@ -15,6 +15,9 @@ const THRESHOLDS = Object.freeze({
   triage: 120,
   terminate: 180,
 });
+const MERGE_TIMEOUT_SEC = 300;
+const MERGE_CONFLICT_GRACE_SEC = 600;
+const MERGE_TIMEOUT_ERROR = `Merge timed out after ${MERGE_TIMEOUT_SEC / 60} minutes`;
 
 // Escalation thresholds (seconds since last heartbeat)
 // Override via DB config: watchdog_warn_sec, watchdog_nudge_sec, watchdog_triage_sec, watchdog_terminate_sec
@@ -286,14 +289,23 @@ function recoverStaleIntegrations(now) {
       continue;
     }
 
-    // Check for merges stuck in 'merging' for > 5 minutes → timeout them
+    // Check for merges stuck in 'merging' for > 5 minutes and route as recoverable conflicts.
     // Use updated_at (when status changed to 'merging'), not created_at (when enqueued)
     for (const m of merges) {
       if (m.status === 'merging' && (m.updated_at || m.created_at)) {
         const mergeAge = (now - new Date(m.updated_at || m.created_at).getTime()) / 1000;
-        if (mergeAge > 300) { // 5 minutes
-          db.updateMerge(m.id, { status: 'failed', error: 'Merge timed out after 5 minutes' });
-          db.log('coordinator', 'merge_timeout', { merge_id: m.id, request_id: req.id });
+        if (mergeAge > MERGE_TIMEOUT_SEC) {
+          db.updateMerge(m.id, { status: 'conflict', error: MERGE_TIMEOUT_ERROR });
+          db.sendMail('allocator', 'merge_failed', {
+            request_id: req.id,
+            error: `Merge timeout promoted to conflict: ${m.branch || 'unknown-branch'} - ${MERGE_TIMEOUT_ERROR}`,
+          });
+          db.log('coordinator', 'merge_timeout', {
+            merge_id: m.id,
+            request_id: req.id,
+            transitioned_to: 'conflict',
+            stale_sec: Math.round(mergeAge),
+          });
         }
       }
     }
@@ -343,7 +355,7 @@ function recoverStaleIntegrations(now) {
         }, 0);
       const conflictAgeSec = oldestConflict / 1000;
 
-      if (conflictAgeSec < 600) { // 10-minute grace period for allocator
+      if (conflictAgeSec < MERGE_CONFLICT_GRACE_SEC) { // 10-minute grace period for allocator
         continue;
       }
 
