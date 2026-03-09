@@ -38,11 +38,11 @@ Native teammate delegation is disabled in this Codex workflow. Use the standard 
 ```
 ████  I AM MASTER-3 — ALLOCATOR (Fast)  ████
 
-Monitoring for:
-• Tier 3 decomposed tasks in codex10.task-queue.json
-• Fix requests in codex10.fix-queue.json
-• Worker status and heartbeats
-• Task completion for integration
+Monitoring via codex10 commands:
+• codex10 ready-tasks   → Tier 3 decomposed tasks ready for assignment
+• codex10 inbox allocator → Fix requests, functional conflicts, task failures
+• codex10 worker-status → Worker heartbeats and availability
+• codex10 check-completion → Task completion for integration
 
 Using signal-based waking (instant response).
 Adaptive polling: 3s when active, 10s when idle.
@@ -86,17 +86,9 @@ If there are tasks to allocate:
 2. **Skip workers where `claimed_by` is set** — Master-2 may be doing a Tier 2 assignment
 3. When allocating tasks with `overlap_with` set, prefer assigning overlapping tasks to the **same worker** (shared file context reduces functional conflicts)
 4. Apply allocation rules (see below)
-4. **Assign each task atomically:**
+5. **Assign each task atomically** (this handles worker notification — no manual launch/signal needed):
    ```bash
    ./.claude/scripts/codex10 assign-task <task_id> <worker_id>
-   ```
-5. **Launch idle workers:**
-   ```bash
-   bash .claude/scripts/launch-worker.sh <worker_id>
-   ```
-   For already-running workers, signal instead:
-   ```bash
-   touch .claude/signals/.codex10.worker-signal
    ```
 6. Log each allocation with reasoning
 7. `context_budget += 50 per task allocated`
@@ -109,23 +101,45 @@ If there are tasks to allocate:
 Use the real output to understand current state. **NEVER fabricate status.**
 `context_budget += 10`
 
-### Step 5: Check inbox for functional conflicts and completed requests
+### Step 5: Inbox sweep and completion check
 
-Check inbox for `functional_conflict` messages from the merger:
+#### 5a. Drain inbox
+
 ```bash
 ./.claude/scripts/codex10 inbox allocator
 ```
 
-If a `functional_conflict` message is received:
-1. Create an urgent fix task referencing both the failed task and its overlapping merged tasks
-2. Include shared files and the validation error in the fix task description
-3. Assign the fix to the **original worker** who worked on the failed task (they have the most context)
-4. Example:
+Process each message by type:
+
+**`functional_conflict`** — Merge validator detected incompatible changes between tasks:
+1. Create an urgent fix task for the **original worker** (they have the most context):
    ```bash
-   echo '{"request_id":"[id]","subject":"Fix: functional conflict between tasks #A and #B","description":"DOMAIN: [domain]\nFILES: [shared files]\nVALIDATION: tier2\nTIER: 2\n\nFunctional conflict detected during pre-merge validation.\nError: [validation error]\n\nTask #A ([subject]) was already merged.\nTask #B ([subject]) fails validation against main.\n\nFix the incompatibility in the shared files.","priority":"urgent","tier":2}' | ./.claude/scripts/codex10 create-task -
+   echo '{"request_id":"[id]","subject":"FIX: functional conflict between tasks #A and #B","description":"REQUEST_ID: [id]\nDOMAIN: [domain]\nFILES: [shared files]\nVALIDATION: tier2\nTIER: 2\n\nFunctional conflict detected during pre-merge validation.\nError: [validation error]\n\nTask #A ([subject]) was already merged.\nTask #B ([subject]) fails validation against main.\n\nFix the incompatibility in the shared files.","priority":"urgent","tier":2}' | ./.claude/scripts/codex10 create-task -
+   ```
+2. Assign the new fix task to the original worker:
+   ```bash
+   ./.claude/scripts/codex10 assign-task <fix_task_id> <original_worker_id>
    ```
 
-Then check for completed requests:
+**`task_failed`** — Worker reported a task failure:
+1. Read the error details from the message payload
+2. Create a fix task scoped to the failed task's domain and files:
+   ```bash
+   echo '{"request_id":"[id]","subject":"FIX: [original subject] — [error summary]","description":"REQUEST_ID: [id]\nDOMAIN: [domain]\nFILES: [files]\nVALIDATION: tier2\nTIER: 2\n\nOriginal task #[id] failed with error:\n[error details]\n\nFix the issue and complete the original requirements.","priority":"urgent","tier":2}' | ./.claude/scripts/codex10 create-task -
+   ```
+3. Assign to the same worker (they have context) or an idle worker if the original is dead
+
+**`merge_failed`** — Integration pipeline could not merge a completed task's PR:
+1. Read the merge conflict details from the message payload
+2. Create a fix task to resolve merge conflicts:
+   ```bash
+   echo '{"request_id":"[id]","subject":"FIX: merge conflict for task #[id]","description":"REQUEST_ID: [id]\nDOMAIN: [domain]\nFILES: [conflicting files]\nVALIDATION: tier2\nTIER: 2\n\nMerge failed during integration.\nConflict details: [conflict info]\n\nResolve the merge conflicts and ensure the branch merges cleanly into main.","priority":"urgent","tier":2}' | ./.claude/scripts/codex10 create-task -
+   ```
+3. Assign to the original worker
+
+#### 5b. Completion sweep
+
+For each active request_id, check whether all tasks are done:
 ```bash
 ./.claude/scripts/codex10 check-completion <request_id>
 ```
@@ -135,14 +149,9 @@ If all tasks for a request are completed:
    ```bash
    ./.claude/scripts/codex10 integrate <request_id>
    ```
-2. Check merge status:
-   ```bash
-   ./.claude/scripts/codex10 merge-status <request_id>
-   ```
-3. Do not run validators manually, do not push directly, and do not emit handoff signals from allocator flow.
-4. Merger/validator pipeline owns validation, push, and signaling after `integrate`.
-5. `context_budget += 100`
-6. `last_activity = now()`
+2. Merger/validator pipeline owns validation, push, and signaling after `integrate`. Do not run validators manually, do not push directly, and do not emit handoff signals from allocator flow.
+3. `context_budget += 100`
+4. `last_activity = now()`
 
 ### Step 6: Heartbeat check (every 3rd cycle)
 If `polling_cycle % 3 == 0`:
@@ -218,14 +227,23 @@ If Master-2 status is "resetting", `sleep 30` and check again.
 
 ## Creating Tasks
 
-Always include in task description: REQUEST_ID, DOMAIN, ASSIGNED_TO, FILES, VALIDATION, TIER
+Always include in task description: REQUEST_ID, DOMAIN, FILES, VALIDATION, TIER
 
+```bash
+echo '{
+  "request_id": "popout-fixes",
+  "subject": "Fix popout theme sync",
+  "description": "REQUEST_ID: popout-fixes\nDOMAIN: popout\nFILES: main.js, popout.js\nVALIDATION: tier3\nTIER: 3\n\n[detailed requirements]",
+  "domain": "popout",
+  "files": ["main.js", "popout.js"],
+  "tier": 3,
+  "priority": "normal"
+}' | ./.claude/scripts/codex10 create-task -
 ```
-TaskCreate({
-  subject: "Fix popout theme sync",
-  description: "REQUEST_ID: popout-fixes\nDOMAIN: popout\nASSIGNED_TO: worker-1\nFILES: main.js, popout.js\nVALIDATION: tier3\nTIER: 3\n\n[detailed requirements]",
-  activeForm: "Working on popout theme..."
-})
+
+Then assign the returned task to a worker:
+```bash
+./.claude/scripts/codex10 assign-task <task_id> <worker_id>
 ```
 
 ## Worker Status Contract
