@@ -7,7 +7,7 @@ const fs = require('fs');
 const os = require('os');
 
 const db = require('../src/db');
-const { THRESHOLDS } = require('../src/watchdog');
+const { THRESHOLDS, recoverStaleIntegrations } = require('../src/watchdog');
 
 let tmpDir;
 
@@ -119,5 +119,65 @@ describe('Heartbeat staleness', () => {
     const worker = db.getWorker(1);
     const launchedAgo = (Date.now() - new Date(worker.launched_at).getTime()) / 1000;
     assert.ok(launchedAgo < THRESHOLDS.warn); // Should be skipped by watchdog
+  });
+});
+
+describe('Stale integration placeholder repair', () => {
+  it('should complete request when metadata indicates no-PR completion', () => {
+    const reqId = db.createRequest('No PR request');
+    const taskId = db.createTask({ request_id: reqId, subject: 'T1', description: 'D1' });
+    db.updateTask(taskId, { status: 'completed', completed_at: new Date().toISOString() });
+    db.updateRequest(reqId, {
+      status: 'integrating',
+      result: 'Completed (no PRs to merge)',
+    });
+    db.enqueueMerge({
+      request_id: reqId,
+      task_id: taskId,
+      pr_url: 'N/A',
+      branch: 'agent-1',
+    });
+
+    const repaired = recoverStaleIntegrations(Date.now(), { source: 'test' });
+    assert.strictEqual(repaired, 1);
+
+    const request = db.getRequest(reqId);
+    assert.strictEqual(request.status, 'completed');
+    assert.ok(request.completed_at);
+    assert.match(request.result, /no PRs to merge/i);
+
+    const merge = db.getDb().prepare('SELECT status, error FROM merge_queue WHERE request_id = ?').get(reqId);
+    assert.strictEqual(merge.status, 'failed');
+    assert.match(merge.error, /Legacy malformed merge row terminalized/);
+    assert.match(merge.error, /placeholder PR token/i);
+
+    const secondRun = recoverStaleIntegrations(Date.now(), { source: 'test' });
+    assert.strictEqual(secondRun, 0);
+  });
+
+  it('should fail-closed when placeholder PR tokens exist without no-PR metadata', () => {
+    const reqId = db.createRequest('Malformed merge request');
+    const taskId = db.createTask({ request_id: reqId, subject: 'T1', description: 'D1' });
+    db.updateTask(taskId, { status: 'completed', completed_at: new Date().toISOString() });
+    db.updateRequest(reqId, { status: 'integrating' });
+    db.enqueueMerge({
+      request_id: reqId,
+      task_id: taskId,
+      pr_url: 'pending',
+      branch: 'agent-1',
+    });
+
+    const repaired = recoverStaleIntegrations(Date.now(), { source: 'test' });
+    assert.strictEqual(repaired, 1);
+
+    const request = db.getRequest(reqId);
+    assert.strictEqual(request.status, 'failed');
+    assert.ok(request.completed_at);
+    assert.match(request.result, /Terminalized malformed merge rows/);
+    assert.match(request.result, /pending/);
+
+    const merge = db.getDb().prepare('SELECT status, error FROM merge_queue WHERE request_id = ?').get(reqId);
+    assert.strictEqual(merge.status, 'failed');
+    assert.match(merge.error, /placeholder PR token/i);
   });
 });

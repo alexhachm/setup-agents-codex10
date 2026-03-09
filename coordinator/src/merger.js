@@ -7,6 +7,9 @@ const db = require('./db');
 
 const BRANCH_RE = /^[a-zA-Z0-9._\/-]+$/;
 const PR_URL_RE = /^https:\/\/github\.com\/[a-zA-Z0-9._-]+\/[a-zA-Z0-9._-]+\/pull\/\d+$/;
+const TERMINAL_TASK_STATUSES = new Set(['completed', 'failed']);
+const ACTIVE_MERGE_STATUSES = new Set(['pending', 'ready', 'merging']);
+const MERGE_TIMEOUT_ERROR_PREFIX = 'Merge timed out after';
 
 function validateEntry(entry) {
   if (entry.branch && !BRANCH_RE.test(entry.branch)) {
@@ -38,52 +41,109 @@ function start(projectDir) {
   db.log('coordinator', 'merger_started');
 }
 
+function markRequestCompleted(requestId, result) {
+  const request = db.getRequest(requestId);
+  if (request && request.status === 'completed') return;
+
+  db.updateRequest(requestId, {
+    status: 'completed',
+    completed_at: new Date().toISOString(),
+    result,
+  });
+  db.sendMail('master-1', 'request_completed', { request_id: requestId, result });
+  db.log('coordinator', 'request_completed', { request_id: requestId });
+}
+
+function getMergeState(requestId) {
+  const merges = db.getDb().prepare(
+    'SELECT id, status FROM merge_queue WHERE request_id = ?'
+  ).all(requestId);
+
+  const statusCounts = {};
+  for (const merge of merges) {
+    statusCounts[merge.status] = (statusCounts[merge.status] || 0) + 1;
+  }
+
+  const allMerged = merges.length > 0 && merges.every(m => m.status === 'merged');
+  const hasActive = merges.some(m => ACTIVE_MERGE_STATUSES.has(m.status));
+  const terminalProblems = merges.filter(m => m.status !== 'merged' && !ACTIVE_MERGE_STATUSES.has(m.status));
+
+  return {
+    merges,
+    statusCounts,
+    allMerged,
+    hasActive,
+    terminalProblems,
+    hasTerminalProblems: terminalProblems.length > 0,
+  };
+}
+
 function onTaskCompleted(taskId) {
   // Check if all tasks for this request are done
   const task = db.getTask(taskId);
   if (!task) return;
 
   const allTasks = db.listTasks({ request_id: task.request_id });
-  const incomplete = allTasks.filter(t => t.status !== 'completed' && t.status !== 'failed');
+  const incomplete = allTasks.filter(t => !TERMINAL_TASK_STATUSES.has(t.status));
 
   if (incomplete.length === 0) {
-    // Check for conflict merges that should be retried — fix tasks may have resolved them
-    const conflictMerges = db.getDb().prepare(
-      "SELECT id FROM merge_queue WHERE request_id = ? AND status = 'conflict'"
+    // Check for recoverable merges that should be retried — fix tasks may have resolved them.
+    // Include legacy timeout rows that were previously marked as failed.
+    const recoverableMerges = db.getDb().prepare(
+      `SELECT id
+         FROM merge_queue
+        WHERE request_id = ?
+          AND (
+            status = 'conflict'
+            OR (status = 'failed' AND error LIKE '${MERGE_TIMEOUT_ERROR_PREFIX}%')
+          )`
     ).all(task.request_id);
 
-    if (conflictMerges.length > 0) {
-      // Reset conflict merges to pending so the merger retries them
-      for (const m of conflictMerges) {
+    if (recoverableMerges.length > 0) {
+      for (const m of recoverableMerges) {
         db.updateMerge(m.id, { status: 'pending', error: null });
       }
       db.updateRequest(task.request_id, { status: 'integrating' });
-      db.log('coordinator', 'conflict_merges_retried', {
+      db.log('coordinator', 'recoverable_merges_retried', {
         request_id: task.request_id,
-        merge_ids: conflictMerges.map(m => m.id),
+        merge_ids: recoverableMerges.map(m => m.id),
       });
       return; // Let merger retry — don't complete yet
     }
 
-    // Check if there are any pending merges to process
-    const pendingMerges = db.getDb().prepare(
-      "SELECT COUNT(*) as cnt FROM merge_queue WHERE request_id = ? AND status IN ('pending', 'merging')"
-    ).get(task.request_id);
+    const mergeState = getMergeState(task.request_id);
+    if (mergeState.allMerged) {
+      const result = `All ${mergeState.merges.length} PR(s) merged successfully`;
+      markRequestCompleted(task.request_id, result);
+      return;
+    }
 
-    if (pendingMerges.cnt > 0) {
+    if (mergeState.merges.length === 0) {
+      // No PRs to merge — complete immediately (e.g. verification tasks, already-merged)
+      const result = `All ${allTasks.length} task(s) completed (no PRs to merge)`;
+      markRequestCompleted(task.request_id, result);
+      return;
+    }
+
+    if (mergeState.hasActive) {
       // Has PRs to merge — mark as integrating, merger will handle it
       db.updateRequest(task.request_id, { status: 'integrating' });
       db.log('coordinator', 'request_ready_for_merge', { request_id: task.request_id });
-    } else {
-      // No PRs to merge — complete immediately (e.g. verification tasks, already-merged)
-      const result = `All ${allTasks.length} task(s) completed (no PRs to merge)`;
-      db.updateRequest(task.request_id, {
-        status: 'completed',
-        completed_at: new Date().toISOString(),
-        result,
+      return;
+    }
+
+    // Do not mark request completed when merge rows are in terminal non-merged states.
+    // Existing retry/fix flow handles failed/conflict entries.
+    if (mergeState.hasTerminalProblems) {
+      const request = db.getRequest(task.request_id);
+      if (!request || request.status !== 'failed') {
+        db.updateRequest(task.request_id, { status: 'integrating' });
+      }
+      db.log('coordinator', 'request_completion_blocked_by_merge_failures', {
+        request_id: task.request_id,
+        merge_ids: mergeState.terminalProblems.map(m => m.id),
+        statuses: mergeState.statusCounts,
       });
-      db.sendMail('master-1', 'request_completed', { request_id: task.request_id, result });
-      db.log('coordinator', 'request_completed', { request_id: task.request_id });
     }
   }
 }
@@ -105,7 +165,13 @@ function processQueue(projectDir) {
     db.updateMerge(entry.id, { status: 'merging' });
     db.log('coordinator', 'merge_start', { merge_id: entry.id, branch: entry.branch, pr: entry.pr_url });
 
-    const result = attemptMerge(entry, projectDir);
+    let result;
+    try {
+      result = attemptMerge(entry, projectDir);
+    } catch (error) {
+      terminalizeMergeEntry(entry, error, 'attempt_merge_exception');
+      return;
+    }
 
     if (result.success) {
       db.updateMerge(entry.id, { status: 'merged', merged_at: new Date().toISOString() });
@@ -135,6 +201,54 @@ function processQueue(projectDir) {
   } finally {
     processing = false;
   }
+}
+
+function getErrorMessage(error) {
+  if (error instanceof Error && error.message) return error.message;
+  if (typeof error === 'string') return error;
+  try {
+    return JSON.stringify(error);
+  } catch {
+    return 'Unknown merge error';
+  }
+}
+
+function terminalizeMergeEntry(entry, error, source) {
+  const occurredAt = new Date().toISOString();
+  const errorMessage = `${source} at ${occurredAt}: ${getErrorMessage(error)}`;
+
+  db.updateMerge(entry.id, { status: 'failed', error: errorMessage });
+
+  const task = entry.task_id ? db.getTask(entry.task_id) : null;
+  db.sendMail('allocator', 'merge_failed', {
+    request_id: entry.request_id,
+    task_id: entry.task_id || null,
+    merge_id: entry.id || null,
+    branch: entry.branch || null,
+    pr_url: entry.pr_url || null,
+    status: 'failed',
+    error: errorMessage,
+    original_task: task ? {
+      subject: task.subject,
+      description: task.description,
+      domain: task.domain,
+      files: task.files,
+      assigned_to: task.assigned_to,
+    } : null,
+  });
+
+  db.log('coordinator', 'merge_terminalized', {
+    merge_id: entry.id,
+    request_id: entry.request_id,
+    task_id: entry.task_id,
+    branch: entry.branch,
+    pr_url: entry.pr_url,
+    source,
+    error: errorMessage,
+  });
+
+  // Progress request lifecycle after terminalizing malformed/exceptional rows.
+  checkRequestCompletion(entry.request_id);
 }
 
 function attemptMerge(entry, projectDir) {
@@ -367,25 +481,37 @@ function tryCleanMerge(entry, projectDir) {
 
 
 function checkRequestCompletion(requestId) {
-  const allMerges = db.getDb().prepare(
-    "SELECT * FROM merge_queue WHERE request_id = ?"
-  ).all(requestId);
+  const allTasks = db.listTasks({ request_id: requestId });
+  const hasNonTerminalTasks = allTasks.some(t => !TERMINAL_TASK_STATUSES.has(t.status));
+  if (hasNonTerminalTasks) return false;
 
-  const allMerged = allMerges.every(m => m.status === 'merged');
-  if (allMerged && allMerges.length > 0) {
-    const result = `All ${allMerges.length} PR(s) merged successfully`;
-    db.updateRequest(requestId, {
-      status: 'completed',
-      completed_at: new Date().toISOString(),
-      result,
-    });
-    // Notify Master-1 so the user learns the request is done
-    db.sendMail('master-1', 'request_completed', {
-      request_id: requestId,
-      result,
-    });
-    db.log('coordinator', 'request_completed', { request_id: requestId });
+  const mergeState = getMergeState(requestId);
+
+  if (mergeState.allMerged) {
+    const result = `All ${mergeState.merges.length} PR(s) merged successfully`;
+    markRequestCompleted(requestId, result);
+    return true;
   }
+
+  if (mergeState.merges.length === 0) {
+    const result = `All ${allTasks.length} task(s) completed (no PRs to merge)`;
+    markRequestCompleted(requestId, result);
+    return true;
+  }
+
+  if (mergeState.hasTerminalProblems) {
+    const request = db.getRequest(requestId);
+    if (!request || request.status !== 'failed') {
+      db.updateRequest(requestId, { status: 'integrating' });
+    }
+    db.log('coordinator', 'request_completion_blocked_by_merge_failures', {
+      request_id: requestId,
+      merge_ids: mergeState.terminalProblems.map(m => m.id),
+      statuses: mergeState.statusCounts,
+    });
+  }
+
+  return false;
 }
 
 function stop() {
