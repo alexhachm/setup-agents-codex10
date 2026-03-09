@@ -17,6 +17,105 @@ let wss = null;
 let setupProcess = null;
 let broadcastIntervalId = null;
 let pingIntervalId = null;
+const LAUNCH_READINESS_MAX_ATTEMPTS = 20;
+const LAUNCH_READINESS_RETRY_MS = 500;
+const LAUNCH_HTTP_TIMEOUT_MS = 1500;
+
+function sleep(ms) {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+function isPidAlive(pid) {
+  if (!Number.isInteger(pid) || pid <= 0) return false;
+  try {
+    process.kill(pid, 0);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+function requestLocalApi({ port, path: reqPath, method = 'GET', body = null, headers = {}, timeoutMs = LAUNCH_HTTP_TIMEOUT_MS }) {
+  return new Promise((resolve, reject) => {
+    const req = http.request({
+      hostname: '127.0.0.1',
+      port,
+      path: reqPath,
+      method,
+      headers,
+      timeout: timeoutMs,
+    }, (apiRes) => {
+      let responseBody = '';
+      apiRes.on('data', (chunk) => {
+        responseBody += chunk.toString();
+      });
+      apiRes.on('end', () => {
+        resolve({ statusCode: apiRes.statusCode || 0, body: responseBody });
+      });
+    });
+    req.on('timeout', () => {
+      req.destroy(new Error(`Request timeout after ${timeoutMs}ms`));
+    });
+    req.on('error', reject);
+    if (body) req.write(body);
+    req.end();
+  });
+}
+
+async function waitForCoordinatorReady(port, pid) {
+  let lastError = 'No response from coordinator';
+  for (let attempt = 1; attempt <= LAUNCH_READINESS_MAX_ATTEMPTS; attempt++) {
+    if (!isPidAlive(pid)) {
+      return { ok: false, error: 'Coordinator process exited before becoming ready' };
+    }
+    try {
+      const statusRes = await requestLocalApi({ port, path: '/api/status' });
+      if (statusRes.statusCode >= 200 && statusRes.statusCode < 300) {
+        return { ok: true };
+      }
+      lastError = `Readiness probe returned HTTP ${statusRes.statusCode}`;
+    } catch (e) {
+      lastError = e.message;
+    }
+    if (attempt < LAUNCH_READINESS_MAX_ATTEMPTS) {
+      await sleep(LAUNCH_READINESS_RETRY_MS);
+    }
+  }
+  return {
+    ok: false,
+    error: `Coordinator did not become ready after ${LAUNCH_READINESS_MAX_ATTEMPTS} attempts (${lastError})`,
+  };
+}
+
+async function seedCoordinatorConfig(port, payload) {
+  const body = JSON.stringify(payload);
+  const response = await requestLocalApi({
+    port,
+    path: '/api/config',
+    method: 'POST',
+    body,
+    headers: {
+      'Content-Type': 'application/json',
+      'Content-Length': Buffer.byteLength(body),
+    },
+  });
+  const trimmedBody = (response.body || '').trim();
+  if (response.statusCode >= 200 && response.statusCode < 300) {
+    return { ok: true };
+  }
+  return {
+    ok: false,
+    statusCode: response.statusCode,
+    error: trimmedBody ? `HTTP ${response.statusCode}: ${trimmedBody}` : `HTTP ${response.statusCode}`,
+  };
+}
+
+function cleanupFailedLaunch(pid, port) {
+  if (isPidAlive(pid)) {
+    try { process.kill(pid, 'SIGTERM'); } catch {}
+  }
+  try { instanceRegistry.deregister(port); } catch {}
+}
 
 function start(projectDir, port = 3100, scriptDir = null, handlers = {}) {
   const app = express();
@@ -551,27 +650,34 @@ function start(projectDir, port = 3100, scriptDir = null, handlers = {}) {
       }
       child.unref();
 
-      // Wait for the new coordinator to start and register
-      await new Promise(r => setTimeout(r, 2000));
+      const childPid = child.pid;
+      const readiness = await waitForCoordinatorReady(newPort, childPid);
+      if (!readiness.ok) {
+        cleanupFailedLaunch(childPid, newPort);
+        return res.status(502).json({
+          ok: false,
+          stage: 'startup',
+          port: newPort,
+          error: 'Launched coordinator failed readiness verification',
+          details: readiness.error,
+        });
+      }
 
-      // Seed config into the new coordinator's API
-      const configBody = JSON.stringify({
+      const seedConfig = await seedCoordinatorConfig(newPort, {
         projectDir: reqDir,
         githubRepo: githubRepo || '',
         numWorkers: parseInt(numWorkers) || 4,
       });
-      try {
-        await new Promise((resolve, reject) => {
-          const configReq = http.request({
-            hostname: '127.0.0.1', port: newPort, path: '/api/config',
-            method: 'POST', headers: { 'Content-Type': 'application/json', 'Content-Length': Buffer.byteLength(configBody) },
-          }, (configRes) => { configRes.resume(); resolve(); });
-          configReq.on('error', reject);
-          configReq.write(configBody);
-          configReq.end();
+      if (!seedConfig.ok) {
+        cleanupFailedLaunch(childPid, newPort);
+        return res.status(502).json({
+          ok: false,
+          stage: 'config_seed',
+          port: newPort,
+          error: 'Launched coordinator failed config seeding',
+          details: seedConfig.error,
+          statusCode: seedConfig.statusCode,
         });
-      } catch (e) {
-        console.error('Failed to seed config into new instance:', e.message);
       }
 
       const name = path.basename(reqDir);
