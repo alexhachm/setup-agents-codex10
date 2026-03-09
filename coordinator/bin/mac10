@@ -338,8 +338,9 @@ async function main() {
         } else console.error(result.error);
         break;
 
-      case 'history': {
-        if (!argv[1]) { console.error('Usage: mac10 history <request_id> [limit]'); process.exit(1); }
+      case 'history':
+      case 'request-history': {
+        if (!argv[1]) { console.error('Usage: mac10 history|request-history <request_id> [limit]'); process.exit(1); }
         const requestId = argv[1];
         const limit = parseInt(argv[2], 10) || 500;
         result = await send(socketPath, 'log', { limit });
@@ -813,6 +814,7 @@ USER:
   clarify <request_id> <msg>     Reply to architect clarification
   log [limit] [actor]            Show activity log
   history <request_id> [limit]   Show request-scoped activity history
+  request-history <request_id> [limit]  Alias for history
 
 ARCHITECT:
   triage <request_id> <tier> [reasoning]
