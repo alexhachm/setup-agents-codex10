@@ -11,10 +11,11 @@ const LOCK_STALE_MS = 10000;
 
 function acquireLock() {
   const deadline = Date.now() + LOCK_STALE_MS;
+  const token = `${process.pid}:${Date.now()}:${Math.random().toString(36).slice(2)}`;
   while (Date.now() < deadline) {
     try {
-      fs.writeFileSync(LOCK_PATH, String(process.pid), { flag: 'wx' });
-      return true;
+      fs.writeFileSync(LOCK_PATH, token, { flag: 'wx' });
+      return token;
     } catch {
       // Check if lock is stale
       try {
@@ -29,13 +30,19 @@ function acquireLock() {
       while (Date.now() - start < 50) { /* spin */ }
     }
   }
-  // Force remove stale lock as last resort
-  try { fs.unlinkSync(LOCK_PATH); } catch {}
-  return false;
+  return null;
 }
 
-function releaseLock() {
-  try { fs.unlinkSync(LOCK_PATH); } catch {}
+function releaseLock(token) {
+  if (!token) return false;
+  try {
+    const currentToken = fs.readFileSync(LOCK_PATH, 'utf8').trim();
+    if (currentToken !== token) return false;
+    fs.unlinkSync(LOCK_PATH);
+    return true;
+  } catch {
+    return false;
+  }
 }
 
 function readRegistry() {
@@ -67,7 +74,10 @@ function normalizeNamespace(namespace) {
 function register({ projectDir, port, pid, name, tmuxSession, startedAt, namespace }) {
   const ns = normalizeNamespace(namespace);
   const resolvedProject = path.resolve(projectDir);
-  acquireLock();
+  const lockToken = acquireLock();
+  if (!lockToken) {
+    throw new Error('Failed to acquire instance registry lock for register');
+  }
   try {
     const entries = readRegistry().filter((e) => {
       const eProject = path.resolve(e.projectDir || '');
@@ -85,22 +95,28 @@ function register({ projectDir, port, pid, name, tmuxSession, startedAt, namespa
     });
     writeRegistry(entries);
   } finally {
-    releaseLock();
+    releaseLock(lockToken);
   }
 }
 
 function deregister(port) {
-  acquireLock();
+  const lockToken = acquireLock();
+  if (!lockToken) {
+    throw new Error('Failed to acquire instance registry lock for deregister');
+  }
   try {
     const entries = readRegistry().filter(e => e.port !== port);
     writeRegistry(entries);
   } finally {
-    releaseLock();
+    releaseLock(lockToken);
   }
 }
 
 function list() {
-  acquireLock();
+  const lockToken = acquireLock();
+  if (!lockToken) {
+    throw new Error('Failed to acquire instance registry lock for list');
+  }
   try {
     const entries = readRegistry();
     const alive = entries.filter(e => isPidAlive(e.pid));
@@ -113,7 +129,7 @@ function list() {
     }
     return normalized;
   } finally {
-    releaseLock();
+    releaseLock(lockToken);
   }
 }
 
