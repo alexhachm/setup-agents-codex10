@@ -346,11 +346,16 @@ function checkMailBlocking(recipient, timeoutMs = 300000, pollMs = 1000) {
 
 function enqueueMerge({ request_id, task_id, pr_url, branch, priority }) {
   // Atomic dedup+insert: prevents TOCTOU race between SELECT and INSERT
-  getDb().prepare(`
+  const result = getDb().prepare(`
     INSERT INTO merge_queue (request_id, task_id, pr_url, branch, priority)
     SELECT ?, ?, ?, ?, ?
     WHERE NOT EXISTS (SELECT 1 FROM merge_queue WHERE pr_url = ?)
   `).run(request_id, task_id, pr_url, branch, priority || 0, pr_url);
+  return {
+    inserted: result.changes > 0,
+    changes: result.changes,
+    lastInsertRowid: result.lastInsertRowid,
+  };
 }
 
 function getNextMerge() {

@@ -11,6 +11,11 @@ let server = null;
 let tcpServer = null;
 let _projectDir = null; // Set on start()
 const NAMESPACE = process.env.MAC10_NAMESPACE || 'mac10';
+const GITHUB_PR_URL_RE = /^https:\/\/github\.com\/[a-zA-Z0-9._-]+\/[a-zA-Z0-9._-]+\/pull\/\d+$/;
+
+function isMergeablePrUrl(prUrl) {
+  return typeof prUrl === 'string' && GITHUB_PR_URL_RE.test(prUrl);
+}
 
 function namespacedFile(defaultName, namespacedName) {
   return NAMESPACE === 'mac10' ? defaultName : namespacedName;
@@ -455,8 +460,7 @@ function handleCommand(cmd, conn, handlers) {
         });
         // Enqueue merge if PR exists (must be a valid URL, not a status string like "already_merged")
         const completedTask = db.getTask(task_id);
-        const isValidPrUrl = pr_url && /^https:\/\//.test(pr_url);
-        if (isValidPrUrl) {
+        if (isMergeablePrUrl(pr_url)) {
           db.enqueueMerge({
             request_id: completedTask.request_id,
             task_id,
@@ -651,24 +655,26 @@ function handleCommand(cmd, conn, handlers) {
         const tasks = db.listTasks({ request_id: reqId, status: 'completed' });
         let queued = 0;
         for (const task of tasks) {
-          if (task.pr_url && task.branch) {
+          if (isMergeablePrUrl(task.pr_url) && task.branch) {
             try {
-              db.enqueueMerge({
+              const enqueueResult = db.enqueueMerge({
                 request_id: reqId,
                 task_id: task.id,
                 branch: task.branch,
                 pr_url: task.pr_url,
               });
-              queued++;
+              if (enqueueResult.inserted) queued++;
             } catch (e) {
               // Already queued or other error — skip
             }
           }
         }
-        db.updateRequest(reqId, { status: 'integrating' });
+        if (queued > 0) {
+          db.updateRequest(reqId, { status: 'integrating' });
+        }
         db.log('coordinator', 'integration_triggered', { request_id: reqId, merges_queued: queued });
         // Trigger merger immediately
-        if (handlers.onIntegrate) handlers.onIntegrate(reqId);
+        if (queued > 0 && handlers.onIntegrate) handlers.onIntegrate(reqId);
         respond(conn, { ok: true, request_id: reqId, merges_queued: queued });
         break;
       }
