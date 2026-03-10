@@ -504,20 +504,26 @@ function findOpenPrUrlForBranch(rawBranch, cwd = _projectDir || process.cwd()) {
 
 function resolveQueuePrTarget(prUrl, branch, cwd = _projectDir || process.cwd()) {
   const normalizedPrUrl = normalizePrUrl(prUrl, cwd);
-  if (isValidGitHubPrUrl(normalizedPrUrl) && isResolvableGitHubPrUrl(normalizedPrUrl, cwd)) {
-    const original = typeof prUrl === 'string' ? prUrl.trim() : '';
+  const hasValidProvidedPr = isValidGitHubPrUrl(normalizedPrUrl);
+  const providedResolvable = hasValidProvidedPr && isResolvableGitHubPrUrl(normalizedPrUrl, cwd);
+  const branchPrUrl = findOpenPrUrlForBranch(branch, cwd);
+
+  if (branchPrUrl && (!hasValidProvidedPr || !providedResolvable || branchPrUrl !== normalizedPrUrl)) {
+    const source = hasValidProvidedPr && branchPrUrl !== normalizedPrUrl
+      ? 'branch_fallback_mismatch'
+      : 'branch_fallback';
     return {
-      pr_url: normalizedPrUrl,
-      source: normalizedPrUrl === original ? 'provided' : 'normalized',
+      pr_url: branchPrUrl,
+      source,
       resolvable: true,
     };
   }
 
-  const branchPrUrl = findOpenPrUrlForBranch(branch, cwd);
-  if (branchPrUrl) {
+  if (providedResolvable) {
+    const original = typeof prUrl === 'string' ? prUrl.trim() : '';
     return {
-      pr_url: branchPrUrl,
-      source: 'branch_fallback',
+      pr_url: normalizedPrUrl,
+      source: normalizedPrUrl === original ? 'provided' : 'normalized',
       resolvable: true,
     };
   }
@@ -527,6 +533,43 @@ function resolveQueuePrTarget(prUrl, branch, cwd = _projectDir || process.cwd())
     source: 'unresolved',
     resolvable: false,
   };
+}
+
+function findHistoricalPrUrlForBranch(requestId, branch, taskId) {
+  if (!requestId) return '';
+  const normalizedBranch = sanitizeBranchName(branch);
+  if (!normalizedBranch) return '';
+  const parsedTaskId = parseInt(taskId, 10);
+  const excludedTaskId = Number.isInteger(parsedTaskId) && parsedTaskId > 0
+    ? parsedTaskId
+    : null;
+
+  const rows = db.getDb().prepare(`
+    SELECT pr_url, status
+    FROM merge_queue
+    WHERE request_id = ?
+      AND branch = ?
+      AND pr_url IS NOT NULL
+      AND trim(pr_url) != ''
+      AND (? IS NULL OR task_id != ?)
+    ORDER BY
+      CASE status
+        WHEN 'merged' THEN 0
+        WHEN 'merging' THEN 1
+        WHEN 'pending' THEN 2
+        WHEN 'conflict' THEN 3
+        WHEN 'failed' THEN 4
+        ELSE 5
+      END,
+      id DESC
+    LIMIT 20
+  `).all(requestId, normalizedBranch, excludedTaskId, excludedTaskId);
+
+  for (const row of rows) {
+    const candidate = typeof row.pr_url === 'string' ? row.pr_url.trim() : '';
+    if (isValidGitHubPrUrl(candidate)) return candidate;
+  }
+  return '';
 }
 
 function parseWorkerId(rawWorkerId) {
@@ -623,10 +666,23 @@ function queueMergeWithRecovery({
 }) {
   const normalizedPriority = Number.isInteger(priority) ? priority : 0;
   const queueCwd = _projectDir || process.cwd();
-  const resolvedPr = resolveQueuePrTarget(pr_url, branch, queueCwd);
+  let resolvedPr = resolveQueuePrTarget(pr_url, branch, queueCwd);
+  if (!resolvedPr.resolvable) {
+    const historicalPrUrl = findHistoricalPrUrlForBranch(request_id, branch, task_id);
+    if (historicalPrUrl) {
+      resolvedPr = {
+        pr_url: historicalPrUrl,
+        source: 'branch_history_fallback',
+        resolvable: true,
+      };
+    }
+  }
   const resolvedPrUrl = resolvedPr.pr_url;
 
-  if (resolvedPr.source === 'branch_fallback' && isValidGitHubPrUrl(resolvedPrUrl)) {
+  if ((resolvedPr.source === 'branch_fallback'
+    || resolvedPr.source === 'branch_fallback_mismatch'
+    || resolvedPr.source === 'branch_history_fallback')
+    && isValidGitHubPrUrl(resolvedPrUrl)) {
     db.updateTask(task_id, { pr_url: resolvedPrUrl });
     db.log('coordinator', 'merge_queue_pr_url_recovered_from_branch', {
       request_id,
