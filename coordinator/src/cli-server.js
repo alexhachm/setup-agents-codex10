@@ -91,6 +91,8 @@ const ROUTING_BUDGET_THRESHOLD_KEY = 'routing_budget_flagship_threshold';
 const LEGACY_BUDGET_REMAINING_KEY = 'flagship_budget_remaining';
 const LEGACY_BUDGET_THRESHOLD_KEY = 'flagship_budget_threshold';
 const PR_RESOLVE_ERROR_RE = /Could not resolve to a PullRequest/i;
+const LOOP_LAUNCH_FAILED = 'loop_launch_failed';
+const LOOP_LAUNCH_FAILED_MESSAGE = 'Failed to launch loop runtime';
 
 function namespacedFile(defaultName, namespacedName) {
   return NAMESPACE === 'mac10' ? defaultName : namespacedName;
@@ -161,6 +163,48 @@ function bridgeToHandoff(requestId, description, type = 'bug-fix') {
 }
 
 const MAX_PAYLOAD_SIZE = 1024 * 1024; // 1MB
+
+function normalizeErrorMessage(error, fallback = 'unknown_error') {
+  if (error && typeof error.message === 'string' && error.message.trim().length > 0) {
+    return error.message.trim();
+  }
+  if (typeof error === 'string' && error.trim().length > 0) return error.trim();
+  try {
+    const serialized = JSON.stringify(error);
+    if (serialized && serialized !== '{}' && serialized !== 'null') return serialized;
+  } catch {}
+  return fallback;
+}
+
+function failClosedLoopLaunch(loopId, launchError) {
+  const launchErrorMessage = normalizeErrorMessage(launchError, 'unknown_launch_error');
+  const failure = {
+    ok: false,
+    error: LOOP_LAUNCH_FAILED,
+    message: LOOP_LAUNCH_FAILED_MESSAGE,
+    loop_id: loopId,
+    launch_error: launchErrorMessage,
+    terminalized: false,
+    terminalization_error: null,
+  };
+  try {
+    db.updateLoop(loopId, {
+      status: 'failed',
+      stopped_at: new Date().toISOString(),
+      last_checkpoint: `launch_failed:${launchErrorMessage}`,
+    });
+    failure.terminalized = true;
+  } catch (terminalizeErr) {
+    failure.terminalization_error = normalizeErrorMessage(terminalizeErr, 'unknown_terminalization_error');
+  }
+  db.log('coordinator', 'loop_launch_failed', {
+    loop_id: loopId,
+    launch_error: launchErrorMessage,
+    terminalized: failure.terminalized,
+    terminalization_error: failure.terminalization_error,
+  });
+  return failure;
+}
 
 const COMMAND_SCHEMAS = {
   'request':           { required: ['description'], types: { description: 'string' } },
@@ -1900,7 +1944,14 @@ function handleCommand(cmd, conn, handlers) {
           break;
         }
         const loopId = db.createLoop(prompt);
-        if (handlers.onLoopCreated) handlers.onLoopCreated(loopId, prompt);
+        if (handlers.onLoopCreated) {
+          try {
+            handlers.onLoopCreated(loopId, prompt);
+          } catch (spawnErr) {
+            respond(conn, failClosedLoopLaunch(loopId, spawnErr));
+            break;
+          }
+        }
         respond(conn, { ok: true, loop_id: loopId });
         break;
       }

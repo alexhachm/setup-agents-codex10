@@ -20,6 +20,50 @@ let pingIntervalId = null;
 const LAUNCH_READINESS_MAX_ATTEMPTS = 20;
 const LAUNCH_READINESS_RETRY_MS = 500;
 const LAUNCH_HTTP_TIMEOUT_MS = 1500;
+const LOOP_LAUNCH_FAILED = 'loop_launch_failed';
+const LOOP_LAUNCH_FAILED_MESSAGE = 'Failed to launch loop runtime';
+
+function normalizeErrorMessage(error, fallback = 'unknown_error') {
+  if (error && typeof error.message === 'string' && error.message.trim().length > 0) {
+    return error.message.trim();
+  }
+  if (typeof error === 'string' && error.trim().length > 0) return error.trim();
+  try {
+    const serialized = JSON.stringify(error);
+    if (serialized && serialized !== '{}' && serialized !== 'null') return serialized;
+  } catch {}
+  return fallback;
+}
+
+function failClosedLoopLaunch(loopId, launchError) {
+  const launchErrorMessage = normalizeErrorMessage(launchError, 'unknown_launch_error');
+  const failure = {
+    ok: false,
+    error: LOOP_LAUNCH_FAILED,
+    message: LOOP_LAUNCH_FAILED_MESSAGE,
+    loop_id: loopId,
+    launch_error: launchErrorMessage,
+    terminalized: false,
+    terminalization_error: null,
+  };
+  try {
+    db.updateLoop(loopId, {
+      status: 'failed',
+      stopped_at: new Date().toISOString(),
+      last_checkpoint: `launch_failed:${launchErrorMessage}`,
+    });
+    failure.terminalized = true;
+  } catch (terminalizeErr) {
+    failure.terminalization_error = normalizeErrorMessage(terminalizeErr, 'unknown_terminalization_error');
+  }
+  db.log('coordinator', 'loop_launch_failed', {
+    loop_id: loopId,
+    launch_error: launchErrorMessage,
+    terminalized: failure.terminalized,
+    terminalization_error: failure.terminalization_error,
+  });
+  return failure;
+}
 
 function sleep(ms) {
   return new Promise((resolve) => setTimeout(resolve, ms));
@@ -793,7 +837,13 @@ function start(projectDir, port = 3100, scriptDir = null, handlers = {}) {
         return res.status(400).json({ ok: false, error: 'prompt is required and must be a string' });
       }
       const id = db.createLoop(prompt);
-      if (handlers.onLoopCreated) handlers.onLoopCreated(id, prompt);
+      if (handlers.onLoopCreated) {
+        try {
+          handlers.onLoopCreated(id, prompt);
+        } catch (spawnErr) {
+          return res.status(500).json(failClosedLoopLaunch(id, spawnErr));
+        }
+      }
       broadcast({ type: 'loop_created', loop_id: id });
       res.json({ ok: true, loop_id: id });
     } catch (e) {
