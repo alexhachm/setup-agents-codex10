@@ -6,7 +6,71 @@ const path = require('path');
 const crypto = require('crypto');
 const { execFileSync } = require('child_process');
 const db = require('./db');
-const modelRouter = require('./model-router');
+let modelRouter = null;
+try {
+  modelRouter = require('./model-router');
+} catch (err) {
+  if (err && err.code !== 'MODULE_NOT_FOUND') throw err;
+}
+
+function getConfigValue(getConfig, key, fallback) {
+  if (typeof getConfig !== 'function') return fallback;
+  const value = getConfig(key);
+  if (value === undefined || value === null) return fallback;
+  const trimmed = String(value).trim();
+  return trimmed === '' ? fallback : trimmed;
+}
+
+function resolveFallbackRoutingClass(task) {
+  const tier = Number(task && task.tier) || 0;
+  const priority = String(task && task.priority || '').toLowerCase();
+  const subject = String(task && task.subject || '').toLowerCase();
+  const description = String(task && task.description || '').toLowerCase();
+  if (tier >= 3) return 'high';
+  if (priority === 'urgent' || priority === 'high') return 'high';
+  if (subject.includes('merge') || subject.includes('conflict') || description.includes('refactor')) return 'mid';
+  return 'spark';
+}
+
+function fallbackModelRouter() {
+  const fallbackStateSource = 'coordinator-fallback-model-router';
+  return {
+    getBudgetState(getConfig) {
+      const rawState = parseBudgetStateConfig(typeof getConfig === 'function' ? getConfig(ROUTING_BUDGET_STATE_KEY) : null);
+      if (!rawState.parsed) return null;
+      return {
+        source: fallbackStateSource,
+        parsed: rawState.parsed,
+        remaining: rawState.remaining,
+        threshold: rawState.threshold,
+      };
+    },
+    routeTask(task = {}, opts = {}) {
+      const getConfig = opts.getConfig;
+      const routingClass = resolveFallbackRoutingClass(task);
+      const defaultModel = routingClass === 'spark'
+        ? getConfigValue(getConfig, 'model_spark', 'gpt-5.3-codex-spark')
+        : getConfigValue(getConfig, 'model_flagship', 'gpt-5.3-codex');
+      const configuredModel = getConfigValue(getConfig, `model_${routingClass}`, defaultModel);
+      const budget = this.getBudgetState(getConfig);
+      const routingReason = 'Fell back to CLI routing shim (model-router unavailable)';
+      return {
+        routing_class: routingClass,
+        model: configuredModel,
+        model_source: configuredModel === defaultModel ? 'config-fallback' : 'fallback-default',
+        reasoning_effort: routingClass === 'high' ? 'high' : 'low',
+        reason: routingReason,
+        budget_state: budget || null,
+        budget_source: budget && budget.source ? budget.source : 'none',
+        routing_precedence: [fallbackStateSource],
+      };
+    },
+  };
+}
+
+if (!modelRouter) {
+  modelRouter = fallbackModelRouter();
+}
 
 let server = null;
 let tcpServer = null;
@@ -199,17 +263,65 @@ function mergeBudgetState(raw, overrides = {}) {
 /** Parse a files field into an array. Handles arrays, JSON strings, and comma-separated strings. */
 function parseFilesField(files) {
   if (files === null || files === undefined) return null;
-  if (Array.isArray(files)) return db.normalizeTaskFiles(files);
+  if (Array.isArray(files)) {
+    return typeof db.normalizeTaskFiles === 'function'
+      ? db.normalizeTaskFiles(files)
+      : fallbackNormalizeTaskFiles(files);
+  }
   if (typeof files === 'string') {
     const trimmed = files.trim();
     if (!trimmed) return [];
     try {
       const parsed = JSON.parse(trimmed);
-      if (Array.isArray(parsed)) return db.normalizeTaskFiles(parsed);
+      if (Array.isArray(parsed)) {
+        return typeof db.normalizeTaskFiles === 'function'
+          ? db.normalizeTaskFiles(parsed)
+          : fallbackNormalizeTaskFiles(parsed);
+      }
     } catch {}
-    return db.normalizeTaskFiles(trimmed.split(','));
+    const splitFiles = trimmed.split(',');
+    return typeof db.normalizeTaskFiles === 'function'
+      ? db.normalizeTaskFiles(splitFiles)
+      : fallbackNormalizeTaskFiles(splitFiles);
   }
   return null;
+}
+
+function fallbackNormalizeTaskFiles(files) {
+  if (!Array.isArray(files)) return [];
+  const seen = new Set();
+  const out = [];
+  for (const file of files) {
+    const normalized = String(file || '').trim();
+    if (!normalized) continue;
+    if (seen.has(normalized)) continue;
+    seen.add(normalized);
+    out.push(normalized);
+  }
+  return out;
+}
+
+function getSafeRequestHistory(request_id, limit) {
+  if (typeof db.getRequestHistory === 'function') {
+    return db.getRequestHistory(request_id, limit);
+  }
+  if (!db.getLog) return [];
+  return db.getLog(2000).filter((entry) => entry && entry.request_id === request_id).slice(0, limit);
+}
+
+function getSafeLatestCompletedTaskCursor(request_id) {
+  if (typeof db.getRequestLatestCompletedTaskCursor !== 'function') return null;
+  return db.getRequestLatestCompletedTaskCursor(request_id);
+}
+
+function hasSafeCompletedTaskProgressSince(request_id, cursor) {
+  if (typeof db.hasRequestCompletedTaskProgressSince !== 'function') return false;
+  return db.hasRequestCompletedTaskProgressSince(request_id, cursor.before, cursor.after);
+}
+
+function backfillSupersededLoopRequestsSafe() {
+  if (typeof db.backfillSupersededLoopRequests !== 'function') return { inspected: 0, repaired: 0 };
+  return db.backfillSupersededLoopRequests();
 }
 
 const SAFE_TASK_DOMAIN_RE = /^[A-Za-z0-9_-]+$/;
@@ -446,9 +558,11 @@ function queueMergeWithRecovery({
   latest_completion_timestamp = undefined,
 }) {
   const normalizedPriority = Number.isInteger(priority) ? priority : 0;
-  const latestCheckpoint = latest_completion_timestamp === undefined
-    ? db.getRequestLatestCompletedTaskCursor(request_id)
-    : latest_completion_timestamp;
+  const getLatestCheckpoint = () => {
+    if (latest_completion_timestamp !== undefined) return latest_completion_timestamp;
+    return getSafeLatestCompletedTaskCursor(request_id);
+  };
+  const latestCheckpoint = getLatestCheckpoint();
 
   const enqueueResult = db.enqueueMerge({
     request_id,
@@ -484,11 +598,10 @@ function queueMergeWithRecovery({
     String(existing.request_id) !== String(request_id) ||
     Number(existing.task_id) !== Number(task_id) ||
     existing.branch !== branch;
-  const hasFreshCompletionProgress = isTerminalRetryStatus && db.hasRequestCompletedTaskProgressSince(
-    request_id,
-    existing.completion_checkpoint,
-    latestCheckpoint,
-  );
+  const hasFreshCompletionProgress = isTerminalRetryStatus && hasSafeCompletedTaskProgressSince(request_id, {
+    before: existing.completion_checkpoint,
+    after: latestCheckpoint,
+  });
   const shouldRetry = isTerminalRetryStatus && (force_retry || hasFreshCompletionProgress);
   const desiredStatus = shouldRetry ? 'pending' : existing.status;
   const needsRefresh =
@@ -747,7 +860,7 @@ function handleCommand(cmd, conn, handlers) {
         const requestId = args.request_id;
         const rawLimit = args.limit || 500;
         const limit = Math.max(1, Math.min(rawLimit, 10000));
-        const logs = db.getRequestHistory(requestId, limit);
+        const logs = getSafeRequestHistory(requestId, limit);
         respond(conn, { ok: true, request_id: requestId, logs });
         break;
       }
@@ -1188,7 +1301,7 @@ function handleCommand(cmd, conn, handlers) {
         }
         // Queue merges for each completed task's branch/PR
         const tasks = db.listTasks({ request_id: reqId, status: 'completed' });
-        const latestCompletedTaskState = db.getRequestLatestCompletedTaskCursor(reqId);
+        const latestCompletedTaskState = getSafeLatestCompletedTaskCursor(reqId);
         let queued = 0;
         for (const task of tasks) {
           const worker = task.assigned_to ? db.getWorker(task.assigned_to) : null;
@@ -1297,7 +1410,7 @@ function handleCommand(cmd, conn, handlers) {
           orphaned = txResult.orphanedResult;
         }
 
-        const supersessionBackfill = db.backfillSupersededLoopRequests();
+        const supersessionBackfill = backfillSupersededLoopRequestsSafe();
         db.log('coordinator', 'repair', {
           reset_workers: stuck.changes,
           orphaned_tasks: orphaned.changes,
