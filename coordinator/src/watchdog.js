@@ -546,10 +546,15 @@ function monitorLoops(projectDir) {
 
       const path = require('path');
       const scriptDir = process.env.MAC10_SCRIPT_DIR || path.resolve(__dirname, '..', '..');
+      const namespace = process.env.MAC10_NAMESPACE || 'mac10';
       const sentinelPath = path.join(scriptDir, 'scripts', 'loop-sentinel.sh');
 
       try {
-        tmux.createWindow(loop.tmux_window, `bash "${sentinelPath}" ${loop.id} "${projectDir}"`, projectDir);
+        tmux.createWindow(
+          loop.tmux_window,
+          `MAC10_NAMESPACE="${namespace}" bash "${sentinelPath}" ${loop.id} "${projectDir}"`,
+          projectDir
+        );
         db.updateLoop(loop.id, {
           tmux_session: tmux.SESSION,
           last_heartbeat: new Date().toISOString(),
