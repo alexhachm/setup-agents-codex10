@@ -2,6 +2,7 @@
 
 const path = require('path');
 const fs = require('fs');
+const { execFile } = require('child_process');
 const db = require('./db');
 const cliServer = require('./cli-server');
 const allocator = require('./allocator');
@@ -139,12 +140,35 @@ const handlers = {
     } else {
       // Native Windows: spawn via launch-worker.sh (opens Windows Terminal tab)
       const launchScript = path.join(projectDir, '.claude', 'scripts', 'launch-worker.sh');
-      const { execFile } = require('child_process');
+      db.updateWorker(worker.id, {
+        tmux_session: null,
+        tmux_window: null,
+        pid: null,
+      });
       execFile('bash', [launchScript, String(worker.id)], {
         cwd: projectDir,
         env: { ...process.env, MAC10_NAMESPACE: namespace },
-      }, (err) => {
+      }, (err, stdout = '', _stderr) => {
         if (err) db.log('coordinator', 'launch_worker_error', { worker_id: worker.id, error: err.message });
+        const pidMatch = String(stdout).match(/^LAUNCH_WORKER_PID=(\d+)$/m);
+        if (!pidMatch) {
+          db.log('coordinator', 'launch_worker_no_pid', { worker_id: worker.id, script: launchScript });
+          db.sendMail('allocator', 'worker_launch_pid_missing', {
+            worker_id: worker.id,
+            reason: 'non_tmux_launch_missing_pid_metadata',
+          });
+          return;
+        }
+        const pid = parseInt(pidMatch[1], 10);
+        if (!Number.isInteger(pid) || pid <= 0) {
+          db.log('coordinator', 'launch_worker_invalid_pid', { worker_id: worker.id, pid: pidMatch[1] });
+          db.sendMail('allocator', 'worker_launch_pid_invalid', {
+            worker_id: worker.id,
+            pid: pidMatch[1],
+          });
+          return;
+        }
+        db.updateWorker(worker.id, { pid });
       });
     }
     db.log('coordinator', 'worker_spawned', { worker_id: worker.id, window: windowName });
@@ -165,19 +189,35 @@ const handlers = {
       db.updateLoop(loopId, {
         tmux_session: tmux.SESSION,
         tmux_window: windowName,
+        pid: null,
       });
     } else {
       // Native Windows: spawn via launch script
-      const { execFile } = require('child_process');
       const sentinelPath = path.join(scriptDir, 'scripts', 'loop-sentinel.sh');
-      execFile('bash', [sentinelPath, String(loopId), projectDir], {
-        cwd: projectDir,
-        detached: true,
-        stdio: 'ignore',
-        env: { ...process.env, MAC10_NAMESPACE: namespace },
-      }, (err) => {
-        if (err) db.log('coordinator', 'loop_launch_error', { loop_id: loopId, error: err.message });
-      });
+      try {
+        const child = execFile('bash', [sentinelPath, String(loopId), projectDir], {
+          cwd: projectDir,
+          detached: true,
+          stdio: 'ignore',
+          env: { ...process.env, MAC10_NAMESPACE: namespace },
+        });
+        child.unref();
+        db.updateLoop(loopId, {
+          tmux_session: 'non_tmux',
+          tmux_window: null,
+          pid: child.pid || null,
+        });
+        child.on('error', (error) => {
+          db.log('coordinator', 'loop_launch_error', { loop_id: loopId, error: error.message });
+        });
+      } catch (err) {
+        db.updateLoop(loopId, {
+          tmux_session: 'non_tmux',
+          tmux_window: null,
+          pid: null,
+        });
+        db.log('coordinator', 'loop_launch_error', { loop_id: loopId, error: err.message });
+      }
     }
     db.log('coordinator', 'loop_spawned', { loop_id: loopId, window: windowName });
   },

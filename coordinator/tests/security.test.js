@@ -6,9 +6,11 @@ const path = require('path');
 const fs = require('fs');
 const os = require('os');
 const net = require('net');
+const http = require('http');
 
 const db = require('../src/db');
 const cliServer = require('../src/cli-server');
+const webServer = require('../src/web-server');
 const overlay = require('../src/overlay');
 
 let tmpDir;
@@ -263,6 +265,12 @@ describe('CLI server security', () => {
     });
   }
 
+  function getHandoffPath() {
+    const namespace = process.env.MAC10_NAMESPACE || 'mac10';
+    const handoffFile = namespace === 'mac10' ? 'handoff.json' : `${namespace}.handoff.json`;
+    return path.join(tmpDir, '.claude', 'state', handoffFile);
+  }
+
   it('should reject missing required fields for request command', async () => {
     const result = await sendCommand('request', {});
     assert.ok(result.error);
@@ -283,6 +291,25 @@ describe('CLI server security', () => {
     });
     assert.ok(result.error);
     assert.ok(result.error.includes('must be of type number'));
+  });
+
+  it('should clamp log command limit to bounded positive values', async () => {
+    for (let i = 0; i < 1100; i++) {
+      db.log('worker-1', `activity_${i}`, { i });
+    }
+
+    const negative = await sendCommand('log', { limit: -1 });
+    assert.strictEqual(negative.ok, true);
+    assert.strictEqual(Array.isArray(negative.logs), true);
+    assert.strictEqual(negative.logs.length, 1);
+
+    const zero = await sendCommand('log', { limit: 0 });
+    assert.strictEqual(zero.ok, true);
+    assert.strictEqual(zero.logs.length, 1);
+
+    const oversized = await sendCommand('log', { limit: 50000 });
+    assert.strictEqual(oversized.ok, true);
+    assert.strictEqual(oversized.logs.length, 1000);
   });
 
   it('should strip unknown keys from create-task', async () => {
@@ -315,6 +342,134 @@ describe('CLI server security', () => {
       assert.ok(result.error);
       assert.ok(result.error.includes('Invalid domain'));
     }
+  });
+
+  it('should normalize and trim request descriptions for request/fix/loop-request', async () => {
+    const rawDescription = '\r\n  Normalize this description\r\n with CRLF and spaces  ';
+    const expectedDescription = 'Normalize this description\n with CRLF and spaces';
+
+    const requestResult = await sendCommand('request', { description: rawDescription });
+    assert.strictEqual(requestResult.ok, true);
+    assert.strictEqual(db.getRequest(requestResult.request_id).description, expectedDescription);
+
+    const fixResult = await sendCommand('fix', { description: rawDescription });
+    assert.strictEqual(fixResult.ok, true);
+    assert.strictEqual(db.getRequest(fixResult.request_id).description, expectedDescription);
+
+    const loopId = db.createLoop('Stability test loop');
+    const loopResult = await sendCommand('loop-request', {
+      loop_id: loopId,
+      description: rawDescription,
+    });
+    assert.strictEqual(loopResult.ok, true);
+    assert.strictEqual(db.getRequest(loopResult.request_id).description, expectedDescription);
+  });
+
+  it('should accept descriptive FIX worker payloads that are not placeholders', async () => {
+    const description = 'FIX worker-3: investigate stuck merge queue retries';
+    const loopId = db.createLoop('Loop for accepted FIX worker payload');
+
+    const requestResult = await sendCommand('request', { description });
+    assert.strictEqual(requestResult.ok, true);
+
+    const fixResult = await sendCommand('fix', { description });
+    assert.strictEqual(fixResult.ok, true);
+
+    const loopResult = await sendCommand('loop-request', {
+      loop_id: loopId,
+      description,
+    });
+    assert.strictEqual(loopResult.ok, true);
+  });
+
+  it('should reject malformed request/fix/loop-request descriptions with no side effects', async () => {
+    const malformedDescriptions = [
+      '[clear description of what the user wants]',
+      'FIX worker-N: [brief description of the fix needed]',
+      '--help',
+      '=== Project: owner/repo\nLoop created: 7\n=== Requests ===',
+    ];
+    const commands = [
+      { command: 'request', args: (description) => ({ description }) },
+      { command: 'fix', args: (description) => ({ description }) },
+      { command: 'loop-request', args: (description, loopId) => ({ loop_id: loopId, description }) },
+    ];
+    const loopId = db.createLoop('Loop for malformed description rejection');
+    const originalCreateRequest = db.createRequest;
+    const originalCreateLoopRequest = db.createLoopRequest;
+    let createRequestCalls = 0;
+    let createLoopRequestCalls = 0;
+    db.createRequest = (...args) => {
+      createRequestCalls += 1;
+      return originalCreateRequest(...args);
+    };
+    db.createLoopRequest = (...args) => {
+      createLoopRequestCalls += 1;
+      return originalCreateLoopRequest(...args);
+    };
+
+    try {
+      for (const description of malformedDescriptions) {
+        for (const command of commands) {
+          const requestsBefore = db.listRequests().length;
+          const architectMailBefore = db.checkMail('architect', false).length;
+          const logsBefore = db.getLog(10000).length;
+          const handoffExistsBefore = fs.existsSync(getHandoffPath());
+          const result = await sendCommand(command.command, command.args(description, loopId));
+
+          assert.strictEqual(result.ok, false);
+          assert.strictEqual(result.error, cliServer.INVALID_REQUEST_DESCRIPTION);
+          assert.strictEqual(db.listRequests().length, requestsBefore);
+          assert.strictEqual(db.checkMail('architect', false).length, architectMailBefore);
+          assert.strictEqual(db.getLog(10000).length, logsBefore);
+          assert.strictEqual(fs.existsSync(getHandoffPath()), handoffExistsBefore);
+        }
+      }
+
+      assert.strictEqual(createRequestCalls, 0);
+      assert.strictEqual(createLoopRequestCalls, 0);
+    } finally {
+      db.createRequest = originalCreateRequest;
+      db.createLoopRequest = originalCreateLoopRequest;
+    }
+  });
+
+  it('should reject overlong descriptions with invalid_request_description_too_long', async () => {
+    const oversized = 'x'.repeat(cliServer.MAX_REQUEST_DESCRIPTION_LENGTH + 1);
+    const loopId = db.createLoop('Loop for oversize test');
+
+    const caseChecks = [
+      await sendCommand('request', { description: oversized }),
+      await sendCommand('fix', { description: oversized }),
+      await sendCommand('loop-request', { loop_id: loopId, description: oversized }),
+    ];
+
+    for (const result of caseChecks) {
+      assert.strictEqual(result.error, cliServer.INVALID_REQUEST_DESCRIPTION_TOO_LONG);
+    }
+  });
+
+  it('should safely store log-change descriptions with shell-like metadata and content', async () => {
+    const description = '--status literal && $PATH ; `echo test`';
+    const result = await sendCommand('log-change', {
+      description,
+      domain: 'coordinator-cli',
+      file_path: 'src/cli-server.js',
+      function_name: 'parseLogChangeArgs',
+      tooltip: 'shell-sensitive $(echo)',
+      status: 'active',
+    });
+
+    assert.strictEqual(result.ok, true);
+    const changes = db.listChanges();
+    assert.strictEqual(changes.length, 1);
+    const change = changes[0];
+    assert.strictEqual(change.description, description);
+    assert.strictEqual(change.domain, 'coordinator-cli');
+    assert.strictEqual(change.file_path, 'src/cli-server.js');
+    assert.strictEqual(change.function_name, 'parseLogChangeArgs');
+    assert.strictEqual(change.tooltip, 'shell-sensitive $(echo)');
+    assert.strictEqual(change.status, 'active');
   });
 
   it('should reject missing command field', async () => {
@@ -360,6 +515,273 @@ describe('CLI server security', () => {
       perms === '600' || perms === '755',
       `Expected socket permissions 600, got ${perms}`
     );
+  });
+});
+
+describe('CLI + Web request description validation', () => {
+  let server;
+  let port;
+
+  beforeEach(async () => {
+    server = webServer.start(tmpDir, 0);
+    await new Promise((resolve, reject) => {
+      server.once('listening', resolve);
+      server.once('error', reject);
+    });
+    port = server.address().port;
+  });
+
+  afterEach(() => {
+    webServer.stop();
+  });
+
+  function sendRequest(description) {
+    const body = JSON.stringify({ description });
+    return new Promise((resolve, reject) => {
+      const req = http.request({
+        host: '127.0.0.1',
+        port,
+        path: '/api/request',
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          'Content-Length': Buffer.byteLength(body),
+        },
+      }, (res) => {
+        let data = '';
+        res.on('data', (chunk) => {
+          data += chunk.toString();
+        });
+        res.on('end', () => {
+          resolve({ status: res.statusCode, body: data ? JSON.parse(data) : {} });
+        });
+      });
+      req.on('error', reject);
+      req.write(body);
+      req.end();
+    });
+  }
+
+  function getJson(routePath) {
+    return new Promise((resolve, reject) => {
+      const req = http.request({
+        host: '127.0.0.1',
+        port,
+        path: routePath,
+        method: 'GET',
+      }, (res) => {
+        let data = '';
+        res.on('data', (chunk) => {
+          data += chunk.toString();
+        });
+        res.on('end', () => {
+          resolve({ status: res.statusCode, body: data ? JSON.parse(data) : {} });
+        });
+      });
+      req.on('error', reject);
+      req.end();
+    });
+  }
+
+  it('should normalize and trim /api/request description', async () => {
+    const rawDescription = '\r\n  api\nrequest\r\ntrimmed  ';
+    const expectedDescription = 'api\nrequest\ntrimmed';
+    const result = await sendRequest(rawDescription);
+
+    assert.strictEqual(result.status, 200);
+    assert.strictEqual(result.body.ok, true);
+    assert.strictEqual(db.getRequest(result.body.request_id).description, expectedDescription);
+  });
+
+  it('should normalize and trim CR-only /api/request description', async () => {
+    const rawDescription = '  \r\r\napi\r\r\nrequest\r   ';
+    const expectedDescription = 'api\nrequest';
+    const result = await sendRequest(rawDescription);
+
+    assert.strictEqual(result.status, 200);
+    assert.strictEqual(result.body.ok, true);
+    assert.strictEqual(db.getRequest(result.body.request_id).description, expectedDescription);
+  });
+
+  it('should accept descriptive FIX worker payloads over /api/request', async () => {
+    const description = 'FIX worker-4: prevent stale allocator lock reuse';
+    const result = await sendRequest(description);
+
+    assert.strictEqual(result.status, 200);
+    assert.strictEqual(result.body.ok, true);
+    assert.strictEqual(db.getRequest(result.body.request_id).description, description);
+  });
+
+  it('should reject malformed /api/request descriptions with no side effects', async () => {
+    const malformedDescriptions = [
+      '[clear description of what the user wants]',
+      'FIX worker-N: [brief description of the fix needed]',
+      '-h',
+      '=== Project: owner/repo\nLoop created: 7\n=== Requests ===',
+    ];
+    const originalCreateRequest = db.createRequest;
+    let createRequestCalls = 0;
+    db.createRequest = (...args) => {
+      createRequestCalls += 1;
+      return originalCreateRequest(...args);
+    };
+
+    try {
+      for (const description of malformedDescriptions) {
+        const requestsBefore = db.listRequests().length;
+        const architectMailBefore = db.checkMail('architect', false).length;
+        const logsBefore = db.getLog(10000).length;
+        const result = await sendRequest(description);
+
+        assert.strictEqual(result.status, 400);
+        assert.strictEqual(result.body.ok, false);
+        assert.strictEqual(result.body.error, cliServer.INVALID_REQUEST_DESCRIPTION);
+        assert.strictEqual(db.listRequests().length, requestsBefore);
+        assert.strictEqual(db.checkMail('architect', false).length, architectMailBefore);
+        assert.strictEqual(db.getLog(10000).length, logsBefore);
+      }
+
+      assert.strictEqual(createRequestCalls, 0);
+    } finally {
+      db.createRequest = originalCreateRequest;
+    }
+  });
+
+  it('should reject oversize /api/request with invalid_request_description_too_long', async () => {
+    const oversized = 'x'.repeat(cliServer.MAX_REQUEST_DESCRIPTION_LENGTH + 1);
+    const result = await sendRequest(oversized);
+
+    assert.strictEqual(result.status, 400);
+    assert.strictEqual(result.body.ok, false);
+    assert.strictEqual(result.body.error, cliServer.INVALID_REQUEST_DESCRIPTION_TOO_LONG);
+  });
+
+  it('should clamp /api/log limit to bounded positive values', async () => {
+    for (let i = 0; i < 1100; i++) {
+      db.log('coordinator', `web_activity_${i}`, { i });
+    }
+
+    const negative = await getJson('/api/log?limit=-1');
+    assert.strictEqual(negative.status, 200);
+    assert.strictEqual(Array.isArray(negative.body), true);
+    assert.strictEqual(negative.body.length, 1);
+
+    const nonNumeric = await getJson('/api/log?limit=abc');
+    assert.strictEqual(nonNumeric.status, 200);
+    assert.strictEqual(nonNumeric.body.length, 100);
+
+    const oversized = await getJson('/api/log?limit=50000');
+    assert.strictEqual(oversized.status, 200);
+    assert.strictEqual(oversized.body.length, 1000);
+  });
+});
+
+describe('Web mutation route ID validation', () => {
+  let server;
+  let port;
+
+  beforeEach(async () => {
+    server = webServer.start(tmpDir, 0);
+    await new Promise((resolve, reject) => {
+      server.once('listening', resolve);
+      server.once('error', reject);
+    });
+    port = server.address().port;
+  });
+
+  afterEach(() => {
+    webServer.stop();
+  });
+
+  function requestJson(method, routePath, payload) {
+    const body = payload === undefined ? null : JSON.stringify(payload);
+    return new Promise((resolve, reject) => {
+      const req = http.request({
+        host: '127.0.0.1',
+        port,
+        path: routePath,
+        method,
+        headers: body ? {
+          'Content-Type': 'application/json',
+          'Content-Length': Buffer.byteLength(body),
+        } : {},
+      }, (res) => {
+        let data = '';
+        res.on('data', (chunk) => {
+          data += chunk.toString();
+        });
+        res.on('end', () => {
+          resolve({ status: res.statusCode, body: data ? JSON.parse(data) : {} });
+        });
+      });
+      req.on('error', reject);
+      if (body) req.write(body);
+      req.end();
+    });
+  }
+
+  it('rejects malformed preset delete IDs and does not delete matching numeric prefix row', async () => {
+    db.savePreset('preset-1', '/tmp/project-1', 'owner/repo', 4);
+    const preset = db.listPresets().find((p) => p.name === 'preset-1');
+    assert.ok(preset);
+    assert.strictEqual(preset.id, 1);
+
+    const result = await requestJson('DELETE', '/api/presets/1abc');
+    assert.strictEqual(result.status, 400);
+    assert.strictEqual(result.body.ok, false);
+    assert.ok(db.getPreset(1));
+  });
+
+  it('rejects out-of-range preset delete IDs', async () => {
+    db.savePreset('preset-1', '/tmp/project-1', 'owner/repo', 4);
+    const preset = db.listPresets().find((p) => p.name === 'preset-1');
+    assert.ok(preset);
+
+    const outOfRange = String(Number.MAX_SAFE_INTEGER + 1);
+    const result = await requestJson('DELETE', `/api/presets/${outOfRange}`);
+    assert.strictEqual(result.status, 400);
+    assert.ok(db.getPreset(preset.id));
+  });
+
+  it('allows valid preset delete IDs', async () => {
+    db.savePreset('preset-1', '/tmp/project-1', 'owner/repo', 4);
+    const preset = db.listPresets().find((p) => p.name === 'preset-1');
+    assert.ok(preset);
+
+    const result = await requestJson('DELETE', `/api/presets/${preset.id}`);
+    assert.strictEqual(result.status, 200);
+    assert.strictEqual(result.body.ok, true);
+    assert.strictEqual(db.getPreset(preset.id), undefined);
+  });
+
+  it('rejects malformed change patch IDs and does not update matching numeric prefix row', async () => {
+    const id = db.createChange({ description: 'd', domain: 'coordinator', status: 'active' });
+    assert.strictEqual(id, 1);
+
+    const result = await requestJson('PATCH', '/api/changes/1abc', { status: 'pending_user_action' });
+    assert.strictEqual(result.status, 400);
+    assert.strictEqual(result.body.ok, false);
+    assert.strictEqual(db.getChange(1).status, 'active');
+  });
+
+  it('rejects out-of-range change patch IDs', async () => {
+    const id = db.createChange({ description: 'd', domain: 'coordinator', status: 'active' });
+    assert.ok(id > 0);
+
+    const outOfRange = String(Number.MAX_SAFE_INTEGER + 1);
+    const result = await requestJson('PATCH', `/api/changes/${outOfRange}`, { status: 'pending_user_action' });
+    assert.strictEqual(result.status, 400);
+    assert.strictEqual(db.getChange(id).status, 'active');
+  });
+
+  it('allows valid change patch IDs', async () => {
+    const id = db.createChange({ description: 'd', domain: 'coordinator', status: 'active' });
+    assert.ok(id > 0);
+
+    const result = await requestJson('PATCH', `/api/changes/${id}`, { status: 'pending_user_action' });
+    assert.strictEqual(result.status, 200);
+    assert.strictEqual(result.body.ok, true);
+    assert.strictEqual(db.getChange(id).status, 'pending_user_action');
   });
 });
 

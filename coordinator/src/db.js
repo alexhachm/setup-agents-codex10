@@ -9,6 +9,156 @@ let db = null;
 const NAMESPACE = process.env.MAC10_NAMESPACE || 'mac10';
 const SQLITE_TIMESTAMP_RE = /^(\d{4}-\d{2}-\d{2}) (\d{2}:\d{2}:\d{2})(\.\d+)?$/;
 const ISO_TIMESTAMP_WITHOUT_ZONE_RE = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d+)?$/;
+const ACTIVITY_LOG_LIMIT_MIN = 1;
+const ACTIVITY_LOG_LIMIT_MAX = 1000;
+const DEFAULT_ACTIVITY_LOG_LIMIT = 50;
+const MALFORMED_REQUEST_PLACEHOLDER_DESCRIPTIONS = new Set([
+  '[clear description of what the user wants]',
+]);
+const MALFORMED_TASK_PLACEHOLDER_DESCRIPTIONS = new Set([
+  '[clear description of what the user wants]',
+  'fix worker-n: [brief description of what needs fixing]',
+]);
+const MALFORMED_TASK_FIX_DESCRIPTION_RE = /^fix\s+worker-(?:n|\d+)\s*:\s*\[brief description of what needs fixing\]$/;
+const MALFORMED_REQUEST_RESULT = 'Malformed scaffold placeholder request was automatically terminalized.';
+const MALFORMED_TASK_RESULT = 'Malformed scaffold placeholder task was automatically terminalized.';
+
+function normalizePlaceholderValue(value) {
+  if (value === null || value === undefined) return '';
+  return String(value).replace(/\s+/g, ' ').trim().toLowerCase();
+}
+
+function isMalformedScaffoldRequestDescription(description) {
+  return MALFORMED_REQUEST_PLACEHOLDER_DESCRIPTIONS.has(normalizePlaceholderValue(description));
+}
+
+function isMalformedScaffoldTaskSignature(text) {
+  const normalized = normalizePlaceholderValue(text);
+  if (!normalized) return false;
+  return MALFORMED_TASK_PLACEHOLDER_DESCRIPTIONS.has(normalized)
+    || MALFORMED_TASK_FIX_DESCRIPTION_RE.test(normalized);
+}
+
+function terminalizeMalformedScaffoldArtifacts() {
+  const d = getDb();
+  const tx = d.transaction(() => {
+    const malformedRequests = d.prepare(`
+      SELECT id, status, description
+      FROM requests
+    `).all().filter((row) => isMalformedScaffoldRequestDescription(row.description));
+
+    const malformedRequestIds = malformedRequests
+      .map((row) => row.id)
+      .filter((id) => String(id || '').trim() !== '')
+      .sort((left, right) => String(left).localeCompare(String(right)));
+    const malformedRequestIdSet = new Set(malformedRequestIds);
+    const requestsToRepair = malformedRequests
+      .filter((row) => !['completed', 'failed'].includes(String(row.status || '').toLowerCase()))
+      .map((row) => row.id)
+      .sort((left, right) => String(left).localeCompare(String(right)));
+
+    const malformedTasks = d.prepare(`
+      SELECT id, request_id, status, assigned_to, subject, description
+      FROM tasks
+    `).all().filter((task) => {
+      if (malformedRequestIdSet.has(task.request_id)) return true;
+      return isMalformedScaffoldTaskSignature(task.description)
+        || isMalformedScaffoldTaskSignature(task.subject);
+    });
+
+    const malformedTaskIds = malformedTasks
+      .map((row) => Number.parseInt(row.id, 10))
+      .filter((id) => Number.isInteger(id) && id > 0)
+      .sort((left, right) => left - right);
+    const tasksToTerminalize = malformedTasks
+      .filter((row) => !['completed', 'failed'].includes(String(row.status || '').toLowerCase()))
+      .map((row) => Number.parseInt(row.id, 10))
+      .filter((id) => Number.isInteger(id) && id > 0);
+    const detachedTaskAssignments = malformedTasks.reduce((count, task) => {
+      return task.assigned_to === null || task.assigned_to === undefined ? count : count + 1;
+    }, 0);
+
+    const workerIdSet = new Set();
+    for (const task of malformedTasks) {
+      const assignedWorkerId = Number.parseInt(task.assigned_to, 10);
+      if (Number.isInteger(assignedWorkerId) && assignedWorkerId > 0) {
+        workerIdSet.add(assignedWorkerId);
+      }
+    }
+    if (malformedTaskIds.length > 0) {
+      const taskPlaceholders = malformedTaskIds.map(() => '?').join(', ');
+      const workerRows = d.prepare(`
+        SELECT id
+        FROM workers
+        WHERE current_task_id IN (${taskPlaceholders})
+      `).all(...malformedTaskIds);
+      for (const row of workerRows) {
+        const workerId = Number.parseInt(row.id, 10);
+        if (Number.isInteger(workerId) && workerId > 0) workerIdSet.add(workerId);
+      }
+    }
+    const workerIds = Array.from(workerIdSet).sort((left, right) => left - right);
+
+    if (requestsToRepair.length > 0) {
+      const placeholders = requestsToRepair.map(() => '?').join(', ');
+      d.prepare(`
+        UPDATE requests
+        SET status = 'failed',
+            result = ?,
+            completed_at = COALESCE(completed_at, datetime('now')),
+            updated_at = datetime('now')
+        WHERE id IN (${placeholders})
+      `).run(MALFORMED_REQUEST_RESULT, ...requestsToRepair);
+    }
+
+    if (malformedTaskIds.length > 0) {
+      const placeholders = malformedTaskIds.map(() => '?').join(', ');
+      d.prepare(`
+        UPDATE tasks
+        SET status = CASE
+              WHEN status IN ('completed', 'failed') THEN status
+              ELSE 'failed'
+            END,
+            result = CASE
+              WHEN status IN ('completed', 'failed') THEN result
+              ELSE ?
+            END,
+            completed_at = CASE
+              WHEN status IN ('completed', 'failed') THEN completed_at
+              ELSE COALESCE(completed_at, datetime('now'))
+            END,
+            assigned_to = NULL,
+            updated_at = datetime('now')
+        WHERE id IN (${placeholders})
+      `).run(MALFORMED_TASK_RESULT, ...malformedTaskIds);
+    }
+
+    if (workerIds.length > 0) {
+      const placeholders = workerIds.map(() => '?').join(', ');
+      d.prepare(`
+        UPDATE workers
+        SET status = CASE
+              WHEN status IN ('assigned', 'running', 'busy') THEN 'idle'
+              ELSE status
+            END,
+            current_task_id = NULL,
+            claimed_by = NULL,
+            claimed_at = NULL
+        WHERE id IN (${placeholders})
+      `).run(...workerIds);
+    }
+
+    return {
+      inspected_requests: malformedRequestIds.length,
+      repaired_requests: requestsToRepair.length,
+      inspected_tasks: malformedTaskIds.length,
+      terminalized_tasks: tasksToTerminalize.length,
+      detached_task_assignments: detachedTaskAssignments,
+      reset_workers: workerIds.length,
+    };
+  });
+  return tx();
+}
 
 function parseCoordinatorTimestamp(value) {
   if (value === null || value === undefined) return null;
@@ -89,7 +239,7 @@ function compareCompletedTaskCursors(left, right) {
 const VALID_COLUMNS = Object.freeze({
   requests: new Set(['description', 'tier', 'status', 'result', 'completed_at', 'loop_id']),
   tasks: new Set(['request_id', 'subject', 'description', 'domain', 'files', 'priority', 'tier', 'depends_on', 'assigned_to', 'status', 'pr_url', 'branch', 'validation', 'overlap_with', 'started_at', 'completed_at', 'result']),
-  workers: new Set(['status', 'domain', 'worktree_path', 'branch', 'tmux_session', 'tmux_window', 'pid', 'current_task_id', 'claimed_by', 'last_heartbeat', 'launched_at', 'tasks_completed']),
+  workers: new Set(['status', 'domain', 'worktree_path', 'branch', 'tmux_session', 'tmux_window', 'pid', 'current_task_id', 'claimed_by', 'claimed_at', 'last_heartbeat', 'launched_at', 'tasks_completed']),
   merge_queue: new Set(['status', 'priority', 'completion_checkpoint', 'merged_at', 'error']),
   changes: new Set(['description', 'domain', 'file_path', 'function_name', 'tooltip', 'enabled', 'status']),
   loops: new Set(['prompt', 'status', 'iteration_count', 'last_checkpoint', 'tmux_session', 'tmux_window', 'pid', 'last_heartbeat', 'stopped_at']),
@@ -149,6 +299,10 @@ function init(projectDir) {
     if (!cols.includes('claimed_by')) {
       db.exec("ALTER TABLE workers ADD COLUMN claimed_by TEXT");
     }
+    if (!cols.includes('claimed_at')) {
+      db.exec("ALTER TABLE workers ADD COLUMN claimed_at TEXT");
+    }
+    db.exec("UPDATE workers SET claimed_at = datetime('now') WHERE claimed_by IS NOT NULL AND claimed_at IS NULL");
   }
   if (existingTables.includes('tasks')) {
     const taskCols = db.prepare("PRAGMA table_info(tasks)").all().map(c => c.name);
@@ -278,6 +432,7 @@ function getReadyTasks() {
 
 function checkAndPromoteTasks() {
   const d = getDb();
+  terminalizeMalformedScaffoldArtifacts();
   // Batch promote pending tasks with no dependencies in a single SQL statement
   d.prepare(`
     UPDATE tasks SET status = 'ready', updated_at = datetime('now')
@@ -344,13 +499,13 @@ function getAllWorkers() {
 
 function claimWorker(workerId, claimer) {
   const result = getDb().prepare(
-    "UPDATE workers SET claimed_by = ? WHERE id = ? AND status = 'idle' AND claimed_by IS NULL"
+    "UPDATE workers SET claimed_by = ?, claimed_at = datetime('now') WHERE id = ? AND status = 'idle' AND claimed_by IS NULL"
   ).run(claimer, workerId);
   return result.changes > 0;
 }
 
 function releaseWorker(workerId) {
-  getDb().prepare('UPDATE workers SET claimed_by = NULL WHERE id = ?').run(workerId);
+  getDb().prepare('UPDATE workers SET claimed_by = NULL, claimed_at = NULL WHERE id = ?').run(workerId);
 }
 
 function checkRequestCompletion(requestId) {
@@ -520,11 +675,21 @@ function log(actor, action, details = {}) {
   `).run(actor, action, JSON.stringify(details));
 }
 
+function normalizeActivityLogLimit(limit, fallback = DEFAULT_ACTIVITY_LOG_LIMIT) {
+  const safeFallback = Number.isSafeInteger(fallback)
+    ? Math.max(ACTIVITY_LOG_LIMIT_MIN, Math.min(fallback, ACTIVITY_LOG_LIMIT_MAX))
+    : DEFAULT_ACTIVITY_LOG_LIMIT;
+  const parsed = typeof limit === 'number' ? limit : Number(limit);
+  if (!Number.isSafeInteger(parsed)) return safeFallback;
+  return Math.max(ACTIVITY_LOG_LIMIT_MIN, Math.min(parsed, ACTIVITY_LOG_LIMIT_MAX));
+}
+
 function getLog(limit = 50, actor) {
+  const normalizedLimit = normalizeActivityLogLimit(limit);
   if (actor) {
-    return getDb().prepare('SELECT * FROM activity_log WHERE actor = ? ORDER BY id DESC LIMIT ?').all(actor, limit);
+    return getDb().prepare('SELECT * FROM activity_log WHERE actor = ? ORDER BY id DESC LIMIT ?').all(actor, normalizedLimit);
   }
-  return getDb().prepare('SELECT * FROM activity_log ORDER BY id DESC LIMIT ?').all(limit);
+  return getDb().prepare('SELECT * FROM activity_log ORDER BY id DESC LIMIT ?').all(normalizedLimit);
 }
 
 // --- Config helpers ---
@@ -762,6 +927,7 @@ function listLoopRequests(loopId) {
 module.exports = {
   init, close, getDb,
   coordinatorAgeMs,
+  terminalizeMalformedScaffoldArtifacts,
   createRequest, getRequest, updateRequest, listRequests,
   createTask, getTask, updateTask, listTasks, getReadyTasks, checkAndPromoteTasks,
   registerWorker, getWorker, updateWorker, getIdleWorkers, getAllWorkers, claimWorker, releaseWorker,
