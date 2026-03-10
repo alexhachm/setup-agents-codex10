@@ -85,6 +85,7 @@ const PR_URL_RE = /^https:\/\/github\.com\/[a-zA-Z0-9._-]+\/[a-zA-Z0-9._-]+\/pul
 const PR_NUMBER_RE = /^#?(\d+)$/;
 const PR_REFERENCE_RE = /^(pull request|pull|pr)\s*#?(\d+)$/i;
 const WORKER_BRANCH_RE = /^agent-\d+$/;
+const VALIDATION_TIER_RE = /^tier\s*([1-3])$/i;
 const ROUTING_BUDGET_STATE_KEY = 'routing_budget_state';
 const ROUTING_BUDGET_REMAINING_KEY = 'routing_budget_flagship_remaining';
 const ROUTING_BUDGET_THRESHOLD_KEY = 'routing_budget_flagship_threshold';
@@ -375,6 +376,32 @@ function parseDependsOnField(dependsOn) {
     }
   }
   throw new Error('Invalid depends_on: expected an array of task ids');
+}
+
+function extractValidationTierToken(rawValidation) {
+  const candidate = typeof rawValidation === 'string' ? rawValidation.trim() : '';
+  if (!candidate) return null;
+  const directMatch = candidate.match(VALIDATION_TIER_RE);
+  if (directMatch) return parseInt(directMatch[1], 10);
+
+  try {
+    const parsed = JSON.parse(candidate);
+    if (typeof parsed !== 'string') return null;
+    const parsedMatch = parsed.trim().match(VALIDATION_TIER_RE);
+    return parsedMatch ? parseInt(parsedMatch[1], 10) : null;
+  } catch {
+    return null;
+  }
+}
+
+function normalizeTaskValidationArg(taskArgs) {
+  if (!taskArgs || typeof taskArgs !== 'object') return;
+  const validationTier = extractValidationTierToken(taskArgs.validation);
+  if (!validationTier) return;
+  if (!Number.isInteger(taskArgs.tier) || taskArgs.tier <= 0) {
+    taskArgs.tier = validationTier;
+  }
+  delete taskArgs.validation;
 }
 
 function normalizeOverlapIdsField(overlapWith, selfId = null) {
@@ -1194,6 +1221,7 @@ function handleCommand(cmd, conn, handlers) {
         // Normalize files to an array before persisting (handles strings, JSON strings, arrays)
         args.files = parseFilesField(args.files);
         args.depends_on = parseDependsOnField(args.depends_on);
+        normalizeTaskValidationArg(args);
         const taskId = db.createTask(args);
         // If no dependencies, mark ready immediately
         if (!args.depends_on || args.depends_on.length === 0) {
@@ -1331,6 +1359,17 @@ function handleCommand(cmd, conn, handlers) {
             task_id,
             requested_branch: resolvedBranch.requestedBranch,
             worker_branch: resolvedBranch.workerBranch,
+          });
+        }
+        const existingTask = db.getTask(task_id);
+        const staleValidationTier = extractValidationTierToken(existingTask && existingTask.validation);
+        if (staleValidationTier) {
+          db.updateTask(task_id, { validation: null });
+          db.log('coordinator', 'complete_task_validation_tier_token_cleared', {
+            worker_id,
+            task_id,
+            validation: existingTask && existingTask.validation,
+            inferred_tier: staleValidationTier,
           });
         }
         db.updateTask(task_id, {
