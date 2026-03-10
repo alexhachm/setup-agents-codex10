@@ -18,6 +18,7 @@ const DEFAULT_WORKERS = 4;
 const LEGACY_MAX_WORKERS_DEFAULT = 8;
 const BRANCH_RE = /^[a-zA-Z0-9._\/-]+$/;
 const PR_URL_RE = /^https:\/\/github\.com\/[a-zA-Z0-9._-]+\/[a-zA-Z0-9._-]+\/pull\/\d+$/;
+const PR_NUMBER_RE = /^#?(\d+)$/;
 const WORKER_BRANCH_RE = /^agent-\d+$/;
 const ROUTING_BUDGET_STATE_KEY = 'routing_budget_state';
 const ROUTING_BUDGET_REMAINING_KEY = 'routing_budget_flagship_remaining';
@@ -323,6 +324,52 @@ function sanitizeBranchName(rawBranch) {
   return trimmed;
 }
 
+function parseGitHubRepoFromRemoteUrl(remoteUrl) {
+  const trimmed = String(remoteUrl || '').trim();
+  if (!trimmed) return '';
+
+  try {
+    const parsed = new URL(trimmed);
+    const host = (parsed.hostname || '').toLowerCase();
+    if (!host.endsWith('github.com')) return '';
+    const parts = parsed.pathname.replace(/^\/+|\/+$/g, '').split('/');
+    if (parts.length < 2) return '';
+    return `${parts[0]}/${parts[1].replace(/\.git$/i, '')}`;
+  } catch {
+    const sshMatch = trimmed.match(/^git@[^:]+:([^/]+)\/([^/.]+)(?:\.git)?$/i);
+    if (sshMatch) return `${sshMatch[1]}/${sshMatch[2]}`;
+  }
+
+  return '';
+}
+
+function getProjectGitHubRepoPath(cwd = _projectDir || process.cwd()) {
+  try {
+    const remoteUrl = execFileSync('git', ['remote', 'get-url', 'origin'], {
+      encoding: 'utf8',
+      cwd,
+      stdio: ['ignore', 'pipe', 'ignore'],
+    }).trim();
+    return parseGitHubRepoFromRemoteUrl(remoteUrl);
+  } catch {
+    return '';
+  }
+}
+
+function normalizePrUrl(rawPrUrl) {
+  if (typeof rawPrUrl !== 'string') return '';
+  const trimmed = rawPrUrl.trim();
+  if (!trimmed) return '';
+  if (PR_URL_RE.test(trimmed)) return trimmed;
+
+  const match = trimmed.match(PR_NUMBER_RE);
+  if (!match) return trimmed;
+
+  const repoPath = getProjectGitHubRepoPath();
+  if (!repoPath) return trimmed;
+  return `https://github.com/${repoPath}/pull/${match[1]}`;
+}
+
 function isValidGitHubPrUrl(value) {
   return typeof value === 'string' && PR_URL_RE.test(value);
 }
@@ -378,13 +425,17 @@ function resolveWorkerBranch(worker, fallbackWorkerId = null) {
   const worktreeBranch = readWorkerBranchFromWorktree(worker);
   const worktreePath = worker && worker.worktree_path ? String(worker.worktree_path).trim() : '';
 
-  // Worker ID is the source of truth for branch identity, but only if branch exists.
+  // Worker ID is the source of truth for branch identity.
+  // Keep canonical as a recovery-safe fallback when local refs are unavailable.
   if (canonicalBranch && branchExists(canonicalBranch, worktreePath || process.cwd())) {
     return canonicalBranch;
   }
 
   if (WORKER_BRANCH_RE.test(workerBranch) && branchExists(workerBranch, worktreePath || process.cwd())) return workerBranch;
   if (worktreeBranch && branchExists(worktreeBranch, worktreePath || process.cwd())) return worktreeBranch;
+  if (canonicalBranch) return canonicalBranch;
+  if (WORKER_BRANCH_RE.test(workerBranch)) return workerBranch;
+  if (worktreeBranch) return worktreeBranch;
   return '';
 }
 
@@ -836,6 +887,7 @@ function handleCommand(cmd, conn, handlers) {
       }
       case 'complete-task': {
         const { worker_id, task_id, pr_url, result, branch } = args;
+        const normalizedPrUrl = normalizePrUrl(pr_url);
         const worker = db.getWorker(worker_id);
         const resolvedBranch = resolveCompletionBranch(worker, branch, worker_id);
         if (resolvedBranch.mismatch) {
@@ -847,7 +899,7 @@ function handleCommand(cmd, conn, handlers) {
           });
         }
         const completeResult = db.completeTaskForWorker(worker_id, task_id, {
-          pr_url: pr_url || null,
+          pr_url: normalizedPrUrl || null,
           branch: resolvedBranch.branch,
           result: result || null,
           completed_at: new Date().toISOString(),
@@ -862,12 +914,13 @@ function handleCommand(cmd, conn, handlers) {
         const tasksCompleted = completedWorker ? completedWorker.tasks_completed : null;
 
         // Enqueue merge if PR exists (must be a valid URL, not a status string like "already_merged")
-        if (isValidGitHubPrUrl(pr_url) && completedTask && resolvedBranch.branch) {
+        const queueBranch = sanitizeBranchName(resolvedBranch.branch || completedTask.branch || (worker && worker.branch) || '');
+        if (isValidGitHubPrUrl(normalizedPrUrl) && completedTask && queueBranch) {
           const queueResult = queueMergeWithRecovery({
             request_id: completedTask.request_id,
             task_id,
-            pr_url,
-            branch: resolvedBranch.branch || '',
+            pr_url: normalizedPrUrl,
+            branch: queueBranch,
             priority: completedTask.priority === 'urgent' ? 10 : 0,
             force_retry: true,
           });
@@ -875,28 +928,41 @@ function handleCommand(cmd, conn, handlers) {
             db.log('coordinator', 'merge_queue_entry_refreshed', {
               request_id: completedTask.request_id,
               task_id,
-              pr_url,
-              branch: resolvedBranch.branch,
+              pr_url: normalizedPrUrl,
+              branch: queueBranch,
               retried: queueResult.retried,
               previous_status: queueResult.previous_status || null,
               merge_id: queueResult.merge_id || null,
             });
           }
         }
+        if (normalizedPrUrl && normalizedPrUrl !== (pr_url || '')) {
+          db.log('coordinator', 'complete_task_pr_url_normalized', {
+            task_id,
+            worker_id,
+            original_pr_url: pr_url,
+            normalized_pr_url: normalizedPrUrl,
+          });
+        }
         db.sendMail('allocator', 'task_completed', {
           worker_id, task_id,
           request_id: completedTask ? completedTask.request_id : null,
-          pr_url,
+          pr_url: normalizedPrUrl,
           tasks_completed: tasksCompleted,
         });
         // Notify architect so it has visibility into Tier 2 outcomes
         db.sendMail('architect', 'task_completed', {
           worker_id, task_id,
           request_id: completedTask ? completedTask.request_id : null,
-          pr_url,
+          pr_url: normalizedPrUrl,
           result,
         });
-        db.log(`worker-${worker_id}`, 'task_completed', { task_id, pr_url, result, tasks_completed: tasksCompleted });
+        db.log(`worker-${worker_id}`, 'task_completed', {
+          task_id,
+          pr_url: normalizedPrUrl,
+          result,
+          tasks_completed: tasksCompleted,
+        });
         // Notify handlers for merge check
         if (handlers.onTaskCompleted) handlers.onTaskCompleted(task_id);
         respond(conn, { ok: true });
@@ -1148,17 +1214,22 @@ function handleCommand(cmd, conn, handlers) {
         let queued = 0;
         for (const task of tasks) {
           const worker = task.assigned_to ? db.getWorker(task.assigned_to) : null;
+          const normalizedPrUrl = normalizePrUrl(task.pr_url);
           const resolvedBranch = resolveCompletionBranch(worker, task.branch, task.assigned_to);
-          if (isValidGitHubPrUrl(task.pr_url) && resolvedBranch.branch) {
-            if (resolvedBranch.mismatch || task.branch !== resolvedBranch.branch) {
-              db.updateTask(task.id, { branch: resolvedBranch.branch });
+          if (task.pr_url !== normalizedPrUrl) {
+            db.updateTask(task.id, { pr_url: normalizedPrUrl || task.pr_url });
+          }
+          const mergeBranch = sanitizeBranchName(resolvedBranch.branch || task.branch || (worker && worker.branch) || '');
+          if (isValidGitHubPrUrl(normalizedPrUrl) && mergeBranch) {
+            if (resolvedBranch.mismatch || task.branch !== mergeBranch) {
+              db.updateTask(task.id, { branch: mergeBranch });
             }
             try {
               const queueResult = queueMergeWithRecovery({
                 request_id: reqId,
                 task_id: task.id,
-                branch: resolvedBranch.branch,
-                pr_url: task.pr_url,
+                branch: mergeBranch,
+                pr_url: normalizedPrUrl,
                 priority: task.priority === 'urgent' ? 10 : 0,
                 force_retry: forceRetry,
                 latest_completion_timestamp: latestCompletedTaskState,
@@ -1168,8 +1239,8 @@ function handleCommand(cmd, conn, handlers) {
                 db.log('coordinator', 'merge_queue_entry_refreshed', {
                   request_id: reqId,
                   task_id: task.id,
-                  pr_url: task.pr_url,
-                  branch: resolvedBranch.branch,
+                  pr_url: normalizedPrUrl,
+                  branch: mergeBranch,
                   retried: queueResult.retried,
                   previous_status: queueResult.previous_status || null,
                   merge_id: queueResult.merge_id || null,

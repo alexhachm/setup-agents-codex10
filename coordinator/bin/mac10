@@ -9,6 +9,8 @@ const { coordinatorAgeMs } = require('../src/db');
 const NAMESPACE = process.env.MAC10_NAMESPACE || 'mac10';
 const STRICT_NAMESPACE = Boolean(process.env.MAC10_NAMESPACE) && process.env.MAC10_NAMESPACE !== 'mac10';
 const BRANCH_RE = /^[a-zA-Z0-9._\/-]+$/;
+const PR_URL_RE = /^https:\/\/github\.com\/[a-zA-Z0-9._-]+\/[a-zA-Z0-9._-]+\/pull\/\d+$/;
+const PR_NUMBER_RE = /^#?(\d+)$/;
 const WORKER_BRANCH_RE = /^agent-\d+$/;
 
 function namespacedCandidates(baseName) {
@@ -289,10 +291,69 @@ function sanitizeBranchName(rawBranch) {
   return trimmed;
 }
 
+function parseGitHubRepoFromRemoteUrl(remoteUrl) {
+  const trimmed = String(remoteUrl || '').trim();
+  if (!trimmed) return '';
+
+  try {
+    const parsed = new URL(trimmed);
+    const host = (parsed.hostname || '').toLowerCase();
+    if (!host.endsWith('github.com')) return '';
+    const parts = parsed.pathname.replace(/^\/+|\/+$/g, '').split('/');
+    if (parts.length < 2) return '';
+    return `${parts[0]}/${parts[1].replace(/\.git$/i, '')}`;
+  } catch {
+    const sshMatch = trimmed.match(/^git@[^:]+:([^/]+)\/([^/.]+)(?:\.git)?$/i);
+    if (sshMatch) return `${sshMatch[1]}/${sshMatch[2]}`;
+    return '';
+  }
+}
+
+function getProjectGitHubRepoPath(cwd = process.cwd()) {
+  try {
+    const remoteUrl = execFileSync('git', ['remote', 'get-url', 'origin'], {
+      encoding: 'utf8',
+      cwd,
+      stdio: ['ignore', 'pipe', 'ignore'],
+    }).trim();
+    return parseGitHubRepoFromRemoteUrl(remoteUrl);
+  } catch {
+    return '';
+  }
+}
+
+function normalizePrUrl(rawPrUrl, cwd = process.cwd()) {
+  if (typeof rawPrUrl !== 'string') return '';
+  const trimmed = rawPrUrl.trim();
+  if (!trimmed) return '';
+  if (PR_URL_RE.test(trimmed)) return trimmed;
+
+  const match = trimmed.match(PR_NUMBER_RE);
+  if (!match) return trimmed;
+  const repoPath = getProjectGitHubRepoPath(cwd);
+  if (!repoPath) return trimmed;
+  return `https://github.com/${repoPath}/pull/${match[1]}`;
+}
+
 function parseWorkerId(rawWorkerId) {
   const parsed = parseInt(rawWorkerId, 10);
   if (!Number.isInteger(parsed) || parsed <= 0) return null;
   return parsed;
+}
+
+function branchExists(rawBranch, cwd = process.cwd()) {
+  const branch = sanitizeBranchName(rawBranch);
+  if (!branch) return false;
+  try {
+    execFileSync('git', ['show-ref', '--verify', '--quiet', `refs/heads/${branch}`], {
+      encoding: 'utf8',
+      cwd,
+      stdio: ['ignore', 'ignore', 'ignore'],
+    });
+    return true;
+  } catch {
+    return false;
+  }
 }
 
 function getCanonicalWorkerBranch(rawWorkerId) {
@@ -313,21 +374,6 @@ function readCurrentBranch() {
   }
 }
 
-function branchExists(rawBranch, cwd = process.cwd()) {
-  const branch = sanitizeBranchName(rawBranch);
-  if (!branch) return false;
-  try {
-    execFileSync('git', ['show-ref', '--verify', '--quiet', `refs/heads/${branch}`], {
-      encoding: 'utf8',
-      cwd,
-      stdio: ['ignore', 'ignore', 'ignore'],
-    });
-    return true;
-  } catch {
-    return false;
-  }
-}
-
 function resolveCompleteTaskBranch(requestedBranch, rawWorkerId) {
   const normalizedRequested = sanitizeBranchName(requestedBranch || '');
   const canonicalWorkerBranch = getCanonicalWorkerBranch(rawWorkerId);
@@ -335,20 +381,20 @@ function resolveCompleteTaskBranch(requestedBranch, rawWorkerId) {
 
   // Worker ID is authoritative. Always prefer agent-<worker_id> when available.
   if (canonicalWorkerBranch) {
-    if (branchExists(canonicalWorkerBranch)) {
-      if (normalizedRequested && normalizedRequested !== canonicalWorkerBranch) {
-        console.error(`[mac10] complete-task branch mismatch: "${normalizedRequested}" != canonical "${canonicalWorkerBranch}", using "${canonicalWorkerBranch}"`);
-      }
-      return canonicalWorkerBranch;
+    if (normalizedRequested && normalizedRequested !== canonicalWorkerBranch) {
+      console.error(branchExists(canonicalWorkerBranch)
+        ? `[mac10] complete-task branch mismatch: "${normalizedRequested}" != canonical "${canonicalWorkerBranch}", using "${canonicalWorkerBranch}"`
+        : `[mac10] complete-task canonical branch missing: "${canonicalWorkerBranch}" not found, using canonical "${canonicalWorkerBranch}"`);
     }
+
     if (normalizedRequested && branchExists(normalizedRequested)) {
-      console.error(`[mac10] complete-task canonical branch missing: "${canonicalWorkerBranch}" not found, using requested "${normalizedRequested}"`);
+      console.error(`[mac10] complete-task requested branch "${normalizedRequested}" exists; canonical branch "${canonicalWorkerBranch}" unavailable`);
       return normalizedRequested;
     }
     if (currentBranch && WORKER_BRANCH_RE.test(currentBranch) && currentBranch !== canonicalWorkerBranch) {
       console.error(`[mac10] complete-task current branch mismatch: "${currentBranch}" != missing canonical "${canonicalWorkerBranch}", cannot resolve`);
     }
-    return '';
+    return canonicalWorkerBranch;
   }
 
   // Without a valid worker ID, don't trust caller-provided/current branch values.
@@ -677,11 +723,12 @@ async function main() {
           console.error('Error: task_id must be a positive integer');
           process.exit(1);
         }
+        const normalizedPrUrl = normalizePrUrl(argv[3]);
         const completionBranch = resolveCompleteTaskBranch(argv[4], argv[1]);
         result = await send(socketPath, 'complete-task', {
           worker_id: String(parsedWorkerId),
           task_id: parsedTaskId,
-          pr_url: argv[3] || '',
+          pr_url: normalizedPrUrl || '',
           branch: completionBranch || '',
           result: argv.slice(5).join(' ') || '',
         });
