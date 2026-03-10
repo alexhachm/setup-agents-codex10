@@ -193,6 +193,28 @@ function parseCoordinatorTimestamp(value) {
   return Number.isNaN(date.getTime()) ? null : date;
 }
 
+function normalizeScaffoldText(value) {
+  if (value === null || value === undefined) return '';
+  return String(value).trim().replace(/\s+/g, ' ').toLowerCase();
+}
+
+function isFixPlaceholderText(value) {
+  const normalized = normalizeScaffoldText(value);
+  if (!normalized) return false;
+  if (FIX_PLACEHOLDER_RE.test(normalized)) return true;
+  if (normalized.startsWith('fix: ')) {
+    return FIX_PLACEHOLDER_RE.test(normalized.slice(5).trim());
+  }
+  return false;
+}
+
+function isKnownScaffoldPlaceholder(value) {
+  const normalized = normalizeScaffoldText(value);
+  if (!normalized) return false;
+  if (normalized === PLACEHOLDER_REQUEST_DESCRIPTION) return true;
+  return isFixPlaceholderText(normalized);
+}
+
 function coordinatorAgeMs(timestamp, nowMs = Date.now()) {
   const parsed = parseCoordinatorTimestamp(timestamp);
   if (!parsed) return null;
@@ -522,6 +544,23 @@ function checkRequestCompletion(requestId) {
     completed: row.completed,
     failed: row.failed,
     all_done: row.completed + row.failed >= row.total && row.total > 0,
+  };
+}
+
+function remediateMalformedScaffoldArtifacts() {
+  const summary = terminalizeMalformedScaffoldArtifacts();
+  return {
+    inspected_requests: summary.inspected_requests,
+    inspected_tasks: summary.inspected_tasks,
+    matched_requests: summary.inspected_requests,
+    matched_tasks: summary.inspected_tasks,
+    terminalized_requests: summary.repaired_requests,
+    terminalized_tasks: summary.terminalized_tasks,
+    cleared_task_assignments: summary.detached_task_assignments,
+    reset_workers: summary.reset_workers,
+    request_ids: [],
+    task_ids: [],
+    worker_ids: [],
   };
 }
 
@@ -929,6 +968,7 @@ module.exports = {
   coordinatorAgeMs,
   terminalizeMalformedScaffoldArtifacts,
   createRequest, getRequest, updateRequest, listRequests,
+  remediateMalformedScaffoldArtifacts,
   createTask, getTask, updateTask, listTasks, getReadyTasks, checkAndPromoteTasks,
   registerWorker, getWorker, updateWorker, getIdleWorkers, getAllWorkers, claimWorker, releaseWorker,
   checkRequestCompletion, getRequestLatestCompletedTaskCursor, hasRequestCompletedTaskProgressSince,

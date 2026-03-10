@@ -192,6 +192,122 @@ describe('CLI Server', () => {
     assert.strictEqual(db.getWorker(1).status, 'idle');
   });
 
+  it('should terminalize malformed scaffold requests/tasks via repair and stay idempotent', async () => {
+    db.registerWorker(1, '/wt-1', 'agent-1');
+
+    db.getDb().prepare(`
+      INSERT INTO requests (id, description, status, tier)
+      VALUES (?, ?, 'decomposed', 2)
+    `).run('req-673d2c05', '[clear description of what the user wants]');
+
+    db.getDb().prepare(`
+      INSERT INTO requests (id, description, status, tier)
+      VALUES (?, ?, 'decomposed', 2)
+    `).run('req-21e8a758', 'FIX worker-2: [brief description of what needs fixing]');
+
+    const baselineReq = db.createRequest('Legitimate request');
+    for (let i = 1; i <= 10; i += 1) {
+      db.createTask({
+        request_id: baselineReq,
+        subject: `Legit task ${i}`,
+        description: `Legit description ${i}`,
+      });
+    }
+
+    const malformedReadyTask = db.createTask({
+      request_id: 'req-21e8a758',
+      subject: 'Fix: FIX worker-2: [brief description of what needs fixing]',
+      description: 'FIX worker-2: [brief description of what needs fixing]',
+      priority: 'urgent',
+      tier: 2,
+    });
+    assert.strictEqual(malformedReadyTask, 11);
+    db.updateTask(malformedReadyTask, { status: 'ready' });
+
+    const malformedAssignedTask = db.createTask({
+      request_id: 'req-673d2c05',
+      subject: 'Scaffold placeholder follow-up',
+      description: 'Investigate placeholder request',
+      tier: 2,
+    });
+    db.updateTask(malformedAssignedTask, { status: 'assigned', assigned_to: 1 });
+    db.updateWorker(1, { status: 'assigned', current_task_id: malformedAssignedTask, claimed_by: 'allocator' });
+
+    const repair1 = await sendCommand('repair', {});
+    assert.strictEqual(repair1.ok, true);
+    assert.strictEqual(repair1.scaffold_remediation.matched_requests, 2);
+    assert.strictEqual(repair1.scaffold_remediation.matched_tasks, 2);
+    assert.strictEqual(repair1.scaffold_remediation.terminalized_requests, 2);
+    assert.strictEqual(repair1.scaffold_remediation.terminalized_tasks, 2);
+    assert.strictEqual(repair1.scaffold_remediation.cleared_task_assignments, 1);
+    assert.strictEqual(repair1.scaffold_remediation.reset_workers, 1);
+
+    const reqA = db.getRequest('req-673d2c05');
+    const reqB = db.getRequest('req-21e8a758');
+    assert.strictEqual(reqA.status, 'failed');
+    assert.strictEqual(reqB.status, 'failed');
+
+    const readyAfterRepair = await sendCommand('ready-tasks', {});
+    assert.strictEqual(readyAfterRepair.ok, true);
+    assert.ok(!readyAfterRepair.tasks.some((task) => task.id === malformedReadyTask));
+
+    const repairedReadyTask = db.getTask(malformedReadyTask);
+    const repairedAssignedTask = db.getTask(malformedAssignedTask);
+    assert.strictEqual(repairedReadyTask.status, 'failed');
+    assert.strictEqual(repairedAssignedTask.status, 'failed');
+    assert.strictEqual(repairedReadyTask.assigned_to, null);
+    assert.strictEqual(repairedAssignedTask.assigned_to, null);
+
+    const repairedWorker = db.getWorker(1);
+    assert.strictEqual(repairedWorker.status, 'idle');
+    assert.strictEqual(repairedWorker.current_task_id, null);
+    assert.strictEqual(repairedWorker.claimed_by, null);
+
+    const repair2 = await sendCommand('repair', {});
+    assert.strictEqual(repair2.ok, true);
+    assert.strictEqual(repair2.scaffold_remediation.terminalized_requests, 0);
+    assert.strictEqual(repair2.scaffold_remediation.terminalized_tasks, 0);
+    assert.strictEqual(repair2.scaffold_remediation.cleared_task_assignments, 0);
+    assert.strictEqual(repair2.scaffold_remediation.reset_workers, 0);
+  });
+
+  it('should neutralize malformed ready task #11 before assign-task dispatch', async () => {
+    db.registerWorker(1, '/wt-1', 'agent-1');
+    db.getDb().prepare(`
+      INSERT INTO requests (id, description, status, tier)
+      VALUES (?, ?, 'decomposed', 2)
+    `).run('req-21e8a758', 'FIX worker-2: [brief description of what needs fixing]');
+
+    const baselineReq = db.createRequest('Legit request');
+    for (let i = 1; i <= 10; i += 1) {
+      db.createTask({
+        request_id: baselineReq,
+        subject: `Task ${i}`,
+        description: `Desc ${i}`,
+      });
+    }
+
+    const task11 = db.createTask({
+      request_id: 'req-21e8a758',
+      subject: 'Fix: FIX worker-2: [brief description of what needs fixing]',
+      description: 'FIX worker-2: [brief description of what needs fixing]',
+      tier: 2,
+      priority: 'urgent',
+    });
+    assert.strictEqual(task11, 11);
+    db.updateTask(task11, { status: 'ready' });
+
+    const assign = await sendCommand('assign-task', { task_id: task11, worker_id: 1 });
+    assert.strictEqual(assign.ok, false);
+    assert.strictEqual(assign.error, 'task_not_ready');
+    assert.strictEqual(assign.scaffold_remediation.terminalized_tasks, 1);
+
+    const neutralizedTask = db.getTask(task11);
+    assert.strictEqual(neutralizedTask.status, 'failed');
+    assert.strictEqual(neutralizedTask.assigned_to, null);
+    assert.strictEqual(db.getWorker(1).status, 'idle');
+  });
+
   it('should return error for unknown commands', async () => {
     const result = await sendCommand('nonexistent', {});
     assert.ok(result.error);
