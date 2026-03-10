@@ -85,12 +85,24 @@ const PR_URL_RE = /^https:\/\/github\.com\/[a-zA-Z0-9._-]+\/[a-zA-Z0-9._-]+\/pul
 const PR_NUMBER_RE = /^#?(\d+)$/;
 const PR_REFERENCE_RE = /^(pull request|pull|pr)\s*#?(\d+)$/i;
 const WORKER_BRANCH_RE = /^agent-\d+$/;
+const VALIDATION_TIER_RE = /^(?:tier\s*)?([1-3])$/i;
 const ROUTING_BUDGET_STATE_KEY = 'routing_budget_state';
 const ROUTING_BUDGET_REMAINING_KEY = 'routing_budget_flagship_remaining';
 const ROUTING_BUDGET_THRESHOLD_KEY = 'routing_budget_flagship_threshold';
 const LEGACY_BUDGET_REMAINING_KEY = 'flagship_budget_remaining';
 const LEGACY_BUDGET_THRESHOLD_KEY = 'flagship_budget_threshold';
 const PR_RESOLVE_ERROR_RE = /Could not resolve to a PullRequest/i;
+const CHANGE_LOG_FIELDS = ['description', 'domain', 'file_path', 'function_name', 'tooltip', 'status'];
+// Shared max for request ingress:
+// - CLI RPC: request/fix/loop-request
+// - HTTP API: /api/request
+const MAX_REQUEST_DESCRIPTION_LENGTH = 4000;
+const INVALID_REQUEST_DESCRIPTION_TOO_LONG = 'invalid_request_description_too_long';
+const LOOP_LAUNCH_FAILED = 'loop_launch_failed';
+const LOOP_LAUNCH_FAILED_MESSAGE = 'Failed to launch loop runtime';
+const ACTIVITY_LOG_LIMIT_MIN = 1;
+const ACTIVITY_LOG_LIMIT_MAX = 1000;
+const DEFAULT_ACTIVITY_LOG_LIMIT = 50;
 
 function namespacedFile(defaultName, namespacedName) {
   return NAMESPACE === 'mac10' ? defaultName : namespacedName;
@@ -162,6 +174,67 @@ function bridgeToHandoff(requestId, description, type = 'bug-fix') {
 
 const MAX_PAYLOAD_SIZE = 1024 * 1024; // 1MB
 
+function validateRequestDescription(rawDescription) {
+  const normalized = String(rawDescription).replace(/(?:\r\n?)+/g, '\n').trim();
+  if (normalized.length > MAX_REQUEST_DESCRIPTION_LENGTH) {
+    const error = new Error(INVALID_REQUEST_DESCRIPTION_TOO_LONG);
+    error.code = INVALID_REQUEST_DESCRIPTION_TOO_LONG;
+    throw error;
+  }
+  return normalized;
+}
+
+function normalizeRequestDescription(rawDescription) {
+  return validateRequestDescription(rawDescription);
+}
+
+function isRequestDescriptionTooLongError(error) {
+  if (!error) return false;
+  return error.code === INVALID_REQUEST_DESCRIPTION_TOO_LONG || error.message === INVALID_REQUEST_DESCRIPTION_TOO_LONG;
+}
+
+function normalizeErrorMessage(error, fallback = 'unknown_error') {
+  if (error && typeof error.message === 'string' && error.message.trim().length > 0) {
+    return error.message.trim();
+  }
+  if (typeof error === 'string' && error.trim().length > 0) return error.trim();
+  try {
+    const serialized = JSON.stringify(error);
+    if (serialized && serialized !== '{}' && serialized !== 'null') return serialized;
+  } catch {}
+  return fallback;
+}
+
+function failClosedLoopLaunch(loopId, launchError) {
+  const launchErrorMessage = normalizeErrorMessage(launchError, 'unknown_launch_error');
+  const failure = {
+    ok: false,
+    error: LOOP_LAUNCH_FAILED,
+    message: LOOP_LAUNCH_FAILED_MESSAGE,
+    loop_id: loopId,
+    launch_error: launchErrorMessage,
+    terminalized: false,
+    terminalization_error: null,
+  };
+  try {
+    db.updateLoop(loopId, {
+      status: 'failed',
+      stopped_at: new Date().toISOString(),
+      last_checkpoint: `launch_failed:${launchErrorMessage}`,
+    });
+    failure.terminalized = true;
+  } catch (terminalizeErr) {
+    failure.terminalization_error = normalizeErrorMessage(terminalizeErr, 'unknown_terminalization_error');
+  }
+  db.log('coordinator', 'loop_launch_failed', {
+    loop_id: loopId,
+    launch_error: launchErrorMessage,
+    terminalized: failure.terminalized,
+    terminalization_error: failure.terminalization_error,
+  });
+  return failure;
+}
+
 const COMMAND_SCHEMAS = {
   'request':           { required: ['description'], types: { description: 'string' } },
   'fix':               { required: ['description'], types: { description: 'string' } },
@@ -185,11 +258,11 @@ const COMMAND_SCHEMAS = {
   'distill':           { required: ['worker_id'], types: { worker_id: 'string' } },
   'inbox':             { required: ['recipient'], types: { recipient: 'string' } },
   'inbox-block':       { required: ['recipient'], types: { recipient: 'string', timeout: 'number', peek: 'boolean' } },
-  'ready-tasks':       { required: [], types: {} },
+  'ready-tasks':       { required: [], types: { json: 'boolean' } },
   'assign-task':       { required: ['task_id', 'worker_id'], types: { task_id: 'number', worker_id: 'number' } },
   'claim-worker':      { required: ['worker_id', 'claimer'], types: { worker_id: 'number', claimer: 'string' } },
   'release-worker':    { required: ['worker_id'], types: { worker_id: 'number' } },
-  'worker-status':     { required: [], types: {} },
+  'worker-status':     { required: [], types: { json: 'boolean' } },
   'check-completion':  { required: ['request_id'], types: { request_id: 'string' } },
   'register-worker':   { required: ['worker_id'], types: { worker_id: 'string', worktree_path: 'string', branch: 'string' } },
   'repair':            { required: [], types: {} },
@@ -224,6 +297,17 @@ function parseBudgetNumber(value) {
   if (!trimmed) return null;
   const parsed = Number(trimmed);
   return Number.isFinite(parsed) ? parsed : null;
+}
+
+function normalizeActivityLogLimit(value, fallback = DEFAULT_ACTIVITY_LOG_LIMIT) {
+  const safeFallback = Number.isSafeInteger(fallback)
+    ? Math.max(ACTIVITY_LOG_LIMIT_MIN, Math.min(fallback, ACTIVITY_LOG_LIMIT_MAX))
+    : DEFAULT_ACTIVITY_LOG_LIMIT;
+  const parsed = typeof value === 'number'
+    ? value
+    : parseBudgetNumber(value);
+  if (!Number.isSafeInteger(parsed)) return safeFallback;
+  return Math.max(ACTIVITY_LOG_LIMIT_MIN, Math.min(parsed, ACTIVITY_LOG_LIMIT_MAX));
 }
 
 function parseBudgetStateConfig(raw) {
@@ -316,6 +400,53 @@ function backfillSupersededLoopRequestsSafe() {
   return db.backfillSupersededLoopRequests();
 }
 
+function toReadyTaskJson(task) {
+  if (!task || typeof task !== 'object') return task;
+  return {
+    ...task,
+    id: task.id ?? null,
+    request_id: task.request_id ?? null,
+    depends_on: task.depends_on ?? null,
+    overlap_with: task.overlap_with ?? null,
+    files: task.files ?? null,
+    tier: task.tier ?? null,
+    validation: task.validation ?? null,
+  };
+}
+
+function toWorkerStatusJson(worker) {
+  if (!worker || typeof worker !== 'object') return worker;
+  return {
+    ...worker,
+    id: worker.id ?? null,
+    status: worker.status ?? null,
+    claimed_by: worker.claimed_by ?? null,
+    current_task_id: worker.current_task_id ?? null,
+    last_heartbeat: worker.last_heartbeat ?? null,
+    launched_at: worker.launched_at ?? null,
+    domain: worker.domain ?? null,
+  };
+}
+
+function remediateMalformedScaffoldArtifactsSafe() {
+  if (typeof db.remediateMalformedScaffoldArtifacts !== 'function') {
+    return {
+      inspected_requests: 0,
+      inspected_tasks: 0,
+      matched_requests: 0,
+      matched_tasks: 0,
+      terminalized_requests: 0,
+      terminalized_tasks: 0,
+      cleared_task_assignments: 0,
+      reset_workers: 0,
+      request_ids: [],
+      task_ids: [],
+      worker_ids: [],
+    };
+  }
+  return db.remediateMalformedScaffoldArtifacts();
+}
+
 const SAFE_TASK_DOMAIN_RE = /^[A-Za-z0-9_-]+$/;
 
 function normalizeTaskDomain(domain) {
@@ -377,6 +508,51 @@ function parseDependsOnField(dependsOn) {
   throw new Error('Invalid depends_on: expected an array of task ids');
 }
 
+function extractValidationTierToken(rawValidation) {
+  const candidate = typeof rawValidation === 'string' ? rawValidation.trim() : '';
+  if (!candidate) return null;
+  const directMatch = candidate.match(VALIDATION_TIER_RE);
+  if (directMatch) return parseInt(directMatch[1], 10);
+
+  try {
+    const parsed = JSON.parse(candidate);
+    if (typeof parsed !== 'string') return null;
+    const parsedMatch = parsed.trim().match(VALIDATION_TIER_RE);
+    return parsedMatch ? parseInt(parsedMatch[1], 10) : null;
+  } catch {
+    return null;
+  }
+}
+
+function normalizeTaskValidationArg(taskArgs) {
+  if (!taskArgs || typeof taskArgs !== 'object') return;
+  const validationTier = extractValidationTierToken(taskArgs.validation);
+  if (!validationTier) return;
+  if (!Number.isInteger(taskArgs.tier) || taskArgs.tier <= 0) {
+    taskArgs.tier = validationTier;
+  }
+  delete taskArgs.validation;
+}
+
+function clearLegacyTaskValidationToken(task, logContext = {}) {
+  if (!task) return false;
+  const staleValidationTier = extractValidationTierToken(task.validation);
+  if (!staleValidationTier) return false;
+  const taskId = Number(task.id);
+  if (!Number.isInteger(taskId) || taskId <= 0) return false;
+  db.updateTask(taskId, { validation: null });
+  if (logContext.source) {
+    db.log('coordinator', logContext.event || 'task_validation_tier_token_cleared', {
+      ...logContext,
+      task_id: taskId,
+      validation: task.validation,
+      inferred_tier: staleValidationTier,
+    });
+  }
+  task.validation = null;
+  return true;
+}
+
 function normalizeOverlapIdsField(overlapWith, selfId = null) {
   if (!overlapWith) return [];
   let ids = overlapWith;
@@ -426,11 +602,28 @@ function parseGitHubRepoFromRemoteUrl(remoteUrl) {
   return '';
 }
 
+function resolveCommandDir(rawDir, fallback) {
+  const candidates = [rawDir, fallback, _projectDir, process.cwd()];
+  for (const candidate of candidates) {
+    if (typeof candidate !== 'string') continue;
+    const trimmed = candidate.trim();
+    if (!trimmed) continue;
+    try {
+      if (fs.existsSync(trimmed) && fs.lstatSync(trimmed).isDirectory()) return trimmed;
+    } catch {
+      continue;
+    }
+  }
+  return '';
+}
+
 function getProjectGitHubRepoPath(cwd = _projectDir || process.cwd()) {
+  const commandCwd = resolveCommandDir(cwd);
+  if (!commandCwd) return '';
   try {
     const remoteUrl = execFileSync('git', ['remote', 'get-url', 'origin'], {
       encoding: 'utf8',
-      cwd,
+      cwd: commandCwd,
       stdio: ['ignore', 'pipe', 'ignore'],
     }).trim();
     return parseGitHubRepoFromRemoteUrl(remoteUrl);
@@ -443,11 +636,32 @@ function extractPrNumber(rawPrUrl) {
   if (typeof rawPrUrl !== 'string') return '';
   const trimmed = rawPrUrl.trim();
   if (!trimmed) return '';
+  const urlMatch = trimmed.match(/\/pull\/(\d+)(?:[/?#].*)?$/i);
+  if (urlMatch && urlMatch[1]) return urlMatch[1];
   const match = trimmed.match(PR_NUMBER_RE);
   if (match) return match[1];
   const refMatch = trimmed.match(PR_REFERENCE_RE);
   if (refMatch) return refMatch[2];
   return '';
+}
+
+function isShorthandPrInput(rawPrUrl) {
+  if (typeof rawPrUrl !== 'string') return false;
+  const trimmed = rawPrUrl.trim();
+  if (!trimmed) return false;
+  return PR_NUMBER_RE.test(trimmed) || PR_REFERENCE_RE.test(trimmed);
+}
+
+function isSuspiciousTaskIdPrInput(rawPrUrl, taskId) {
+  const prNumber = extractPrNumber(rawPrUrl);
+  if (!prNumber) return false;
+  const parsedTaskId = parseInt(taskId, 10);
+  if (!Number.isInteger(parsedTaskId) || parsedTaskId <= 0) return false;
+  return Number(prNumber) === parsedTaskId;
+}
+
+function shouldIgnoreTaskIdLikePrInput(rawPrUrl, taskId) {
+  return isShorthandPrInput(rawPrUrl) && isSuspiciousTaskIdPrInput(rawPrUrl, taskId);
 }
 
 function normalizePrUrl(rawPrUrl, cwd = _projectDir || process.cwd()) {
@@ -470,10 +684,12 @@ function isValidGitHubPrUrl(value) {
 
 function isResolvableGitHubPrUrl(prUrl, cwd = _projectDir || process.cwd()) {
   if (!isValidGitHubPrUrl(prUrl)) return false;
+  const commandCwd = resolveCommandDir(cwd);
+  if (!commandCwd) return false;
   try {
     execFileSync('gh', ['pr', 'view', prUrl, '--json', 'state'], {
       encoding: 'utf8',
-      cwd,
+      cwd: commandCwd,
       stdio: ['ignore', 'ignore', 'pipe'],
       timeout: 12000,
     });
@@ -488,10 +704,12 @@ function isResolvableGitHubPrUrl(prUrl, cwd = _projectDir || process.cwd()) {
 function findOpenPrUrlForBranch(rawBranch, cwd = _projectDir || process.cwd()) {
   const branch = sanitizeBranchName(rawBranch);
   if (!branch) return '';
+  const commandCwd = resolveCommandDir(cwd);
+  if (!commandCwd) return '';
   try {
     const prUrl = execFileSync('gh', ['pr', 'list', '--state', 'open', '--head', branch, '--json', 'url', '--jq', '.[0].url'], {
       encoding: 'utf8',
-      cwd,
+      cwd: commandCwd,
       stdio: ['ignore', 'pipe', 'pipe'],
       timeout: 12000,
     }).trim();
@@ -504,20 +722,26 @@ function findOpenPrUrlForBranch(rawBranch, cwd = _projectDir || process.cwd()) {
 
 function resolveQueuePrTarget(prUrl, branch, cwd = _projectDir || process.cwd()) {
   const normalizedPrUrl = normalizePrUrl(prUrl, cwd);
-  if (isValidGitHubPrUrl(normalizedPrUrl) && isResolvableGitHubPrUrl(normalizedPrUrl, cwd)) {
-    const original = typeof prUrl === 'string' ? prUrl.trim() : '';
+  const hasValidProvidedPr = isValidGitHubPrUrl(normalizedPrUrl);
+  const providedResolvable = hasValidProvidedPr && isResolvableGitHubPrUrl(normalizedPrUrl, cwd);
+  const branchPrUrl = findOpenPrUrlForBranch(branch, cwd);
+
+  if (branchPrUrl && (!hasValidProvidedPr || !providedResolvable || branchPrUrl !== normalizedPrUrl)) {
+    const source = hasValidProvidedPr && branchPrUrl !== normalizedPrUrl
+      ? 'branch_fallback_mismatch'
+      : 'branch_fallback';
     return {
-      pr_url: normalizedPrUrl,
-      source: normalizedPrUrl === original ? 'provided' : 'normalized',
+      pr_url: branchPrUrl,
+      source,
       resolvable: true,
     };
   }
 
-  const branchPrUrl = findOpenPrUrlForBranch(branch, cwd);
-  if (branchPrUrl) {
+  if (providedResolvable) {
+    const original = typeof prUrl === 'string' ? prUrl.trim() : '';
     return {
-      pr_url: branchPrUrl,
-      source: 'branch_fallback',
+      pr_url: normalizedPrUrl,
+      source: normalizedPrUrl === original ? 'provided' : 'normalized',
       resolvable: true,
     };
   }
@@ -527,6 +751,43 @@ function resolveQueuePrTarget(prUrl, branch, cwd = _projectDir || process.cwd())
     source: 'unresolved',
     resolvable: false,
   };
+}
+
+function findHistoricalPrUrlForBranch(requestId, branch, taskId) {
+  if (!requestId) return '';
+  const normalizedBranch = sanitizeBranchName(branch);
+  if (!normalizedBranch) return '';
+  const parsedTaskId = parseInt(taskId, 10);
+  const excludedTaskId = Number.isInteger(parsedTaskId) && parsedTaskId > 0
+    ? parsedTaskId
+    : null;
+
+  const rows = db.getDb().prepare(`
+    SELECT pr_url, status
+    FROM merge_queue
+    WHERE request_id = ?
+      AND branch = ?
+      AND pr_url IS NOT NULL
+      AND trim(pr_url) != ''
+      AND (? IS NULL OR task_id != ?)
+    ORDER BY
+      CASE status
+        WHEN 'merged' THEN 0
+        WHEN 'merging' THEN 1
+        WHEN 'pending' THEN 2
+        WHEN 'conflict' THEN 3
+        WHEN 'failed' THEN 4
+        ELSE 5
+      END,
+      id DESC
+    LIMIT 20
+  `).all(requestId, normalizedBranch, excludedTaskId, excludedTaskId);
+
+  for (const row of rows) {
+    const candidate = typeof row.pr_url === 'string' ? row.pr_url.trim() : '';
+    if (isValidGitHubPrUrl(candidate)) return candidate;
+  }
+  return '';
 }
 
 function parseWorkerId(rawWorkerId) {
@@ -545,6 +806,11 @@ function readWorkerBranchFromWorktree(worker) {
   const worktreePath = worker && worker.worktree_path ? String(worker.worktree_path).trim() : '';
   if (!worktreePath) return '';
   try {
+    if (!fs.existsSync(worktreePath) || !fs.lstatSync(worktreePath).isDirectory()) return '';
+  } catch {
+    return '';
+  }
+  try {
     const branch = sanitizeBranchName(execFileSync('git', ['branch', '--show-current'], {
       encoding: 'utf8',
       cwd: worktreePath,
@@ -556,13 +822,33 @@ function readWorkerBranchFromWorktree(worker) {
   }
 }
 
+function getTrackedWorktreeChanges(worktreePath) {
+  const cwd = typeof worktreePath === 'string' ? worktreePath.trim() : '';
+  if (!cwd || !fs.existsSync(cwd)) return [];
+  try {
+    const output = execFileSync('git', ['status', '--porcelain'], {
+      encoding: 'utf8',
+      cwd,
+      stdio: ['ignore', 'pipe', 'ignore'],
+    });
+    return output
+      .split('\n')
+      .map((line) => line.replace(/\r$/, ''))
+      .filter((line) => line && !line.startsWith('?? '));
+  } catch {
+    return [];
+  }
+}
+
 function branchExists(rawBranch, repositoryDir = process.cwd()) {
   const branch = sanitizeBranchName(rawBranch);
   if (!branch) return false;
+  const commandCwd = resolveCommandDir(repositoryDir, _projectDir || process.cwd());
+  if (!commandCwd) return false;
   try {
     execFileSync('git', ['show-ref', '--verify', '--quiet', `refs/heads/${branch}`], {
       encoding: 'utf8',
-      cwd: repositoryDir,
+      cwd: commandCwd,
       stdio: ['ignore', 'ignore', 'ignore'],
     });
     return true;
@@ -622,11 +908,37 @@ function queueMergeWithRecovery({
   latest_completion_timestamp = undefined,
 }) {
   const normalizedPriority = Number.isInteger(priority) ? priority : 0;
+  const queueTask = db.getTask(task_id);
+  clearLegacyTaskValidationToken(queueTask, {
+    source: true,
+    event: 'queue_merge_validation_legacy_token_cleared',
+    request_id,
+    task_id,
+    branch,
+    worker_id: queueTask && queueTask.assigned_to ? String(queueTask.assigned_to) : null,
+  });
   const queueCwd = _projectDir || process.cwd();
-  const resolvedPr = resolveQueuePrTarget(pr_url, branch, queueCwd);
+  let resolvedPr = resolveQueuePrTarget(pr_url, branch, queueCwd);
+  const taskIdCollision = isSuspiciousTaskIdPrInput(resolvedPr.pr_url, task_id);
+  if (!resolvedPr.resolvable || taskIdCollision) {
+    const historicalPrUrl = findHistoricalPrUrlForBranch(request_id, branch, task_id);
+    if (historicalPrUrl) {
+      resolvedPr = {
+        pr_url: historicalPrUrl,
+        source: taskIdCollision
+          ? 'branch_history_task_id_collision_fallback'
+          : 'branch_history_fallback',
+        resolvable: true,
+      };
+    }
+  }
   const resolvedPrUrl = resolvedPr.pr_url;
 
-  if (resolvedPr.source === 'branch_fallback' && isValidGitHubPrUrl(resolvedPrUrl)) {
+  if ((resolvedPr.source === 'branch_fallback'
+    || resolvedPr.source === 'branch_fallback_mismatch'
+    || resolvedPr.source === 'branch_history_fallback'
+    || resolvedPr.source === 'branch_history_task_id_collision_fallback')
+    && isValidGitHubPrUrl(resolvedPrUrl)) {
     db.updateTask(task_id, { pr_url: resolvedPrUrl });
     db.log('coordinator', 'merge_queue_pr_url_recovered_from_branch', {
       request_id,
@@ -882,6 +1194,11 @@ function validateCommand(cmd) {
       throw new Error(`Field "${field}" must be of type ${expectedType}`);
     }
   }
+
+  if (command === 'request' || command === 'fix' || command === 'loop-request') {
+    a.description = validateRequestDescription(a.description);
+  }
+
   // Strip unknown keys for create-task
   if (schema.allowed && args) {
     for (const key of Object.keys(args)) {
@@ -1067,7 +1384,8 @@ function handleCommand(cmd, conn, handlers) {
         break;
       }
       case 'log': {
-        const logs = db.getLog(args.limit || 50, args.actor);
+        const limit = normalizeActivityLogLimit(args.limit);
+        const logs = db.getLog(limit, args.actor);
         respond(conn, { ok: true, logs });
         break;
       }
@@ -1095,7 +1413,13 @@ function handleCommand(cmd, conn, handlers) {
         // Normalize files to an array before persisting (handles strings, JSON strings, arrays)
         args.files = parseFilesField(args.files);
         args.depends_on = parseDependsOnField(args.depends_on);
+        normalizeTaskValidationArg(args);
         const taskId = db.createTask(args);
+        clearLegacyTaskValidationToken(db.getTask(taskId), {
+          source: true,
+          event: 'create_task_validation_tier_token_cleared',
+          task_id: taskId,
+        });
         // If no dependencies, mark ready immediately
         if (!args.depends_on || args.depends_on.length === 0) {
           db.updateTask(taskId, { status: 'ready' });
@@ -1198,10 +1522,33 @@ function handleCommand(cmd, conn, handlers) {
       case 'complete-task': {
         const { worker_id, task_id, pr_url, result, branch } = args;
         const worker = db.getWorker(worker_id);
+        const trackedChanges = getTrackedWorktreeChanges(worker && worker.worktree_path);
+        if (trackedChanges.length > 0) {
+          db.log('coordinator', 'complete_task_rejected_dirty_worktree', {
+            worker_id,
+            task_id,
+            tracked_change_count: trackedChanges.length,
+            tracked_changes: trackedChanges.slice(0, 8),
+          });
+          respond(conn, {
+            ok: false,
+            error: 'Worker worktree has tracked git changes; commit or stash before complete-task.',
+          });
+          break;
+        }
         const completionPrNormalizationCwd = worker && worker.worktree_path
           ? worker.worktree_path
           : (_projectDir || process.cwd());
-        const normalizedPrUrl = normalizePrUrl(pr_url, completionPrNormalizationCwd);
+        const ignoredSuspiciousTaskIdPr = shouldIgnoreTaskIdLikePrInput(pr_url, task_id);
+        const completionPrInput = ignoredSuspiciousTaskIdPr ? '' : pr_url;
+        const normalizedPrUrl = normalizePrUrl(completionPrInput, completionPrNormalizationCwd);
+        if (ignoredSuspiciousTaskIdPr) {
+          db.log('coordinator', 'complete_task_pr_url_ignored_task_id_collision', {
+            worker_id,
+            task_id,
+            original_pr_url: pr_url,
+          });
+        }
         const resolvedBranch = resolveCompletionBranch(worker, branch, worker_id);
         if (resolvedBranch.mismatch) {
           db.log('coordinator', 'complete_task_branch_overridden', {
@@ -1211,6 +1558,13 @@ function handleCommand(cmd, conn, handlers) {
             worker_branch: resolvedBranch.workerBranch,
           });
         }
+        const existingTask = db.getTask(task_id);
+        clearLegacyTaskValidationToken(existingTask, {
+          source: true,
+          event: 'complete_task_validation_tier_token_cleared',
+          worker_id,
+          task_id,
+        });
         db.updateTask(task_id, {
           status: 'completed',
           pr_url: normalizedPrUrl || null,
@@ -1371,11 +1725,13 @@ function handleCommand(cmd, conn, handlers) {
 
       // === ALLOCATOR commands ===
       case 'ready-tasks': {
+        const scaffoldRemediation = remediateMalformedScaffoldArtifactsSafe();
         const tasks = db.getReadyTasks();
-        respond(conn, { ok: true, tasks });
+        respond(conn, { ok: true, tasks: tasks.map(toReadyTaskJson), scaffold_remediation: scaffoldRemediation });
         break;
       }
       case 'assign-task': {
+        const scaffoldRemediation = remediateMalformedScaffoldArtifactsSafe();
         const { task_id: assignTaskId, worker_id: assignWorkerId } = args;
         // Atomic assignment: same pattern as allocator.js assignTaskToWorker
         const assignResult = db.getDb().transaction(() => {
@@ -1396,7 +1752,7 @@ function handleCommand(cmd, conn, handlers) {
         })();
 
         if (!assignResult.ok) {
-          respond(conn, { ok: false, error: assignResult.reason });
+          respond(conn, { ok: false, error: assignResult.reason, scaffold_remediation: scaffoldRemediation });
           break;
         }
 
@@ -1472,6 +1828,7 @@ function handleCommand(cmd, conn, handlers) {
           ok: true,
           task_id: assignTaskId,
           worker_id: assignWorkerId,
+          scaffold_remediation: scaffoldRemediation,
           routing: {
             class: routingDecision.routing_class,
             model: routingDecision.model,
@@ -1498,7 +1855,7 @@ function handleCommand(cmd, conn, handlers) {
       }
       case 'worker-status': {
         const workers = db.getAllWorkers();
-        respond(conn, { ok: true, workers });
+        respond(conn, { ok: true, workers: workers.map(toWorkerStatusJson) });
         break;
       }
       case 'check-completion': {
@@ -1527,6 +1884,13 @@ function handleCommand(cmd, conn, handlers) {
         const latestCompletedTaskState = db.getRequestLatestCompletedTaskCursor(reqId);
         let queued = 0;
         for (const task of tasks) {
+          const staleValidation = clearLegacyTaskValidationToken(task, {
+            source: true,
+            event: 'integrate_validation_tier_token_cleared',
+          });
+          if (staleValidation) {
+            task.validation = null;
+          }
           const worker = task.assigned_to ? db.getWorker(task.assigned_to) : null;
           const taskPrNormalizationCwd = worker && worker.worktree_path
             ? worker.worktree_path
@@ -1637,16 +2001,19 @@ function handleCommand(cmd, conn, handlers) {
         }
 
         const supersessionBackfill = backfillSupersededLoopRequestsSafe();
+        const scaffoldRemediation = remediateMalformedScaffoldArtifactsSafe();
         db.log('coordinator', 'repair', {
           reset_workers: stuck.changes,
           orphaned_tasks: orphaned.changes,
           supersession_backfill: supersessionBackfill,
+          scaffold_remediation: scaffoldRemediation,
         });
         respond(conn, {
           ok: true,
           reset_workers: stuck.changes,
           orphaned_tasks: orphaned.changes,
           supersession_backfill: supersessionBackfill,
+          scaffold_remediation: scaffoldRemediation,
         });
         break;
       }
@@ -1865,7 +2232,17 @@ function handleCommand(cmd, conn, handlers) {
 
       // === CHANGES commands ===
       case 'log-change': {
-        const changeId = db.createChange(args);
+        if (!args || typeof args.description !== 'string' || args.description.trim().length === 0) {
+          respond(conn, { ok: false, error: 'description must be a non-empty string' });
+          break;
+        }
+        const changePayload = {};
+        for (const field of CHANGE_LOG_FIELDS) {
+          if (args[field] !== undefined) {
+            changePayload[field] = args[field];
+          }
+        }
+        const changeId = db.createChange(changePayload);
         const change = db.getChange(changeId);
         db.log('coordinator', 'change_logged', { change_id: changeId, description: args.description });
         if (handlers.onChangeCreated) handlers.onChangeCreated(change);
@@ -1900,7 +2277,14 @@ function handleCommand(cmd, conn, handlers) {
           break;
         }
         const loopId = db.createLoop(prompt);
-        if (handlers.onLoopCreated) handlers.onLoopCreated(loopId, prompt);
+        if (handlers.onLoopCreated) {
+          try {
+            handlers.onLoopCreated(loopId, prompt);
+          } catch (spawnErr) {
+            respond(conn, failClosedLoopLaunch(loopId, spawnErr));
+            break;
+          }
+        }
         respond(conn, { ok: true, loop_id: loopId });
         break;
       }
@@ -1910,7 +2294,18 @@ function handleCommand(cmd, conn, handlers) {
           respond(conn, { ok: false, error: 'Loop not found' });
           break;
         }
-        db.stopLoop(args.loop_id);
+        if (handlers.onLoopStop) {
+          const result = handlers.onLoopStop(loop);
+          if (!result || result.ok === false) {
+            respond(conn, {
+              ok: false,
+              error: result && result.error ? result.error : 'Failed to stop loop runtime',
+            });
+            break;
+          }
+        } else {
+          db.stopLoop(args.loop_id);
+        }
         respond(conn, { ok: true, loop_id: args.loop_id });
         break;
       }
@@ -2068,4 +2463,17 @@ function handleCommand(cmd, conn, handlers) {
   }
 }
 
-module.exports = { start, stop, getSocketPath };
+module.exports = {
+  start,
+  stop,
+  getSocketPath,
+  validateRequestDescription,
+  normalizeRequestDescription,
+  isRequestDescriptionTooLongError,
+  failClosedLoopLaunch,
+  LOOP_LAUNCH_FAILED,
+  LOOP_LAUNCH_FAILED_MESSAGE,
+  CHANGE_LOG_FIELDS,
+  MAX_REQUEST_DESCRIPTION_LENGTH,
+  INVALID_REQUEST_DESCRIPTION_TOO_LONG,
+};
