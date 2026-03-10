@@ -218,8 +218,20 @@ cp "$MAC10_CLI" "$CODEX10_CLI"
 chmod +x "$CODEX10_CLI"
 
 # Compatibility shim: many prompts still invoke `mac10` directly.
-# Keep that command namespaced to codex10 inside this project.
-cp "$MAC10_CLI" "$MAC10_COMPAT"
+# Preserve caller namespace for non-codex flows.
+cat > "$MAC10_COMPAT" << 'WRAPPER'
+#!/usr/bin/env bash
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+MAC10_BIN="PLACEHOLDER_MAC10_BIN"
+if [ ! -f "$MAC10_BIN" ]; then
+  echo "ERROR: mac10 CLI not found at $MAC10_BIN" >&2
+  echo "  Has the setup-agents repo moved? Re-run setup.sh to fix." >&2
+  exit 1
+fi
+export MAC10_NAMESPACE="${MAC10_NAMESPACE:-mac10}"
+exec node "$MAC10_BIN" "$@"
+WRAPPER
+sed -i "s|PLACEHOLDER_MAC10_BIN|$MAC10_BIN|" "$MAC10_COMPAT"
 chmod +x "$MAC10_COMPAT"
 
 # Add to PATH for this project's agents
