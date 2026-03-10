@@ -728,7 +728,10 @@ async function main() {
           console.error('Error: task_id must be a positive integer');
           process.exit(1);
         }
-        const normalizedPrUrl = normalizePrUrl(argv[3]);
+        const normalizedPrUrl = normalizePrUrl(
+          argv[3],
+          projectOverride ? path.resolve(projectOverride) : process.cwd(),
+        );
         const completionBranch = resolveCompleteTaskBranch(argv[4], argv[1]);
         result = await send(socketPath, 'complete-task', {
           worker_id: String(parsedWorkerId),
