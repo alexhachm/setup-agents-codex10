@@ -345,6 +345,38 @@ function normalizePrUrl(rawPrUrl, cwd = process.cwd()) {
   return `https://github.com/${repoPath}/pull/${normalizedMatch}`;
 }
 
+function isTierValidationTag(value) {
+  const normalized = String(value || '').trim().toLowerCase().replace(/[\s_-]+/g, '');
+  return normalized === 'tier1' || normalized === 'tier2' || normalized === 'tier3';
+}
+
+function normalizeCreateTaskValidation(rawValidation) {
+  if (rawValidation === undefined || rawValidation === null) return null;
+
+  let candidate = rawValidation;
+  if (typeof candidate === 'string') {
+    const trimmed = candidate.trim();
+    if (!trimmed) return null;
+    try {
+      candidate = JSON.parse(trimmed);
+    } catch {
+      candidate = trimmed;
+    }
+  }
+
+  if (typeof candidate === 'string') {
+    const trimmed = candidate.trim();
+    if (!trimmed || isTierValidationTag(trimmed)) return null;
+    return trimmed;
+  }
+
+  if (Array.isArray(candidate) || (candidate && typeof candidate === 'object')) {
+    return candidate;
+  }
+
+  return null;
+}
+
 function parseWorkerId(rawWorkerId) {
   const parsed = parseInt(rawWorkerId, 10);
   if (!Number.isInteger(parsed) || parsed <= 0) return null;
@@ -660,6 +692,7 @@ async function main() {
         // JSON input from stdin or arg
         const taskInput = argv[1] === '-' ? fs.readFileSync(0, 'utf8') : argv.slice(1).join(' ');
         const taskArgs = JSON.parse(taskInput);
+        taskArgs.validation = normalizeCreateTaskValidation(taskArgs.validation);
         result = await send(socketPath, 'create-task', taskArgs);
         if (result.ok) console.log(`Task created: ${result.task_id}`);
         else console.error(result.error);

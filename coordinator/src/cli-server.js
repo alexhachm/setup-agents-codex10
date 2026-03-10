@@ -457,6 +457,38 @@ function normalizePrUrl(rawPrUrl, cwd = _projectDir || process.cwd()) {
   return `https://github.com/${repoPath}/pull/${normalizedMatch}`;
 }
 
+function isTierValidationTag(value) {
+  const normalized = String(value || '').trim().toLowerCase().replace(/[\s_-]+/g, '');
+  return normalized === 'tier1' || normalized === 'tier2' || normalized === 'tier3';
+}
+
+function normalizeTaskValidation(rawValidation) {
+  if (rawValidation === undefined || rawValidation === null) return null;
+
+  let candidate = rawValidation;
+  if (typeof candidate === 'string') {
+    const trimmed = candidate.trim();
+    if (!trimmed) return null;
+    try {
+      candidate = JSON.parse(trimmed);
+    } catch {
+      candidate = trimmed;
+    }
+  }
+
+  if (typeof candidate === 'string') {
+    const trimmed = candidate.trim();
+    if (!trimmed || isTierValidationTag(trimmed)) return null;
+    return trimmed;
+  }
+
+  if (Array.isArray(candidate) || (candidate && typeof candidate === 'object')) {
+    return candidate;
+  }
+
+  return null;
+}
+
 function isValidGitHubPrUrl(value) {
   return typeof value === 'string' && PR_URL_RE.test(value);
 }
@@ -979,6 +1011,7 @@ function handleCommand(cmd, conn, handlers) {
         // Normalize files to an array before persisting (handles strings, JSON strings, arrays)
         args.files = parseFilesField(args.files);
         args.depends_on = parseDependsOnField(args.depends_on);
+        args.validation = normalizeTaskValidation(args.validation);
         const taskId = db.createTask(args);
         // If no dependencies, mark ready immediately
         if (!args.depends_on || args.depends_on.length === 0) {
