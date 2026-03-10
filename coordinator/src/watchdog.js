@@ -198,6 +198,13 @@ function getLoopLaunchMode(loop) {
   return 'non_tmux';
 }
 
+function getWorkerLaunchMode(worker, tmuxAvailable) {
+  const hasTmuxSession = typeof worker.tmux_session === 'string' && worker.tmux_session.trim().length > 0;
+  const hasTmuxWindow = typeof worker.tmux_window === 'string' && worker.tmux_window.trim().length > 0;
+  if (tmuxAvailable && hasTmuxSession && hasTmuxWindow) return 'tmux';
+  return 'non_tmux';
+}
+
 function recoverNonTmuxLoop(loop, projectDir, reason) {
   try {
     const child = execFile('bash', [LOOP_SENTINEL_PATH, String(loop.id), projectDir], {
@@ -300,6 +307,7 @@ function runStartupRecoverySweep() {
 function tick(projectDir) {
   const workers = db.getAllWorkers();
   const now = Date.now();
+  const tmuxAvailable = tmux.isAvailable();
 
   for (const worker of workers) {
     // Skip idle workers and clear their escalation tracking
@@ -308,15 +316,14 @@ function tick(projectDir) {
       continue;
     }
 
-    // ZFC death detection: check if tmux pane is actually alive
-    const tmuxAvailable = tmux.isAvailable();
-    const windowName = `worker-${worker.id}`;
-    const paneAlive = tmuxAvailable ? tmux.isPaneAlive(windowName) : true;
-
-    if (tmuxAvailable && !paneAlive && worker.status !== 'idle' && worker.status !== 'completed_task') {
-      // Process died unexpectedly
-      handleDeath(worker, 'tmux_pane_dead', true);
-      continue;
+    // ZFC death detection: check pane liveness only for tmux-backed workers.
+    if (getWorkerLaunchMode(worker, tmuxAvailable) === 'tmux') {
+      const paneAlive = tmux.isPaneAlive(worker.tmux_window);
+      if (!paneAlive && worker.status !== 'completed_task') {
+        // Process died unexpectedly
+        handleDeath(worker, 'tmux_pane_dead', true);
+        continue;
+      }
     }
 
     // Skip workers just launched (grace period)
