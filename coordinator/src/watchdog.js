@@ -125,9 +125,17 @@ function runStartupRecoverySweep() {
   }
 }
 
+function shouldCheckTmuxPane(worker, tmuxAvailable) {
+  if (!tmuxAvailable) return false;
+  const hasTmuxSession = typeof worker.tmux_session === 'string' && worker.tmux_session.trim().length > 0;
+  const hasTmuxWindow = typeof worker.tmux_window === 'string' && worker.tmux_window.trim().length > 0;
+  return hasTmuxSession && hasTmuxWindow;
+}
+
 function tick(projectDir) {
   const workers = db.getAllWorkers();
   const now = Date.now();
+  const tmuxAvailable = tmux.isAvailable();
 
   for (const worker of workers) {
     // Skip idle workers and clear their escalation tracking
@@ -136,14 +144,14 @@ function tick(projectDir) {
       continue;
     }
 
-    // ZFC death detection: check if tmux pane is actually alive
-    const windowName = `worker-${worker.id}`;
-    const paneAlive = tmux.isPaneAlive(windowName);
-
-    if (!paneAlive && worker.status !== 'idle' && worker.status !== 'completed_task') {
-      // Process died unexpectedly
-      handleDeath(worker, 'tmux_pane_dead');
-      continue;
+    // ZFC death detection: check pane liveness only for tmux-backed workers.
+    if (shouldCheckTmuxPane(worker, tmuxAvailable)) {
+      const paneAlive = tmux.isPaneAlive(worker.tmux_window);
+      if (!paneAlive && worker.status !== 'completed_task') {
+        // Process died unexpectedly
+        handleDeath(worker, 'tmux_pane_dead');
+        continue;
+      }
     }
 
     // Skip workers just launched (grace period)
