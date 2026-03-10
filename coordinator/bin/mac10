@@ -372,11 +372,11 @@ function getCanonicalWorkerBranch(rawWorkerId) {
   return `agent-${workerId}`;
 }
 
-function readCurrentBranch() {
+function readCurrentBranch(cwd = process.cwd()) {
   try {
     return sanitizeBranchName(execFileSync('git', ['branch', '--show-current'], {
       encoding: 'utf8',
-      cwd: process.cwd(),
+      cwd,
       stdio: ['ignore', 'pipe', 'ignore'],
     }));
   } catch {
@@ -384,14 +384,14 @@ function readCurrentBranch() {
   }
 }
 
-function resolveCompleteTaskBranch(requestedBranch, rawWorkerId) {
+function resolveCompleteTaskBranch(requestedBranch, rawWorkerId, projectCwd = process.cwd()) {
   const normalizedRequested = sanitizeBranchName(requestedBranch || '');
   const canonicalWorkerBranch = getCanonicalWorkerBranch(rawWorkerId);
-  const currentBranch = readCurrentBranch();
+  const currentBranch = readCurrentBranch(projectCwd);
 
   // Worker ID is authoritative. Always prefer agent-<worker_id> when available.
   if (canonicalWorkerBranch) {
-    if (branchExists(canonicalWorkerBranch)) {
+    if (branchExists(canonicalWorkerBranch, projectCwd)) {
       if (normalizedRequested && normalizedRequested !== canonicalWorkerBranch) {
         console.error(`[mac10] complete-task branch mismatch: "${normalizedRequested}" != canonical "${canonicalWorkerBranch}", using "${canonicalWorkerBranch}"`);
       }
@@ -402,7 +402,7 @@ function resolveCompleteTaskBranch(requestedBranch, rawWorkerId) {
       console.error(`[mac10] complete-task canonical branch missing: "${canonicalWorkerBranch}" not found, using requested "${normalizedRequested}"`);
     }
 
-    if (normalizedRequested && branchExists(normalizedRequested)) {
+    if (normalizedRequested && branchExists(normalizedRequested, projectCwd)) {
       console.error(`[mac10] complete-task requested branch "${normalizedRequested}" exists; canonical branch "${canonicalWorkerBranch}" unavailable`);
       return normalizedRequested;
     }
@@ -738,11 +738,16 @@ async function main() {
           console.error('Error: task_id must be a positive integer');
           process.exit(1);
         }
+        const completionProjectCwd = projectOverride ? path.resolve(projectOverride) : process.cwd();
         const normalizedPrUrl = normalizePrUrl(
           argv[3],
-          projectOverride ? path.resolve(projectOverride) : process.cwd(),
+          completionProjectCwd,
         );
-        const completionBranch = resolveCompleteTaskBranch(argv[4], argv[1]);
+        const completionBranch = resolveCompleteTaskBranch(
+          argv[4],
+          argv[1],
+          completionProjectCwd,
+        );
         result = await send(socketPath, 'complete-task', {
           worker_id: String(parsedWorkerId),
           task_id: parsedTaskId,
