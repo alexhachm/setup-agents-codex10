@@ -13,7 +13,15 @@ const PR_URL_RE = /^https:\/\/github\.com\/[a-zA-Z0-9._-]+\/[a-zA-Z0-9._-]+\/pul
 const PR_NUMBER_RE = /^#?(\d+)$/;
 const PR_REFERENCE_RE = /^(pull request|pull|pr)\s*#?(\d+)$/i;
 const WORKER_BRANCH_RE = /^agent-\d+$/;
-const VALIDATION_TIER_RE = /^tier\s*([1-3])$/i;
+const LOG_CHANGE_USAGE = 'Usage: mac10 log-change <description|-> [--domain X] [--file Y] [--fn Z] [--tooltip T] [--status S]';
+const LOG_CHANGE_FLAG_MAP = new Map([
+  ['--domain', 'domain'],
+  ['--file', 'file_path'],
+  ['--fn', 'function_name'],
+  ['--tooltip', 'tooltip'],
+  ['--status', 'status'],
+]);
+const VALIDATION_TIER_RE = /^(?:tier\s*)?([1-3])$/i;
 
 function namespacedCandidates(baseName) {
   if (NAMESPACE === 'mac10') return [baseName];
@@ -582,6 +590,72 @@ function parseCompleteTaskArgs(optionalArgs, rawWorkerId, rawTaskId, projectCwd 
   };
 }
 
+function parseTextPayloadArgs(args, payloadStartIndex) {
+  const payloadArgs = Array.isArray(args) ? args.slice(payloadStartIndex) : [];
+  if (payloadArgs.length === 1 && payloadArgs[0] === '-') {
+    return fs.readFileSync(0, 'utf8');
+  }
+  return payloadArgs.join(' ');
+}
+
+function resolveTextPayload(payload) {
+  if (payload === '-') {
+    return fs.readFileSync(0, 'utf8');
+  }
+  return payload;
+}
+
+function parseLogChangeArgs(rawArgs, readStdinDescription = () => fs.readFileSync(0, 'utf8')) {
+  const args = Array.isArray(rawArgs) ? rawArgs : [];
+  if (args.length === 0) {
+    return { ok: false, error: LOG_CHANGE_USAGE };
+  }
+
+  const changeArgs = { description: '' };
+  const stdinMode = args[0] === '-';
+
+  if (stdinMode) {
+    changeArgs.description = readStdinDescription();
+    if (!changeArgs.description || !changeArgs.description.trim()) {
+      return { ok: false, error: `${LOG_CHANGE_USAGE}\nError: description from stdin cannot be empty.` };
+    }
+    for (let i = 1; i < args.length; i++) {
+      const field = LOG_CHANGE_FLAG_MAP.get(args[i]);
+      if (!field) {
+        return { ok: false, error: `${LOG_CHANGE_USAGE}\nUnexpected argument in stdin mode: ${args[i]}` };
+      }
+      if (!args[i + 1]) {
+        return { ok: false, error: LOG_CHANGE_USAGE };
+      }
+      changeArgs[field] = args[++i];
+    }
+    if (!changeArgs.description) {
+      return { ok: false, error: LOG_CHANGE_USAGE };
+    }
+    return { ok: true, args: changeArgs };
+  }
+
+  let cursor = args.length - 1;
+  while (cursor > 0) {
+    const field = LOG_CHANGE_FLAG_MAP.get(args[cursor - 1]);
+    if (!field) {
+      break;
+    }
+    if (args[cursor] === undefined) {
+      return { ok: false, error: LOG_CHANGE_USAGE };
+    }
+    changeArgs[field] = args[cursor];
+    cursor -= 2;
+  }
+
+  changeArgs.description = args.slice(0, cursor + 1).join(' ');
+
+  if (!changeArgs.description) {
+    return { ok: false, error: LOG_CHANGE_USAGE };
+  }
+  return { ok: true, args: changeArgs };
+}
+
 async function main() {
   const rawArgv = process.argv.slice(2);
   if (rawArgv.length === 0) {
@@ -820,16 +894,39 @@ async function main() {
       case 'create-task':
         // JSON input from stdin or arg
         const taskInput = argv[1] === '-' ? fs.readFileSync(0, 'utf8') : argv.slice(1).join(' ');
-        const taskArgs = normalizeCreateTaskArgs(JSON.parse(taskInput));
+        let taskArgs;
+        try {
+          taskArgs = normalizeCreateTaskArgs(JSON.parse(taskInput));
+        } catch (err) {
+          console.error('Error: create-task input must be valid JSON');
+          console.error(`Details: ${err.message}`);
+          process.exit(1);
+        }
         result = await send(socketPath, 'create-task', taskArgs);
         if (result.ok) console.log(`Task created: ${result.task_id}`);
         else console.error(result.error);
         break;
 
       case 'tier1-complete':
+        if (!argv[1] || !argv[2]) {
+          console.error('Usage: mac10 tier1-complete <request_id> <result>');
+          console.error('   or: mac10 tier1-complete <request_id> -');
+          process.exit(1);
+        }
+        if (argv[2] === '-' && argv.length !== 3) {
+          console.error('Usage: mac10 tier1-complete <request_id> <result>');
+          console.error('   or: mac10 tier1-complete <request_id> -');
+          process.exit(1);
+        }
+        const tier1Result = parseTextPayloadArgs(argv, 2);
+        if (!tier1Result || !tier1Result.trim()) {
+          console.error('Usage: mac10 tier1-complete <request_id> -');
+          console.error('Error: tier1-complete result from stdin cannot be empty.');
+          process.exit(1);
+        }
         result = await send(socketPath, 'tier1-complete', {
           request_id: argv[1],
-          result: argv.slice(2).join(' '),
+          result: tier1Result,
         });
         if (result.ok) console.log('Tier 1 completed.');
         else console.error(result.error);
@@ -888,7 +985,7 @@ async function main() {
         break;
 
       case 'complete-task':
-        if (argv.length < 3) { console.error('Usage: mac10 complete-task <worker_id> <task_id> [pr_url] [branch] [result]'); process.exit(1); }
+        if (argv.length < 3) { console.error('Usage: mac10 complete-task <worker_id> <task_id> [pr_url] [branch] [result|-]'); process.exit(1); }
         const parsedWorkerId = parseWorkerId(argv[1]);
         if (parsedWorkerId === null) {
           console.error('Error: worker_id must be a positive integer');
@@ -900,12 +997,13 @@ async function main() {
           process.exit(1);
         }
         const completionProjectCwd = projectOverride ? path.resolve(projectOverride) : process.cwd();
-        const completionArgs = parseCompleteTaskArgs(
-          argv.slice(3),
-          argv[1],
-          parsedTaskId,
-          completionProjectCwd,
-        );
+      const completionArgs = parseCompleteTaskArgs(
+        argv.slice(3),
+        argv[1],
+        parsedTaskId,
+        completionProjectCwd,
+      );
+      completionArgs.result = resolveTextPayload(completionArgs.result);
         const trackedChanges = getTrackedWorktreeChanges(completionProjectCwd);
         if (trackedChanges.length > 0) {
           console.error('[mac10] complete-task aborted: tracked git changes detected in worktree.');
@@ -930,11 +1028,11 @@ async function main() {
         break;
 
       case 'fail-task':
-        if (argv.length < 4) { console.error('Usage: mac10 fail-task <worker_id> <task_id> <error>'); process.exit(1); }
+        if (argv.length < 4) { console.error('Usage: mac10 fail-task <worker_id> <task_id> <error|->'); process.exit(1); }
         result = await send(socketPath, 'fail-task', {
           worker_id: argv[1],
           task_id: parseInt(argv[2], 10),
-          error: argv.slice(3).join(' '),
+          error: resolveTextPayload(parseTextPayloadArgs(argv, 3)),
         });
         if (result.ok) console.log('Task failure recorded.');
         else console.error(result.error);
@@ -1152,23 +1250,12 @@ async function main() {
         break;
 
       case 'log-change': {
-        // mac10 log-change <description> [--domain X] [--file Y] [--fn Z] [--tooltip T] [--status S]
-        const changeArgs = { description: '' };
-        const descParts = [];
-        for (let i = 1; i < argv.length; i++) {
-          if (argv[i] === '--domain' && argv[i + 1]) { changeArgs.domain = argv[++i]; }
-          else if (argv[i] === '--file' && argv[i + 1]) { changeArgs.file_path = argv[++i]; }
-          else if (argv[i] === '--fn' && argv[i + 1]) { changeArgs.function_name = argv[++i]; }
-          else if (argv[i] === '--tooltip' && argv[i + 1]) { changeArgs.tooltip = argv[++i]; }
-          else if (argv[i] === '--status' && argv[i + 1]) { changeArgs.status = argv[++i]; }
-          else { descParts.push(argv[i]); }
-        }
-        changeArgs.description = descParts.join(' ');
-        if (!changeArgs.description) {
-          console.error('Usage: mac10 log-change <description> [--domain X] [--file Y] [--fn Z] [--tooltip T]');
+        const parsed = parseLogChangeArgs(argv.slice(1));
+        if (!parsed.ok) {
+          console.error(parsed.error);
           process.exit(1);
         }
-        result = await send(socketPath, 'log-change', changeArgs);
+        result = await send(socketPath, 'log-change', parsed.args);
         if (result.ok) console.log(`Change logged: #${result.change_id}`);
         else console.error(result.error);
         break;
@@ -1334,7 +1421,8 @@ USER:
 ARCHITECT:
   triage <request_id> <tier> [reasoning|-]  (- reads reasoning from stdin)
   create-task <json>             Create task (JSON from stdin with -)
-  tier1-complete <request_id> [result]
+  tier1-complete <request_id> <result>
+  tier1-complete <request_id> -   Read tier1 completion result from stdin
   ask-clarification <request_id> <question>
   inbox <recipient> [--block] [--peek] [--timeout=ms]
 
@@ -1352,8 +1440,10 @@ WORKER:
   start-task <worker_id> <task_id>
   heartbeat <worker_id>
   reset-worker <worker_id>       Reset worker to idle state
-  complete-task <worker_id> <task_id> [pr_url] [branch] [result]
-  fail-task <worker_id> <task_id> <error>
+  complete-task <worker_id> <task_id> [pr_url] [branch] [result|-]
+                               Use "-" to read result text from stdin
+  fail-task <worker_id> <task_id> <error|->
+                               Use "-" to read error text from stdin
   distill <worker_id> <domain> <content|->
                                Use "-" to read distill content from stdin
 
@@ -1369,7 +1459,8 @@ LOOPS:
   loop-requests <id> [--json]    List all requests for a loop
 
 CHANGES:
-  log-change <desc> [--domain X] [--file Y] [--fn Z] [--tooltip T]
+  log-change <desc|-> [--domain X] [--file Y] [--fn Z] [--tooltip T] [--status S]
+                               Use "-" to read description from stdin safely
   list-changes [domain]          List all changes (optionally filter by domain)
 
 SYSTEM:
@@ -1435,4 +1526,11 @@ function printStatus(data) {
   console.log('');
 }
 
-main().catch(e => { console.error(e); process.exit(1); });
+module.exports = {
+  parseLogChangeArgs,
+  LOG_CHANGE_USAGE,
+};
+
+if (require.main === module) {
+  main().catch(e => { console.error(e); process.exit(1); });
+}

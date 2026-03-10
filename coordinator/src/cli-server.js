@@ -85,7 +85,7 @@ const PR_URL_RE = /^https:\/\/github\.com\/[a-zA-Z0-9._-]+\/[a-zA-Z0-9._-]+\/pul
 const PR_NUMBER_RE = /^#?(\d+)$/;
 const PR_REFERENCE_RE = /^(pull request|pull|pr)\s*#?(\d+)$/i;
 const WORKER_BRANCH_RE = /^agent-\d+$/;
-const VALIDATION_TIER_RE = /^tier\s*([1-3])$/i;
+const VALIDATION_TIER_RE = /^(?:tier\s*)?([1-3])$/i;
 const ROUTING_BUDGET_STATE_KEY = 'routing_budget_state';
 const ROUTING_BUDGET_REMAINING_KEY = 'routing_budget_flagship_remaining';
 const ROUTING_BUDGET_THRESHOLD_KEY = 'routing_budget_flagship_threshold';
@@ -402,6 +402,25 @@ function normalizeTaskValidationArg(taskArgs) {
     taskArgs.tier = validationTier;
   }
   delete taskArgs.validation;
+}
+
+function clearLegacyTaskValidationToken(task, logContext = {}) {
+  if (!task) return false;
+  const staleValidationTier = extractValidationTierToken(task.validation);
+  if (!staleValidationTier) return false;
+  const taskId = Number(task.id);
+  if (!Number.isInteger(taskId) || taskId <= 0) return false;
+  db.updateTask(taskId, { validation: null });
+  if (logContext.source) {
+    db.log('coordinator', logContext.event || 'task_validation_tier_token_cleared', {
+      ...logContext,
+      task_id: taskId,
+      validation: task.validation,
+      inferred_tier: staleValidationTier,
+    });
+  }
+  task.validation = null;
+  return true;
 }
 
 function normalizeOverlapIdsField(overlapWith, selfId = null) {
@@ -731,6 +750,15 @@ function queueMergeWithRecovery({
   latest_completion_timestamp = undefined,
 }) {
   const normalizedPriority = Number.isInteger(priority) ? priority : 0;
+  const queueTask = db.getTask(task_id);
+  clearLegacyTaskValidationToken(queueTask, {
+    source: true,
+    event: 'queue_merge_validation_legacy_token_cleared',
+    request_id,
+    task_id,
+    branch,
+    worker_id: queueTask && queueTask.assigned_to ? String(queueTask.assigned_to) : null,
+  });
   const queueCwd = _projectDir || process.cwd();
   let resolvedPr = resolveQueuePrTarget(pr_url, branch, queueCwd);
   const taskIdCollision = isSuspiciousTaskIdPrInput(resolvedPr.pr_url, task_id);
@@ -1223,6 +1251,11 @@ function handleCommand(cmd, conn, handlers) {
         args.depends_on = parseDependsOnField(args.depends_on);
         normalizeTaskValidationArg(args);
         const taskId = db.createTask(args);
+        clearLegacyTaskValidationToken(db.getTask(taskId), {
+          source: true,
+          event: 'create_task_validation_tier_token_cleared',
+          task_id: taskId,
+        });
         // If no dependencies, mark ready immediately
         if (!args.depends_on || args.depends_on.length === 0) {
           db.updateTask(taskId, { status: 'ready' });
@@ -1362,16 +1395,12 @@ function handleCommand(cmd, conn, handlers) {
           });
         }
         const existingTask = db.getTask(task_id);
-        const staleValidationTier = extractValidationTierToken(existingTask && existingTask.validation);
-        if (staleValidationTier) {
-          db.updateTask(task_id, { validation: null });
-          db.log('coordinator', 'complete_task_validation_tier_token_cleared', {
-            worker_id,
-            task_id,
-            validation: existingTask && existingTask.validation,
-            inferred_tier: staleValidationTier,
-          });
-        }
+        clearLegacyTaskValidationToken(existingTask, {
+          source: true,
+          event: 'complete_task_validation_tier_token_cleared',
+          worker_id,
+          task_id,
+        });
         db.updateTask(task_id, {
           status: 'completed',
           pr_url: normalizedPrUrl || null,
@@ -1688,6 +1717,13 @@ function handleCommand(cmd, conn, handlers) {
         const latestCompletedTaskState = db.getRequestLatestCompletedTaskCursor(reqId);
         let queued = 0;
         for (const task of tasks) {
+          const staleValidation = clearLegacyTaskValidationToken(task, {
+            source: true,
+            event: 'integrate_validation_tier_token_cleared',
+          });
+          if (staleValidation) {
+            task.validation = null;
+          }
           const worker = task.assigned_to ? db.getWorker(task.assigned_to) : null;
           const taskPrNormalizationCwd = worker && worker.worktree_path
             ? worker.worktree_path
