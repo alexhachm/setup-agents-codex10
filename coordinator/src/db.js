@@ -345,12 +345,16 @@ function checkMailBlocking(recipient, timeoutMs = 300000, pollMs = 1000) {
 // --- Merge queue helpers ---
 
 function enqueueMerge({ request_id, task_id, pr_url, branch, priority }) {
-  // Atomic dedup+insert: prevents TOCTOU race between SELECT and INSERT
+  // Atomic dedup+insert scoped to request/task ownership.
+  // This prevents cross-request PR dedupe from rebinding existing rows.
   const result = getDb().prepare(`
     INSERT INTO merge_queue (request_id, task_id, pr_url, branch, priority)
     SELECT ?, ?, ?, ?, ?
-    WHERE NOT EXISTS (SELECT 1 FROM merge_queue WHERE pr_url = ?)
-  `).run(request_id, task_id, pr_url, branch, priority || 0, pr_url);
+    WHERE NOT EXISTS (
+      SELECT 1 FROM merge_queue
+      WHERE request_id = ? AND task_id = ?
+    )
+  `).run(request_id, task_id, pr_url, branch, priority || 0, request_id, task_id);
   return {
     inserted: result.changes > 0,
     changes: result.changes,
