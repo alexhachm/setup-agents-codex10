@@ -49,6 +49,43 @@ function coordinatorAgeMs(timestamp, nowMs = Date.now()) {
   return Math.max(0, nowMs - parsed.getTime());
 }
 
+function buildCompletedTaskCursor(timestampValue, taskId = 0) {
+  const parsedTimestamp = parseCoordinatorTimestamp(timestampValue);
+  if (!parsedTimestamp) return null;
+  const parsedTaskId = Number.parseInt(taskId, 10);
+  const normalizedTaskId = Number.isInteger(parsedTaskId) && parsedTaskId > 0 ? parsedTaskId : 0;
+  return `${parsedTimestamp.toISOString()}|${normalizedTaskId}`;
+}
+
+function parseCompletedTaskCursor(cursorValue) {
+  if (cursorValue === null || cursorValue === undefined) return null;
+  const rawCursor = String(cursorValue).trim();
+  if (!rawCursor) return null;
+
+  const separatorIndex = rawCursor.lastIndexOf('|');
+  const timestampPart = separatorIndex >= 0 ? rawCursor.slice(0, separatorIndex).trim() : rawCursor;
+  const taskIdPart = separatorIndex >= 0 ? rawCursor.slice(separatorIndex + 1).trim() : '';
+  const parsedTimestamp = parseCoordinatorTimestamp(timestampPart);
+  if (!parsedTimestamp) return null;
+
+  const parsedTaskId = Number.parseInt(taskIdPart, 10);
+  const normalizedTaskId = Number.isInteger(parsedTaskId) && parsedTaskId > 0 ? parsedTaskId : 0;
+  return {
+    cursor: `${parsedTimestamp.toISOString()}|${normalizedTaskId}`,
+    timestampMs: parsedTimestamp.getTime(),
+    taskId: normalizedTaskId,
+  };
+}
+
+function compareCompletedTaskCursors(left, right) {
+  if (!left || !right) return 0;
+  if (left.timestampMs < right.timestampMs) return -1;
+  if (left.timestampMs > right.timestampMs) return 1;
+  if (left.taskId < right.taskId) return -1;
+  if (left.taskId > right.taskId) return 1;
+  return 0;
+}
+
 const VALID_COLUMNS = Object.freeze({
   requests: new Set(['description', 'tier', 'status', 'result', 'completed_at', 'loop_id']),
   tasks: new Set(['request_id', 'subject', 'description', 'domain', 'files', 'priority', 'tier', 'depends_on', 'assigned_to', 'status', 'pr_url', 'branch', 'validation', 'overlap_with', 'started_at', 'completed_at', 'result']),
@@ -66,6 +103,26 @@ function validateColumns(table, fields) {
       throw new Error(`Invalid column "${key}" for table "${table}"`);
     }
   }
+}
+
+function ensureMergeQueueColumns(database) {
+  const mergeCols = database.prepare("PRAGMA table_info(merge_queue)").all().map((column) => column.name);
+  if (mergeCols.length === 0) return;
+
+  if (!mergeCols.includes('updated_at')) {
+    database.exec("ALTER TABLE merge_queue ADD COLUMN updated_at TEXT");
+  }
+  if (!mergeCols.includes('completion_checkpoint')) {
+    database.exec("ALTER TABLE merge_queue ADD COLUMN completion_checkpoint TEXT");
+  }
+
+  if (mergeCols.includes('created_at')) {
+    database.exec("UPDATE merge_queue SET updated_at = COALESCE(updated_at, created_at, datetime('now')) WHERE updated_at IS NULL");
+    database.exec("UPDATE merge_queue SET completion_checkpoint = COALESCE(completion_checkpoint, updated_at, created_at, datetime('now')) WHERE completion_checkpoint IS NULL");
+    return;
+  }
+  database.exec("UPDATE merge_queue SET updated_at = COALESCE(updated_at, datetime('now')) WHERE updated_at IS NULL");
+  database.exec("UPDATE merge_queue SET completion_checkpoint = COALESCE(completion_checkpoint, updated_at, datetime('now')) WHERE completion_checkpoint IS NULL");
 }
 
 function getDbPath(projectDir) {
@@ -105,30 +162,12 @@ function init(projectDir) {
       db.exec("ALTER TABLE requests ADD COLUMN loop_id INTEGER REFERENCES loops(id)");
     }
   }
-  if (existingTables.includes('merge_queue')) {
-    const mergeCols = db.prepare("PRAGMA table_info(merge_queue)").all().map(c => c.name);
-    const hasCreatedAt = mergeCols.includes('created_at');
-    if (!mergeCols.includes('updated_at')) {
-      db.exec("ALTER TABLE merge_queue ADD COLUMN updated_at TEXT");
-    }
-    if (hasCreatedAt) {
-      db.exec("UPDATE merge_queue SET updated_at = COALESCE(updated_at, created_at, datetime('now')) WHERE updated_at IS NULL");
-    } else {
-      db.exec("UPDATE merge_queue SET updated_at = COALESCE(updated_at, datetime('now')) WHERE updated_at IS NULL");
-    }
-    if (!mergeCols.includes('completion_checkpoint')) {
-      db.exec("ALTER TABLE merge_queue ADD COLUMN completion_checkpoint TEXT");
-    }
-    if (hasCreatedAt) {
-      db.exec("UPDATE merge_queue SET completion_checkpoint = COALESCE(completion_checkpoint, updated_at, created_at, datetime('now')) WHERE completion_checkpoint IS NULL");
-    } else {
-      db.exec("UPDATE merge_queue SET completion_checkpoint = COALESCE(completion_checkpoint, updated_at, datetime('now')) WHERE completion_checkpoint IS NULL");
-    }
-  }
+  if (existingTables.includes('merge_queue')) ensureMergeQueueColumns(db);
 
   // Now safe to run full schema (CREATE TABLE IF NOT EXISTS + indexes)
   const schema = fs.readFileSync(path.join(__dirname, 'schema.sql'), 'utf8');
   db.exec(schema);
+  ensureMergeQueueColumns(db);
 
   // Store project dir in config
   db.prepare('UPDATE config SET value = ? WHERE key = ?').run(projectDir, 'project_dir');
@@ -331,6 +370,44 @@ function checkRequestCompletion(requestId) {
   };
 }
 
+function getRequestLatestCompletedTaskCursor(requestId) {
+  if (requestId === null || requestId === undefined) return null;
+  const normalizedRequestId = String(requestId).trim();
+  if (!normalizedRequestId) return null;
+
+  const row = getDb().prepare(`
+    SELECT id, completed_at, updated_at, created_at
+    FROM tasks
+    WHERE request_id = ?
+      AND status = 'completed'
+    ORDER BY COALESCE(completed_at, updated_at, created_at) DESC, id DESC
+    LIMIT 1
+  `).get(normalizedRequestId);
+  if (!row) return null;
+
+  return buildCompletedTaskCursor(
+    row.completed_at || row.updated_at || row.created_at,
+    row.id
+  );
+}
+
+function hasRequestCompletedTaskProgressSince(requestId, beforeCursor, afterCursor = undefined) {
+  if (requestId === null || requestId === undefined) return false;
+  const normalizedRequestId = String(requestId).trim();
+  if (!normalizedRequestId) return false;
+
+  const parsedBefore = parseCompletedTaskCursor(beforeCursor);
+  if (!parsedBefore) return false;
+
+  let parsedAfter = parseCompletedTaskCursor(afterCursor);
+  if (!parsedAfter && afterCursor === undefined) {
+    parsedAfter = parseCompletedTaskCursor(getRequestLatestCompletedTaskCursor(normalizedRequestId));
+  }
+  if (!parsedAfter) return false;
+
+  return compareCompletedTaskCursors(parsedBefore, parsedAfter) < 0;
+}
+
 // --- Mail helpers ---
 
 function sendMail(recipient, type, payload = {}) {
@@ -395,6 +472,9 @@ function checkMailBlocking(recipient, timeoutMs = 300000, pollMs = 1000) {
 // --- Merge queue helpers ---
 
 function enqueueMerge({ request_id, task_id, pr_url, branch, priority, completion_checkpoint = null }) {
+  const normalizedPriority = Number.isInteger(priority) ? priority : 0;
+  const parsedCheckpoint = parseCompletedTaskCursor(completion_checkpoint);
+  const normalizedCheckpoint = parsedCheckpoint ? parsedCheckpoint.cursor : null;
   // Atomic dedup+insert scoped to request/task ownership.
   // This prevents cross-request PR dedupe from rebinding existing rows.
   const result = getDb().prepare(`
@@ -404,7 +484,7 @@ function enqueueMerge({ request_id, task_id, pr_url, branch, priority, completio
       SELECT 1 FROM merge_queue
       WHERE request_id = ? AND task_id = ?
     )
-  `).run(request_id, task_id, pr_url, branch, priority || 0, completion_checkpoint, request_id, task_id);
+  `).run(request_id, task_id, pr_url, branch, normalizedPriority, normalizedCheckpoint, request_id, task_id);
   return {
     inserted: result.changes > 0,
     changes: result.changes,
@@ -684,7 +764,8 @@ module.exports = {
   coordinatorAgeMs,
   createRequest, getRequest, updateRequest, listRequests,
   createTask, getTask, updateTask, listTasks, getReadyTasks, checkAndPromoteTasks,
-  registerWorker, getWorker, updateWorker, getIdleWorkers, getAllWorkers, claimWorker, releaseWorker, checkRequestCompletion,
+  registerWorker, getWorker, updateWorker, getIdleWorkers, getAllWorkers, claimWorker, releaseWorker,
+  checkRequestCompletion, getRequestLatestCompletedTaskCursor, hasRequestCompletedTaskProgressSince,
   sendMail, checkMail, checkMailBlocking, purgeOldMail,
   enqueueMerge, getNextMerge, updateMerge,
   log, getLog,
