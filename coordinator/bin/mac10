@@ -4,8 +4,14 @@
 const net = require('net');
 const path = require('path');
 const fs = require('fs');
+const { execFileSync } = require('child_process');
+const { coordinatorAgeMs } = require('../src/db');
 const NAMESPACE = process.env.MAC10_NAMESPACE || 'mac10';
 const STRICT_NAMESPACE = Boolean(process.env.MAC10_NAMESPACE) && process.env.MAC10_NAMESPACE !== 'mac10';
+const BRANCH_RE = /^[a-zA-Z0-9._\/-]+$/;
+const PR_URL_RE = /^https:\/\/github\.com\/[a-zA-Z0-9._-]+\/[a-zA-Z0-9._-]+\/pull\/\d+$/;
+const PR_NUMBER_RE = /^#?(\d+)$/;
+const WORKER_BRANCH_RE = /^agent-\d+$/;
 
 function namespacedCandidates(baseName) {
   if (NAMESPACE === 'mac10') return [baseName];
@@ -63,6 +69,19 @@ function findConnectionTarget() {
   process.exit(1);
 }
 
+function getTransportTimeoutMs(command, args) {
+  if (command === 'inbox-block') {
+    const requestedTimeout = Number(args && args.timeout);
+    // Match caller intent for blocking inbox timeout and add a small buffer
+    // so the server can send its final empty response at deadline.
+    if (Number.isFinite(requestedTimeout) && requestedTimeout > 0) {
+      return requestedTimeout + 2000;
+    }
+    return 302000;
+  }
+  return 30000;
+}
+
 function send(target, command, args) {
   return new Promise((resolve, reject) => {
     let settled = false;
@@ -100,11 +119,10 @@ function send(target, command, args) {
       // Connection closed without a complete response
       settle(reject, new Error('Connection closed before receiving a complete response'));
     });
-    // Timeout for blocking commands
-    const timeout = command === 'inbox-block' ? 600000 : 30000;
+    const timeout = getTransportTimeoutMs(command, args);
     conn.setTimeout(timeout, () => {
       conn.end();
-      settle(resolve, { ok: true, messages: [] }); // timeout returns empty for blocking inbox
+      settle(reject, new Error(`Transport timeout for command "${command}" after ${timeout}ms`));
     });
   });
 }
@@ -183,6 +201,35 @@ function getPidFilePath(projectDir) {
   return path.join(projectDir, '.claude', 'state', base);
 }
 
+function findProjectRoot(startDir = process.cwd()) {
+  let dir = path.resolve(startDir);
+  while (dir !== path.dirname(dir)) {
+    if (fs.existsSync(path.join(dir, '.claude', 'state'))) {
+      return dir;
+    }
+    dir = path.dirname(dir);
+  }
+  return path.resolve(startDir);
+}
+
+function cleanupNamespaceEndpoints(projectDir) {
+  const stateDir = path.join(projectDir, '.claude', 'state');
+  const pointerNames = ['mac10.sock.path', 'mac10.sock', 'mac10.tcp.port', 'mac10.pipe'];
+  for (const baseName of pointerNames) {
+    for (const name of namespacedCandidates(baseName)) {
+      const pointer = path.join(stateDir, name);
+      if (!fs.existsSync(pointer)) continue;
+      if (baseName === 'mac10.sock.path') {
+        try {
+          const sockPath = fs.readFileSync(pointer, 'utf8').trim();
+          if (sockPath) fs.unlinkSync(sockPath);
+        } catch {}
+      }
+      try { fs.unlinkSync(pointer); } catch {}
+    }
+  }
+}
+
 function isPidAlive(pid) {
   if (!Number.isInteger(pid) || pid <= 0) return false;
   try {
@@ -197,6 +244,172 @@ function formatDetails(details) {
   if (details === undefined || details === null) return '';
   if (typeof details === 'string') return details;
   try { return JSON.stringify(details); } catch { return String(details); }
+}
+
+function formatMergeAge(createdAt, includeAgo = false) {
+  const ageMs = coordinatorAgeMs(createdAt);
+  if (ageMs === null) return '';
+  const suffix = includeAgo ? ' ago' : '';
+  return `${Math.round(ageMs / 60000)}m${suffix}`;
+}
+
+function isUnsupportedRpcError(message) {
+  if (!message) return false;
+  return /unknown command|unsupported|not implemented|invalid command/i.test(String(message));
+}
+
+function formatWorkerProbeError(error) {
+  if (error === 'Worker not found') return 'worker-not-found';
+  return error || 'worker-command-failed';
+}
+
+function detailsMatchRequest(details, requestId) {
+  if (details === undefined || details === null) return false;
+  if (typeof details === 'string') {
+    if (details.includes(requestId)) return true;
+    try {
+      const parsed = JSON.parse(details);
+      return detailsMatchRequest(parsed, requestId);
+    } catch {
+      return false;
+    }
+  }
+  if (Array.isArray(details)) {
+    return details.some((entry) => detailsMatchRequest(entry, requestId));
+  }
+  if (typeof details === 'object') {
+    if (details.request_id === requestId || details.requestId === requestId) return true;
+    return Object.values(details).some((value) => detailsMatchRequest(value, requestId));
+  }
+  return false;
+}
+
+function sanitizeBranchName(rawBranch) {
+  if (typeof rawBranch !== 'string') return '';
+  const trimmed = rawBranch.trim();
+  if (!trimmed || !BRANCH_RE.test(trimmed)) return '';
+  return trimmed;
+}
+
+function parseGitHubRepoFromRemoteUrl(remoteUrl) {
+  const trimmed = String(remoteUrl || '').trim();
+  if (!trimmed) return '';
+
+  try {
+    const parsed = new URL(trimmed);
+    const host = (parsed.hostname || '').toLowerCase();
+    if (!host.endsWith('github.com')) return '';
+    const parts = parsed.pathname.replace(/^\/+|\/+$/g, '').split('/');
+    if (parts.length < 2) return '';
+    return `${parts[0]}/${parts[1].replace(/\.git$/i, '')}`;
+  } catch {
+    const sshMatch = trimmed.match(/^git@[^:]+:([^/]+)\/([^/.]+)(?:\.git)?$/i);
+    if (sshMatch) return `${sshMatch[1]}/${sshMatch[2]}`;
+    return '';
+  }
+}
+
+function getProjectGitHubRepoPath(cwd = process.cwd()) {
+  try {
+    const remoteUrl = execFileSync('git', ['remote', 'get-url', 'origin'], {
+      encoding: 'utf8',
+      cwd,
+      stdio: ['ignore', 'pipe', 'ignore'],
+    }).trim();
+    return parseGitHubRepoFromRemoteUrl(remoteUrl);
+  } catch {
+    return '';
+  }
+}
+
+function normalizePrUrl(rawPrUrl, cwd = process.cwd()) {
+  if (typeof rawPrUrl !== 'string') return '';
+  const trimmed = rawPrUrl.trim();
+  if (!trimmed) return '';
+  if (PR_URL_RE.test(trimmed)) return trimmed;
+
+  const match = trimmed.match(PR_NUMBER_RE);
+  if (!match) return trimmed;
+  const repoPath = getProjectGitHubRepoPath(cwd);
+  if (!repoPath) return trimmed;
+  return `https://github.com/${repoPath}/pull/${match[1]}`;
+}
+
+function parseWorkerId(rawWorkerId) {
+  const parsed = parseInt(rawWorkerId, 10);
+  if (!Number.isInteger(parsed) || parsed <= 0) return null;
+  return parsed;
+}
+
+function branchExists(rawBranch, cwd = process.cwd()) {
+  const branch = sanitizeBranchName(rawBranch);
+  if (!branch) return false;
+  try {
+    execFileSync('git', ['show-ref', '--verify', '--quiet', `refs/heads/${branch}`], {
+      encoding: 'utf8',
+      cwd,
+      stdio: ['ignore', 'ignore', 'ignore'],
+    });
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+function getCanonicalWorkerBranch(rawWorkerId) {
+  const workerId = parseWorkerId(rawWorkerId);
+  if (workerId === null) return '';
+  return `agent-${workerId}`;
+}
+
+function readCurrentBranch() {
+  try {
+    return sanitizeBranchName(execFileSync('git', ['branch', '--show-current'], {
+      encoding: 'utf8',
+      cwd: process.cwd(),
+      stdio: ['ignore', 'pipe', 'ignore'],
+    }));
+  } catch {
+    return '';
+  }
+}
+
+function resolveCompleteTaskBranch(requestedBranch, rawWorkerId) {
+  const normalizedRequested = sanitizeBranchName(requestedBranch || '');
+  const canonicalWorkerBranch = getCanonicalWorkerBranch(rawWorkerId);
+  const currentBranch = readCurrentBranch();
+
+  // Worker ID is authoritative. Always prefer agent-<worker_id> when available.
+  if (canonicalWorkerBranch) {
+    if (branchExists(canonicalWorkerBranch)) {
+      if (normalizedRequested && normalizedRequested !== canonicalWorkerBranch) {
+        console.error(`[mac10] complete-task branch mismatch: "${normalizedRequested}" != canonical "${canonicalWorkerBranch}", using "${canonicalWorkerBranch}"`);
+      }
+      return canonicalWorkerBranch;
+    }
+
+    if (normalizedRequested && normalizedRequested !== canonicalWorkerBranch) {
+      console.error(`[mac10] complete-task canonical branch missing: "${canonicalWorkerBranch}" not found, using requested "${normalizedRequested}"`);
+    }
+
+    if (normalizedRequested && branchExists(normalizedRequested)) {
+      console.error(`[mac10] complete-task requested branch "${normalizedRequested}" exists; canonical branch "${canonicalWorkerBranch}" unavailable`);
+      return normalizedRequested;
+    }
+    if (currentBranch && WORKER_BRANCH_RE.test(currentBranch) && currentBranch !== canonicalWorkerBranch) {
+      console.error(`[mac10] complete-task current branch mismatch: "${currentBranch}" != missing canonical "${canonicalWorkerBranch}", cannot resolve`);
+    }
+    return '';
+  }
+
+  // Without a valid worker ID, don't trust caller-provided/current branch values.
+  if (normalizedRequested) {
+    console.error(`[mac10] complete-task branch ignored: "${normalizedRequested}" (unable to resolve canonical worker branch)`);
+  }
+  if (currentBranch) {
+    console.error(`[mac10] complete-task current branch ignored: "${currentBranch}" (unable to resolve canonical worker branch)`);
+  }
+  return '';
 }
 
 async function main() {
@@ -286,11 +499,45 @@ async function main() {
   }
 
   if (cmd === 'stop') {
-    const socketPath = findConnectionTarget();
-    // Just remove the socket — coordinator watches for this
-    try { fs.unlinkSync(socketPath); } catch {}
-    console.log('Coordinator stopped.');
+    const projectDir = projectOverride
+      ? path.resolve(projectOverride)
+      : (argv[1] ? path.resolve(argv[1]) : findProjectRoot(process.cwd()));
+    const pidFile = getPidFilePath(projectDir);
+
+    let pid = NaN;
+    try {
+      pid = parseInt(fs.readFileSync(pidFile, 'utf8').trim(), 10);
+    } catch {}
+
+    if (isPidAlive(pid)) {
+      try { process.kill(pid, 'SIGTERM'); } catch {}
+      const deadline = Date.now() + 10000;
+      while (Date.now() < deadline && isPidAlive(pid)) {
+        await new Promise(r => setTimeout(r, 200));
+      }
+      if (isPidAlive(pid)) {
+        try { process.kill(pid, 'SIGKILL'); } catch {}
+      }
+    }
+
+    try { fs.unlinkSync(pidFile); } catch {}
+    cleanupNamespaceEndpoints(projectDir);
+    if (isPidAlive(pid)) {
+      console.error(`Failed to stop coordinator for namespace "${NAMESPACE}" (PID ${pid})`);
+      process.exit(1);
+    }
+    console.log(`Coordinator stopped for namespace "${NAMESPACE}"${Number.isInteger(pid) ? ` (PID ${pid})` : ''}.`);
     process.exit(0);
+  }
+
+  let loopPrompt = null;
+  if (cmd === 'loop') {
+    if (argv.length < 2) { console.error('Usage: mac10 loop <prompt>'); process.exit(1); }
+    loopPrompt = argv.slice(1).join(' ');
+    if (!loopPrompt.trim()) {
+      console.error('Error: prompt must be a non-empty string');
+      process.exit(1);
+    }
   }
 
   const socketPath = projectOverride ? findConnectionTargetForProject(projectOverride) : findConnectionTarget();
@@ -338,18 +585,33 @@ async function main() {
         } else console.error(result.error);
         break;
 
-      case 'history': {
-        if (!argv[1]) { console.error('Usage: mac10 history <request_id> [limit]'); process.exit(1); }
+      case 'history':
+      case 'request-history': {
+        if (!argv[1]) { console.error('Usage: mac10 history|request-history <request_id> [limit]'); process.exit(1); }
         const requestId = argv[1];
         const limit = parseInt(argv[2], 10) || 500;
-        result = await send(socketPath, 'log', { limit });
-        if (!result.ok) {
+        result = await send(socketPath, 'request-history', { request_id: requestId, limit });
+
+        let rows = [];
+        if (result.ok) {
+          rows = (result.logs || []).reverse();
+        } else if (isUnsupportedRpcError(result.error)) {
+          // Rolling upgrade compatibility: emulate request-scoped history from legacy log RPC.
+          const legacyLimit = Math.max(limit * 5, 2000);
+          const legacyResult = await send(socketPath, 'log', { limit: legacyLimit });
+          if (!legacyResult.ok) {
+            console.error(legacyResult.error || result.error);
+            break;
+          }
+          rows = (legacyResult.logs || [])
+            .filter((entry) => detailsMatchRequest(entry.details, requestId))
+            .slice(0, limit)
+            .reverse();
+        } else {
           console.error(result.error);
           break;
         }
-        const rows = result.logs
-          .filter((entry) => `${entry.action || ''} ${formatDetails(entry.details)}`.includes(requestId))
-          .reverse();
+
         if (rows.length === 0) {
           const statusRes = await send(socketPath, 'status', {});
           if (statusRes.ok) {
@@ -421,7 +683,10 @@ async function main() {
           } else {
             console.log('No task assigned.');
           }
-        } else console.error(result.error);
+        } else {
+          console.error(formatWorkerProbeError(result.error));
+          process.exit(1);
+        }
         break;
 
       case 'start-task':
@@ -438,7 +703,10 @@ async function main() {
         if (!argv[1]) { console.error('Usage: mac10 heartbeat <worker_id>'); process.exit(1); }
         result = await send(socketPath, 'heartbeat', { worker_id: argv[1] });
         if (result.ok) console.log('ok');
-        else console.error(result.error);
+        else {
+          console.error(formatWorkerProbeError(result.error));
+          process.exit(1);
+        }
         break;
 
       case 'reset-worker':
@@ -450,11 +718,23 @@ async function main() {
 
       case 'complete-task':
         if (argv.length < 3) { console.error('Usage: mac10 complete-task <worker_id> <task_id> [pr_url] [branch] [result]'); process.exit(1); }
+        const parsedWorkerId = parseWorkerId(argv[1]);
+        if (parsedWorkerId === null) {
+          console.error('Error: worker_id must be a positive integer');
+          process.exit(1);
+        }
+        const parsedTaskId = parseInt(argv[2], 10);
+        if (!Number.isInteger(parsedTaskId) || parsedTaskId <= 0) {
+          console.error('Error: task_id must be a positive integer');
+          process.exit(1);
+        }
+        const normalizedPrUrl = normalizePrUrl(argv[3]);
+        const completionBranch = resolveCompleteTaskBranch(argv[4], argv[1]);
         result = await send(socketPath, 'complete-task', {
-          worker_id: argv[1],
-          task_id: parseInt(argv[2], 10),
-          pr_url: argv[3] || '',
-          branch: argv[4] || '',
+          worker_id: String(parsedWorkerId),
+          task_id: parsedTaskId,
+          pr_url: normalizedPrUrl || '',
+          branch: completionBranch || '',
           result: argv.slice(5).join(' ') || '',
         });
         if (result.ok) console.log('Task completed.');
@@ -484,13 +764,19 @@ async function main() {
         break;
 
       case 'inbox': {
-        if (!argv[1]) { console.error('Usage: mac10 inbox <recipient> [--block] [--peek]'); process.exit(1); }
+        if (!argv[1]) { console.error('Usage: mac10 inbox <recipient> [--block] [--peek] [--timeout=ms]'); process.exit(1); }
         const recipient = argv[1];
         const block = argv.includes('--block');
         const peek = argv.includes('--peek');
-        const timeout = parseInt(argv.find(a => a.startsWith('--timeout='))?.split('=')[1], 10) || 300000;
+        const timeoutArg = argv.find(a => a.startsWith('--timeout='));
+        const parsedTimeout = timeoutArg ? parseInt(timeoutArg.split('=')[1], 10) : NaN;
+        if (timeoutArg && (!Number.isFinite(parsedTimeout) || parsedTimeout <= 0)) {
+          console.error('Error: --timeout must be a positive integer in milliseconds');
+          process.exit(1);
+        }
+        const timeout = Number.isFinite(parsedTimeout) ? parsedTimeout : 300000;
         if (block) {
-          result = await send(socketPath, 'inbox-block', { recipient, timeout });
+          result = await send(socketPath, 'inbox-block', { recipient, timeout, peek });
         } else {
           result = await send(socketPath, 'inbox', { recipient, peek });
         }
@@ -597,13 +883,27 @@ async function main() {
         } else console.error(result.error);
         break;
 
-      case 'integrate':
+      case 'integrate': {
+        if (!argv[1]) { console.error('Usage: mac10 integrate <request_id> [--retry-terminal]'); process.exit(1); }
+        const options = argv.slice(2);
+        let retryTerminal = false;
+        for (const option of options) {
+          if (option === '--retry-terminal' || option === '--force-retry') {
+            retryTerminal = true;
+            continue;
+          }
+          console.error('Usage: mac10 integrate <request_id> [--retry-terminal]');
+          process.exit(1);
+        }
         result = await send(socketPath, 'integrate', {
           request_id: argv[1],
+          retry_terminal: retryTerminal,
+          force_retry: retryTerminal,
         });
         if (result.ok) console.log(`Integration triggered for ${result.request_id}: ${result.merges_queued} merge(s) queued.`);
         else console.error(result.error);
         break;
+      }
 
       // SYSTEM
       case 'register-worker':
@@ -618,7 +918,12 @@ async function main() {
 
       case 'repair':
         result = await send(socketPath, 'repair', {});
-        if (result.ok) console.log(`Repaired: ${result.reset_workers} workers, ${result.orphaned_tasks} tasks`);
+        if (result.ok) {
+          const supersessionBackfill = result.supersession_backfill || {};
+          const repairedPairs = Number.isFinite(supersessionBackfill.repaired) ? supersessionBackfill.repaired : 0;
+          const inspectedPairs = Number.isFinite(supersessionBackfill.inspected) ? supersessionBackfill.inspected : 0;
+          console.log(`Repaired: ${result.reset_workers} workers, ${result.orphaned_tasks} tasks, ${repairedPairs}/${inspectedPairs} superseded request pairs`);
+        }
         else console.error(result.error);
         break;
 
@@ -646,7 +951,7 @@ async function main() {
           } else {
             console.log('\n=== Merge Queue ===');
             for (const m of result.merges) {
-              const age = m.created_at ? `${Math.round((Date.now() - new Date(m.created_at).getTime()) / 60000)}m ago` : '';
+              const age = formatMergeAge(m.created_at, true);
               const err = m.error ? ` error: ${m.error.slice(0, 80)}` : '';
               console.log(`  #${m.id} [${m.status}] ${m.branch || '(no branch)'} ${age}${err}`);
             }
@@ -698,8 +1003,7 @@ async function main() {
 
       // LOOP
       case 'loop':
-        if (argv.length < 2) { console.error('Usage: mac10 loop <prompt>'); process.exit(1); }
-        result = await send(socketPath, 'loop', { prompt: argv.slice(1).join(' ') });
+        result = await send(socketPath, 'loop', { prompt: loopPrompt });
         if (result.ok) console.log(`Loop created: ${result.loop_id}`);
         else console.error(result.error);
         break;
@@ -774,13 +1078,31 @@ async function main() {
           } else {
             console.log(`Loop request created: ${result.request_id}`);
           }
+          if (result.superseded_target && result.superseded_target.request_id) {
+            const target = result.superseded_target;
+            const disposition = target.terminalized ? 'terminalized' : (target.already_terminal ? 'already terminal' : 'unchanged');
+            const replacedBy = target.replaced_by ? ` replaced_by=${target.replaced_by}` : '';
+            console.log(`Superseded target: ${target.request_id} [${target.status}] ${disposition}${replacedBy}`);
+          }
         } else console.error(result.error);
         break;
 
-      case 'loop-requests':
-        if (!argv[1]) { console.error('Usage: mac10 loop-requests <loop_id>'); process.exit(1); }
+      case 'loop-requests': {
+        if (!argv[1]) { console.error('Usage: mac10 loop-requests <loop_id> [--json]'); process.exit(1); }
+        const options = argv.slice(2);
+        let jsonMode = false;
+        for (const option of options) {
+          if (option === '--json') {
+            jsonMode = true;
+            continue;
+          }
+          console.error('Usage: mac10 loop-requests <loop_id> [--json]');
+          process.exit(1);
+        }
         result = await send(socketPath, 'loop-requests', { loop_id: parseInt(argv[1], 10) });
-        if (result.ok) {
+        if (jsonMode) {
+          console.log(JSON.stringify(result, null, 2));
+        } else if (result.ok) {
           if (result.requests.length === 0) {
             console.log('No requests for this loop.');
           } else {
@@ -788,8 +1110,11 @@ async function main() {
               console.log(`  ${r.id} [${r.status}] ${r.tier ? `T${r.tier}` : '  '} ${r.description.slice(0, 60)}`);
             }
           }
-        } else console.error(result.error);
+        } else {
+          console.error(result.error);
+        }
         break;
+      }
 
       default:
         console.error(`Unknown command: ${cmd}`);
@@ -813,13 +1138,14 @@ USER:
   clarify <request_id> <msg>     Reply to architect clarification
   log [limit] [actor]            Show activity log
   history <request_id> [limit]   Show request-scoped activity history
+  request-history <request_id> [limit]  Alias for history
 
 ARCHITECT:
   triage <request_id> <tier> [reasoning]
   create-task <json>             Create task (JSON from stdin with -)
   tier1-complete <request_id> [result]
   ask-clarification <request_id> <question>
-  inbox <recipient> [--block] [--peek]
+  inbox <recipient> [--block] [--peek] [--timeout=ms]
 
 ALLOCATOR:
   ready-tasks                    List tasks ready for assignment
@@ -827,7 +1153,8 @@ ALLOCATOR:
   worker-status                  Show all workers
   check-completion <request_id>  Check if all tasks for request are done
   check-overlaps <request_id>   Show file overlaps between tasks
-  integrate <request_id>         Trigger worktree merge/integration
+  integrate <request_id> [--retry-terminal]
+                                 Trigger worktree merge/integration (optionally retry terminal merge rows)
 
 WORKER:
   my-task <worker_id>            Get current assigned task
@@ -846,8 +1173,8 @@ LOOPS:
   loop-heartbeat <id>            Heartbeat (exits 2 if stopped)
   set-config <key> <value>        Set coordinator config at runtime (no restart needed)
   loop-prompt <id>               Get loop prompt + checkpoint for sentinel
-  loop-request <id> <desc>       Submit request from loop (dedup-aware)
-  loop-requests <id>             List all requests for a loop
+  loop-request <id> <desc>       Submit request from loop (dedup + supersession-aware)
+  loop-requests <id> [--json]    List all requests for a loop
 
 CHANGES:
   log-change <desc> [--domain X] [--file Y] [--fn Z] [--tooltip T]
@@ -855,7 +1182,7 @@ CHANGES:
 
 SYSTEM:
   start [project_dir]            Start coordinator
-  stop                           Stop coordinator
+  stop [project_dir]             Stop coordinator
   repair                         Fix stuck state
   add-worker                     Create a new worker worktree (up to max_workers)
   merge-status [request_id]      Show merge queue entries
@@ -907,7 +1234,7 @@ function printStatus(data) {
   if (data.merges && data.merges.length > 0) {
     console.log('\n=== Merges ===');
     for (const m of data.merges) {
-      const age = m.created_at ? `${Math.round((Date.now() - new Date(m.created_at).getTime()) / 60000)}m` : '';
+      const age = formatMergeAge(m.created_at);
       const err = m.error ? ` — ${m.error.slice(0, 60)}` : '';
       console.log(`  #${m.id} [${m.status}] ${m.branch || '(no branch)'} (${age})${err}`);
     }
