@@ -242,6 +242,10 @@ describe('CLI Server', () => {
       INSERT INTO requests (id, description)
       VALUES (?, ?)
     `).run('req-673d2c05', '[clear description of what the user wants]');
+    db.getDb().prepare(`
+      INSERT INTO requests (id, description)
+      VALUES (?, ?)
+    `).run('req-21e8a758', 'FIX worker-2: [brief description of what needs fixing]');
 
     const malformedTaskId = db.createTask({
       request_id: 'req-673d2c05',
@@ -255,7 +259,7 @@ describe('CLI Server', () => {
 
     const firstRepair = await sendCommand('repair', {});
     assert.strictEqual(firstRepair.ok, true);
-    assert.strictEqual(firstRepair.malformed_scaffold.repaired_requests, 1);
+    assert.strictEqual(firstRepair.malformed_scaffold.repaired_requests, 2);
     assert.strictEqual(firstRepair.malformed_scaffold.terminalized_tasks, 1);
     assert.strictEqual(firstRepair.malformed_scaffold.detached_task_assignments, 1);
     assert.strictEqual(firstRepair.malformed_scaffold.reset_workers, 1);
@@ -263,6 +267,9 @@ describe('CLI Server', () => {
     const repairedRequest = db.getRequest('req-673d2c05');
     assert.strictEqual(repairedRequest.status, 'failed');
     assert.match(repairedRequest.result, /Malformed scaffold placeholder request/i);
+    const repairedFixPlaceholderRequest = db.getRequest('req-21e8a758');
+    assert.strictEqual(repairedFixPlaceholderRequest.status, 'failed');
+    assert.match(repairedFixPlaceholderRequest.result, /Malformed scaffold placeholder request/i);
 
     const repairedTask = db.getTask(malformedTaskId);
     assert.strictEqual(repairedTask.status, 'failed');

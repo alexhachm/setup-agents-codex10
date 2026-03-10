@@ -22,6 +22,15 @@ const MALFORMED_TASK_PLACEHOLDER_DESCRIPTIONS = new Set([
 const MALFORMED_TASK_FIX_DESCRIPTION_RE = /^fix\s+worker-(?:n|\d+)\s*:\s*\[brief description of what needs fixing\]$/;
 const MALFORMED_REQUEST_RESULT = 'Malformed scaffold placeholder request was automatically terminalized.';
 const MALFORMED_TASK_RESULT = 'Malformed scaffold placeholder task was automatically terminalized.';
+const ACTIVE_REQUEST_STATUSES = Object.freeze([
+  'pending',
+  'triaging',
+  'decomposed',
+  'in_progress',
+  'executing_tier1',
+  'integrating',
+]);
+const ACTIVE_REQUEST_STATUS_SET = new Set(ACTIVE_REQUEST_STATUSES);
 
 function normalizePlaceholderValue(value) {
   if (value === null || value === undefined) return '';
@@ -29,7 +38,9 @@ function normalizePlaceholderValue(value) {
 }
 
 function isMalformedScaffoldRequestDescription(description) {
-  return MALFORMED_REQUEST_PLACEHOLDER_DESCRIPTIONS.has(normalizePlaceholderValue(description));
+  const normalized = normalizePlaceholderValue(description);
+  return MALFORMED_REQUEST_PLACEHOLDER_DESCRIPTIONS.has(normalized)
+    || isMalformedScaffoldTaskSignature(normalized);
 }
 
 function isMalformedScaffoldTaskSignature(text) {
@@ -421,12 +432,21 @@ function listTasks(filters = {}) {
   return getDb().prepare(sql).all(...vals);
 }
 
+function isRequestAssignableStatus(status) {
+  const normalized = String(status || '').trim().toLowerCase();
+  return ACTIVE_REQUEST_STATUS_SET.has(normalized);
+}
+
 function getReadyTasks() {
   // Tasks that are ready and have no unfinished dependencies
   return getDb().prepare(`
-    SELECT * FROM tasks
-    WHERE status = 'ready' AND assigned_to IS NULL
-    ORDER BY CASE priority WHEN 'urgent' THEN 0 WHEN 'high' THEN 1 WHEN 'normal' THEN 2 WHEN 'low' THEN 3 END, id
+    SELECT t.*
+    FROM tasks t
+    INNER JOIN requests r ON r.id = t.request_id
+    WHERE t.status = 'ready'
+      AND t.assigned_to IS NULL
+      AND lower(coalesce(r.status, '')) IN ('pending', 'triaging', 'decomposed', 'in_progress', 'executing_tier1', 'integrating')
+    ORDER BY CASE t.priority WHEN 'urgent' THEN 0 WHEN 'high' THEN 1 WHEN 'normal' THEN 2 WHEN 'low' THEN 3 END, t.id
   `).all();
 }
 
@@ -929,7 +949,7 @@ module.exports = {
   coordinatorAgeMs,
   terminalizeMalformedScaffoldArtifacts,
   createRequest, getRequest, updateRequest, listRequests,
-  createTask, getTask, updateTask, listTasks, getReadyTasks, checkAndPromoteTasks,
+  createTask, getTask, updateTask, listTasks, getReadyTasks, isRequestAssignableStatus, checkAndPromoteTasks,
   registerWorker, getWorker, updateWorker, getIdleWorkers, getAllWorkers, claimWorker, releaseWorker,
   checkRequestCompletion, getRequestLatestCompletedTaskCursor, hasRequestCompletedTaskProgressSince,
   sendMail, checkMail, checkMailBlocking, purgeOldMail,
