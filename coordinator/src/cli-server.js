@@ -310,16 +310,6 @@ function getSafeRequestHistory(request_id, limit) {
   return db.getLog(2000).filter((entry) => entry && entry.request_id === request_id).slice(0, limit);
 }
 
-function getSafeLatestCompletedTaskCursor(request_id) {
-  if (typeof db.getRequestLatestCompletedTaskCursor !== 'function') return null;
-  return db.getRequestLatestCompletedTaskCursor(request_id);
-}
-
-function hasSafeCompletedTaskProgressSince(request_id, cursor) {
-  if (typeof db.hasRequestCompletedTaskProgressSince !== 'function') return false;
-  return db.hasRequestCompletedTaskProgressSince(request_id, cursor.before, cursor.after);
-}
-
 function backfillSupersededLoopRequestsSafe() {
   if (typeof db.backfillSupersededLoopRequests !== 'function') return { inspected: 0, repaired: 0 };
   return db.backfillSupersededLoopRequests();
@@ -565,7 +555,7 @@ function queueMergeWithRecovery({
   const normalizedPriority = Number.isInteger(priority) ? priority : 0;
   const getLatestCheckpoint = () => {
     if (latest_completion_timestamp !== undefined) return latest_completion_timestamp;
-    return getSafeLatestCompletedTaskCursor(request_id);
+    return db.getRequestLatestCompletedTaskCursor(request_id);
   };
   const latestCheckpoint = getLatestCheckpoint();
 
@@ -660,10 +650,11 @@ function queueMergeWithRecovery({
   const currentPriority = Number.isInteger(existing.priority) ? existing.priority : 0;
   const desiredPriority = Math.max(currentPriority, normalizedPriority);
   const isTerminalRetryStatus = existing.status === 'failed' || existing.status === 'conflict';
-  const hasFreshCompletionProgress = isTerminalRetryStatus && hasSafeCompletedTaskProgressSince(request_id, {
-    before: existing.completion_checkpoint,
-    after: latestCheckpoint,
-  });
+  const hasFreshCompletionProgress = isTerminalRetryStatus && db.hasRequestCompletedTaskProgressSince(
+    request_id,
+    existing.completion_checkpoint,
+    latestCheckpoint
+  );
   const shouldRetry = isTerminalRetryStatus && (force_retry || hasFreshCompletionProgress);
   const desiredStatus = shouldRetry ? 'pending' : existing.status;
   const needsRefresh =
@@ -1356,7 +1347,7 @@ function handleCommand(cmd, conn, handlers) {
         }
         // Queue merges for each completed task's branch/PR
         const tasks = db.listTasks({ request_id: reqId, status: 'completed' });
-        const latestCompletedTaskState = getSafeLatestCompletedTaskCursor(reqId);
+        const latestCompletedTaskState = db.getRequestLatestCompletedTaskCursor(reqId);
         let queued = 0;
         for (const task of tasks) {
           const worker = task.assigned_to ? db.getWorker(task.assigned_to) : null;
