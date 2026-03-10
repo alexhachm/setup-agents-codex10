@@ -29,7 +29,9 @@ function normalizePlaceholderValue(value) {
 }
 
 function isMalformedScaffoldRequestDescription(description) {
-  return MALFORMED_REQUEST_PLACEHOLDER_DESCRIPTIONS.has(normalizePlaceholderValue(description));
+  const normalized = normalizePlaceholderValue(description);
+  return MALFORMED_REQUEST_PLACEHOLDER_DESCRIPTIONS.has(normalized)
+    || isMalformedScaffoldTaskSignature(normalized);
 }
 
 function isMalformedScaffoldTaskSignature(text) {
