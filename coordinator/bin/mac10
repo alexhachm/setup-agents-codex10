@@ -313,6 +313,21 @@ function readCurrentBranch() {
   }
 }
 
+function branchExists(rawBranch, cwd = process.cwd()) {
+  const branch = sanitizeBranchName(rawBranch);
+  if (!branch) return false;
+  try {
+    execFileSync('git', ['show-ref', '--verify', '--quiet', `refs/heads/${branch}`], {
+      encoding: 'utf8',
+      cwd,
+      stdio: ['ignore', 'ignore', 'ignore'],
+    });
+    return true;
+  } catch {
+    return false;
+  }
+}
+
 function resolveCompleteTaskBranch(requestedBranch, rawWorkerId) {
   const normalizedRequested = sanitizeBranchName(requestedBranch || '');
   const canonicalWorkerBranch = getCanonicalWorkerBranch(rawWorkerId);
@@ -320,13 +335,20 @@ function resolveCompleteTaskBranch(requestedBranch, rawWorkerId) {
 
   // Worker ID is authoritative. Always prefer agent-<worker_id> when available.
   if (canonicalWorkerBranch) {
+    if (branchExists(canonicalWorkerBranch)) {
+      if (normalizedRequested && normalizedRequested !== canonicalWorkerBranch) {
+        console.error(`[mac10] complete-task branch mismatch: "${normalizedRequested}" != canonical "${canonicalWorkerBranch}", using "${canonicalWorkerBranch}"`);
+      }
+      return canonicalWorkerBranch;
+    }
+    if (normalizedRequested && branchExists(normalizedRequested)) {
+      console.error(`[mac10] complete-task canonical branch missing: "${canonicalWorkerBranch}" not found, using requested "${normalizedRequested}"`);
+      return normalizedRequested;
+    }
     if (currentBranch && WORKER_BRANCH_RE.test(currentBranch) && currentBranch !== canonicalWorkerBranch) {
-      console.error(`[mac10] complete-task current branch mismatch: "${currentBranch}" != canonical "${canonicalWorkerBranch}", using "${canonicalWorkerBranch}"`);
+      console.error(`[mac10] complete-task current branch mismatch: "${currentBranch}" != missing canonical "${canonicalWorkerBranch}", cannot resolve`);
     }
-    if (normalizedRequested && normalizedRequested !== canonicalWorkerBranch) {
-      console.error(`[mac10] complete-task branch mismatch: "${normalizedRequested}" != canonical "${canonicalWorkerBranch}", using "${canonicalWorkerBranch}"`);
-    }
-    return canonicalWorkerBranch;
+    return '';
   }
 
   // Without a valid worker ID, don't trust caller-provided/current branch values.

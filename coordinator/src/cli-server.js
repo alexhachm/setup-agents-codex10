@@ -354,6 +354,21 @@ function readWorkerBranchFromWorktree(worker) {
   }
 }
 
+function branchExists(rawBranch, repositoryDir = process.cwd()) {
+  const branch = sanitizeBranchName(rawBranch);
+  if (!branch) return false;
+  try {
+    execFileSync('git', ['show-ref', '--verify', '--quiet', `refs/heads/${branch}`], {
+      encoding: 'utf8',
+      cwd: repositoryDir,
+      stdio: ['ignore', 'ignore', 'ignore'],
+    });
+    return true;
+  } catch {
+    return false;
+  }
+}
+
 function resolveWorkerBranch(worker, fallbackWorkerId = null) {
   const workerId = worker && worker.id !== undefined && worker.id !== null
     ? worker.id
@@ -361,12 +376,15 @@ function resolveWorkerBranch(worker, fallbackWorkerId = null) {
   const canonicalBranch = canonicalBranchForWorkerId(workerId);
   const workerBranch = sanitizeBranchName(worker && worker.branch ? String(worker.branch) : '');
   const worktreeBranch = readWorkerBranchFromWorktree(worker);
+  const worktreePath = worker && worker.worktree_path ? String(worker.worktree_path).trim() : '';
 
-  // Worker ID is the source of truth for branch identity.
-  if (canonicalBranch) return canonicalBranch;
+  // Worker ID is the source of truth for branch identity, but only if branch exists.
+  if (canonicalBranch && branchExists(canonicalBranch, worktreePath || process.cwd())) {
+    return canonicalBranch;
+  }
 
-  if (WORKER_BRANCH_RE.test(workerBranch)) return workerBranch;
-  if (worktreeBranch) return worktreeBranch;
+  if (WORKER_BRANCH_RE.test(workerBranch) && branchExists(workerBranch, worktreePath || process.cwd())) return workerBranch;
+  if (worktreeBranch && branchExists(worktreeBranch, worktreePath || process.cwd())) return worktreeBranch;
   return '';
 }
 
@@ -663,7 +681,17 @@ function handleCommand(cmd, conn, handlers) {
         const merges = db.getDb().prepare(
           "SELECT * FROM merge_queue WHERE status != 'merged' ORDER BY id DESC"
         ).all();
-        respond(conn, { ok: true, requests, workers, tasks, project_dir, merges });
+        const routingBudget = modelRouter.getBudgetState(db.getConfig);
+        respond(conn, {
+          ok: true,
+          requests,
+          workers,
+          tasks,
+          project_dir,
+          merges,
+          budget_state: routingBudget,
+          budget_source: routingBudget ? (routingBudget.source || 'none') : 'none',
+        });
         break;
       }
       case 'clarify': {
