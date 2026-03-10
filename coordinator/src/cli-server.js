@@ -92,6 +92,17 @@ const ROUTING_BUDGET_THRESHOLD_KEY = 'routing_budget_flagship_threshold';
 const LEGACY_BUDGET_REMAINING_KEY = 'flagship_budget_remaining';
 const LEGACY_BUDGET_THRESHOLD_KEY = 'flagship_budget_threshold';
 const PR_RESOLVE_ERROR_RE = /Could not resolve to a PullRequest/i;
+const CHANGE_LOG_FIELDS = ['description', 'domain', 'file_path', 'function_name', 'tooltip', 'status'];
+// Shared max for request ingress:
+// - CLI RPC: request/fix/loop-request
+// - HTTP API: /api/request
+const MAX_REQUEST_DESCRIPTION_LENGTH = 4000;
+const INVALID_REQUEST_DESCRIPTION_TOO_LONG = 'invalid_request_description_too_long';
+const LOOP_LAUNCH_FAILED = 'loop_launch_failed';
+const LOOP_LAUNCH_FAILED_MESSAGE = 'Failed to launch loop runtime';
+const ACTIVITY_LOG_LIMIT_MIN = 1;
+const ACTIVITY_LOG_LIMIT_MAX = 1000;
+const DEFAULT_ACTIVITY_LOG_LIMIT = 50;
 
 function namespacedFile(defaultName, namespacedName) {
   return NAMESPACE === 'mac10' ? defaultName : namespacedName;
@@ -163,6 +174,67 @@ function bridgeToHandoff(requestId, description, type = 'bug-fix') {
 
 const MAX_PAYLOAD_SIZE = 1024 * 1024; // 1MB
 
+function validateRequestDescription(rawDescription) {
+  const normalized = String(rawDescription).replace(/(?:\r\n?)+/g, '\n').trim();
+  if (normalized.length > MAX_REQUEST_DESCRIPTION_LENGTH) {
+    const error = new Error(INVALID_REQUEST_DESCRIPTION_TOO_LONG);
+    error.code = INVALID_REQUEST_DESCRIPTION_TOO_LONG;
+    throw error;
+  }
+  return normalized;
+}
+
+function normalizeRequestDescription(rawDescription) {
+  return validateRequestDescription(rawDescription);
+}
+
+function isRequestDescriptionTooLongError(error) {
+  if (!error) return false;
+  return error.code === INVALID_REQUEST_DESCRIPTION_TOO_LONG || error.message === INVALID_REQUEST_DESCRIPTION_TOO_LONG;
+}
+
+function normalizeErrorMessage(error, fallback = 'unknown_error') {
+  if (error && typeof error.message === 'string' && error.message.trim().length > 0) {
+    return error.message.trim();
+  }
+  if (typeof error === 'string' && error.trim().length > 0) return error.trim();
+  try {
+    const serialized = JSON.stringify(error);
+    if (serialized && serialized !== '{}' && serialized !== 'null') return serialized;
+  } catch {}
+  return fallback;
+}
+
+function failClosedLoopLaunch(loopId, launchError) {
+  const launchErrorMessage = normalizeErrorMessage(launchError, 'unknown_launch_error');
+  const failure = {
+    ok: false,
+    error: LOOP_LAUNCH_FAILED,
+    message: LOOP_LAUNCH_FAILED_MESSAGE,
+    loop_id: loopId,
+    launch_error: launchErrorMessage,
+    terminalized: false,
+    terminalization_error: null,
+  };
+  try {
+    db.updateLoop(loopId, {
+      status: 'failed',
+      stopped_at: new Date().toISOString(),
+      last_checkpoint: `launch_failed:${launchErrorMessage}`,
+    });
+    failure.terminalized = true;
+  } catch (terminalizeErr) {
+    failure.terminalization_error = normalizeErrorMessage(terminalizeErr, 'unknown_terminalization_error');
+  }
+  db.log('coordinator', 'loop_launch_failed', {
+    loop_id: loopId,
+    launch_error: launchErrorMessage,
+    terminalized: failure.terminalized,
+    terminalization_error: failure.terminalization_error,
+  });
+  return failure;
+}
+
 const COMMAND_SCHEMAS = {
   'request':           { required: ['description'], types: { description: 'string' } },
   'fix':               { required: ['description'], types: { description: 'string' } },
@@ -186,11 +258,11 @@ const COMMAND_SCHEMAS = {
   'distill':           { required: ['worker_id'], types: { worker_id: 'string' } },
   'inbox':             { required: ['recipient'], types: { recipient: 'string' } },
   'inbox-block':       { required: ['recipient'], types: { recipient: 'string', timeout: 'number', peek: 'boolean' } },
-  'ready-tasks':       { required: [], types: {} },
+  'ready-tasks':       { required: [], types: { json: 'boolean' } },
   'assign-task':       { required: ['task_id', 'worker_id'], types: { task_id: 'number', worker_id: 'number' } },
   'claim-worker':      { required: ['worker_id', 'claimer'], types: { worker_id: 'number', claimer: 'string' } },
   'release-worker':    { required: ['worker_id'], types: { worker_id: 'number' } },
-  'worker-status':     { required: [], types: {} },
+  'worker-status':     { required: [], types: { json: 'boolean' } },
   'check-completion':  { required: ['request_id'], types: { request_id: 'string' } },
   'register-worker':   { required: ['worker_id'], types: { worker_id: 'string', worktree_path: 'string', branch: 'string' } },
   'repair':            { required: [], types: {} },
@@ -225,6 +297,17 @@ function parseBudgetNumber(value) {
   if (!trimmed) return null;
   const parsed = Number(trimmed);
   return Number.isFinite(parsed) ? parsed : null;
+}
+
+function normalizeActivityLogLimit(value, fallback = DEFAULT_ACTIVITY_LOG_LIMIT) {
+  const safeFallback = Number.isSafeInteger(fallback)
+    ? Math.max(ACTIVITY_LOG_LIMIT_MIN, Math.min(fallback, ACTIVITY_LOG_LIMIT_MAX))
+    : DEFAULT_ACTIVITY_LOG_LIMIT;
+  const parsed = typeof value === 'number'
+    ? value
+    : parseBudgetNumber(value);
+  if (!Number.isSafeInteger(parsed)) return safeFallback;
+  return Math.max(ACTIVITY_LOG_LIMIT_MIN, Math.min(parsed, ACTIVITY_LOG_LIMIT_MAX));
 }
 
 function parseBudgetStateConfig(raw) {
@@ -315,6 +398,34 @@ function getSafeRequestHistory(request_id, limit) {
 function backfillSupersededLoopRequestsSafe() {
   if (typeof db.backfillSupersededLoopRequests !== 'function') return { inspected: 0, repaired: 0 };
   return db.backfillSupersededLoopRequests();
+}
+
+function toReadyTaskJson(task) {
+  if (!task || typeof task !== 'object') return task;
+  return {
+    ...task,
+    id: task.id ?? null,
+    request_id: task.request_id ?? null,
+    depends_on: task.depends_on ?? null,
+    overlap_with: task.overlap_with ?? null,
+    files: task.files ?? null,
+    tier: task.tier ?? null,
+    validation: task.validation ?? null,
+  };
+}
+
+function toWorkerStatusJson(worker) {
+  if (!worker || typeof worker !== 'object') return worker;
+  return {
+    ...worker,
+    id: worker.id ?? null,
+    status: worker.status ?? null,
+    claimed_by: worker.claimed_by ?? null,
+    current_task_id: worker.current_task_id ?? null,
+    last_heartbeat: worker.last_heartbeat ?? null,
+    launched_at: worker.launched_at ?? null,
+    domain: worker.domain ?? null,
+  };
 }
 
 const SAFE_TASK_DOMAIN_RE = /^[A-Za-z0-9_-]+$/;
@@ -472,11 +583,28 @@ function parseGitHubRepoFromRemoteUrl(remoteUrl) {
   return '';
 }
 
+function resolveCommandDir(rawDir, fallback) {
+  const candidates = [rawDir, fallback, _projectDir, process.cwd()];
+  for (const candidate of candidates) {
+    if (typeof candidate !== 'string') continue;
+    const trimmed = candidate.trim();
+    if (!trimmed) continue;
+    try {
+      if (fs.existsSync(trimmed) && fs.lstatSync(trimmed).isDirectory()) return trimmed;
+    } catch {
+      continue;
+    }
+  }
+  return '';
+}
+
 function getProjectGitHubRepoPath(cwd = _projectDir || process.cwd()) {
+  const commandCwd = resolveCommandDir(cwd);
+  if (!commandCwd) return '';
   try {
     const remoteUrl = execFileSync('git', ['remote', 'get-url', 'origin'], {
       encoding: 'utf8',
-      cwd,
+      cwd: commandCwd,
       stdio: ['ignore', 'pipe', 'ignore'],
     }).trim();
     return parseGitHubRepoFromRemoteUrl(remoteUrl);
@@ -537,10 +665,12 @@ function isValidGitHubPrUrl(value) {
 
 function isResolvableGitHubPrUrl(prUrl, cwd = _projectDir || process.cwd()) {
   if (!isValidGitHubPrUrl(prUrl)) return false;
+  const commandCwd = resolveCommandDir(cwd);
+  if (!commandCwd) return false;
   try {
     execFileSync('gh', ['pr', 'view', prUrl, '--json', 'state'], {
       encoding: 'utf8',
-      cwd,
+      cwd: commandCwd,
       stdio: ['ignore', 'ignore', 'pipe'],
       timeout: 12000,
     });
@@ -555,10 +685,12 @@ function isResolvableGitHubPrUrl(prUrl, cwd = _projectDir || process.cwd()) {
 function findOpenPrUrlForBranch(rawBranch, cwd = _projectDir || process.cwd()) {
   const branch = sanitizeBranchName(rawBranch);
   if (!branch) return '';
+  const commandCwd = resolveCommandDir(cwd);
+  if (!commandCwd) return '';
   try {
     const prUrl = execFileSync('gh', ['pr', 'list', '--state', 'open', '--head', branch, '--json', 'url', '--jq', '.[0].url'], {
       encoding: 'utf8',
-      cwd,
+      cwd: commandCwd,
       stdio: ['ignore', 'pipe', 'pipe'],
       timeout: 12000,
     }).trim();
@@ -655,6 +787,11 @@ function readWorkerBranchFromWorktree(worker) {
   const worktreePath = worker && worker.worktree_path ? String(worker.worktree_path).trim() : '';
   if (!worktreePath) return '';
   try {
+    if (!fs.existsSync(worktreePath) || !fs.lstatSync(worktreePath).isDirectory()) return '';
+  } catch {
+    return '';
+  }
+  try {
     const branch = sanitizeBranchName(execFileSync('git', ['branch', '--show-current'], {
       encoding: 'utf8',
       cwd: worktreePath,
@@ -687,10 +824,12 @@ function getTrackedWorktreeChanges(worktreePath) {
 function branchExists(rawBranch, repositoryDir = process.cwd()) {
   const branch = sanitizeBranchName(rawBranch);
   if (!branch) return false;
+  const commandCwd = resolveCommandDir(repositoryDir, _projectDir || process.cwd());
+  if (!commandCwd) return false;
   try {
     execFileSync('git', ['show-ref', '--verify', '--quiet', `refs/heads/${branch}`], {
       encoding: 'utf8',
-      cwd: repositoryDir,
+      cwd: commandCwd,
       stdio: ['ignore', 'ignore', 'ignore'],
     });
     return true;
@@ -1036,6 +1175,11 @@ function validateCommand(cmd) {
       throw new Error(`Field "${field}" must be of type ${expectedType}`);
     }
   }
+
+  if (command === 'request' || command === 'fix' || command === 'loop-request') {
+    a.description = validateRequestDescription(a.description);
+  }
+
   // Strip unknown keys for create-task
   if (schema.allowed && args) {
     for (const key of Object.keys(args)) {
@@ -1221,7 +1365,8 @@ function handleCommand(cmd, conn, handlers) {
         break;
       }
       case 'log': {
-        const logs = db.getLog(args.limit || 50, args.actor);
+        const limit = normalizeActivityLogLimit(args.limit);
+        const logs = db.getLog(limit, args.actor);
         respond(conn, { ok: true, logs });
         break;
       }
@@ -1562,7 +1707,7 @@ function handleCommand(cmd, conn, handlers) {
       // === ALLOCATOR commands ===
       case 'ready-tasks': {
         const tasks = db.getReadyTasks();
-        respond(conn, { ok: true, tasks });
+        respond(conn, { ok: true, tasks: tasks.map(toReadyTaskJson) });
         break;
       }
       case 'assign-task': {
@@ -1688,7 +1833,7 @@ function handleCommand(cmd, conn, handlers) {
       }
       case 'worker-status': {
         const workers = db.getAllWorkers();
-        respond(conn, { ok: true, workers });
+        respond(conn, { ok: true, workers: workers.map(toWorkerStatusJson) });
         break;
       }
       case 'check-completion': {
@@ -2062,7 +2207,17 @@ function handleCommand(cmd, conn, handlers) {
 
       // === CHANGES commands ===
       case 'log-change': {
-        const changeId = db.createChange(args);
+        if (!args || typeof args.description !== 'string' || args.description.trim().length === 0) {
+          respond(conn, { ok: false, error: 'description must be a non-empty string' });
+          break;
+        }
+        const changePayload = {};
+        for (const field of CHANGE_LOG_FIELDS) {
+          if (args[field] !== undefined) {
+            changePayload[field] = args[field];
+          }
+        }
+        const changeId = db.createChange(changePayload);
         const change = db.getChange(changeId);
         db.log('coordinator', 'change_logged', { change_id: changeId, description: args.description });
         if (handlers.onChangeCreated) handlers.onChangeCreated(change);
@@ -2097,7 +2252,14 @@ function handleCommand(cmd, conn, handlers) {
           break;
         }
         const loopId = db.createLoop(prompt);
-        if (handlers.onLoopCreated) handlers.onLoopCreated(loopId, prompt);
+        if (handlers.onLoopCreated) {
+          try {
+            handlers.onLoopCreated(loopId, prompt);
+          } catch (spawnErr) {
+            respond(conn, failClosedLoopLaunch(loopId, spawnErr));
+            break;
+          }
+        }
         respond(conn, { ok: true, loop_id: loopId });
         break;
       }
@@ -2107,7 +2269,18 @@ function handleCommand(cmd, conn, handlers) {
           respond(conn, { ok: false, error: 'Loop not found' });
           break;
         }
-        db.stopLoop(args.loop_id);
+        if (handlers.onLoopStop) {
+          const result = handlers.onLoopStop(loop);
+          if (!result || result.ok === false) {
+            respond(conn, {
+              ok: false,
+              error: result && result.error ? result.error : 'Failed to stop loop runtime',
+            });
+            break;
+          }
+        } else {
+          db.stopLoop(args.loop_id);
+        }
         respond(conn, { ok: true, loop_id: args.loop_id });
         break;
       }
@@ -2265,4 +2438,17 @@ function handleCommand(cmd, conn, handlers) {
   }
 }
 
-module.exports = { start, stop, getSocketPath };
+module.exports = {
+  start,
+  stop,
+  getSocketPath,
+  validateRequestDescription,
+  normalizeRequestDescription,
+  isRequestDescriptionTooLongError,
+  failClosedLoopLaunch,
+  LOOP_LAUNCH_FAILED,
+  LOOP_LAUNCH_FAILED_MESSAGE,
+  CHANGE_LOG_FIELDS,
+  MAX_REQUEST_DESCRIPTION_LENGTH,
+  INVALID_REQUEST_DESCRIPTION_TOO_LONG,
+};
