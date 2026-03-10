@@ -660,11 +660,50 @@
 
   // --- Submit request ---
 
-  document.getElementById('request-btn').addEventListener('click', () => {
+  const requestInputEl = document.getElementById('request-input');
+  const requestBtnEl = document.getElementById('request-btn');
+  const requestFormEl = document.getElementById('request-form');
+  let requestFeedbackTimer = null;
+
+  const fixBtnEl = document.createElement('button');
+  fixBtnEl.id = 'request-fix-btn';
+  fixBtnEl.type = 'button';
+  fixBtnEl.textContent = 'Submit Urgent Fix';
+  fixBtnEl.style.padding = '10px 20px';
+  fixBtnEl.style.background = '#da3633';
+  fixBtnEl.style.color = '#fff';
+  fixBtnEl.style.border = 'none';
+  fixBtnEl.style.borderRadius = '6px';
+  fixBtnEl.style.cursor = 'pointer';
+  fixBtnEl.style.fontSize = '14px';
+  fixBtnEl.style.fontWeight = '600';
+  fixBtnEl.style.transition = 'background 0.15s ease';
+  fixBtnEl.addEventListener('mouseenter', () => { fixBtnEl.style.background = '#f85149'; });
+  fixBtnEl.addEventListener('mouseleave', () => { fixBtnEl.style.background = '#da3633'; });
+  requestBtnEl.insertAdjacentElement('afterend', fixBtnEl);
+
+  const requestFeedbackEl = document.createElement('div');
+  requestFeedbackEl.id = 'request-feedback';
+  requestFeedbackEl.style.display = 'none';
+  requestFeedbackEl.style.marginTop = '8px';
+  requestFeedbackEl.style.fontSize = '12px';
+  requestFeedbackEl.style.color = '#8b949e';
+  requestFormEl.insertAdjacentElement('afterend', requestFeedbackEl);
+
+  function showRequestFeedback(message, isError) {
+    requestFeedbackEl.textContent = message;
+    requestFeedbackEl.style.display = '';
+    requestFeedbackEl.style.color = isError ? '#f85149' : '#3fb950';
+    if (requestFeedbackTimer) clearTimeout(requestFeedbackTimer);
+    requestFeedbackTimer = setTimeout(() => {
+      requestFeedbackEl.style.display = 'none';
+    }, 8000);
+  }
+
+  requestBtnEl.addEventListener('click', () => {
     const tab = activeTab();
     if (!tab) return;
-    const input = document.getElementById('request-input');
-    const desc = input.value.trim();
+    const desc = requestInputEl.value.trim();
     if (!desc) return;
     tabFetch(tab, '/api/request', {
       method: 'POST',
@@ -672,14 +711,53 @@
       body: JSON.stringify({ description: desc }),
     }).then(r => r.json()).then(data => {
       if (data.ok) {
-        input.value = '';
+        requestInputEl.value = '';
         fetchTabStatus(tab);
       }
     }).catch(err => console.error('Request submit failed:', err));
   });
 
-  document.getElementById('request-input').addEventListener('keydown', (e) => {
-    if (e.key === 'Enter') document.getElementById('request-btn').click();
+  fixBtnEl.addEventListener('click', async () => {
+    const tab = activeTab();
+    if (!tab) return;
+    const desc = requestInputEl.value.trim();
+    if (!desc) return;
+
+    const originalText = fixBtnEl.textContent;
+    fixBtnEl.disabled = true;
+    fixBtnEl.textContent = 'Submitting...';
+
+    try {
+      const response = await tabFetch(tab, '/api/fix', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ description: desc }),
+      });
+      const data = await response.json().catch(() => ({}));
+
+      if (!response.ok || !data.ok) {
+        const errMsg = data.error || data.message || ('HTTP ' + response.status);
+        showRequestFeedback('Urgent fix failed: ' + errMsg, true);
+        return;
+      }
+      if (!data.request_id || !data.task_id) {
+        showRequestFeedback('Urgent fix failed: missing request/task acknowledgement', true);
+        return;
+      }
+
+      requestInputEl.value = '';
+      showRequestFeedback('Urgent fix queued: ' + data.request_id + ' / task #' + data.task_id, false);
+      fetchTabStatus(tab);
+    } catch (err) {
+      showRequestFeedback('Urgent fix failed: ' + err.message, true);
+    } finally {
+      fixBtnEl.disabled = false;
+      fixBtnEl.textContent = originalText;
+    }
+  });
+
+  requestInputEl.addEventListener('keydown', (e) => {
+    if (e.key === 'Enter') requestBtnEl.click();
   });
 
   // --- Settings panel (right-click on panel header) ---
