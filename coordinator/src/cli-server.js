@@ -6,19 +6,98 @@ const path = require('path');
 const crypto = require('crypto');
 const { execFileSync } = require('child_process');
 const db = require('./db');
+let modelRouter = null;
+try {
+  modelRouter = require('./model-router');
+} catch (err) {
+  if (err && err.code !== 'MODULE_NOT_FOUND') throw err;
+}
+
+function getConfigValue(getConfig, key, fallback) {
+  if (typeof getConfig !== 'function') return fallback;
+  const value = getConfig(key);
+  if (value === undefined || value === null) return fallback;
+  const trimmed = String(value).trim();
+  return trimmed === '' ? fallback : trimmed;
+}
+
+function resolveFallbackRoutingClass(task) {
+  const tier = Number(task && task.tier) || 0;
+  const priority = String(task && task.priority || '').toLowerCase();
+  const subject = String(task && task.subject || '').toLowerCase();
+  const description = String(task && task.description || '').toLowerCase();
+  if (tier >= 3) return 'high';
+  if (priority === 'urgent' || priority === 'high') return 'high';
+  if (subject.includes('merge') || subject.includes('conflict') || description.includes('refactor')) return 'mid';
+  return 'spark';
+}
+
+function fallbackModelRouter() {
+  const fallbackStateSource = 'coordinator-fallback-model-router';
+  return {
+    getBudgetState(getConfig) {
+      const rawState = parseBudgetStateConfig(typeof getConfig === 'function' ? getConfig(ROUTING_BUDGET_STATE_KEY) : null);
+      if (!rawState.parsed) return null;
+      return {
+        source: fallbackStateSource,
+        parsed: rawState.parsed,
+        remaining: rawState.remaining,
+        threshold: rawState.threshold,
+      };
+    },
+    routeTask(task = {}, opts = {}) {
+      const getConfig = opts.getConfig;
+      const routingClass = resolveFallbackRoutingClass(task);
+      const defaultModel = routingClass === 'spark'
+        ? getConfigValue(getConfig, 'model_spark', 'gpt-5.3-codex-spark')
+        : getConfigValue(getConfig, 'model_flagship', 'gpt-5.3-codex');
+      const configuredModel = getConfigValue(getConfig, `model_${routingClass}`, defaultModel);
+      const budget = this.getBudgetState(getConfig);
+      const routingReason = 'Fell back to CLI routing shim (model-router unavailable)';
+      return {
+        routing_class: routingClass,
+        model: configuredModel,
+        model_source: configuredModel === defaultModel ? 'config-fallback' : 'fallback-default',
+        reasoning_effort: routingClass === 'high' ? 'high' : 'low',
+        reason: routingReason,
+        budget_state: budget || null,
+        budget_source: budget && budget.source ? budget.source : 'none',
+        routing_precedence: [fallbackStateSource],
+      };
+    },
+  };
+}
+
+if (!modelRouter) {
+  modelRouter = fallbackModelRouter();
+}
 
 let server = null;
 let tcpServer = null;
 let _projectDir = null; // Set on start()
 const NAMESPACE = process.env.MAC10_NAMESPACE || 'mac10';
-const GITHUB_PR_URL_RE = /^https:\/\/github\.com\/[a-zA-Z0-9._-]+\/[a-zA-Z0-9._-]+\/pull\/\d+$/;
-
-function isMergeablePrUrl(prUrl) {
-  return typeof prUrl === 'string' && GITHUB_PR_URL_RE.test(prUrl);
-}
+const WORKER_LIMIT_MIN = 1;
+const WORKER_LIMIT_MAX = 8;
+const DEFAULT_WORKERS = 4;
+const LEGACY_MAX_WORKERS_DEFAULT = 8;
+const BRANCH_RE = /^[a-zA-Z0-9._\/-]+$/;
+const PR_URL_RE = /^https:\/\/github\.com\/[a-zA-Z0-9._-]+\/[a-zA-Z0-9._-]+\/pull\/\d+$/;
+const PR_NUMBER_RE = /^#?(\d+)$/;
+const WORKER_BRANCH_RE = /^agent-\d+$/;
+const ROUTING_BUDGET_STATE_KEY = 'routing_budget_state';
+const ROUTING_BUDGET_REMAINING_KEY = 'routing_budget_flagship_remaining';
+const ROUTING_BUDGET_THRESHOLD_KEY = 'routing_budget_flagship_threshold';
+const LEGACY_BUDGET_REMAINING_KEY = 'flagship_budget_remaining';
+const LEGACY_BUDGET_THRESHOLD_KEY = 'flagship_budget_threshold';
 
 function namespacedFile(defaultName, namespacedName) {
   return NAMESPACE === 'mac10' ? defaultName : namespacedName;
+}
+
+function hintFromRoutingClass(routingClass) {
+  if (routingClass === 'xhigh' || routingClass === 'high') return 'complex';
+  if (routingClass === 'mid') return 'moderate';
+  return 'simple';
 }
 
 // Write a request entry to handoff.json so the architect (which reads that file) can triage it.
@@ -44,12 +123,27 @@ function bridgeToHandoff(requestId, description, type = 'bug-fix') {
     if (!Array.isArray(arr)) arr = [];
     // Skip if already present
     if (arr.some(e => e.request_id === requestId)) return;
+    const route = modelRouter.routeTask({
+      subject: description,
+      description,
+      tier: 2,
+      priority: type === 'fix' ? 'high' : 'normal',
+    }, { getConfig: db.getConfig });
     arr.push({
       request_id: requestId,
       timestamp: new Date().toISOString(),
       type,
       description,
-      complexity_hint: 'simple',
+      complexity_hint: hintFromRoutingClass(route.routing_class),
+      routing_class: route.routing_class,
+      routing_model: route.model,
+      routing_model_source: route.model_source || null,
+      routing_reasoning_effort: route.reasoning_effort,
+      routing_reason: route.reason,
+      routing_precedence: route.routing_precedence || [],
+      budget_state: route.budget_state || null,
+      budget_source: route.budget_source || 'none',
+      routing_updated_at: new Date().toISOString(),
       status: 'pending_decomposition',
     });
     fs.writeFileSync(handoffPath, JSON.stringify(arr, null, 2));
@@ -72,6 +166,7 @@ const COMMAND_SCHEMAS = {
   'status':            { required: [], types: {} },
   'clarify':           { required: ['request_id', 'message'], types: { request_id: 'string', message: 'string' } },
   'log':               { required: [], types: { limit: 'number', actor: 'string' } },
+  'request-history':   { required: ['request_id'], types: { request_id: 'string', limit: 'number' } },
   'triage':            { required: ['request_id', 'tier'], types: { request_id: 'string', tier: 'number', reasoning: 'string' } },
   'create-task':       {
     required: ['request_id', 'subject', 'description'],
@@ -87,7 +182,7 @@ const COMMAND_SCHEMAS = {
   'fail-task':         { required: ['worker_id', 'task_id', 'error'], types: { worker_id: 'string', error: 'string' } },
   'distill':           { required: ['worker_id'], types: { worker_id: 'string' } },
   'inbox':             { required: ['recipient'], types: { recipient: 'string' } },
-  'inbox-block':       { required: ['recipient'], types: { recipient: 'string', timeout: 'number' } },
+  'inbox-block':       { required: ['recipient'], types: { recipient: 'string', timeout: 'number', peek: 'boolean' } },
   'ready-tasks':       { required: [], types: {} },
   'assign-task':       { required: ['task_id', 'worker_id'], types: { task_id: 'number', worker_id: 'number' } },
   'claim-worker':      { required: ['worker_id', 'claimer'], types: { worker_id: 'number', claimer: 'string' } },
@@ -108,7 +203,7 @@ const COMMAND_SCHEMAS = {
   },
   'list-changes':      { required: [], types: { domain: 'string', status: 'string' } },
   'update-change':     { required: ['id'], types: { id: 'number' } },
-  'integrate':         { required: ['request_id'], types: { request_id: 'string' } },
+  'integrate':         { required: ['request_id'], types: { request_id: 'string', retry_terminal: 'boolean', force_retry: 'boolean' } },
   'loop':              { required: ['prompt'], types: { prompt: 'string' } },
   'stop-loop':         { required: ['loop_id'], types: { loop_id: 'number' } },
   'loop-status':       { required: [], types: {} },
@@ -120,13 +215,113 @@ const COMMAND_SCHEMAS = {
   'loop-requests':     { required: ['loop_id'], types: { loop_id: 'number' } },
 };
 
+function parseBudgetNumber(value) {
+  if (value === undefined || value === null) return null;
+  if (typeof value === 'number') return Number.isFinite(value) ? value : null;
+  const trimmed = String(value).trim();
+  if (!trimmed) return null;
+  const parsed = Number(trimmed);
+  return Number.isFinite(parsed) ? parsed : null;
+}
+
+function parseBudgetStateConfig(raw) {
+  if (raw === undefined || raw === null) {
+    return { parsed: null, remaining: null, threshold: null };
+  }
+  const trimmed = String(raw).trim();
+  if (!trimmed) {
+    return { parsed: null, remaining: null, threshold: null };
+  }
+  try {
+    const parsed = JSON.parse(trimmed);
+    if (!parsed || typeof parsed !== 'object') {
+      return { parsed: null, remaining: null, threshold: null };
+    }
+    const flagship = parsed.flagship && typeof parsed.flagship === 'object' ? parsed.flagship : parsed;
+    return {
+      parsed,
+      remaining: parseBudgetNumber(flagship.remaining),
+      threshold: parseBudgetNumber(flagship.threshold),
+    };
+  } catch {
+    return { parsed: null, remaining: null, threshold: null };
+  }
+}
+
+function mergeBudgetState(raw, overrides = {}) {
+  const current = parseBudgetStateConfig(raw).parsed;
+  const state = current && typeof current === 'object' ? { ...current } : {};
+  const flagship = state.flagship && typeof state.flagship === 'object' ? { ...state.flagship } : {};
+  for (const [field, incoming] of Object.entries(overrides)) {
+    if (incoming === undefined || incoming === null) continue;
+    flagship[field] = incoming;
+  }
+  state.flagship = flagship;
+  return state;
+}
+
 /** Parse a files field into an array. Handles arrays, JSON strings, and comma-separated strings. */
 function parseFilesField(files) {
-  if (Array.isArray(files)) return files;
+  if (files === null || files === undefined) return null;
+  if (Array.isArray(files)) {
+    return typeof db.normalizeTaskFiles === 'function'
+      ? db.normalizeTaskFiles(files)
+      : fallbackNormalizeTaskFiles(files);
+  }
   if (typeof files === 'string') {
-    try { return JSON.parse(files); } catch { return files.split(',').map(f => f.trim()); }
+    const trimmed = files.trim();
+    if (!trimmed) return [];
+    try {
+      const parsed = JSON.parse(trimmed);
+      if (Array.isArray(parsed)) {
+        return typeof db.normalizeTaskFiles === 'function'
+          ? db.normalizeTaskFiles(parsed)
+          : fallbackNormalizeTaskFiles(parsed);
+      }
+    } catch {}
+    const splitFiles = trimmed.split(',');
+    return typeof db.normalizeTaskFiles === 'function'
+      ? db.normalizeTaskFiles(splitFiles)
+      : fallbackNormalizeTaskFiles(splitFiles);
   }
   return null;
+}
+
+function fallbackNormalizeTaskFiles(files) {
+  if (!Array.isArray(files)) return [];
+  const seen = new Set();
+  const out = [];
+  for (const file of files) {
+    const normalized = String(file || '').trim();
+    if (!normalized) continue;
+    if (seen.has(normalized)) continue;
+    seen.add(normalized);
+    out.push(normalized);
+  }
+  return out;
+}
+
+function getSafeRequestHistory(request_id, limit) {
+  if (typeof db.getRequestHistory === 'function') {
+    return db.getRequestHistory(request_id, limit);
+  }
+  if (!db.getLog) return [];
+  return db.getLog(2000).filter((entry) => entry && entry.request_id === request_id).slice(0, limit);
+}
+
+function getSafeLatestCompletedTaskCursor(request_id) {
+  if (typeof db.getRequestLatestCompletedTaskCursor !== 'function') return null;
+  return db.getRequestLatestCompletedTaskCursor(request_id);
+}
+
+function hasSafeCompletedTaskProgressSince(request_id, cursor) {
+  if (typeof db.hasRequestCompletedTaskProgressSince !== 'function') return false;
+  return db.hasRequestCompletedTaskProgressSince(request_id, cursor.before, cursor.after);
+}
+
+function backfillSupersededLoopRequestsSafe() {
+  if (typeof db.backfillSupersededLoopRequests !== 'function') return { inspected: 0, repaired: 0 };
+  return db.backfillSupersededLoopRequests();
 }
 
 const SAFE_TASK_DOMAIN_RE = /^[A-Za-z0-9_-]+$/;
@@ -146,6 +341,311 @@ function normalizeTaskDomain(domain) {
     throw new Error('Invalid domain: only letters, numbers, "-" and "_" are allowed');
   }
   return trimmed;
+}
+
+/**
+ * Parse reset-worker ownership context from args.
+ * Backward compatible formats:
+ * - worker_id="7"
+ * - worker_id="7|123|2026-03-09T01:23:45.678Z"
+ */
+function parseResetOwnership(args) {
+  const rawWorker = String(args.worker_id || '');
+  const [rawWorkerId, rawTaskId = '', rawAssignmentToken = ''] = rawWorker.split('|', 3);
+  const worker_id = rawWorkerId.trim();
+
+  const candidateTaskId = args.expected_task_id !== undefined
+    ? args.expected_task_id
+    : rawTaskId.trim();
+  const parsedTaskId = parseInt(candidateTaskId, 10);
+  const expected_task_id = Number.isInteger(parsedTaskId) ? parsedTaskId : null;
+
+  const expected_assignment_token = (typeof args.assignment_token === 'string' && args.assignment_token.trim())
+    ? args.assignment_token.trim()
+    : (rawAssignmentToken.trim() || null);
+
+  return { worker_id, expected_task_id, expected_assignment_token };
+}
+
+/** Parse depends_on into an array of task ids. Accepts arrays or JSON-array strings. */
+function parseDependsOnField(dependsOn) {
+  if (dependsOn === null || dependsOn === undefined) return null;
+  if (Array.isArray(dependsOn)) return dependsOn;
+  if (typeof dependsOn === 'string') {
+    try {
+      const parsed = JSON.parse(dependsOn);
+      if (!Array.isArray(parsed)) {
+        throw new Error('depends_on JSON must be an array');
+      }
+      return parsed;
+    } catch (e) {
+      throw new Error(`Invalid depends_on: ${e.message}`);
+    }
+  }
+  throw new Error('Invalid depends_on: expected an array of task ids');
+}
+
+function normalizeOverlapIdsField(overlapWith, selfId = null) {
+  if (!overlapWith) return [];
+  let ids = overlapWith;
+  if (typeof ids === 'string') {
+    try { ids = JSON.parse(ids); } catch { return []; }
+  }
+  if (!Array.isArray(ids)) return [];
+  const parsedSelfId = Number(selfId);
+  const hasSelfId = Number.isInteger(parsedSelfId) && parsedSelfId > 0;
+
+  const normalized = [];
+  const seen = new Set();
+  for (const rawId of ids) {
+    const id = Number(rawId);
+    if (!Number.isInteger(id) || id <= 0) continue;
+    if (hasSelfId && id === parsedSelfId) continue;
+    if (seen.has(id)) continue;
+    seen.add(id);
+    normalized.push(id);
+  }
+  return normalized;
+}
+
+function sanitizeBranchName(rawBranch) {
+  if (typeof rawBranch !== 'string') return '';
+  const trimmed = rawBranch.trim();
+  if (!trimmed || !BRANCH_RE.test(trimmed)) return '';
+  return trimmed;
+}
+
+function parseGitHubRepoFromRemoteUrl(remoteUrl) {
+  const trimmed = String(remoteUrl || '').trim();
+  if (!trimmed) return '';
+
+  try {
+    const parsed = new URL(trimmed);
+    const host = (parsed.hostname || '').toLowerCase();
+    if (!host.endsWith('github.com')) return '';
+    const parts = parsed.pathname.replace(/^\/+|\/+$/g, '').split('/');
+    if (parts.length < 2) return '';
+    return `${parts[0]}/${parts[1].replace(/\.git$/i, '')}`;
+  } catch {
+    const sshMatch = trimmed.match(/^git@[^:]+:([^/]+)\/([^/.]+)(?:\.git)?$/i);
+    if (sshMatch) return `${sshMatch[1]}/${sshMatch[2]}`;
+  }
+
+  return '';
+}
+
+function getProjectGitHubRepoPath(cwd = _projectDir || process.cwd()) {
+  try {
+    const remoteUrl = execFileSync('git', ['remote', 'get-url', 'origin'], {
+      encoding: 'utf8',
+      cwd,
+      stdio: ['ignore', 'pipe', 'ignore'],
+    }).trim();
+    return parseGitHubRepoFromRemoteUrl(remoteUrl);
+  } catch {
+    return '';
+  }
+}
+
+function normalizePrUrl(rawPrUrl) {
+  if (typeof rawPrUrl !== 'string') return '';
+  const trimmed = rawPrUrl.trim();
+  if (!trimmed) return '';
+  if (PR_URL_RE.test(trimmed)) return trimmed;
+
+  const match = trimmed.match(PR_NUMBER_RE);
+  if (!match) return trimmed;
+
+  const repoPath = getProjectGitHubRepoPath();
+  if (!repoPath) return trimmed;
+  return `https://github.com/${repoPath}/pull/${match[1]}`;
+}
+
+function isValidGitHubPrUrl(value) {
+  return typeof value === 'string' && PR_URL_RE.test(value);
+}
+
+function parseWorkerId(rawWorkerId) {
+  const parsed = parseInt(rawWorkerId, 10);
+  if (!Number.isInteger(parsed) || parsed <= 0) return null;
+  return parsed;
+}
+
+function canonicalBranchForWorkerId(rawWorkerId) {
+  const workerId = parseWorkerId(rawWorkerId);
+  if (workerId === null) return '';
+  return `agent-${workerId}`;
+}
+
+function readWorkerBranchFromWorktree(worker) {
+  const worktreePath = worker && worker.worktree_path ? String(worker.worktree_path).trim() : '';
+  if (!worktreePath) return '';
+  try {
+    const branch = sanitizeBranchName(execFileSync('git', ['branch', '--show-current'], {
+      encoding: 'utf8',
+      cwd: worktreePath,
+      stdio: ['ignore', 'pipe', 'ignore'],
+    }));
+    return WORKER_BRANCH_RE.test(branch) ? branch : '';
+  } catch {
+    return '';
+  }
+}
+
+function branchExists(rawBranch, repositoryDir = process.cwd()) {
+  const branch = sanitizeBranchName(rawBranch);
+  if (!branch) return false;
+  try {
+    execFileSync('git', ['show-ref', '--verify', '--quiet', `refs/heads/${branch}`], {
+      encoding: 'utf8',
+      cwd: repositoryDir,
+      stdio: ['ignore', 'ignore', 'ignore'],
+    });
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+function resolveWorkerBranch(worker, fallbackWorkerId = null) {
+  const workerId = worker && worker.id !== undefined && worker.id !== null
+    ? worker.id
+    : fallbackWorkerId;
+  const canonicalBranch = canonicalBranchForWorkerId(workerId);
+  const workerBranch = sanitizeBranchName(worker && worker.branch ? String(worker.branch) : '');
+  const worktreeBranch = readWorkerBranchFromWorktree(worker);
+  const worktreePath = worker && worker.worktree_path ? String(worker.worktree_path).trim() : '';
+
+  // Worker ID is the source of truth for branch identity.
+  // Keep canonical as a recovery-safe fallback when local refs are unavailable.
+  if (canonicalBranch && branchExists(canonicalBranch, worktreePath || process.cwd())) {
+    return canonicalBranch;
+  }
+
+  if (WORKER_BRANCH_RE.test(workerBranch) && branchExists(workerBranch, worktreePath || process.cwd())) return workerBranch;
+  if (worktreeBranch && branchExists(worktreeBranch, worktreePath || process.cwd())) return worktreeBranch;
+  if (canonicalBranch) return canonicalBranch;
+  if (WORKER_BRANCH_RE.test(workerBranch)) return workerBranch;
+  if (worktreeBranch) return worktreeBranch;
+  return '';
+}
+
+function resolveCompletionBranch(worker, reportedBranch, fallbackWorkerId = null) {
+  const workerBranch = resolveWorkerBranch(worker, fallbackWorkerId);
+  const requestedBranch = sanitizeBranchName(reportedBranch);
+
+  if (!requestedBranch) return { branch: workerBranch || null, mismatch: false, requestedBranch: null, workerBranch };
+  if (!workerBranch) {
+    // Fail closed when worker identity is unavailable. This prevents stale or
+    // caller-provided feature branches from entering merge_queue.
+    return { branch: null, mismatch: true, requestedBranch, workerBranch: null };
+  }
+
+  if (requestedBranch !== workerBranch) {
+    return { branch: workerBranch, mismatch: true, requestedBranch, workerBranch };
+  }
+
+  return { branch: requestedBranch, mismatch: false, requestedBranch, workerBranch };
+}
+
+function queueMergeWithRecovery({
+  request_id,
+  task_id,
+  pr_url,
+  branch,
+  priority = 0,
+  force_retry = false,
+  latest_completion_timestamp = undefined,
+}) {
+  const normalizedPriority = Number.isInteger(priority) ? priority : 0;
+  const getLatestCheckpoint = () => {
+    if (latest_completion_timestamp !== undefined) return latest_completion_timestamp;
+    return getSafeLatestCompletedTaskCursor(request_id);
+  };
+  const latestCheckpoint = getLatestCheckpoint();
+
+  const enqueueResult = db.enqueueMerge({
+    request_id,
+    task_id,
+    pr_url,
+    branch,
+    priority: normalizedPriority,
+    completion_checkpoint: latestCheckpoint,
+  });
+  if (enqueueResult.inserted) {
+    return { queued: true, inserted: true, refreshed: false, retried: false };
+  }
+
+  const existing = db.getDb().prepare(`
+    SELECT id, request_id, task_id, branch, status, priority, updated_at, completion_checkpoint
+    FROM merge_queue
+    WHERE pr_url = ?
+    ORDER BY id DESC
+    LIMIT 1
+  `).get(pr_url);
+
+  if (!existing) {
+    return { queued: false, inserted: false, refreshed: false, retried: false, reason: 'missing_existing_entry' };
+  }
+  if (existing.status === 'merged' || existing.status === 'merging') {
+    return { queued: false, inserted: false, refreshed: false, retried: false, reason: `status_${existing.status}` };
+  }
+
+  const currentPriority = Number.isInteger(existing.priority) ? existing.priority : 0;
+  const desiredPriority = Math.max(currentPriority, normalizedPriority);
+  const isTerminalRetryStatus = existing.status === 'failed' || existing.status === 'conflict';
+  const mergeIdentityChanged =
+    String(existing.request_id) !== String(request_id) ||
+    Number(existing.task_id) !== Number(task_id) ||
+    existing.branch !== branch;
+  const hasFreshCompletionProgress = isTerminalRetryStatus && hasSafeCompletedTaskProgressSince(request_id, {
+    before: existing.completion_checkpoint,
+    after: latestCheckpoint,
+  });
+  const shouldRetry = isTerminalRetryStatus && (force_retry || hasFreshCompletionProgress);
+  const desiredStatus = shouldRetry ? 'pending' : existing.status;
+  const needsRefresh =
+    mergeIdentityChanged ||
+    currentPriority !== desiredPriority ||
+    existing.status !== desiredStatus;
+
+  if (!needsRefresh) {
+    if (isTerminalRetryStatus && !shouldRetry) {
+      return { queued: false, inserted: false, refreshed: false, retried: false, reason: 'terminal_without_fresh_progress' };
+    }
+    return { queued: false, inserted: false, refreshed: false, retried: false, reason: 'already_current' };
+  }
+
+  db.getDb().prepare(`
+    UPDATE merge_queue
+    SET request_id = ?,
+        task_id = ?,
+        branch = ?,
+        priority = ?,
+        status = ?,
+        error = CASE WHEN ? = 1 THEN NULL ELSE error END,
+        completion_checkpoint = ?,
+        updated_at = strftime('%Y-%m-%dT%H:%M:%fZ','now')
+    WHERE id = ?
+  `).run(
+    request_id,
+    task_id,
+    branch,
+    desiredPriority,
+    desiredStatus,
+    shouldRetry ? 1 : 0,
+    shouldRetry ? (latestCheckpoint || null) : existing.completion_checkpoint,
+    existing.id
+  );
+
+  return {
+    queued: shouldRetry,
+    inserted: false,
+    refreshed: true,
+    retried: shouldRetry,
+    previous_status: existing.status,
+    merge_id: existing.id,
+  };
 }
 
 function validateCommand(cmd) {
@@ -330,7 +830,17 @@ function handleCommand(cmd, conn, handlers) {
         const merges = db.getDb().prepare(
           "SELECT * FROM merge_queue WHERE status != 'merged' ORDER BY id DESC"
         ).all();
-        respond(conn, { ok: true, requests, workers, tasks, project_dir, merges });
+        const routingBudget = modelRouter.getBudgetState(db.getConfig);
+        respond(conn, {
+          ok: true,
+          requests,
+          workers,
+          tasks,
+          project_dir,
+          merges,
+          budget_state: routingBudget,
+          budget_source: routingBudget ? (routingBudget.source || 'none') : 'none',
+        });
         break;
       }
       case 'clarify': {
@@ -344,6 +854,14 @@ function handleCommand(cmd, conn, handlers) {
       case 'log': {
         const logs = db.getLog(args.limit || 50, args.actor);
         respond(conn, { ok: true, logs });
+        break;
+      }
+      case 'request-history': {
+        const requestId = args.request_id;
+        const rawLimit = args.limit || 500;
+        const limit = Math.max(1, Math.min(rawLimit, 10000));
+        const logs = getSafeRequestHistory(requestId, limit);
+        respond(conn, { ok: true, request_id: requestId, logs });
         break;
       }
 
@@ -360,9 +878,8 @@ function handleCommand(cmd, conn, handlers) {
       }
       case 'create-task': {
         // Normalize files to an array before persisting (handles strings, JSON strings, arrays)
-        if (args.files) {
-          args.files = parseFilesField(args.files);
-        }
+        args.files = parseFilesField(args.files);
+        args.depends_on = parseDependsOnField(args.depends_on);
         const taskId = db.createTask(args);
         // If no dependencies, mark ready immediately
         if (!args.depends_on || args.depends_on.length === 0) {
@@ -370,23 +887,25 @@ function handleCommand(cmd, conn, handlers) {
         }
         // Detect file overlaps with other tasks in the same request
         let overlaps = [];
-        const taskFiles = parseFilesField(args.files);
-        if (taskFiles && taskFiles.length > 0) {
-          overlaps = db.findOverlappingTasks(args.request_id, taskFiles);
-          if (overlaps.length > 0) {
+        const taskFiles = Array.isArray(args.files) ? args.files : [];
+        if (taskFiles.length > 0) {
+          overlaps = db.findOverlappingTasks(args.request_id, taskFiles, taskId)
+            .filter((o) => Number(o.task_id) !== taskId);
+          const overlapIds = normalizeOverlapIdsField(overlaps.map((o) => o.task_id), taskId);
+          if (overlapIds.length > 0) {
             // Set overlap_with on the new task
-            const overlapIds = overlaps.map(o => o.task_id);
             db.updateTask(taskId, { overlap_with: JSON.stringify(overlapIds) });
             // Update existing overlapping tasks to include the new task
-            for (const o of overlaps) {
-              const existing = db.getTask(o.task_id);
-              let existingOverlaps = [];
-              if (existing && existing.overlap_with) {
-                try { existingOverlaps = JSON.parse(existing.overlap_with); } catch {}
-              }
+            for (const overlapId of overlapIds) {
+              const existing = db.getTask(overlapId);
+              const existingOverlaps = normalizeOverlapIdsField(existing && existing.overlap_with, overlapId);
+              let shouldUpdate = !!existing;
               if (!existingOverlaps.includes(taskId)) {
                 existingOverlaps.push(taskId);
-                db.updateTask(o.task_id, { overlap_with: JSON.stringify(existingOverlaps) });
+                shouldUpdate = true;
+              }
+              if (shouldUpdate) {
+                db.updateTask(overlapId, { overlap_with: JSON.stringify(existingOverlaps) });
               }
             }
             db.log('coordinator', 'overlap_detected', {
@@ -420,7 +939,11 @@ function handleCommand(cmd, conn, handlers) {
       // === WORKER commands ===
       case 'my-task': {
         const worker = db.getWorker(args.worker_id);
-        if (!worker || !worker.current_task_id) {
+        if (!worker) {
+          respond(conn, { ok: false, error: 'Worker not found' });
+          break;
+        }
+        if (!worker.current_task_id) {
           respond(conn, { ok: true, task: null });
           break;
         }
@@ -437,16 +960,43 @@ function handleCommand(cmd, conn, handlers) {
         break;
       }
       case 'heartbeat': {
-        db.updateWorker(args.worker_id, { last_heartbeat: new Date().toISOString() });
+        const worker = db.getWorker(args.worker_id);
+        if (!worker) {
+          respond(conn, { ok: false, error: 'Worker not found' });
+          break;
+        }
+
+        const heartbeatTs = new Date().toISOString();
+        const updateResult = db.getDb().prepare(`
+          UPDATE workers
+          SET last_heartbeat = ?
+          WHERE id = ?
+        `).run(heartbeatTs, args.worker_id);
+        if (updateResult.changes !== 1) {
+          respond(conn, { ok: false, error: 'Worker not found' });
+          break;
+        }
+
         respond(conn, { ok: true });
         break;
       }
       case 'complete-task': {
         const { worker_id, task_id, pr_url, result, branch } = args;
+        const normalizedPrUrl = normalizePrUrl(pr_url);
+        const worker = db.getWorker(worker_id);
+        const resolvedBranch = resolveCompletionBranch(worker, branch, worker_id);
+        if (resolvedBranch.mismatch) {
+          db.log('coordinator', 'complete_task_branch_overridden', {
+            worker_id,
+            task_id,
+            requested_branch: resolvedBranch.requestedBranch,
+            worker_branch: resolvedBranch.workerBranch,
+          });
+        }
         db.updateTask(task_id, {
           status: 'completed',
-          pr_url: pr_url || null,
-          branch: branch || null,
+          pr_url: normalizedPrUrl || null,
+          branch: resolvedBranch.branch,
           result: result || null,
           completed_at: new Date().toISOString(),
         });
@@ -458,31 +1008,56 @@ function handleCommand(cmd, conn, handlers) {
           current_task_id: null,
           tasks_completed: tasksCompleted,
         });
-        // Enqueue merge if PR exists (must be a valid URL, not a status string like "already_merged")
         const completedTask = db.getTask(task_id);
-        if (isMergeablePrUrl(pr_url)) {
-          db.enqueueMerge({
+        // Enqueue merge if PR exists (must be a valid URL, not a status string like "already_merged")
+        const queueBranch = sanitizeBranchName(resolvedBranch.branch || completedTask.branch || (worker && worker.branch) || '');
+        if (isValidGitHubPrUrl(normalizedPrUrl) && completedTask && queueBranch) {
+          const queueResult = queueMergeWithRecovery({
             request_id: completedTask.request_id,
             task_id,
-            pr_url,
-            branch: branch || '',
+            pr_url: normalizedPrUrl,
+            branch: queueBranch,
             priority: completedTask.priority === 'urgent' ? 10 : 0,
+          });
+          if (queueResult.refreshed) {
+            db.log('coordinator', 'merge_queue_entry_refreshed', {
+              request_id: completedTask.request_id,
+              task_id,
+              pr_url: normalizedPrUrl,
+              branch: queueBranch,
+              retried: queueResult.retried,
+              previous_status: queueResult.previous_status || null,
+              merge_id: queueResult.merge_id || null,
+            });
+          }
+        }
+        if (normalizedPrUrl && normalizedPrUrl !== (pr_url || '')) {
+          db.log('coordinator', 'complete_task_pr_url_normalized', {
+            task_id,
+            worker_id,
+            original_pr_url: pr_url,
+            normalized_pr_url: normalizedPrUrl,
           });
         }
         db.sendMail('allocator', 'task_completed', {
           worker_id, task_id,
-          request_id: completedTask.request_id,
-          pr_url,
+          request_id: completedTask ? completedTask.request_id : null,
+          pr_url: normalizedPrUrl,
           tasks_completed: tasksCompleted,
         });
         // Notify architect so it has visibility into Tier 2 outcomes
         db.sendMail('architect', 'task_completed', {
           worker_id, task_id,
-          request_id: completedTask.request_id,
-          pr_url,
+          request_id: completedTask ? completedTask.request_id : null,
+          pr_url: normalizedPrUrl,
           result,
         });
-        db.log(`worker-${worker_id}`, 'task_completed', { task_id, pr_url, result, tasks_completed: tasksCompleted });
+        db.log(`worker-${worker_id}`, 'task_completed', {
+          task_id,
+          pr_url: normalizedPrUrl,
+          result,
+          tasks_completed: tasksCompleted,
+        });
         // Notify handlers for merge check
         if (handlers.onTaskCompleted) handlers.onTaskCompleted(task_id);
         respond(conn, { ok: true });
@@ -491,6 +1066,14 @@ function handleCommand(cmd, conn, handlers) {
       case 'fail-task': {
         const { worker_id: wid, task_id: tid, error } = args;
         const failedTask = db.getTask(tid);
+        const routingMeta = failedTask ? {
+          subject: failedTask.subject,
+          description: failedTask.description,
+          domain: failedTask.domain,
+          files: failedTask.files,
+          tier: failedTask.tier,
+          assigned_to: failedTask.assigned_to,
+        } : null;
         db.updateTask(tid, { status: 'failed', result: error, completed_at: new Date().toISOString() });
         db.updateWorker(wid, { status: 'idle', current_task_id: null });
         db.sendMail('allocator', 'task_failed', {
@@ -498,6 +1081,12 @@ function handleCommand(cmd, conn, handlers) {
           task_id: tid,
           request_id: failedTask ? failedTask.request_id : null,
           error,
+          subject: routingMeta ? routingMeta.subject : null,
+          domain: routingMeta ? routingMeta.domain : null,
+          files: routingMeta ? routingMeta.files : null,
+          tier: routingMeta ? routingMeta.tier : null,
+          assigned_to: routingMeta ? routingMeta.assigned_to : null,
+          original_task: routingMeta,
         });
         // Also notify architect so it has visibility into failures
         db.sendMail('architect', 'task_failed', {
@@ -505,6 +1094,7 @@ function handleCommand(cmd, conn, handlers) {
           task_id: tid,
           request_id: failedTask ? failedTask.request_id : null,
           error,
+          original_task: routingMeta,
         });
         db.log(`worker-${wid}`, 'task_failed', { task_id: tid, error });
         respond(conn, { ok: true });
@@ -526,6 +1116,7 @@ function handleCommand(cmd, conn, handlers) {
         // Async blocking inbox check — polls without freezing the event loop
         const recipient = args.recipient;
         const timeoutMs = args.timeout || 300000;
+        const consume = !args.peek;
         const pollMs = 1000;
         const deadline = Date.now() + timeoutMs;
         let cancelled = false;
@@ -537,7 +1128,7 @@ function handleCommand(cmd, conn, handlers) {
         const poll = () => {
           if (cancelled) return;
           try {
-            const msgs = db.checkMail(recipient);
+            const msgs = db.checkMail(recipient, consume);
             if (msgs.length > 0) {
               respond(conn, { ok: true, messages: msgs });
               return;
@@ -586,8 +1177,40 @@ function handleCommand(cmd, conn, handlers) {
           break;
         }
 
-        // Send mail to worker
         const assignedTask = db.getTask(assignTaskId);
+        const assignedWorker = db.getWorker(assignWorkerId);
+        const routingDecision = modelRouter.routeTask(assignedTask, { getConfig: db.getConfig });
+        const routingTelemetry = {
+          budget_state: routingDecision.budget_state || null,
+          budget_source: routingDecision.budget_source || 'none',
+          model_source: routingDecision.model_source || null,
+          routing_precedence: routingDecision.routing_precedence || [],
+        };
+
+        // Trigger tmux spawn via handler — revert assignment on failure
+        if (handlers.onAssignTask) {
+          try {
+            handlers.onAssignTask(assignedTask, assignedWorker, routingDecision);
+          } catch (spawnErr) {
+            db.getDb().transaction(() => {
+              db.updateTask(assignTaskId, {
+                status: assignResult.task.status,
+                assigned_to: assignResult.task.assigned_to,
+              });
+              db.updateWorker(assignWorkerId, {
+                status: assignResult.worker.status,
+                current_task_id: assignResult.worker.current_task_id,
+                domain: assignResult.worker.domain,
+                claimed_by: assignResult.worker.claimed_by,
+                launched_at: assignResult.worker.launched_at,
+              });
+            })();
+            db.log('coordinator', 'assign_handler_failed', { task_id: assignTaskId, worker_id: assignWorkerId, error: spawnErr.message });
+            respond(conn, { ok: false, error: `Failed to spawn worker: ${spawnErr.message}` });
+            break;
+          }
+        }
+
         db.sendMail(`worker-${assignWorkerId}`, 'task_assigned', {
           task_id: assignTaskId,
           subject: assignedTask.subject,
@@ -597,23 +1220,47 @@ function handleCommand(cmd, conn, handlers) {
           tier: assignedTask.tier,
           request_id: assignedTask.request_id,
           validation: assignedTask.validation,
+          assignment_token: assignedWorker ? assignedWorker.launched_at : null,
+          routing_class: routingDecision.routing_class,
+          model: routingDecision.model,
+          model_source: routingTelemetry.model_source,
+          reasoning_effort: routingDecision.reasoning_effort,
+          routing_reason: routingDecision.reason,
+          routing_precedence: routingTelemetry.routing_precedence,
+          budget_state: routingTelemetry.budget_state,
+          budget_source: routingTelemetry.budget_source,
         });
-        db.log('allocator', 'task_assigned', { task_id: assignTaskId, worker_id: assignWorkerId, domain: assignedTask.domain });
+        db.log('allocator', 'task_assigned', {
+          task_id: assignTaskId,
+          worker_id: assignWorkerId,
+          domain: assignedTask.domain,
+          assignment_token: assignedWorker ? assignedWorker.launched_at : null,
+          routing_class: routingDecision.routing_class,
+          model: routingDecision.model,
+          model_source: routingTelemetry.model_source,
+          reasoning_effort: routingDecision.reasoning_effort,
+          routing_reason: routingDecision.reason,
+          routing_precedence: routingTelemetry.routing_precedence,
+          budget_state: routingTelemetry.budget_state,
+          budget_source: routingTelemetry.budget_source,
+        });
 
-        // Trigger tmux spawn via handler — revert assignment on failure
-        if (handlers.onAssignTask) {
-          try {
-            handlers.onAssignTask(assignedTask, db.getWorker(assignWorkerId));
-          } catch (spawnErr) {
-            db.updateTask(assignTaskId, { status: 'ready', assigned_to: null });
-            db.updateWorker(assignWorkerId, { status: 'idle', current_task_id: null, launched_at: null });
-            db.log('coordinator', 'assign_handler_failed', { task_id: assignTaskId, worker_id: assignWorkerId, error: spawnErr.message });
-            respond(conn, { ok: false, error: `Failed to spawn worker: ${spawnErr.message}` });
-            break;
-          }
-        }
-
-        respond(conn, { ok: true, task_id: assignTaskId, worker_id: assignWorkerId });
+        respond(conn, {
+          ok: true,
+          task_id: assignTaskId,
+          worker_id: assignWorkerId,
+          routing: {
+            class: routingDecision.routing_class,
+            model: routingDecision.model,
+            model_source: routingTelemetry.model_source,
+            reasoning_effort: routingDecision.reasoning_effort,
+            reason: routingDecision.reason,
+            precedence: routingTelemetry.routing_precedence,
+          },
+          assignment_token: assignedWorker ? assignedWorker.launched_at : null,
+          budget_state: routingTelemetry.budget_state,
+          budget_source: routingTelemetry.budget_source,
+        });
         break;
       }
       case 'claim-worker': {
@@ -646,6 +1293,7 @@ function handleCommand(cmd, conn, handlers) {
       case 'integrate': {
         // Master-3 triggers integration when all tasks for a request complete
         const reqId = args.request_id;
+        const forceRetry = args.retry_terminal === true || args.force_retry === true;
         const completion = db.checkRequestCompletion(reqId);
         if (!completion.all_done) {
           respond(conn, { ok: false, error: 'Not all tasks completed', ...completion });
@@ -653,19 +1301,44 @@ function handleCommand(cmd, conn, handlers) {
         }
         // Queue merges for each completed task's branch/PR
         const tasks = db.listTasks({ request_id: reqId, status: 'completed' });
+        const latestCompletedTaskState = getSafeLatestCompletedTaskCursor(reqId);
         let queued = 0;
         for (const task of tasks) {
-          if (isMergeablePrUrl(task.pr_url) && task.branch) {
+          const worker = task.assigned_to ? db.getWorker(task.assigned_to) : null;
+          const normalizedPrUrl = normalizePrUrl(task.pr_url);
+          const resolvedBranch = resolveCompletionBranch(worker, task.branch, task.assigned_to);
+          if (task.pr_url !== normalizedPrUrl) {
+            db.updateTask(task.id, { pr_url: normalizedPrUrl || task.pr_url });
+          }
+          const mergeBranch = sanitizeBranchName(resolvedBranch.branch || task.branch || (worker && worker.branch) || '');
+          if (isValidGitHubPrUrl(normalizedPrUrl) && mergeBranch) {
+            if (resolvedBranch.mismatch || task.branch !== mergeBranch) {
+              db.updateTask(task.id, { branch: mergeBranch });
+            }
             try {
-              const enqueueResult = db.enqueueMerge({
+              const queueResult = queueMergeWithRecovery({
                 request_id: reqId,
                 task_id: task.id,
-                branch: task.branch,
-                pr_url: task.pr_url,
+                branch: mergeBranch,
+                pr_url: normalizedPrUrl,
+                priority: task.priority === 'urgent' ? 10 : 0,
+                force_retry: forceRetry,
+                latest_completion_timestamp: latestCompletedTaskState,
               });
-              if (enqueueResult.inserted) queued++;
+              if (queueResult.queued) queued++;
+              if (queueResult.refreshed) {
+                db.log('coordinator', 'merge_queue_entry_refreshed', {
+                  request_id: reqId,
+                  task_id: task.id,
+                  pr_url: normalizedPrUrl,
+                  branch: mergeBranch,
+                  retried: queueResult.retried,
+                  previous_status: queueResult.previous_status || null,
+                  merge_id: queueResult.merge_id || null,
+                });
+              }
             } catch (e) {
-              // Already queued or other error — skip
+              // Invalid merge metadata or transient DB error — skip this task entry
             }
           }
         }
@@ -688,12 +1361,67 @@ function handleCommand(cmd, conn, handlers) {
         break;
       }
       case 'repair': {
-        // Reset stuck states
+        // Reset stuck states using the freshest lifecycle timestamp so newly assigned workers
+        // are not treated as stale when they still carry an older heartbeat value.
         const cutoff = new Date(Date.now() - 3 * 60 * 1000).toISOString();
-        const stuck = db.getDb().prepare("UPDATE workers SET status = 'idle', current_task_id = NULL WHERE status IN ('assigned','running','busy') AND last_heartbeat < ?").run(cutoff);
-        const orphaned = db.getDb().prepare("UPDATE tasks SET status = 'ready', assigned_to = NULL WHERE status IN ('assigned','in_progress') AND assigned_to IN (SELECT id FROM workers WHERE status = 'idle')").run();
-        db.log('coordinator', 'repair', { reset_workers: stuck.changes, orphaned_tasks: orphaned.changes });
-        respond(conn, { ok: true, reset_workers: stuck.changes, orphaned_tasks: orphaned.changes });
+        const dbConn = db.getDb();
+        const staleWorkers = dbConn.prepare(`
+          SELECT id
+          FROM workers
+          WHERE status IN ('assigned', 'running', 'busy')
+            AND datetime(
+              CASE
+                WHEN last_heartbeat IS NULL AND launched_at IS NULL THEN created_at
+                WHEN last_heartbeat IS NULL THEN launched_at
+                WHEN launched_at IS NULL THEN last_heartbeat
+                WHEN datetime(last_heartbeat) >= datetime(launched_at) THEN last_heartbeat
+                ELSE launched_at
+              END
+            ) < datetime(?)
+        `).all(cutoff);
+
+        let stuck = { changes: 0 };
+        let orphaned = { changes: 0 };
+
+        if (staleWorkers.length > 0) {
+          const staleIds = staleWorkers.map((row) => row.id);
+          const placeholders = staleIds.map(() => '?').join(', ');
+          const updateTasks = dbConn.prepare(`
+            UPDATE tasks
+            SET status = 'ready',
+                assigned_to = NULL
+            WHERE status IN ('assigned', 'in_progress')
+              AND assigned_to IN (${placeholders})
+          `);
+          const updateWorkers = dbConn.prepare(`
+            UPDATE workers
+            SET status = 'idle',
+                current_task_id = NULL,
+                claimed_by = NULL
+            WHERE id IN (${placeholders})
+          `);
+          const tx = dbConn.transaction((ids) => {
+            const orphanedResult = updateTasks.run(...ids);
+            const stuckResult = updateWorkers.run(...ids);
+            return { stuckResult, orphanedResult };
+          });
+          const txResult = tx(staleIds);
+          stuck = txResult.stuckResult;
+          orphaned = txResult.orphanedResult;
+        }
+
+        const supersessionBackfill = backfillSupersededLoopRequestsSafe();
+        db.log('coordinator', 'repair', {
+          reset_workers: stuck.changes,
+          orphaned_tasks: orphaned.changes,
+          supersession_backfill: supersessionBackfill,
+        });
+        respond(conn, {
+          ok: true,
+          reset_workers: stuck.changes,
+          orphaned_tasks: orphaned.changes,
+          supersession_backfill: supersessionBackfill,
+        });
         break;
       }
       case 'ping': {
@@ -731,8 +1459,28 @@ function handleCommand(cmd, conn, handlers) {
             if (configuredPrimary) return configuredPrimary;
 
             try {
-              return execFileSync('git', ['symbolic-ref', '--short', 'HEAD'], { cwd: projDir, encoding: 'utf8' }).trim();
-            } catch { return 'main'; }
+              const remoteHead = execFileSync(
+                'git',
+                ['symbolic-ref', '--short', 'refs/remotes/origin/HEAD'],
+                { cwd: projDir, encoding: 'utf8' },
+              ).trim();
+              if (remoteHead.startsWith('origin/')) {
+                return remoteHead.slice('origin/'.length);
+              }
+            } catch {}
+
+            try {
+              const abbrevRemoteHead = execFileSync(
+                'git',
+                ['rev-parse', '--abbrev-ref', 'origin/HEAD'],
+                { cwd: projDir, encoding: 'utf8' },
+              ).trim();
+              if (abbrevRemoteHead.startsWith('origin/')) {
+                return abbrevRemoteHead.slice('origin/'.length);
+              }
+            } catch {}
+
+            return 'main';
           })();
           try {
             execFileSync('git', ['branch', branchName, mainBranch], { cwd: projDir, encoding: 'utf8' });
@@ -817,13 +1565,47 @@ function handleCommand(cmd, conn, handlers) {
       }
 
       case 'reset-worker': {
-        // Called by sentinel when Claude exits — resets worker to idle
-        const resetWid = args.worker_id;
+        // Called by sentinel when Claude exits — ownership checks prevent stale
+        // sentinels from clearing a newer assignment.
+        const { worker_id: resetWid, expected_task_id: expectedTaskId, expected_assignment_token: expectedToken } = parseResetOwnership(args);
+        if (!resetWid) {
+          respond(conn, { ok: false, error: 'Missing worker_id' });
+          break;
+        }
         const resetWorker = db.getWorker(resetWid);
         if (!resetWorker) {
           respond(conn, { ok: false, error: 'Worker not found' });
           break;
         }
+
+        if (
+          expectedTaskId !== null &&
+          resetWorker.current_task_id !== null &&
+          resetWorker.current_task_id !== expectedTaskId
+        ) {
+          db.log(`worker-${resetWid}`, 'sentinel_reset_skipped', {
+            reason: 'task_mismatch',
+            expected_task_id: expectedTaskId,
+            current_task_id: resetWorker.current_task_id,
+          });
+          respond(conn, { ok: true, skipped: true, reason: 'task_mismatch' });
+          break;
+        }
+
+        if (
+          expectedToken &&
+          resetWorker.launched_at &&
+          resetWorker.launched_at !== expectedToken
+        ) {
+          db.log(`worker-${resetWid}`, 'sentinel_reset_skipped', {
+            reason: 'assignment_mismatch',
+            expected_assignment_token: expectedToken,
+            current_assignment_token: resetWorker.launched_at,
+          });
+          respond(conn, { ok: true, skipped: true, reason: 'assignment_mismatch' });
+          break;
+        }
+
         // Only reset if worker isn't already idle (avoid clobbering a fresh assignment)
         if (resetWorker.status !== 'idle') {
           db.updateWorker(resetWid, {
@@ -831,7 +1613,11 @@ function handleCommand(cmd, conn, handlers) {
             current_task_id: null,
             last_heartbeat: new Date().toISOString(),
           });
-          db.log(`worker-${resetWid}`, 'sentinel_reset', { previous_status: resetWorker.status });
+          db.log(`worker-${resetWid}`, 'sentinel_reset', {
+            previous_status: resetWorker.status,
+            expected_task_id: expectedTaskId,
+            expected_assignment_token: expectedToken,
+          });
         }
         respond(conn, { ok: true });
         break;
@@ -882,8 +1668,13 @@ function handleCommand(cmd, conn, handlers) {
 
       // === LOOP commands ===
       case 'loop': {
-        const loopId = db.createLoop(args.prompt);
-        if (handlers.onLoopCreated) handlers.onLoopCreated(loopId, args.prompt);
+        const prompt = args.prompt;
+        if (prompt.trim().length === 0) {
+          respond(conn, { ok: false, error: 'prompt must be a non-empty string' });
+          break;
+        }
+        const loopId = db.createLoop(prompt);
+        if (handlers.onLoopCreated) handlers.onLoopCreated(loopId, prompt);
         respond(conn, { ok: true, loop_id: loopId });
         break;
       }
@@ -938,14 +1729,63 @@ function handleCommand(cmd, conn, handlers) {
           'watchdog_warn_sec', 'watchdog_nudge_sec', 'watchdog_triage_sec', 'watchdog_terminate_sec',
           'watchdog_interval_ms', 'allocator_interval_ms', 'max_workers',
           'primary_branch',
+          'model_flagship', 'model_spark', 'model_mini',
+          'model_flagship', 'model_codex_spark', 'model_spark', 'model_mini',
+          'model_xhigh', 'model_high', 'model_mid',
+          'reasoning_xhigh', 'reasoning_high', 'reasoning_mid', 'reasoning_spark', 'reasoning_mini',
+          ROUTING_BUDGET_STATE_KEY,
+          ROUTING_BUDGET_REMAINING_KEY,
+          ROUTING_BUDGET_THRESHOLD_KEY,
         ];
         if (!ALLOWED_KEYS.includes(key)) {
           respond(conn, { error: `Key '${key}' is not configurable. Allowed: ${ALLOWED_KEYS.join(', ')}` });
           break;
         }
-        db.getDb().prepare("INSERT INTO config(key, value) VALUES(?,?) ON CONFLICT(key) DO UPDATE SET value=excluded.value").run(key, value);
-        db.log('coordinator', 'config_set', { key, value });
-        respond(conn, { ok: true, key, value });
+        const dbConn = db.getDb();
+        const upsertConfig = dbConn.prepare('INSERT INTO config(key, value) VALUES(?,?) ON CONFLICT(key) DO UPDATE SET value=excluded.value');
+        let storedValue = String(value);
+        if (key === 'max_workers') {
+          storedValue = String(clampWorkerLimit(value));
+          upsertConfig.run('max_workers', storedValue);
+          upsertConfig.run('num_workers', storedValue);
+        } else {
+          if (key === ROUTING_BUDGET_STATE_KEY) {
+            const parsedState = parseBudgetStateConfig(value);
+            if (parsedState.parsed) {
+              storedValue = JSON.stringify(parsedState.parsed);
+            }
+          }
+          upsertConfig.run(key, storedValue);
+        }
+
+        if (key === ROUTING_BUDGET_STATE_KEY) {
+          const parsedState = parseBudgetStateConfig(storedValue);
+          if (parsedState.remaining !== null) {
+            db.setConfig(ROUTING_BUDGET_REMAINING_KEY, String(parsedState.remaining));
+            db.setConfig(LEGACY_BUDGET_REMAINING_KEY, String(parsedState.remaining));
+          }
+          if (parsedState.threshold !== null) {
+            db.setConfig(ROUTING_BUDGET_THRESHOLD_KEY, String(parsedState.threshold));
+            db.setConfig(LEGACY_BUDGET_THRESHOLD_KEY, String(parsedState.threshold));
+          }
+        } else if (key === ROUTING_BUDGET_REMAINING_KEY) {
+          const parsedValue = parseBudgetNumber(value);
+          if (parsedValue !== null) {
+            const updated = mergeBudgetState(db.getConfig(ROUTING_BUDGET_STATE_KEY), { remaining: parsedValue });
+            db.setConfig(ROUTING_BUDGET_STATE_KEY, JSON.stringify(updated));
+            db.setConfig(LEGACY_BUDGET_REMAINING_KEY, String(parsedValue));
+          }
+        } else if (key === ROUTING_BUDGET_THRESHOLD_KEY) {
+          const parsedValue = parseBudgetNumber(value);
+          if (parsedValue !== null) {
+            const updated = mergeBudgetState(db.getConfig(ROUTING_BUDGET_STATE_KEY), { threshold: parsedValue });
+            db.setConfig(ROUTING_BUDGET_STATE_KEY, JSON.stringify(updated));
+            db.setConfig(LEGACY_BUDGET_THRESHOLD_KEY, String(parsedValue));
+          }
+        }
+
+        db.log('coordinator', 'config_set', { key, value: storedValue });
+        respond(conn, { ok: true, key, value: storedValue });
         break;
       }
       case 'loop-prompt': {
@@ -976,7 +1816,12 @@ function handleCommand(cmd, conn, handlers) {
         }
         const lrResult = db.createLoopRequest(args.description, args.loop_id);
         if (!lrResult.deduplicated) bridgeToHandoff(lrResult.id, args.description);
-        respond(conn, { ok: true, request_id: lrResult.id, deduplicated: lrResult.deduplicated });
+        respond(conn, {
+          ok: true,
+          request_id: lrResult.id,
+          deduplicated: lrResult.deduplicated,
+          superseded_target: lrResult.superseded_target || null,
+        });
         break;
       }
       case 'loop-requests': {
