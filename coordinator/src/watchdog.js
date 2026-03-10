@@ -399,10 +399,30 @@ function recoverStaleIntegrations(now, options = {}) {
         });
         if (mergeAge === null) continue;
         if (mergeAge > MERGE_TIMEOUT_SEC) {
+          const sourceTask = m.task_id ? db.getTask(m.task_id) : null;
+          const timeoutError = `Merge timeout promoted to conflict: ${m.branch || 'unknown-branch'} - ${MERGE_TIMEOUT_ERROR}`;
           db.updateMerge(m.id, { status: 'conflict', error: MERGE_TIMEOUT_ERROR });
           db.sendMail('allocator', 'merge_failed', {
             request_id: req.id,
-            error: `Merge timeout promoted to conflict: ${m.branch || 'unknown-branch'} - ${MERGE_TIMEOUT_ERROR}`,
+            merge_id: m.id,
+            task_id: m.task_id,
+            branch: m.branch,
+            pr_url: m.pr_url,
+            status: 'conflict',
+            reason: 'merge_timeout_promoted',
+            subject: sourceTask ? sourceTask.subject : null,
+            domain: sourceTask ? sourceTask.domain : null,
+            files: sourceTask ? sourceTask.files : null,
+            tier: sourceTask ? sourceTask.tier : null,
+            assigned_to: sourceTask ? sourceTask.assigned_to : null,
+            original_task: sourceTask ? {
+              subject: sourceTask.subject,
+              domain: sourceTask.domain,
+              files: sourceTask.files,
+              tier: sourceTask.tier,
+              assigned_to: sourceTask.assigned_to,
+            } : null,
+            error: timeoutError,
           });
           db.log('coordinator', 'merge_timeout', {
             merge_id: m.id,
