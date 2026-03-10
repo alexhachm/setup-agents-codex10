@@ -1729,7 +1729,6 @@ function handleCommand(cmd, conn, handlers) {
           'watchdog_warn_sec', 'watchdog_nudge_sec', 'watchdog_triage_sec', 'watchdog_terminate_sec',
           'watchdog_interval_ms', 'allocator_interval_ms', 'max_workers',
           'primary_branch',
-          'model_flagship', 'model_spark', 'model_mini',
           'model_flagship', 'model_codex_spark', 'model_spark', 'model_mini',
           'model_xhigh', 'model_high', 'model_mid',
           'reasoning_xhigh', 'reasoning_high', 'reasoning_mid', 'reasoning_spark', 'reasoning_mini',
