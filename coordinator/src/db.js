@@ -9,6 +9,8 @@ let db = null;
 const NAMESPACE = process.env.MAC10_NAMESPACE || 'mac10';
 const SQLITE_TIMESTAMP_RE = /^(\d{4}-\d{2}-\d{2}) (\d{2}:\d{2}:\d{2})(\.\d+)?$/;
 const ISO_TIMESTAMP_WITHOUT_ZONE_RE = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d+)?$/;
+const PLACEHOLDER_REQUEST_DESCRIPTION = '[clear description of what the user wants]';
+const FIX_PLACEHOLDER_RE = /^fix worker-(?:n|\d+): \[brief description of what needs fixing\]$/i;
 
 function parseCoordinatorTimestamp(value) {
   if (value === null || value === undefined) return null;
@@ -41,6 +43,28 @@ function parseCoordinatorTimestamp(value) {
 
   const date = new Date(raw);
   return Number.isNaN(date.getTime()) ? null : date;
+}
+
+function normalizeScaffoldText(value) {
+  if (value === null || value === undefined) return '';
+  return String(value).trim().replace(/\s+/g, ' ').toLowerCase();
+}
+
+function isFixPlaceholderText(value) {
+  const normalized = normalizeScaffoldText(value);
+  if (!normalized) return false;
+  if (FIX_PLACEHOLDER_RE.test(normalized)) return true;
+  if (normalized.startsWith('fix: ')) {
+    return FIX_PLACEHOLDER_RE.test(normalized.slice(5).trim());
+  }
+  return false;
+}
+
+function isKnownScaffoldPlaceholder(value) {
+  const normalized = normalizeScaffoldText(value);
+  if (!normalized) return false;
+  if (normalized === PLACEHOLDER_REQUEST_DESCRIPTION) return true;
+  return isFixPlaceholderText(normalized);
 }
 
 function coordinatorAgeMs(timestamp, nowMs = Date.now()) {
@@ -278,6 +302,7 @@ function getReadyTasks() {
 
 function checkAndPromoteTasks() {
   const d = getDb();
+  remediateMalformedScaffoldArtifacts();
   // Batch promote pending tasks with no dependencies in a single SQL statement
   d.prepare(`
     UPDATE tasks SET status = 'ready', updated_at = datetime('now')
@@ -367,6 +392,112 @@ function checkRequestCompletion(requestId) {
     completed: row.completed,
     failed: row.failed,
     all_done: row.completed + row.failed >= row.total && row.total > 0,
+  };
+}
+
+function remediateMalformedScaffoldArtifacts(nowIso = new Date().toISOString()) {
+  const d = getDb();
+  const malformedRequestReason = 'Terminalized malformed scaffold placeholder request';
+  const malformedTaskReason = 'Terminalized malformed scaffold placeholder task';
+
+  const requestRows = d.prepare('SELECT id, description, status FROM requests').all();
+  const malformedRequestIds = requestRows
+    .filter((row) => isKnownScaffoldPlaceholder(row.description))
+    .map((row) => row.id);
+  const malformedRequestSet = new Set(malformedRequestIds);
+
+  const taskRows = d.prepare('SELECT id, request_id, subject, description, status, assigned_to FROM tasks').all();
+  const malformedTaskRows = taskRows.filter((row) => {
+    if (malformedRequestSet.has(row.request_id)) return true;
+    return isKnownScaffoldPlaceholder(row.description) || isKnownScaffoldPlaceholder(row.subject);
+  });
+  const malformedTaskIds = malformedTaskRows.map((row) => row.id);
+
+  const assignedWorkerIds = new Set();
+  for (const task of malformedTaskRows) {
+    if (task.assigned_to !== null && task.assigned_to !== undefined) {
+      assignedWorkerIds.add(Number(task.assigned_to));
+    }
+  }
+  if (malformedTaskIds.length > 0) {
+    const placeholders = malformedTaskIds.map(() => '?').join(', ');
+    const workerRows = d.prepare(`
+      SELECT id
+      FROM workers
+      WHERE current_task_id IN (${placeholders})
+    `).all(...malformedTaskIds);
+    for (const worker of workerRows) {
+      assignedWorkerIds.add(Number(worker.id));
+    }
+  }
+  const malformedWorkerIds = [...assignedWorkerIds].filter((id) => Number.isInteger(id));
+
+  let terminalizedRequests = 0;
+  let terminalizedTasks = 0;
+  let clearedTaskAssignments = 0;
+  let resetWorkers = 0;
+
+  const txn = d.transaction(() => {
+    if (malformedRequestIds.length > 0) {
+      const placeholders = malformedRequestIds.map(() => '?').join(', ');
+      terminalizedRequests = d.prepare(`
+        UPDATE requests
+        SET status = 'failed',
+            result = COALESCE(result, ?),
+            completed_at = COALESCE(completed_at, ?),
+            updated_at = datetime('now')
+        WHERE id IN (${placeholders})
+          AND status NOT IN ('completed', 'failed')
+      `).run(malformedRequestReason, nowIso, ...malformedRequestIds).changes;
+    }
+
+    if (malformedTaskIds.length > 0) {
+      const placeholders = malformedTaskIds.map(() => '?').join(', ');
+      terminalizedTasks = d.prepare(`
+        UPDATE tasks
+        SET status = 'failed',
+            result = COALESCE(result, ?),
+            completed_at = COALESCE(completed_at, ?),
+            updated_at = datetime('now')
+        WHERE id IN (${placeholders})
+          AND status NOT IN ('completed', 'failed')
+      `).run(malformedTaskReason, nowIso, ...malformedTaskIds).changes;
+
+      clearedTaskAssignments = d.prepare(`
+        UPDATE tasks
+        SET assigned_to = NULL,
+            updated_at = datetime('now')
+        WHERE id IN (${placeholders})
+          AND assigned_to IS NOT NULL
+      `).run(...malformedTaskIds).changes;
+    }
+
+    if (malformedWorkerIds.length > 0) {
+      const placeholders = malformedWorkerIds.map(() => '?').join(', ');
+      resetWorkers = d.prepare(`
+        UPDATE workers
+        SET status = 'idle',
+            current_task_id = NULL,
+            claimed_by = NULL
+        WHERE id IN (${placeholders})
+          AND (status != 'idle' OR current_task_id IS NOT NULL OR claimed_by IS NOT NULL)
+      `).run(...malformedWorkerIds).changes;
+    }
+  });
+  txn();
+
+  return {
+    inspected_requests: requestRows.length,
+    inspected_tasks: taskRows.length,
+    matched_requests: malformedRequestIds.length,
+    matched_tasks: malformedTaskIds.length,
+    terminalized_requests: terminalizedRequests,
+    terminalized_tasks: terminalizedTasks,
+    cleared_task_assignments: clearedTaskAssignments,
+    reset_workers: resetWorkers,
+    request_ids: malformedRequestIds,
+    task_ids: malformedTaskIds,
+    worker_ids: malformedWorkerIds,
   };
 }
 
@@ -763,6 +894,7 @@ module.exports = {
   init, close, getDb,
   coordinatorAgeMs,
   createRequest, getRequest, updateRequest, listRequests,
+  remediateMalformedScaffoldArtifacts,
   createTask, getTask, updateTask, listTasks, getReadyTasks, checkAndPromoteTasks,
   registerWorker, getWorker, updateWorker, getIdleWorkers, getAllWorkers, claimWorker, releaseWorker,
   checkRequestCompletion, getRequestLatestCompletedTaskCursor, hasRequestCompletedTaskProgressSince,

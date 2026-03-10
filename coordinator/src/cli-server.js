@@ -316,6 +316,25 @@ function backfillSupersededLoopRequestsSafe() {
   return db.backfillSupersededLoopRequests();
 }
 
+function remediateMalformedScaffoldArtifactsSafe() {
+  if (typeof db.remediateMalformedScaffoldArtifacts !== 'function') {
+    return {
+      inspected_requests: 0,
+      inspected_tasks: 0,
+      matched_requests: 0,
+      matched_tasks: 0,
+      terminalized_requests: 0,
+      terminalized_tasks: 0,
+      cleared_task_assignments: 0,
+      reset_workers: 0,
+      request_ids: [],
+      task_ids: [],
+      worker_ids: [],
+    };
+  }
+  return db.remediateMalformedScaffoldArtifacts();
+}
+
 const SAFE_TASK_DOMAIN_RE = /^[A-Za-z0-9_-]+$/;
 
 function normalizeTaskDomain(domain) {
@@ -1371,11 +1390,13 @@ function handleCommand(cmd, conn, handlers) {
 
       // === ALLOCATOR commands ===
       case 'ready-tasks': {
+        const scaffoldRemediation = remediateMalformedScaffoldArtifactsSafe();
         const tasks = db.getReadyTasks();
-        respond(conn, { ok: true, tasks });
+        respond(conn, { ok: true, tasks, scaffold_remediation: scaffoldRemediation });
         break;
       }
       case 'assign-task': {
+        const scaffoldRemediation = remediateMalformedScaffoldArtifactsSafe();
         const { task_id: assignTaskId, worker_id: assignWorkerId } = args;
         // Atomic assignment: same pattern as allocator.js assignTaskToWorker
         const assignResult = db.getDb().transaction(() => {
@@ -1396,7 +1417,7 @@ function handleCommand(cmd, conn, handlers) {
         })();
 
         if (!assignResult.ok) {
-          respond(conn, { ok: false, error: assignResult.reason });
+          respond(conn, { ok: false, error: assignResult.reason, scaffold_remediation: scaffoldRemediation });
           break;
         }
 
@@ -1472,6 +1493,7 @@ function handleCommand(cmd, conn, handlers) {
           ok: true,
           task_id: assignTaskId,
           worker_id: assignWorkerId,
+          scaffold_remediation: scaffoldRemediation,
           routing: {
             class: routingDecision.routing_class,
             model: routingDecision.model,
@@ -1637,16 +1659,19 @@ function handleCommand(cmd, conn, handlers) {
         }
 
         const supersessionBackfill = backfillSupersededLoopRequestsSafe();
+        const scaffoldRemediation = remediateMalformedScaffoldArtifactsSafe();
         db.log('coordinator', 'repair', {
           reset_workers: stuck.changes,
           orphaned_tasks: orphaned.changes,
           supersession_backfill: supersessionBackfill,
+          scaffold_remediation: scaffoldRemediation,
         });
         respond(conn, {
           ok: true,
           reset_workers: stuck.changes,
           orphaned_tasks: orphaned.changes,
           supersession_backfill: supersessionBackfill,
+          scaffold_remediation: scaffoldRemediation,
         });
         break;
       }
