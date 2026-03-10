@@ -83,7 +83,7 @@ const LEGACY_MAX_WORKERS_DEFAULT = 8;
 const BRANCH_RE = /^[a-zA-Z0-9._\/-]+$/;
 const PR_URL_RE = /^https:\/\/github\.com\/[a-zA-Z0-9._-]+\/[a-zA-Z0-9._-]+\/pull\/\d+$/;
 const PR_NUMBER_RE = /^#?(\d+)$/;
-const PR_REFERENCE_RE = /(?:^|[\s-])(pull request|pull|pr)\s*#?(\d+)$/i;
+const PR_REFERENCE_RE = /^(pull request|pull|pr)\s*#?(\d+)$/i;
 const WORKER_BRANCH_RE = /^agent-\d+$/;
 const ROUTING_BUDGET_STATE_KEY = 'routing_budget_state';
 const ROUTING_BUDGET_REMAINING_KEY = 'routing_budget_flagship_remaining';
@@ -439,17 +439,24 @@ function getProjectGitHubRepoPath(cwd = _projectDir || process.cwd()) {
   }
 }
 
+function extractPrNumber(rawPrUrl) {
+  if (typeof rawPrUrl !== 'string') return '';
+  const trimmed = rawPrUrl.trim();
+  if (!trimmed) return '';
+  const match = trimmed.match(PR_NUMBER_RE);
+  if (match) return match[1];
+  const refMatch = trimmed.match(PR_REFERENCE_RE);
+  if (refMatch) return refMatch[2];
+  return '';
+}
+
 function normalizePrUrl(rawPrUrl, cwd = _projectDir || process.cwd()) {
   if (typeof rawPrUrl !== 'string') return '';
   const trimmed = rawPrUrl.trim();
   if (!trimmed) return '';
   if (PR_URL_RE.test(trimmed)) return trimmed;
 
-  const match = trimmed.match(PR_NUMBER_RE);
-  const refMatch = match ? null : trimmed.match(PR_REFERENCE_RE);
-  const normalizedMatch = match
-    ? match[1]
-    : (refMatch ? refMatch[2] : null);
+  const normalizedMatch = extractPrNumber(trimmed);
   if (!normalizedMatch) return trimmed;
 
   const repoPath = getProjectGitHubRepoPath(cwd);
@@ -476,6 +483,50 @@ function isResolvableGitHubPrUrl(prUrl, cwd = _projectDir || process.cwd()) {
     if (PR_RESOLVE_ERROR_RE.test(errorText)) return false;
     return true;
   }
+}
+
+function findOpenPrUrlForBranch(rawBranch, cwd = _projectDir || process.cwd()) {
+  const branch = sanitizeBranchName(rawBranch);
+  if (!branch) return '';
+  try {
+    const prUrl = execFileSync('gh', ['pr', 'list', '--state', 'open', '--head', branch, '--json', 'url', '--jq', '.[0].url'], {
+      encoding: 'utf8',
+      cwd,
+      stdio: ['ignore', 'pipe', 'pipe'],
+      timeout: 12000,
+    }).trim();
+    if (!isValidGitHubPrUrl(prUrl)) return '';
+    return prUrl;
+  } catch {
+    return '';
+  }
+}
+
+function resolveQueuePrTarget(prUrl, branch, cwd = _projectDir || process.cwd()) {
+  const normalizedPrUrl = normalizePrUrl(prUrl, cwd);
+  if (isValidGitHubPrUrl(normalizedPrUrl) && isResolvableGitHubPrUrl(normalizedPrUrl, cwd)) {
+    const original = typeof prUrl === 'string' ? prUrl.trim() : '';
+    return {
+      pr_url: normalizedPrUrl,
+      source: normalizedPrUrl === original ? 'provided' : 'normalized',
+      resolvable: true,
+    };
+  }
+
+  const branchPrUrl = findOpenPrUrlForBranch(branch, cwd);
+  if (branchPrUrl) {
+    return {
+      pr_url: branchPrUrl,
+      source: 'branch_fallback',
+      resolvable: true,
+    };
+  }
+
+  return {
+    pr_url: normalizedPrUrl,
+    source: 'unresolved',
+    resolvable: false,
+  };
 }
 
 function parseWorkerId(rawWorkerId) {
@@ -571,10 +622,22 @@ function queueMergeWithRecovery({
   latest_completion_timestamp = undefined,
 }) {
   const normalizedPriority = Number.isInteger(priority) ? priority : 0;
-  const resolvedPrUrl = normalizePrUrl(pr_url, _projectDir || process.cwd());
   const queueCwd = _projectDir || process.cwd();
+  const resolvedPr = resolveQueuePrTarget(pr_url, branch, queueCwd);
+  const resolvedPrUrl = resolvedPr.pr_url;
 
-  if (!isValidGitHubPrUrl(resolvedPrUrl) || !isResolvableGitHubPrUrl(resolvedPrUrl, queueCwd)) {
+  if (resolvedPr.source === 'branch_fallback' && isValidGitHubPrUrl(resolvedPrUrl)) {
+    db.updateTask(task_id, { pr_url: resolvedPrUrl });
+    db.log('coordinator', 'merge_queue_pr_url_recovered_from_branch', {
+      request_id,
+      task_id,
+      branch,
+      original_pr_url: typeof pr_url === 'string' ? pr_url : null,
+      resolved_pr_url: resolvedPrUrl,
+    });
+  }
+
+  if (!resolvedPr.resolvable) {
     const staleEntries = db.getDb().prepare(`
       SELECT id, status
       FROM merge_queue
@@ -587,7 +650,15 @@ function queueMergeWithRecovery({
         db.updateMerge(entry.id, { status: 'failed', error: 'invalid_or_missing_pr' });
       }
     }
-    return { queued: false, inserted: false, refreshed: false, retried: false, reason: 'invalid_or_missing_pr' };
+    return {
+      queued: false,
+      inserted: false,
+      refreshed: false,
+      retried: false,
+      reason: 'invalid_or_missing_pr',
+      resolved_pr_url: isValidGitHubPrUrl(resolvedPrUrl) ? resolvedPrUrl : null,
+      pr_resolution_source: resolvedPr.source,
+    };
   }
 
   db.getDb().prepare(`
@@ -630,7 +701,7 @@ function queueMergeWithRecovery({
       db.log('coordinator', 'merge_queue_duplicate_pr_ownership_preserved', {
         request_id,
         task_id,
-        pr_url,
+        pr_url: resolvedPrUrl,
         branch,
         new_merge_id: enqueueResult.lastInsertRowid,
         existing_merge_id: existingDuplicatePrOwner.id,
@@ -640,7 +711,14 @@ function queueMergeWithRecovery({
         existing_status: existingDuplicatePrOwner.status,
       });
     }
-    return { queued: true, inserted: true, refreshed: false, retried: false };
+    return {
+      queued: true,
+      inserted: true,
+      refreshed: false,
+      retried: false,
+      resolved_pr_url: resolvedPrUrl,
+      pr_resolution_source: resolvedPr.source,
+    };
   }
 
   const existing = db.getDb().prepare(`
@@ -671,12 +749,30 @@ function queueMergeWithRecovery({
         existing_request_id: existingByPr.request_id,
         existing_task_id: existingByPr.task_id,
         existing_branch: existingByPr.branch,
+        resolved_pr_url: resolvedPrUrl,
+        pr_resolution_source: resolvedPr.source,
       };
     }
-    return { queued: false, inserted: false, refreshed: false, retried: false, reason: 'missing_existing_entry' };
+    return {
+      queued: false,
+      inserted: false,
+      refreshed: false,
+      retried: false,
+      reason: 'missing_existing_entry',
+      resolved_pr_url: resolvedPrUrl,
+      pr_resolution_source: resolvedPr.source,
+    };
   }
   if (existing.status === 'merged' || existing.status === 'merging') {
-    return { queued: false, inserted: false, refreshed: false, retried: false, reason: `status_${existing.status}` };
+    return {
+      queued: false,
+      inserted: false,
+      refreshed: false,
+      retried: false,
+      reason: `status_${existing.status}`,
+      resolved_pr_url: resolvedPrUrl,
+      pr_resolution_source: resolvedPr.source,
+    };
   }
   if (String(existing.request_id) !== String(request_id) || Number(existing.task_id) !== Number(task_id)) {
     return {
@@ -689,6 +785,8 @@ function queueMergeWithRecovery({
       existing_request_id: existing.request_id,
       existing_task_id: existing.task_id,
       existing_branch: existing.branch,
+      resolved_pr_url: resolvedPrUrl,
+      pr_resolution_source: resolvedPr.source,
     };
   }
 
@@ -712,9 +810,25 @@ function queueMergeWithRecovery({
 
   if (!needsRefresh) {
     if (isTerminalRetryStatus && !shouldRetry) {
-      return { queued: false, inserted: false, refreshed: false, retried: false, reason: 'terminal_without_fresh_progress' };
+      return {
+        queued: false,
+        inserted: false,
+        refreshed: false,
+        retried: false,
+        reason: 'terminal_without_fresh_progress',
+        resolved_pr_url: resolvedPrUrl,
+        pr_resolution_source: resolvedPr.source,
+      };
     }
-    return { queued: false, inserted: false, refreshed: false, retried: false, reason: 'already_current' };
+    return {
+      queued: false,
+      inserted: false,
+      refreshed: false,
+      retried: false,
+      reason: 'already_current',
+      resolved_pr_url: resolvedPrUrl,
+      pr_resolution_source: resolvedPr.source,
+    };
   }
 
   db.getDb().prepare(`
@@ -744,6 +858,8 @@ function queueMergeWithRecovery({
     retried: shouldRetry,
     previous_status: existing.status,
     merge_id: existing.id,
+    resolved_pr_url: resolvedPrUrl,
+    pr_resolution_source: resolvedPr.source,
   };
 }
 
@@ -1113,7 +1229,8 @@ function handleCommand(cmd, conn, handlers) {
         const completedTask = db.getTask(task_id);
         // Enqueue merge if PR exists (must be a valid URL, not a status string like "already_merged")
         const queueBranch = sanitizeBranchName(resolvedBranch.branch || completedTask.branch || (worker && worker.branch) || '');
-        if (isValidGitHubPrUrl(normalizedPrUrl) && completedTask && queueBranch) {
+        let completionPrUrl = normalizedPrUrl;
+        if (completedTask && queueBranch) {
           const queueResult = queueMergeWithRecovery({
             request_id: completedTask.request_id,
             task_id,
@@ -1121,11 +1238,15 @@ function handleCommand(cmd, conn, handlers) {
             branch: queueBranch,
             priority: completedTask.priority === 'urgent' ? 10 : 0,
           });
+          if (queueResult.resolved_pr_url && queueResult.resolved_pr_url !== completionPrUrl) {
+            completionPrUrl = queueResult.resolved_pr_url;
+            db.updateTask(task_id, { pr_url: completionPrUrl });
+          }
           if (queueResult.refreshed) {
             db.log('coordinator', 'merge_queue_entry_refreshed', {
               request_id: completedTask.request_id,
               task_id,
-              pr_url: normalizedPrUrl,
+              pr_url: queueResult.resolved_pr_url || completionPrUrl || normalizedPrUrl,
               branch: queueBranch,
               retried: queueResult.retried,
               previous_status: queueResult.previous_status || null,
@@ -1133,30 +1254,30 @@ function handleCommand(cmd, conn, handlers) {
             });
           }
         }
-        if (normalizedPrUrl && normalizedPrUrl !== (pr_url || '')) {
+        if (completionPrUrl && completionPrUrl !== (pr_url || '')) {
           db.log('coordinator', 'complete_task_pr_url_normalized', {
             task_id,
             worker_id,
             original_pr_url: pr_url,
-            normalized_pr_url: normalizedPrUrl,
+            normalized_pr_url: completionPrUrl,
           });
         }
         db.sendMail('allocator', 'task_completed', {
           worker_id, task_id,
           request_id: completedTask ? completedTask.request_id : null,
-          pr_url: normalizedPrUrl,
+          pr_url: completionPrUrl,
           tasks_completed: tasksCompleted,
         });
         // Notify architect so it has visibility into Tier 2 outcomes
         db.sendMail('architect', 'task_completed', {
           worker_id, task_id,
           request_id: completedTask ? completedTask.request_id : null,
-          pr_url: normalizedPrUrl,
+          pr_url: completionPrUrl,
           result,
         });
         db.log(`worker-${worker_id}`, 'task_completed', {
           task_id,
-          pr_url: normalizedPrUrl,
+          pr_url: completionPrUrl,
           result,
           tasks_completed: tasksCompleted,
         });
@@ -1416,7 +1537,7 @@ function handleCommand(cmd, conn, handlers) {
             db.updateTask(task.id, { pr_url: normalizedPrUrl || task.pr_url });
           }
           const mergeBranch = sanitizeBranchName(resolvedBranch.branch || task.branch || (worker && worker.branch) || '');
-          if (isValidGitHubPrUrl(normalizedPrUrl) && mergeBranch) {
+          if (mergeBranch) {
             if (resolvedBranch.mismatch || task.branch !== mergeBranch) {
               db.updateTask(task.id, { branch: mergeBranch });
             }
@@ -1429,12 +1550,16 @@ function handleCommand(cmd, conn, handlers) {
               force_retry: forceRetry,
               latest_completion_timestamp: latestCompletedTaskState,
             });
+            const queuedPrUrl = queueResult.resolved_pr_url || normalizedPrUrl;
+            if (queuedPrUrl && queuedPrUrl !== task.pr_url) {
+              db.updateTask(task.id, { pr_url: queuedPrUrl });
+            }
             if (queueResult.queued) queued++;
             if (queueResult.refreshed) {
               db.log('coordinator', 'merge_queue_entry_refreshed', {
                 request_id: reqId,
                 task_id: task.id,
-                pr_url: normalizedPrUrl,
+                pr_url: queuedPrUrl,
                 branch: mergeBranch,
                 retried: queueResult.retried,
                 previous_status: queueResult.previous_status || null,
