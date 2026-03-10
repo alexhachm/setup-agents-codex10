@@ -578,43 +578,88 @@ function queueMergeWithRecovery({
     completion_checkpoint: latestCheckpoint,
   });
   if (enqueueResult.inserted) {
+    const existingDuplicatePrOwner = db.getDb().prepare(`
+      SELECT id, request_id, task_id, branch, status
+      FROM merge_queue
+      WHERE pr_url = ?
+        AND id != ?
+        AND (
+          request_id != ?
+          OR task_id != ?
+          OR branch != ?
+        )
+      ORDER BY id DESC
+      LIMIT 1
+    `).get(pr_url, enqueueResult.lastInsertRowid, request_id, task_id, branch);
+    if (existingDuplicatePrOwner) {
+      db.log('coordinator', 'merge_queue_duplicate_pr_ownership_preserved', {
+        request_id,
+        task_id,
+        pr_url,
+        branch,
+        new_merge_id: enqueueResult.lastInsertRowid,
+        existing_merge_id: existingDuplicatePrOwner.id,
+        existing_request_id: existingDuplicatePrOwner.request_id,
+        existing_task_id: existingDuplicatePrOwner.task_id,
+        existing_branch: existingDuplicatePrOwner.branch,
+        existing_status: existingDuplicatePrOwner.status,
+      });
+    }
     return { queued: true, inserted: true, refreshed: false, retried: false };
   }
 
-  let existing = db.getDb().prepare(`
+  const existing = db.getDb().prepare(`
     SELECT id, request_id, task_id, branch, status, priority, pr_url, updated_at, completion_checkpoint
     FROM merge_queue
-    WHERE pr_url = ?
+    WHERE request_id = ?
+      AND task_id = ?
     ORDER BY id DESC
     LIMIT 1
-  `).get(pr_url);
-  if (!existing) {
-    existing = db.getDb().prepare(`
-      SELECT id, request_id, task_id, branch, status, priority, pr_url, updated_at, completion_checkpoint
-      FROM merge_queue
-      WHERE request_id = ?
-        AND task_id = ?
-      ORDER BY id DESC
-      LIMIT 1
-    `).get(request_id, task_id);
-  }
-  const prUrlChanged = existing && existing.pr_url !== pr_url;
+  `).get(request_id, task_id);
 
   if (!existing) {
+    const existingByPr = db.getDb().prepare(`
+      SELECT id, request_id, task_id, branch, status
+      FROM merge_queue
+      WHERE pr_url = ?
+      ORDER BY id DESC
+      LIMIT 1
+    `).get(pr_url);
+    if (existingByPr) {
+      return {
+        queued: false,
+        inserted: false,
+        refreshed: false,
+        retried: false,
+        reason: 'existing_pr_owned_by_other_request',
+        merge_id: existingByPr.id,
+        existing_request_id: existingByPr.request_id,
+        existing_task_id: existingByPr.task_id,
+        existing_branch: existingByPr.branch,
+      };
+    }
     return { queued: false, inserted: false, refreshed: false, retried: false, reason: 'missing_existing_entry' };
   }
   if (existing.status === 'merged' || existing.status === 'merging') {
     return { queued: false, inserted: false, refreshed: false, retried: false, reason: `status_${existing.status}` };
   }
+  if (String(existing.request_id) !== String(request_id) || Number(existing.task_id) !== Number(task_id)) {
+    return {
+      queued: false,
+      inserted: false,
+      refreshed: false,
+      retried: false,
+      reason: 'ownership_mismatch',
+      merge_id: existing.id,
+      existing_request_id: existing.request_id,
+      existing_task_id: existing.task_id,
+      existing_branch: existing.branch,
+    };
+  }
 
   const currentPriority = Number.isInteger(existing.priority) ? existing.priority : 0;
   const desiredPriority = Math.max(currentPriority, normalizedPriority);
   const isTerminalRetryStatus = existing.status === 'failed' || existing.status === 'conflict';
-  const mergeIdentityChanged =
-    String(existing.request_id) !== String(request_id) ||
-    Number(existing.task_id) !== Number(task_id) ||
-    existing.branch !== branch ||
-    existing.pr_url !== pr_url;
   const hasFreshCompletionProgress = isTerminalRetryStatus && hasSafeCompletedTaskProgressSince(request_id, {
     before: existing.completion_checkpoint,
     after: latestCheckpoint,
@@ -622,7 +667,6 @@ function queueMergeWithRecovery({
   const shouldRetry = isTerminalRetryStatus && (force_retry || hasFreshCompletionProgress);
   const desiredStatus = shouldRetry ? 'pending' : existing.status;
   const needsRefresh =
-    mergeIdentityChanged ||
     currentPriority !== desiredPriority ||
     existing.status !== desiredStatus;
 
@@ -635,36 +679,19 @@ function queueMergeWithRecovery({
 
   db.getDb().prepare(`
     UPDATE merge_queue
-    SET request_id = ?,
-        task_id = ?,
-        branch = ?,
-        pr_url = ?,
-        priority = ?,
+    SET priority = ?,
         status = ?,
         error = CASE WHEN ? = 1 THEN NULL ELSE error END,
         completion_checkpoint = ?,
         updated_at = strftime('%Y-%m-%dT%H:%M:%fZ','now')
     WHERE id = ?
   `).run(
-    request_id,
-    task_id,
-    branch,
-    pr_url,
     desiredPriority,
     desiredStatus,
     shouldRetry ? 1 : 0,
     shouldRetry ? (latestCheckpoint || null) : existing.completion_checkpoint,
     existing.id
   );
-  if (prUrlChanged) {
-    db.getDb().prepare(`
-      DELETE FROM merge_queue
-      WHERE request_id = ?
-        AND task_id = ?
-        AND id != ?
-        AND status NOT IN ('merged', 'merging')
-    `).run(request_id, task_id, existing.id);
-  }
 
   return {
     queued: shouldRetry,
