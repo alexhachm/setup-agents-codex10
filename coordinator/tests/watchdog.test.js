@@ -7,7 +7,9 @@ const fs = require('fs');
 const os = require('os');
 
 const db = require('../src/db');
-const { THRESHOLDS } = require('../src/watchdog');
+const tmux = require('../src/tmux');
+const watchdog = require('../src/watchdog');
+const { THRESHOLDS } = watchdog;
 
 let tmpDir;
 
@@ -119,5 +121,71 @@ describe('Heartbeat staleness', () => {
     const worker = db.getWorker(1);
     const launchedAgo = (Date.now() - new Date(worker.launched_at).getTime()) / 1000;
     assert.ok(launchedAgo < THRESHOLDS.warn); // Should be skipped by watchdog
+  });
+});
+
+describe('Worker pane liveness checks', () => {
+  it('skips pane-death checks for workers without tmux metadata', () => {
+    db.registerWorker(1, '/wt-1', 'agent-1');
+    db.updateWorker(1, {
+      status: 'busy',
+      last_heartbeat: new Date().toISOString(),
+      launched_at: new Date(Date.now() - 300 * 1000).toISOString(),
+      tmux_session: null,
+      tmux_window: null,
+    });
+
+    const originalIsAvailable = tmux.isAvailable;
+    const originalIsPaneAlive = tmux.isPaneAlive;
+    let paneChecks = 0;
+
+    tmux.isAvailable = () => true;
+    tmux.isPaneAlive = () => {
+      paneChecks += 1;
+      return false;
+    };
+
+    try {
+      watchdog.tick(tmpDir);
+    } finally {
+      tmux.isAvailable = originalIsAvailable;
+      tmux.isPaneAlive = originalIsPaneAlive;
+    }
+
+    const worker = db.getWorker(1);
+    assert.strictEqual(paneChecks, 0);
+    assert.strictEqual(worker.status, 'busy');
+  });
+
+  it('runs pane-death checks for tmux workers with session/window metadata', () => {
+    db.registerWorker(1, '/wt-1', 'agent-1');
+    db.updateWorker(1, {
+      status: 'busy',
+      last_heartbeat: new Date().toISOString(),
+      launched_at: new Date(Date.now() - 300 * 1000).toISOString(),
+      tmux_session: 'mac10-test',
+      tmux_window: 'worker-1',
+    });
+
+    const originalIsAvailable = tmux.isAvailable;
+    const originalIsPaneAlive = tmux.isPaneAlive;
+    let paneChecks = 0;
+
+    tmux.isAvailable = () => true;
+    tmux.isPaneAlive = () => {
+      paneChecks += 1;
+      return false;
+    };
+
+    try {
+      watchdog.tick(tmpDir);
+    } finally {
+      tmux.isAvailable = originalIsAvailable;
+      tmux.isPaneAlive = originalIsPaneAlive;
+    }
+
+    const worker = db.getWorker(1);
+    assert.ok(paneChecks > 0);
+    assert.strictEqual(worker.status, 'idle');
   });
 });
