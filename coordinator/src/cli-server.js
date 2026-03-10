@@ -90,6 +90,7 @@ const ROUTING_BUDGET_REMAINING_KEY = 'routing_budget_flagship_remaining';
 const ROUTING_BUDGET_THRESHOLD_KEY = 'routing_budget_flagship_threshold';
 const LEGACY_BUDGET_REMAINING_KEY = 'flagship_budget_remaining';
 const LEGACY_BUDGET_THRESHOLD_KEY = 'flagship_budget_threshold';
+const PR_RESOLVE_ERROR_RE = /Could not resolve to a PullRequest/i;
 
 function namespacedFile(defaultName, namespacedName) {
   return NAMESPACE === 'mac10' ? defaultName : namespacedName;
@@ -438,7 +439,7 @@ function getProjectGitHubRepoPath(cwd = _projectDir || process.cwd()) {
   }
 }
 
-function normalizePrUrl(rawPrUrl) {
+function normalizePrUrl(rawPrUrl, cwd = _projectDir || process.cwd()) {
   if (typeof rawPrUrl !== 'string') return '';
   const trimmed = rawPrUrl.trim();
   if (!trimmed) return '';
@@ -451,13 +452,30 @@ function normalizePrUrl(rawPrUrl) {
     : (refMatch ? refMatch[2] : null);
   if (!normalizedMatch) return trimmed;
 
-  const repoPath = getProjectGitHubRepoPath();
+  const repoPath = getProjectGitHubRepoPath(cwd);
   if (!repoPath) return trimmed;
   return `https://github.com/${repoPath}/pull/${normalizedMatch}`;
 }
 
 function isValidGitHubPrUrl(value) {
   return typeof value === 'string' && PR_URL_RE.test(value);
+}
+
+function isResolvableGitHubPrUrl(prUrl, cwd = _projectDir || process.cwd()) {
+  if (!isValidGitHubPrUrl(prUrl)) return false;
+  try {
+    execFileSync('gh', ['pr', 'view', prUrl, '--json', 'state'], {
+      encoding: 'utf8',
+      cwd,
+      stdio: ['ignore', 'ignore', 'pipe'],
+      timeout: 12000,
+    });
+    return true;
+  } catch (e) {
+    const errorText = String(e.message || '') + String(e.stderr || '') + String(e.stdout || '');
+    if (PR_RESOLVE_ERROR_RE.test(errorText)) return false;
+    return true;
+  }
 }
 
 function parseWorkerId(rawWorkerId) {
@@ -553,6 +571,33 @@ function queueMergeWithRecovery({
   latest_completion_timestamp = undefined,
 }) {
   const normalizedPriority = Number.isInteger(priority) ? priority : 0;
+  const resolvedPrUrl = normalizePrUrl(pr_url, _projectDir || process.cwd());
+  const queueCwd = _projectDir || process.cwd();
+
+  if (!isValidGitHubPrUrl(resolvedPrUrl) || !isResolvableGitHubPrUrl(resolvedPrUrl, queueCwd)) {
+    const staleEntries = db.getDb().prepare(`
+      SELECT id, status
+      FROM merge_queue
+      WHERE request_id = ?
+        AND task_id = ?
+        AND status NOT IN ('merged', 'merging')
+    `).all(request_id, task_id);
+    for (const entry of staleEntries) {
+      if (entry.status === 'pending') {
+        db.updateMerge(entry.id, { status: 'failed', error: 'invalid_or_missing_pr' });
+      }
+    }
+    return { queued: false, inserted: false, refreshed: false, retried: false, reason: 'invalid_or_missing_pr' };
+  }
+
+  db.getDb().prepare(`
+    DELETE FROM merge_queue
+    WHERE request_id = ?
+      AND task_id = ?
+      AND pr_url <> ?
+      AND status NOT IN ('merged', 'merging')
+  `).run(request_id, task_id, resolvedPrUrl);
+
   const getLatestCheckpoint = () => {
     if (latest_completion_timestamp !== undefined) return latest_completion_timestamp;
     return db.getRequestLatestCompletedTaskCursor(request_id);
@@ -562,7 +607,7 @@ function queueMergeWithRecovery({
   const enqueueResult = db.enqueueMerge({
     request_id,
     task_id,
-    pr_url,
+    pr_url: resolvedPrUrl,
     branch,
     priority: normalizedPriority,
     completion_checkpoint: latestCheckpoint,
@@ -580,7 +625,7 @@ function queueMergeWithRecovery({
         )
       ORDER BY id DESC
       LIMIT 1
-    `).get(pr_url, enqueueResult.lastInsertRowid, request_id, task_id, branch);
+    `).get(resolvedPrUrl, enqueueResult.lastInsertRowid, request_id, task_id, branch);
     if (existingDuplicatePrOwner) {
       db.log('coordinator', 'merge_queue_duplicate_pr_ownership_preserved', {
         request_id,
@@ -614,7 +659,7 @@ function queueMergeWithRecovery({
       WHERE pr_url = ?
       ORDER BY id DESC
       LIMIT 1
-    `).get(pr_url);
+    `).get(resolvedPrUrl);
     if (existingByPr) {
       return {
         queued: false,
@@ -650,14 +695,18 @@ function queueMergeWithRecovery({
   const currentPriority = Number.isInteger(existing.priority) ? existing.priority : 0;
   const desiredPriority = Math.max(currentPriority, normalizedPriority);
   const isTerminalRetryStatus = existing.status === 'failed' || existing.status === 'conflict';
+  const mergeIdentityChanged =
+    existing.branch !== branch ||
+    existing.pr_url !== resolvedPrUrl;
   const hasFreshCompletionProgress = isTerminalRetryStatus && db.hasRequestCompletedTaskProgressSince(
     request_id,
     existing.completion_checkpoint,
     latestCheckpoint
   );
-  const shouldRetry = isTerminalRetryStatus && (force_retry || hasFreshCompletionProgress);
+  const shouldRetry = isTerminalRetryStatus && (force_retry || hasFreshCompletionProgress || mergeIdentityChanged);
   const desiredStatus = shouldRetry ? 'pending' : existing.status;
   const needsRefresh =
+    mergeIdentityChanged ||
     currentPriority !== desiredPriority ||
     existing.status !== desiredStatus;
 
@@ -670,13 +719,17 @@ function queueMergeWithRecovery({
 
   db.getDb().prepare(`
     UPDATE merge_queue
-    SET priority = ?,
+    SET branch = ?,
+        pr_url = ?,
+        priority = ?,
         status = ?,
         error = CASE WHEN ? = 1 THEN NULL ELSE error END,
         completion_checkpoint = ?,
         updated_at = strftime('%Y-%m-%dT%H:%M:%fZ','now')
     WHERE id = ?
   `).run(
+    branch,
+    resolvedPrUrl,
     desiredPriority,
     desiredStatus,
     shouldRetry ? 1 : 0,
@@ -1028,8 +1081,11 @@ function handleCommand(cmd, conn, handlers) {
       }
       case 'complete-task': {
         const { worker_id, task_id, pr_url, result, branch } = args;
-        const normalizedPrUrl = normalizePrUrl(pr_url);
         const worker = db.getWorker(worker_id);
+        const completionPrNormalizationCwd = worker && worker.worktree_path
+          ? worker.worktree_path
+          : (_projectDir || process.cwd());
+        const normalizedPrUrl = normalizePrUrl(pr_url, completionPrNormalizationCwd);
         const resolvedBranch = resolveCompletionBranch(worker, branch, worker_id);
         if (resolvedBranch.mismatch) {
           db.log('coordinator', 'complete_task_branch_overridden', {
@@ -1351,7 +1407,10 @@ function handleCommand(cmd, conn, handlers) {
         let queued = 0;
         for (const task of tasks) {
           const worker = task.assigned_to ? db.getWorker(task.assigned_to) : null;
-          const normalizedPrUrl = normalizePrUrl(task.pr_url);
+          const taskPrNormalizationCwd = worker && worker.worktree_path
+            ? worker.worktree_path
+            : (_projectDir || process.cwd());
+          const normalizedPrUrl = normalizePrUrl(task.pr_url, taskPrNormalizationCwd);
           const resolvedBranch = resolveCompletionBranch(worker, task.branch, task.assigned_to);
           if (task.pr_url !== normalizedPrUrl) {
             db.updateTask(task.id, { pr_url: normalizedPrUrl || task.pr_url });
