@@ -381,10 +381,15 @@ function resolveCompleteTaskBranch(requestedBranch, rawWorkerId) {
 
   // Worker ID is authoritative. Always prefer agent-<worker_id> when available.
   if (canonicalWorkerBranch) {
+    if (branchExists(canonicalWorkerBranch)) {
+      if (normalizedRequested && normalizedRequested !== canonicalWorkerBranch) {
+        console.error(`[mac10] complete-task branch mismatch: "${normalizedRequested}" != canonical "${canonicalWorkerBranch}", using "${canonicalWorkerBranch}"`);
+      }
+      return canonicalWorkerBranch;
+    }
+
     if (normalizedRequested && normalizedRequested !== canonicalWorkerBranch) {
-      console.error(branchExists(canonicalWorkerBranch)
-        ? `[mac10] complete-task branch mismatch: "${normalizedRequested}" != canonical "${canonicalWorkerBranch}", using "${canonicalWorkerBranch}"`
-        : `[mac10] complete-task canonical branch missing: "${canonicalWorkerBranch}" not found, using canonical "${canonicalWorkerBranch}"`);
+      console.error(`[mac10] complete-task canonical branch missing: "${canonicalWorkerBranch}" not found, using requested "${normalizedRequested}"`);
     }
 
     if (normalizedRequested && branchExists(normalizedRequested)) {
@@ -394,7 +399,7 @@ function resolveCompleteTaskBranch(requestedBranch, rawWorkerId) {
     if (currentBranch && WORKER_BRANCH_RE.test(currentBranch) && currentBranch !== canonicalWorkerBranch) {
       console.error(`[mac10] complete-task current branch mismatch: "${currentBranch}" != missing canonical "${canonicalWorkerBranch}", cannot resolve`);
     }
-    return canonicalWorkerBranch;
+    return '';
   }
 
   // Without a valid worker ID, don't trust caller-provided/current branch values.
