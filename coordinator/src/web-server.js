@@ -10,7 +10,9 @@ const db = require('./db');
 const instanceRegistry = require('./instance-registry');
 const {
   validateRequestDescription,
+  isInvalidRequestDescriptionError,
   isRequestDescriptionTooLongError,
+  INVALID_REQUEST_DESCRIPTION,
   INVALID_REQUEST_DESCRIPTION_TOO_LONG,
   failClosedLoopLaunch,
 } = require('./cli-server');
@@ -248,6 +250,9 @@ function start(projectDir, port = 3100, scriptDir = null, handlers = {}) {
       try {
         normalizedDescription = validateRequestDescription(description);
       } catch (err) {
+        if (isInvalidRequestDescriptionError(err)) {
+          return res.status(400).json({ ok: false, error: INVALID_REQUEST_DESCRIPTION });
+        }
         if (isRequestDescriptionTooLongError(err)) {
           return res.status(400).json({ ok: false, error: INVALID_REQUEST_DESCRIPTION_TOO_LONG });
         }

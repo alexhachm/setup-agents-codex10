@@ -97,7 +97,18 @@ const CHANGE_LOG_FIELDS = ['description', 'domain', 'file_path', 'function_name'
 // - CLI RPC: request/fix/loop-request
 // - HTTP API: /api/request
 const MAX_REQUEST_DESCRIPTION_LENGTH = 4000;
+const INVALID_REQUEST_DESCRIPTION = 'invalid_request_description';
 const INVALID_REQUEST_DESCRIPTION_TOO_LONG = 'invalid_request_description_too_long';
+const REQUEST_DESCRIPTION_HELP_ONLY_RE = /^(?:--help|-h)$/i;
+const REQUEST_DESCRIPTION_DUMP_MARKERS = [
+  '=== project:',
+  'loop created:',
+  '=== requests ===',
+];
+const REQUEST_DESCRIPTION_PLACEHOLDER_PATTERNS = [
+  /^\[\s*clear description of what the user wants\s*\]$/i,
+  /^fix\s+worker-(?:n|\d+)\s*:\s*\[\s*brief description[^\]]*\]\s*$/i,
+];
 const LOOP_LAUNCH_FAILED = 'loop_launch_failed';
 const LOOP_LAUNCH_FAILED_MESSAGE = 'Failed to launch loop runtime';
 const ACTIVITY_LOG_LIMIT_MIN = 1;
@@ -174,12 +185,36 @@ function bridgeToHandoff(requestId, description, type = 'bug-fix') {
 
 const MAX_PAYLOAD_SIZE = 1024 * 1024; // 1MB
 
+function makeRequestDescriptionError(code) {
+  const error = new Error(code);
+  error.code = code;
+  return error;
+}
+
+function hasRequestDescriptionPlaceholderScaffold(normalizedDescription) {
+  return REQUEST_DESCRIPTION_PLACEHOLDER_PATTERNS.some((pattern) => pattern.test(normalizedDescription));
+}
+
+function hasRequestDescriptionDumpPayloadFragment(normalizedDescription) {
+  const loweredDescription = normalizedDescription.toLowerCase();
+  return REQUEST_DESCRIPTION_DUMP_MARKERS.some((marker) => loweredDescription.includes(marker));
+}
+
+function hasInvalidRequestDescriptionContent(normalizedDescription) {
+  return (
+    REQUEST_DESCRIPTION_HELP_ONLY_RE.test(normalizedDescription) ||
+    hasRequestDescriptionPlaceholderScaffold(normalizedDescription) ||
+    hasRequestDescriptionDumpPayloadFragment(normalizedDescription)
+  );
+}
+
 function validateRequestDescription(rawDescription) {
   const normalized = String(rawDescription).replace(/(?:\r\n?)+/g, '\n').trim();
   if (normalized.length > MAX_REQUEST_DESCRIPTION_LENGTH) {
-    const error = new Error(INVALID_REQUEST_DESCRIPTION_TOO_LONG);
-    error.code = INVALID_REQUEST_DESCRIPTION_TOO_LONG;
-    throw error;
+    throw makeRequestDescriptionError(INVALID_REQUEST_DESCRIPTION_TOO_LONG);
+  }
+  if (hasInvalidRequestDescriptionContent(normalized)) {
+    throw makeRequestDescriptionError(INVALID_REQUEST_DESCRIPTION);
   }
   return normalized;
 }
@@ -191,6 +226,17 @@ function normalizeRequestDescription(rawDescription) {
 function isRequestDescriptionTooLongError(error) {
   if (!error) return false;
   return error.code === INVALID_REQUEST_DESCRIPTION_TOO_LONG || error.message === INVALID_REQUEST_DESCRIPTION_TOO_LONG;
+}
+
+function isInvalidRequestDescriptionError(error) {
+  if (!error) return false;
+  return error.code === INVALID_REQUEST_DESCRIPTION || error.message === INVALID_REQUEST_DESCRIPTION;
+}
+
+function getRequestDescriptionErrorCode(error) {
+  if (isRequestDescriptionTooLongError(error)) return INVALID_REQUEST_DESCRIPTION_TOO_LONG;
+  if (isInvalidRequestDescriptionError(error)) return INVALID_REQUEST_DESCRIPTION;
+  return null;
 }
 
 function normalizeErrorMessage(error, fallback = 'unknown_error') {
@@ -1235,7 +1281,12 @@ function createConnectionHandler(handlers) {
           validateCommand(cmd);
           handleCommand(cmd, conn, handlers);
         } catch (e) {
-          respond(conn, { error: e.message });
+          const descriptionErrorCode = getRequestDescriptionErrorCode(e);
+          if (descriptionErrorCode) {
+            respond(conn, { ok: false, error: descriptionErrorCode });
+          } else {
+            respond(conn, { error: e.message });
+          }
         }
       }
     });
@@ -2445,10 +2496,12 @@ module.exports = {
   validateRequestDescription,
   normalizeRequestDescription,
   isRequestDescriptionTooLongError,
+  isInvalidRequestDescriptionError,
   failClosedLoopLaunch,
   LOOP_LAUNCH_FAILED,
   LOOP_LAUNCH_FAILED_MESSAGE,
   CHANGE_LOG_FIELDS,
+  INVALID_REQUEST_DESCRIPTION,
   MAX_REQUEST_DESCRIPTION_LENGTH,
   INVALID_REQUEST_DESCRIPTION_TOO_LONG,
 };

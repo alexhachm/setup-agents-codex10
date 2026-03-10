@@ -265,6 +265,12 @@ describe('CLI server security', () => {
     });
   }
 
+  function getHandoffPath() {
+    const namespace = process.env.MAC10_NAMESPACE || 'mac10';
+    const handoffFile = namespace === 'mac10' ? 'handoff.json' : `${namespace}.handoff.json`;
+    return path.join(tmpDir, '.claude', 'state', handoffFile);
+  }
+
   it('should reject missing required fields for request command', async () => {
     const result = await sendCommand('request', {});
     assert.ok(result.error);
@@ -357,6 +363,75 @@ describe('CLI server security', () => {
     });
     assert.strictEqual(loopResult.ok, true);
     assert.strictEqual(db.getRequest(loopResult.request_id).description, expectedDescription);
+  });
+
+  it('should accept descriptive FIX worker payloads that are not placeholders', async () => {
+    const description = 'FIX worker-3: investigate stuck merge queue retries';
+    const loopId = db.createLoop('Loop for accepted FIX worker payload');
+
+    const requestResult = await sendCommand('request', { description });
+    assert.strictEqual(requestResult.ok, true);
+
+    const fixResult = await sendCommand('fix', { description });
+    assert.strictEqual(fixResult.ok, true);
+
+    const loopResult = await sendCommand('loop-request', {
+      loop_id: loopId,
+      description,
+    });
+    assert.strictEqual(loopResult.ok, true);
+  });
+
+  it('should reject malformed request/fix/loop-request descriptions with no side effects', async () => {
+    const malformedDescriptions = [
+      '[clear description of what the user wants]',
+      'FIX worker-N: [brief description of the fix needed]',
+      '--help',
+      '=== Project: owner/repo\nLoop created: 7\n=== Requests ===',
+    ];
+    const commands = [
+      { command: 'request', args: (description) => ({ description }) },
+      { command: 'fix', args: (description) => ({ description }) },
+      { command: 'loop-request', args: (description, loopId) => ({ loop_id: loopId, description }) },
+    ];
+    const loopId = db.createLoop('Loop for malformed description rejection');
+    const originalCreateRequest = db.createRequest;
+    const originalCreateLoopRequest = db.createLoopRequest;
+    let createRequestCalls = 0;
+    let createLoopRequestCalls = 0;
+    db.createRequest = (...args) => {
+      createRequestCalls += 1;
+      return originalCreateRequest(...args);
+    };
+    db.createLoopRequest = (...args) => {
+      createLoopRequestCalls += 1;
+      return originalCreateLoopRequest(...args);
+    };
+
+    try {
+      for (const description of malformedDescriptions) {
+        for (const command of commands) {
+          const requestsBefore = db.listRequests().length;
+          const architectMailBefore = db.checkMail('architect', false).length;
+          const logsBefore = db.getLog(10000).length;
+          const handoffExistsBefore = fs.existsSync(getHandoffPath());
+          const result = await sendCommand(command.command, command.args(description, loopId));
+
+          assert.strictEqual(result.ok, false);
+          assert.strictEqual(result.error, cliServer.INVALID_REQUEST_DESCRIPTION);
+          assert.strictEqual(db.listRequests().length, requestsBefore);
+          assert.strictEqual(db.checkMail('architect', false).length, architectMailBefore);
+          assert.strictEqual(db.getLog(10000).length, logsBefore);
+          assert.strictEqual(fs.existsSync(getHandoffPath()), handoffExistsBefore);
+        }
+      }
+
+      assert.strictEqual(createRequestCalls, 0);
+      assert.strictEqual(createLoopRequestCalls, 0);
+    } finally {
+      db.createRequest = originalCreateRequest;
+      db.createLoopRequest = originalCreateLoopRequest;
+    }
   });
 
   it('should reject overlong descriptions with invalid_request_description_too_long', async () => {
@@ -526,6 +601,50 @@ describe('CLI + Web request description validation', () => {
     assert.strictEqual(result.status, 200);
     assert.strictEqual(result.body.ok, true);
     assert.strictEqual(db.getRequest(result.body.request_id).description, expectedDescription);
+  });
+
+  it('should accept descriptive FIX worker payloads over /api/request', async () => {
+    const description = 'FIX worker-4: prevent stale allocator lock reuse';
+    const result = await sendRequest(description);
+
+    assert.strictEqual(result.status, 200);
+    assert.strictEqual(result.body.ok, true);
+    assert.strictEqual(db.getRequest(result.body.request_id).description, description);
+  });
+
+  it('should reject malformed /api/request descriptions with no side effects', async () => {
+    const malformedDescriptions = [
+      '[clear description of what the user wants]',
+      'FIX worker-N: [brief description of the fix needed]',
+      '-h',
+      '=== Project: owner/repo\nLoop created: 7\n=== Requests ===',
+    ];
+    const originalCreateRequest = db.createRequest;
+    let createRequestCalls = 0;
+    db.createRequest = (...args) => {
+      createRequestCalls += 1;
+      return originalCreateRequest(...args);
+    };
+
+    try {
+      for (const description of malformedDescriptions) {
+        const requestsBefore = db.listRequests().length;
+        const architectMailBefore = db.checkMail('architect', false).length;
+        const logsBefore = db.getLog(10000).length;
+        const result = await sendRequest(description);
+
+        assert.strictEqual(result.status, 400);
+        assert.strictEqual(result.body.ok, false);
+        assert.strictEqual(result.body.error, cliServer.INVALID_REQUEST_DESCRIPTION);
+        assert.strictEqual(db.listRequests().length, requestsBefore);
+        assert.strictEqual(db.checkMail('architect', false).length, architectMailBefore);
+        assert.strictEqual(db.getLog(10000).length, logsBefore);
+      }
+
+      assert.strictEqual(createRequestCalls, 0);
+    } finally {
+      db.createRequest = originalCreateRequest;
+    }
   });
 
   it('should reject oversize /api/request with invalid_request_description_too_long', async () => {
