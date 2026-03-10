@@ -13,6 +13,7 @@ const PR_URL_RE = /^https:\/\/github\.com\/[a-zA-Z0-9._-]+\/[a-zA-Z0-9._-]+\/pul
 const PR_NUMBER_RE = /^#?(\d+)$/;
 const PR_REFERENCE_RE = /^(pull request|pull|pr)\s*#?(\d+)$/i;
 const WORKER_BRANCH_RE = /^agent-\d+$/;
+const VALIDATION_TIER_RE = /^tier\s*([1-3])$/i;
 
 function namespacedCandidates(baseName) {
   if (NAMESPACE === 'mac10') return [baseName];
@@ -375,6 +376,35 @@ function isSuspiciousTaskIdPrInput(rawPr, rawTaskId) {
   return Number(prNumber) === taskId;
 }
 
+function extractValidationTierToken(rawValidation) {
+  const candidate = typeof rawValidation === 'string' ? rawValidation.trim() : '';
+  if (!candidate) return null;
+  const directMatch = candidate.match(VALIDATION_TIER_RE);
+  if (directMatch) return parseInt(directMatch[1], 10);
+
+  try {
+    const parsed = JSON.parse(candidate);
+    if (typeof parsed !== 'string') return null;
+    const parsedMatch = parsed.trim().match(VALIDATION_TIER_RE);
+    return parsedMatch ? parseInt(parsedMatch[1], 10) : null;
+  } catch {
+    return null;
+  }
+}
+
+function normalizeCreateTaskArgs(taskArgs) {
+  if (!taskArgs || typeof taskArgs !== 'object' || Array.isArray(taskArgs)) return taskArgs;
+  const validationTier = extractValidationTierToken(taskArgs.validation);
+  if (!validationTier) return taskArgs;
+
+  const normalized = { ...taskArgs };
+  if (!Number.isInteger(normalized.tier) || normalized.tier <= 0) {
+    normalized.tier = validationTier;
+  }
+  delete normalized.validation;
+  return normalized;
+}
+
 function parseWorkerId(rawWorkerId) {
   const parsed = parseInt(rawWorkerId, 10);
   if (!Number.isInteger(parsed) || parsed <= 0) return null;
@@ -436,6 +466,23 @@ function getTrackedWorktreeChanges(cwd = process.cwd()) {
   } catch {
     return [];
   }
+}
+
+function getDescriptionFromArgvOrStdin(argv, commandName) {
+  if (argv[1] !== '-') {
+    return argv.slice(1).join(' ');
+  }
+  if (argv.length !== 2) {
+    console.error(`Usage: mac10 ${commandName} -`);
+    process.exit(1);
+  }
+  const description = fs.readFileSync(0, 'utf8');
+  if (!description || !description.trim()) {
+    console.error(`Usage: mac10 ${commandName} -`);
+    console.error(`Error: ${commandName} description from stdin cannot be empty.`);
+    process.exit(1);
+  }
+  return description;
 }
 
 function resolveCompleteTaskBranch(requestedBranch, rawWorkerId, projectCwd = process.cwd()) {
@@ -671,14 +718,14 @@ async function main() {
       // USER
       case 'request':
         if (argv.length < 2) { console.error('Usage: mac10 request <description>'); process.exit(1); }
-        result = await send(socketPath, 'request', { description: argv.slice(1).join(' ') });
+        result = await send(socketPath, 'request', { description: getDescriptionFromArgvOrStdin(argv, 'request') });
         if (result.ok) console.log(`Request created: ${result.request_id}`);
         else console.error(result.error);
         break;
 
       case 'fix':
         if (argv.length < 2) { console.error('Usage: mac10 fix <description>'); process.exit(1); }
-        result = await send(socketPath, 'fix', { description: argv.slice(1).join(' ') });
+        result = await send(socketPath, 'fix', { description: getDescriptionFromArgvOrStdin(argv, 'fix') });
         if (result.ok) console.log(`Urgent fix created: ${result.request_id} (task ${result.task_id})`);
         else console.error(result.error);
         break;
@@ -759,11 +806,12 @@ async function main() {
 
       // ARCHITECT
       case 'triage':
-        if (argv.length < 3) { console.error('Usage: mac10 triage <request_id> <tier> [reasoning]'); process.exit(1); }
+        if (argv.length < 3) { console.error('Usage: mac10 triage <request_id> <tier> [reasoning|-]'); process.exit(1); }
+        const triageReasoning = argv[3] === '-' ? fs.readFileSync(0, 'utf8') : argv.slice(3).join(' ');
         result = await send(socketPath, 'triage', {
           request_id: argv[1],
           tier: parseInt(argv[2], 10),
-          reasoning: argv.slice(3).join(' '),
+          reasoning: triageReasoning,
         });
         if (result.ok) console.log('Triage recorded.');
         else console.error(result.error);
@@ -772,7 +820,7 @@ async function main() {
       case 'create-task':
         // JSON input from stdin or arg
         const taskInput = argv[1] === '-' ? fs.readFileSync(0, 'utf8') : argv.slice(1).join(' ');
-        const taskArgs = JSON.parse(taskInput);
+        const taskArgs = normalizeCreateTaskArgs(JSON.parse(taskInput));
         result = await send(socketPath, 'create-task', taskArgs);
         if (result.ok) console.log(`Task created: ${result.task_id}`);
         else console.error(result.error);
@@ -893,11 +941,14 @@ async function main() {
         break;
 
       case 'distill':
-        if (argv.length < 4) { console.error('Usage: mac10 distill <worker_id> <domain> <content>'); process.exit(1); }
+        if (argv.length < 4) { console.error('Usage: mac10 distill <worker_id> <domain> <content|->'); process.exit(1); }
+        const distillContent = (argv[3] === '-' && argv.length === 4)
+          ? fs.readFileSync(0, 'utf8')
+          : argv.slice(3).join(' ');
         result = await send(socketPath, 'distill', {
           worker_id: argv[1],
           domain: argv[2],
-          content: argv.slice(3).join(' '),
+          content: distillContent,
         });
         if (result.ok) console.log('Knowledge distilled.');
         else console.error(result.error);
@@ -1272,8 +1323,8 @@ function printUsage() {
 mac10 — Multi-agent coordinator CLI
 
 USER:
-  request <description>          Submit a new coding request
-  fix <description>              Submit an urgent fix (priority queue)
+  request <description> | request -  Submit a new coding request (or from stdin)
+  fix <description> | fix -      Submit an urgent fix (priority queue)
   status                         Show all requests, tasks, and workers
   clarify <request_id> <msg>     Reply to architect clarification
   log [limit] [actor]            Show activity log
@@ -1281,7 +1332,7 @@ USER:
   request-history <request_id> [limit]  Alias for history
 
 ARCHITECT:
-  triage <request_id> <tier> [reasoning]
+  triage <request_id> <tier> [reasoning|-]  (- reads reasoning from stdin)
   create-task <json>             Create task (JSON from stdin with -)
   tier1-complete <request_id> [result]
   ask-clarification <request_id> <question>
@@ -1303,7 +1354,8 @@ WORKER:
   reset-worker <worker_id>       Reset worker to idle state
   complete-task <worker_id> <task_id> [pr_url] [branch] [result]
   fail-task <worker_id> <task_id> <error>
-  distill <worker_id> <domain> <content>
+  distill <worker_id> <domain> <content|->
+                               Use "-" to read distill content from stdin
 
 LOOPS:
   loop <prompt>                  Start a persistent autonomous loop
