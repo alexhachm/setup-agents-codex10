@@ -53,7 +53,7 @@ const VALID_COLUMNS = Object.freeze({
   requests: new Set(['description', 'tier', 'status', 'result', 'completed_at', 'loop_id']),
   tasks: new Set(['request_id', 'subject', 'description', 'domain', 'files', 'priority', 'tier', 'depends_on', 'assigned_to', 'status', 'pr_url', 'branch', 'validation', 'overlap_with', 'started_at', 'completed_at', 'result']),
   workers: new Set(['status', 'domain', 'worktree_path', 'branch', 'tmux_session', 'tmux_window', 'pid', 'current_task_id', 'claimed_by', 'last_heartbeat', 'launched_at', 'tasks_completed']),
-  merge_queue: new Set(['status', 'priority', 'merged_at', 'error']),
+  merge_queue: new Set(['status', 'priority', 'completion_checkpoint', 'merged_at', 'error']),
   changes: new Set(['description', 'domain', 'file_path', 'function_name', 'tooltip', 'enabled', 'status']),
   loops: new Set(['prompt', 'status', 'iteration_count', 'last_checkpoint', 'tmux_session', 'tmux_window', 'pid', 'last_heartbeat', 'stopped_at']),
 });
@@ -107,13 +107,22 @@ function init(projectDir) {
   }
   if (existingTables.includes('merge_queue')) {
     const mergeCols = db.prepare("PRAGMA table_info(merge_queue)").all().map(c => c.name);
+    const hasCreatedAt = mergeCols.includes('created_at');
     if (!mergeCols.includes('updated_at')) {
       db.exec("ALTER TABLE merge_queue ADD COLUMN updated_at TEXT");
     }
-    if (mergeCols.includes('created_at')) {
+    if (hasCreatedAt) {
       db.exec("UPDATE merge_queue SET updated_at = COALESCE(updated_at, created_at, datetime('now')) WHERE updated_at IS NULL");
     } else {
       db.exec("UPDATE merge_queue SET updated_at = COALESCE(updated_at, datetime('now')) WHERE updated_at IS NULL");
+    }
+    if (!mergeCols.includes('completion_checkpoint')) {
+      db.exec("ALTER TABLE merge_queue ADD COLUMN completion_checkpoint TEXT");
+    }
+    if (hasCreatedAt) {
+      db.exec("UPDATE merge_queue SET completion_checkpoint = COALESCE(completion_checkpoint, updated_at, created_at, datetime('now')) WHERE completion_checkpoint IS NULL");
+    } else {
+      db.exec("UPDATE merge_queue SET completion_checkpoint = COALESCE(completion_checkpoint, updated_at, datetime('now')) WHERE completion_checkpoint IS NULL");
     }
   }
 
@@ -385,17 +394,17 @@ function checkMailBlocking(recipient, timeoutMs = 300000, pollMs = 1000) {
 
 // --- Merge queue helpers ---
 
-function enqueueMerge({ request_id, task_id, pr_url, branch, priority }) {
+function enqueueMerge({ request_id, task_id, pr_url, branch, priority, completion_checkpoint = null }) {
   // Atomic dedup+insert scoped to request/task ownership.
   // This prevents cross-request PR dedupe from rebinding existing rows.
   const result = getDb().prepare(`
-    INSERT INTO merge_queue (request_id, task_id, pr_url, branch, priority)
-    SELECT ?, ?, ?, ?, ?
+    INSERT INTO merge_queue (request_id, task_id, pr_url, branch, priority, completion_checkpoint)
+    SELECT ?, ?, ?, ?, ?, ?
     WHERE NOT EXISTS (
       SELECT 1 FROM merge_queue
       WHERE request_id = ? AND task_id = ?
     )
-  `).run(request_id, task_id, pr_url, branch, priority || 0, request_id, task_id);
+  `).run(request_id, task_id, pr_url, branch, priority || 0, completion_checkpoint, request_id, task_id);
   return {
     inserted: result.changes > 0,
     changes: result.changes,

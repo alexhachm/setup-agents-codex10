@@ -1370,30 +1370,26 @@ function handleCommand(cmd, conn, handlers) {
             if (resolvedBranch.mismatch || task.branch !== mergeBranch) {
               db.updateTask(task.id, { branch: mergeBranch });
             }
-            try {
-              const queueResult = queueMergeWithRecovery({
+            const queueResult = queueMergeWithRecovery({
+              request_id: reqId,
+              task_id: task.id,
+              branch: mergeBranch,
+              pr_url: normalizedPrUrl,
+              priority: task.priority === 'urgent' ? 10 : 0,
+              force_retry: forceRetry,
+              latest_completion_timestamp: latestCompletedTaskState,
+            });
+            if (queueResult.queued) queued++;
+            if (queueResult.refreshed) {
+              db.log('coordinator', 'merge_queue_entry_refreshed', {
                 request_id: reqId,
                 task_id: task.id,
-                branch: mergeBranch,
                 pr_url: normalizedPrUrl,
-                priority: task.priority === 'urgent' ? 10 : 0,
-                force_retry: forceRetry,
-                latest_completion_timestamp: latestCompletedTaskState,
+                branch: mergeBranch,
+                retried: queueResult.retried,
+                previous_status: queueResult.previous_status || null,
+                merge_id: queueResult.merge_id || null,
               });
-              if (queueResult.queued) queued++;
-              if (queueResult.refreshed) {
-                db.log('coordinator', 'merge_queue_entry_refreshed', {
-                  request_id: reqId,
-                  task_id: task.id,
-                  pr_url: normalizedPrUrl,
-                  branch: mergeBranch,
-                  retried: queueResult.retried,
-                  previous_status: queueResult.previous_status || null,
-                  merge_id: queueResult.merge_id || null,
-                });
-              }
-            } catch (e) {
-              // Invalid merge metadata or transient DB error — skip this task entry
             }
           }
         }

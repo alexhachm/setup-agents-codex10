@@ -85,6 +85,7 @@ CREATE TABLE IF NOT EXISTS merge_queue (
   priority INTEGER NOT NULL DEFAULT 0,  -- higher = merge first
   created_at TEXT NOT NULL DEFAULT (datetime('now')),
   updated_at TEXT NOT NULL DEFAULT (datetime('now')),
+  completion_checkpoint TEXT,
   merged_at TEXT,
   error TEXT
 );
