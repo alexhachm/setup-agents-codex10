@@ -8,6 +8,12 @@ const fs = require('fs');
 const { spawn } = require('child_process');
 const db = require('./db');
 const instanceRegistry = require('./instance-registry');
+const {
+  validateRequestDescription,
+  isRequestDescriptionTooLongError,
+  INVALID_REQUEST_DESCRIPTION_TOO_LONG,
+  failClosedLoopLaunch,
+} = require('./cli-server');
 
 const REPO_RE = /^(https?:\/\/github\.com\/)?[a-zA-Z0-9._-]+\/[a-zA-Z0-9._-]+(\.git)?$/;
 const SAFE_PATH_RE = /^(?:\/|[A-Za-z]:[\\/])[a-zA-Z0-9._\\/: -]+$/;
@@ -20,6 +26,27 @@ let pingIntervalId = null;
 const LAUNCH_READINESS_MAX_ATTEMPTS = 20;
 const LAUNCH_READINESS_RETRY_MS = 500;
 const LAUNCH_HTTP_TIMEOUT_MS = 1500;
+const ACTIVITY_LOG_LIMIT_MIN = 1;
+const ACTIVITY_LOG_LIMIT_MAX = 1000;
+const DEFAULT_ACTIVITY_LOG_LIMIT = 100;
+
+function parseStrictPositiveIntegerParam(value) {
+  if (typeof value !== 'string' || !/^\d+$/.test(value)) return null;
+  const parsed = Number(value);
+  if (!Number.isSafeInteger(parsed) || parsed <= 0) return null;
+  return parsed;
+}
+
+function normalizeActivityLogLimit(value, fallback = DEFAULT_ACTIVITY_LOG_LIMIT) {
+  const safeFallback = Number.isSafeInteger(fallback)
+    ? Math.max(ACTIVITY_LOG_LIMIT_MIN, Math.min(fallback, ACTIVITY_LOG_LIMIT_MAX))
+    : DEFAULT_ACTIVITY_LOG_LIMIT;
+  const parsed = typeof value === 'number'
+    ? value
+    : Number(typeof value === 'string' ? value.trim() : NaN);
+  if (!Number.isSafeInteger(parsed)) return safeFallback;
+  return Math.max(ACTIVITY_LOG_LIMIT_MIN, Math.min(parsed, ACTIVITY_LOG_LIMIT_MAX));
+}
 
 function sleep(ms) {
   return new Promise((resolve) => setTimeout(resolve, ms));
@@ -204,7 +231,7 @@ function start(projectDir, port = 3100, scriptDir = null, handlers = {}) {
 
   app.get('/api/log', (req, res) => {
     try {
-      const limit = Math.min(parseInt(req.query.limit) || 100, 1000);
+      const limit = normalizeActivityLogLimit(req.query.limit);
       res.json(db.getLog(limit, req.query.actor));
     } catch (e) {
       res.status(500).json({ error: e.message });
@@ -214,10 +241,19 @@ function start(projectDir, port = 3100, scriptDir = null, handlers = {}) {
   app.post('/api/request', (req, res) => {
     try {
       const { description } = req.body;
-      if (!description || typeof description !== 'string') {
+      if (typeof description !== 'string') {
         return res.status(400).json({ ok: false, error: 'description is required and must be a string' });
       }
-      const id = db.createRequest(description);
+      let normalizedDescription;
+      try {
+        normalizedDescription = validateRequestDescription(description);
+      } catch (err) {
+        if (isRequestDescriptionTooLongError(err)) {
+          return res.status(400).json({ ok: false, error: INVALID_REQUEST_DESCRIPTION_TOO_LONG });
+        }
+        throw err;
+      }
+      const id = db.createRequest(normalizedDescription);
       res.json({ ok: true, request_id: id });
       broadcast({ type: 'request_created', request_id: id });
     } catch (e) {
@@ -311,7 +347,7 @@ function start(projectDir, port = 3100, scriptDir = null, handlers = {}) {
 
   app.delete('/api/presets/:id', (req, res) => {
     try {
-      const id = parseInt(req.params.id);
+      const id = parseStrictPositiveIntegerParam(req.params.id);
       if (!id) return res.status(400).json({ ok: false, error: 'Invalid preset id' });
       const deleted = db.deletePreset(id);
       if (!deleted) return res.status(404).json({ ok: false, error: 'Preset not found' });
@@ -744,7 +780,7 @@ function start(projectDir, port = 3100, scriptDir = null, handlers = {}) {
 
   app.patch('/api/changes/:id', (req, res) => {
     try {
-      const id = parseInt(req.params.id);
+      const id = parseStrictPositiveIntegerParam(req.params.id);
       if (!id) return res.status(400).json({ ok: false, error: 'Invalid change id' });
       const existing = db.getChange(id);
       if (!existing) return res.status(404).json({ ok: false, error: 'Change not found' });
@@ -793,7 +829,13 @@ function start(projectDir, port = 3100, scriptDir = null, handlers = {}) {
         return res.status(400).json({ ok: false, error: 'prompt is required and must be a string' });
       }
       const id = db.createLoop(prompt);
-      if (handlers.onLoopCreated) handlers.onLoopCreated(id, prompt);
+      if (handlers.onLoopCreated) {
+        try {
+          handlers.onLoopCreated(id, prompt);
+        } catch (spawnErr) {
+          return res.status(500).json(failClosedLoopLaunch(id, spawnErr));
+        }
+      }
       broadcast({ type: 'loop_created', loop_id: id });
       res.json({ ok: true, loop_id: id });
     } catch (e) {
@@ -806,7 +848,17 @@ function start(projectDir, port = 3100, scriptDir = null, handlers = {}) {
       const id = parseInt(req.params.id);
       const loop = db.getLoop(id);
       if (!loop) return res.status(404).json({ ok: false, error: 'Loop not found' });
-      db.stopLoop(id);
+      if (handlers.onLoopStop) {
+        const result = handlers.onLoopStop(loop);
+        if (!result || result.ok === false) {
+          return res.status(500).json({
+            ok: false,
+            error: result && result.error ? result.error : 'Failed to stop loop runtime',
+          });
+        }
+      } else {
+        db.stopLoop(id);
+      }
       broadcast({ type: 'loop_stopped', loop_id: id });
       res.json({ ok: true, loop_id: id });
     } catch (e) {
