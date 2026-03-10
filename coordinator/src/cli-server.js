@@ -83,6 +83,7 @@ const LEGACY_MAX_WORKERS_DEFAULT = 8;
 const BRANCH_RE = /^[a-zA-Z0-9._\/-]+$/;
 const PR_URL_RE = /^https:\/\/github\.com\/[a-zA-Z0-9._-]+\/[a-zA-Z0-9._-]+\/pull\/\d+$/;
 const PR_NUMBER_RE = /^#?(\d+)$/;
+const PR_REFERENCE_RE = /(?:^|[\s-])(pull request|pull|pr)\s*#?(\d+)$/i;
 const WORKER_BRANCH_RE = /^agent-\d+$/;
 const ROUTING_BUDGET_STATE_KEY = 'routing_budget_state';
 const ROUTING_BUDGET_REMAINING_KEY = 'routing_budget_flagship_remaining';
@@ -454,11 +455,15 @@ function normalizePrUrl(rawPrUrl) {
   if (PR_URL_RE.test(trimmed)) return trimmed;
 
   const match = trimmed.match(PR_NUMBER_RE);
-  if (!match) return trimmed;
+  const refMatch = match ? null : trimmed.match(PR_REFERENCE_RE);
+  const normalizedMatch = match
+    ? match[1]
+    : (refMatch ? refMatch[2] : null);
+  if (!normalizedMatch) return trimmed;
 
   const repoPath = getProjectGitHubRepoPath();
   if (!repoPath) return trimmed;
-  return `https://github.com/${repoPath}/pull/${match[1]}`;
+  return `https://github.com/${repoPath}/pull/${normalizedMatch}`;
 }
 
 function isValidGitHubPrUrl(value) {
@@ -576,13 +581,24 @@ function queueMergeWithRecovery({
     return { queued: true, inserted: true, refreshed: false, retried: false };
   }
 
-  const existing = db.getDb().prepare(`
-    SELECT id, request_id, task_id, branch, status, priority, updated_at, completion_checkpoint
+  let existing = db.getDb().prepare(`
+    SELECT id, request_id, task_id, branch, status, priority, pr_url, updated_at, completion_checkpoint
     FROM merge_queue
     WHERE pr_url = ?
     ORDER BY id DESC
     LIMIT 1
   `).get(pr_url);
+  if (!existing) {
+    existing = db.getDb().prepare(`
+      SELECT id, request_id, task_id, branch, status, priority, pr_url, updated_at, completion_checkpoint
+      FROM merge_queue
+      WHERE request_id = ?
+        AND task_id = ?
+      ORDER BY id DESC
+      LIMIT 1
+    `).get(request_id, task_id);
+  }
+  const prUrlChanged = existing && existing.pr_url !== pr_url;
 
   if (!existing) {
     return { queued: false, inserted: false, refreshed: false, retried: false, reason: 'missing_existing_entry' };
@@ -597,7 +613,8 @@ function queueMergeWithRecovery({
   const mergeIdentityChanged =
     String(existing.request_id) !== String(request_id) ||
     Number(existing.task_id) !== Number(task_id) ||
-    existing.branch !== branch;
+    existing.branch !== branch ||
+    existing.pr_url !== pr_url;
   const hasFreshCompletionProgress = isTerminalRetryStatus && hasSafeCompletedTaskProgressSince(request_id, {
     before: existing.completion_checkpoint,
     after: latestCheckpoint,
@@ -621,6 +638,7 @@ function queueMergeWithRecovery({
     SET request_id = ?,
         task_id = ?,
         branch = ?,
+        pr_url = ?,
         priority = ?,
         status = ?,
         error = CASE WHEN ? = 1 THEN NULL ELSE error END,
@@ -631,12 +649,22 @@ function queueMergeWithRecovery({
     request_id,
     task_id,
     branch,
+    pr_url,
     desiredPriority,
     desiredStatus,
     shouldRetry ? 1 : 0,
     shouldRetry ? (latestCheckpoint || null) : existing.completion_checkpoint,
     existing.id
   );
+  if (prUrlChanged) {
+    db.getDb().prepare(`
+      DELETE FROM merge_queue
+      WHERE request_id = ?
+        AND task_id = ?
+        AND id != ?
+        AND status NOT IN ('merged', 'merging')
+    `).run(request_id, task_id, existing.id);
+  }
 
   return {
     queued: shouldRetry,

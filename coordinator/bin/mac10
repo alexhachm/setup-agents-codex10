@@ -11,6 +11,7 @@ const STRICT_NAMESPACE = Boolean(process.env.MAC10_NAMESPACE) && process.env.MAC
 const BRANCH_RE = /^[a-zA-Z0-9._\/-]+$/;
 const PR_URL_RE = /^https:\/\/github\.com\/[a-zA-Z0-9._-]+\/[a-zA-Z0-9._-]+\/pull\/\d+$/;
 const PR_NUMBER_RE = /^#?(\d+)$/;
+const PR_REFERENCE_RE = /(?:^|[\s-])(pull request|pull|pr)\s*#?(\d+)$/i;
 const WORKER_BRANCH_RE = /^agent-\d+$/;
 
 function namespacedCandidates(baseName) {
@@ -329,10 +330,13 @@ function normalizePrUrl(rawPrUrl, cwd = process.cwd()) {
   if (PR_URL_RE.test(trimmed)) return trimmed;
 
   const match = trimmed.match(PR_NUMBER_RE);
-  if (!match) return trimmed;
+  const normalizedMatch = match
+    ? match[1]
+    : (trimmed.match(PR_REFERENCE_RE) ? trimmed.match(PR_REFERENCE_RE)[2] : null);
+  if (!normalizedMatch) return trimmed;
   const repoPath = getProjectGitHubRepoPath(cwd);
   if (!repoPath) return trimmed;
-  return `https://github.com/${repoPath}/pull/${match[1]}`;
+  return `https://github.com/${repoPath}/pull/${normalizedMatch}`;
 }
 
 function parseWorkerId(rawWorkerId) {
