@@ -165,7 +165,12 @@ function tick(projectDir) {
         : getThresholds().terminate;
       if (completedAgo > 30) {
         // Reset to idle so allocator can reuse
-        db.updateWorker(worker.id, { status: 'idle', current_task_id: null });
+        db.updateWorker(worker.id, {
+          status: 'idle',
+          current_task_id: null,
+          claimed_by: null,
+          claimed_at: null,
+        });
         db.log('coordinator', 'worker_auto_reset', { worker_id: worker.id });
       }
     }
@@ -277,6 +282,8 @@ function handleDeath(worker, reason) {
   db.updateWorker(worker.id, {
     status: 'idle',
     current_task_id: null,
+    claimed_by: null,
+    claimed_at: null,
     pid: null,
   });
 }
@@ -303,18 +310,27 @@ function releaseStaleClaimsCheck(now) {
   ).all();
 
   for (const worker of claimedWorkers) {
-    // Use last_heartbeat or created_at as claim timestamp proxy
-    const claimTime = worker.last_heartbeat || worker.created_at;
-    if (!claimTime) {
+    if (!worker.claimed_at) {
+      db.log('coordinator', 'stale_claim_released', {
+        worker_id: worker.id,
+        reason: 'missing_claim_timestamp',
+      });
       db.releaseWorker(worker.id);
-      db.log('coordinator', 'stale_claim_released', { worker_id: worker.id, reason: 'no_timestamp' });
       continue;
     }
-    const staleSec = getAgeSeconds(now, claimTime, {
+    const staleSec = getAgeSeconds(now, worker.claimed_at, {
       worker_id: worker.id,
       scope: 'release_stale_claim',
+      claim_source: 'claimed_at',
     });
-    if (staleSec === null) continue;
+    if (staleSec === null) {
+      db.log('coordinator', 'stale_claim_released', {
+        worker_id: worker.id,
+        reason: 'invalid_claim_timestamp',
+      });
+      db.releaseWorker(worker.id);
+      continue;
+    }
     if (staleSec > 120) {
       db.releaseWorker(worker.id);
       db.log('coordinator', 'stale_claim_released', { worker_id: worker.id, stale_sec: staleSec });
