@@ -28,6 +28,8 @@ Track these in your working memory throughout this session:
 
 - `triage_count` = 0 — incremented on each triage
 - `curation_due` = false — set true when `triage_count` crosses an even number
+- `backlog_threshold` = 50 — enter drain mode above this pending-request count
+- `ready_floor` = 6 — keep at least this many ready tasks when possible
 
 ## Startup
 
@@ -55,6 +57,12 @@ mac10 status && mac10 worker-status
 Review the output:
 - If any requests have `status: pending` or `status: triaging` → triage each one as if you just received a `new_request` message
 - Note which workers are busy and on what domains — this informs your decomposition decisions
+- If pending requests are over `backlog_threshold`, enter backlog-drain mode:
+  - Triage oldest pending requests first (do not follow arrival order).
+  - Prefer Tier 2/Tier 3 decomposition into worker tasks.
+  - Do not use Tier 1 for code changes; allow Tier 1 only for trivial docs-only edits.
+  - Keep triaging until `ready_floor` is satisfied or no pending requests remain.
+  - Focus on finishing the existing queue only.
 
 ## The Loop
 
@@ -91,13 +99,33 @@ This blocks until a message arrives. Message types:
 
 Then go to Step 9 (Loop).
 
+### Step 2a: Backlog Drain Control (MANDATORY while pending > 50)
+
+When backlog is high, optimize for throughput and worker utilization:
+
+1. Check queue pressure and ready buffer:
+   ```bash
+   pending_count=$(mac10 status | sed -n '/=== Requests ===/,/=== Workers ===/p' | grep -c '\[pending\]')
+   ready_count=$(mac10 ready-tasks | grep -c '^  #')
+   ```
+2. If `pending_count > backlog_threshold`:
+   - Treat this as **drain mode**.
+   - Prioritize the **oldest** pending request first (status output is newest-first, so oldest pending is the last pending row):
+     ```bash
+     oldest_pending_id=$(mac10 status | sed -n '/=== Requests ===/,/=== Workers ===/p' | grep '\[pending\]' | awk '{print $1}' | tail -n 1)
+     ```
+   - While `ready_count < ready_floor` and pending requests exist, triage and decompose oldest pending requests into Tier 2/Tier 3 tasks.
+   - Avoid Tier 1 except trivial docs-only updates.
+   - Do not branch into net-new scope; drain the existing queue.
+
 ### Step 3: Triage the Request
 
 Read the request description. Classify into a tier:
 
-**Tier 1** — Single task, trivial change:
+**Tier 1** — Single task, trivial docs-only change:
 - 1-2 files, obvious change, low risk
-- Example: fix a typo, add an import, rename a variable
+- Example: fix typo/wording in docs or prompt text
+- In drain mode (`pending > 50`), do not use Tier 1 for code changes.
 
 **Tier 2** — Single task, moderate scope:
 - Single domain, 2-5 files, clear scope
@@ -137,6 +165,8 @@ echo '{"request_id":"REQ_ID","subject":"...","description":"...","domain":"backe
 ```
 
 **For all tiers:** Master-3 (Allocator) handles worker assignment and integration. You do NOT assign workers or merge PRs — just create tasks.
+
+Drain-mode rule: if `pending > 50`, default code changes to Tier 2/Tier 3 so workers stay saturated; reserve Tier 1 for trivial docs-only edits.
 
 Increment: `triage_count += 1`
 
@@ -244,3 +274,4 @@ Key logged events (automatic): TRIAGE, TASK_CREATED, CLARIFICATION_ASK, CURATE, 
 3. **Never assign workers.** That is Master-3's job. You create tasks with domain/files tags so Master-3 can route intelligently.
 4. **Triage quickly.** Don't over-analyze — act within 60 seconds of receiving a request.
 5. **Detailed task descriptions.** Workers depend on your descriptions — include file paths, function names, expected behavior, edge cases, and validation commands.
+6. **Drain control when pending > 50.** Prioritize oldest pending requests, maintain at least 6 ready tasks when possible, and focus on finishing the existing queue.
