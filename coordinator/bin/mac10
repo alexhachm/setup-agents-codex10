@@ -353,6 +353,13 @@ function extractPrNumber(rawPr) {
   return '';
 }
 
+function isShorthandPrInput(rawPr) {
+  if (typeof rawPr !== 'string') return false;
+  const trimmed = rawPr.trim();
+  if (!trimmed) return false;
+  return PR_NUMBER_RE.test(trimmed) || PR_REFERENCE_RE.test(trimmed);
+}
+
 function looksLikePrInput(rawPr) {
   if (typeof rawPr !== 'string') return false;
   const trimmed = rawPr.trim();
@@ -466,10 +473,12 @@ function parseCompleteTaskArgs(optionalArgs, rawWorkerId, rawTaskId, projectCwd 
   const firstLooksPr = looksLikePrInput(first);
   const firstLooksBranch = looksLikeBranchInput(first, rawWorkerId);
   const secondLooksBranch = looksLikeBranchInput(second, rawWorkerId);
-  const firstSuspiciousTaskIdPr = firstLooksPr && isSuspiciousTaskIdPrInput(first, rawTaskId);
+  const firstSuspiciousTaskIdPr = isShorthandPrInput(first) && isSuspiciousTaskIdPrInput(first, rawTaskId);
 
   if (extras.length === 1) {
-    if (firstLooksPr) {
+    if (firstSuspiciousTaskIdPr) {
+      console.error(`[mac10] complete-task ignored suspicious PR input "${firstTrimmed}" matching task_id "${rawTaskId}"`);
+    } else if (firstLooksPr) {
       rawPrUrl = firstTrimmed;
     } else if (firstLooksBranch) {
       rawBranch = sanitizeBranchName(first);
@@ -479,9 +488,13 @@ function parseCompleteTaskArgs(optionalArgs, rawWorkerId, rawTaskId, projectCwd 
   } else if (extras.length > 1 && !firstTrimmed && secondLooksBranch) {
     rawBranch = sanitizeBranchName(second);
     resultParts = extras.slice(2);
-  } else if (firstSuspiciousTaskIdPr && secondLooksBranch) {
-    rawBranch = sanitizeBranchName(second);
-    resultParts = extras.slice(2);
+  } else if (firstSuspiciousTaskIdPr) {
+    if (secondLooksBranch) {
+      rawBranch = sanitizeBranchName(second);
+      resultParts = extras.slice(2);
+    } else {
+      resultParts = extras.slice(1);
+    }
     console.error(`[mac10] complete-task ignored suspicious PR input "${firstTrimmed}" matching task_id "${rawTaskId}"`);
   } else if (firstLooksPr) {
     rawPrUrl = firstTrimmed;
