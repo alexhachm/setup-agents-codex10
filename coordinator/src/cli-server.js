@@ -443,11 +443,32 @@ function extractPrNumber(rawPrUrl) {
   if (typeof rawPrUrl !== 'string') return '';
   const trimmed = rawPrUrl.trim();
   if (!trimmed) return '';
+  const urlMatch = trimmed.match(/\/pull\/(\d+)(?:[/?#].*)?$/i);
+  if (urlMatch && urlMatch[1]) return urlMatch[1];
   const match = trimmed.match(PR_NUMBER_RE);
   if (match) return match[1];
   const refMatch = trimmed.match(PR_REFERENCE_RE);
   if (refMatch) return refMatch[2];
   return '';
+}
+
+function isShorthandPrInput(rawPrUrl) {
+  if (typeof rawPrUrl !== 'string') return false;
+  const trimmed = rawPrUrl.trim();
+  if (!trimmed) return false;
+  return PR_NUMBER_RE.test(trimmed) || PR_REFERENCE_RE.test(trimmed);
+}
+
+function isSuspiciousTaskIdPrInput(rawPrUrl, taskId) {
+  const prNumber = extractPrNumber(rawPrUrl);
+  if (!prNumber) return false;
+  const parsedTaskId = parseInt(taskId, 10);
+  if (!Number.isInteger(parsedTaskId) || parsedTaskId <= 0) return false;
+  return Number(prNumber) === parsedTaskId;
+}
+
+function shouldIgnoreTaskIdLikePrInput(rawPrUrl, taskId) {
+  return isShorthandPrInput(rawPrUrl) && isSuspiciousTaskIdPrInput(rawPrUrl, taskId);
 }
 
 function normalizePrUrl(rawPrUrl, cwd = _projectDir || process.cwd()) {
@@ -667,12 +688,15 @@ function queueMergeWithRecovery({
   const normalizedPriority = Number.isInteger(priority) ? priority : 0;
   const queueCwd = _projectDir || process.cwd();
   let resolvedPr = resolveQueuePrTarget(pr_url, branch, queueCwd);
-  if (!resolvedPr.resolvable) {
+  const taskIdCollision = isSuspiciousTaskIdPrInput(resolvedPr.pr_url, task_id);
+  if (!resolvedPr.resolvable || taskIdCollision) {
     const historicalPrUrl = findHistoricalPrUrlForBranch(request_id, branch, task_id);
     if (historicalPrUrl) {
       resolvedPr = {
         pr_url: historicalPrUrl,
-        source: 'branch_history_fallback',
+        source: taskIdCollision
+          ? 'branch_history_task_id_collision_fallback'
+          : 'branch_history_fallback',
         resolvable: true,
       };
     }
@@ -681,7 +705,8 @@ function queueMergeWithRecovery({
 
   if ((resolvedPr.source === 'branch_fallback'
     || resolvedPr.source === 'branch_fallback_mismatch'
-    || resolvedPr.source === 'branch_history_fallback')
+    || resolvedPr.source === 'branch_history_fallback'
+    || resolvedPr.source === 'branch_history_task_id_collision_fallback')
     && isValidGitHubPrUrl(resolvedPrUrl)) {
     db.updateTask(task_id, { pr_url: resolvedPrUrl });
     db.log('coordinator', 'merge_queue_pr_url_recovered_from_branch', {
@@ -1257,7 +1282,16 @@ function handleCommand(cmd, conn, handlers) {
         const completionPrNormalizationCwd = worker && worker.worktree_path
           ? worker.worktree_path
           : (_projectDir || process.cwd());
-        const normalizedPrUrl = normalizePrUrl(pr_url, completionPrNormalizationCwd);
+        const ignoredSuspiciousTaskIdPr = shouldIgnoreTaskIdLikePrInput(pr_url, task_id);
+        const completionPrInput = ignoredSuspiciousTaskIdPr ? '' : pr_url;
+        const normalizedPrUrl = normalizePrUrl(completionPrInput, completionPrNormalizationCwd);
+        if (ignoredSuspiciousTaskIdPr) {
+          db.log('coordinator', 'complete_task_pr_url_ignored_task_id_collision', {
+            worker_id,
+            task_id,
+            original_pr_url: pr_url,
+          });
+        }
         const resolvedBranch = resolveCompletionBranch(worker, branch, worker_id);
         if (resolvedBranch.mismatch) {
           db.log('coordinator', 'complete_task_branch_overridden', {
