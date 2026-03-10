@@ -97,7 +97,18 @@ const CHANGE_LOG_FIELDS = ['description', 'domain', 'file_path', 'function_name'
 // - CLI RPC: request/fix/loop-request
 // - HTTP API: /api/request
 const MAX_REQUEST_DESCRIPTION_LENGTH = 4000;
+const INVALID_REQUEST_DESCRIPTION = 'invalid_request_description';
 const INVALID_REQUEST_DESCRIPTION_TOO_LONG = 'invalid_request_description_too_long';
+const REQUEST_DESCRIPTION_HELP_ONLY_RE = /^(?:--help|-h)$/i;
+const REQUEST_DESCRIPTION_DUMP_MARKERS = [
+  '=== project:',
+  'loop created:',
+  '=== requests ===',
+];
+const REQUEST_DESCRIPTION_PLACEHOLDER_PATTERNS = [
+  /^\[\s*clear description of what the user wants\s*\]$/i,
+  /^fix\s+worker-(?:n|\d+)\s*:\s*\[\s*brief description[^\]]*\]\s*$/i,
+];
 const LOOP_LAUNCH_FAILED = 'loop_launch_failed';
 const LOOP_LAUNCH_FAILED_MESSAGE = 'Failed to launch loop runtime';
 const ACTIVITY_LOG_LIMIT_MIN = 1;
@@ -174,12 +185,36 @@ function bridgeToHandoff(requestId, description, type = 'bug-fix') {
 
 const MAX_PAYLOAD_SIZE = 1024 * 1024; // 1MB
 
+function makeRequestDescriptionError(code) {
+  const error = new Error(code);
+  error.code = code;
+  return error;
+}
+
+function hasRequestDescriptionPlaceholderScaffold(normalizedDescription) {
+  return REQUEST_DESCRIPTION_PLACEHOLDER_PATTERNS.some((pattern) => pattern.test(normalizedDescription));
+}
+
+function hasRequestDescriptionDumpPayloadFragment(normalizedDescription) {
+  const loweredDescription = normalizedDescription.toLowerCase();
+  return REQUEST_DESCRIPTION_DUMP_MARKERS.some((marker) => loweredDescription.includes(marker));
+}
+
+function hasInvalidRequestDescriptionContent(normalizedDescription) {
+  return (
+    REQUEST_DESCRIPTION_HELP_ONLY_RE.test(normalizedDescription) ||
+    hasRequestDescriptionPlaceholderScaffold(normalizedDescription) ||
+    hasRequestDescriptionDumpPayloadFragment(normalizedDescription)
+  );
+}
+
 function validateRequestDescription(rawDescription) {
   const normalized = String(rawDescription).replace(/(?:\r\n?)+/g, '\n').trim();
   if (normalized.length > MAX_REQUEST_DESCRIPTION_LENGTH) {
-    const error = new Error(INVALID_REQUEST_DESCRIPTION_TOO_LONG);
-    error.code = INVALID_REQUEST_DESCRIPTION_TOO_LONG;
-    throw error;
+    throw makeRequestDescriptionError(INVALID_REQUEST_DESCRIPTION_TOO_LONG);
+  }
+  if (hasInvalidRequestDescriptionContent(normalized)) {
+    throw makeRequestDescriptionError(INVALID_REQUEST_DESCRIPTION);
   }
   return normalized;
 }
@@ -193,6 +228,17 @@ function isRequestDescriptionTooLongError(error) {
   return error.code === INVALID_REQUEST_DESCRIPTION_TOO_LONG || error.message === INVALID_REQUEST_DESCRIPTION_TOO_LONG;
 }
 
+function isInvalidRequestDescriptionError(error) {
+  if (!error) return false;
+  return error.code === INVALID_REQUEST_DESCRIPTION || error.message === INVALID_REQUEST_DESCRIPTION;
+}
+
+function getRequestDescriptionErrorCode(error) {
+  if (isRequestDescriptionTooLongError(error)) return INVALID_REQUEST_DESCRIPTION_TOO_LONG;
+  if (isInvalidRequestDescriptionError(error)) return INVALID_REQUEST_DESCRIPTION;
+  return null;
+}
+
 function normalizeErrorMessage(error, fallback = 'unknown_error') {
   if (error && typeof error.message === 'string' && error.message.trim().length > 0) {
     return error.message.trim();
@@ -203,6 +249,10 @@ function normalizeErrorMessage(error, fallback = 'unknown_error') {
     if (serialized && serialized !== '{}' && serialized !== 'null') return serialized;
   } catch {}
   return fallback;
+}
+
+function isPromiseLike(value) {
+  return Boolean(value) && typeof value.then === 'function';
 }
 
 function failClosedLoopLaunch(loopId, launchError) {
@@ -221,6 +271,10 @@ function failClosedLoopLaunch(loopId, launchError) {
       status: 'failed',
       stopped_at: new Date().toISOString(),
       last_checkpoint: `launch_failed:${launchErrorMessage}`,
+      tmux_session: null,
+      tmux_window: null,
+      pid: null,
+      last_heartbeat: new Date().toISOString(),
     });
     failure.terminalized = true;
   } catch (terminalizeErr) {
@@ -233,6 +287,18 @@ function failClosedLoopLaunch(loopId, launchError) {
     terminalization_error: failure.terminalization_error,
   });
   return failure;
+}
+
+function normalizeLoopLaunchFailureResponse(loopId, launchFailure) {
+  if (launchFailure && typeof launchFailure === 'object' && launchFailure.ok === false) {
+    if (launchFailure.error === LOOP_LAUNCH_FAILED) {
+      return {
+        ...launchFailure,
+        loop_id: launchFailure.loop_id || loopId,
+      };
+    }
+  }
+  return failClosedLoopLaunch(loopId, launchFailure);
 }
 
 const COMMAND_SCHEMAS = {
@@ -398,6 +464,20 @@ function getSafeRequestHistory(request_id, limit) {
 function backfillSupersededLoopRequestsSafe() {
   if (typeof db.backfillSupersededLoopRequests !== 'function') return { inspected: 0, repaired: 0 };
   return db.backfillSupersededLoopRequests();
+}
+
+function terminalizeMalformedScaffoldArtifactsSafe() {
+  if (typeof db.terminalizeMalformedScaffoldArtifacts !== 'function') {
+    return {
+      inspected_requests: 0,
+      repaired_requests: 0,
+      inspected_tasks: 0,
+      terminalized_tasks: 0,
+      detached_task_assignments: 0,
+      reset_workers: 0,
+    };
+  }
+  return db.terminalizeMalformedScaffoldArtifacts();
 }
 
 function toReadyTaskJson(task) {
@@ -583,6 +663,13 @@ function parseGitHubRepoFromRemoteUrl(remoteUrl) {
   return '';
 }
 
+function parseGitHubRepoFromPrUrl(prUrl) {
+  if (typeof prUrl !== 'string') return '';
+  const match = prUrl.trim().match(/^https:\/\/github\.com\/([^/]+\/[^/]+)\/pull\/\d+(?:[/?#].*)?$/i);
+  if (!match || !match[1]) return '';
+  return match[1].replace(/\.git$/i, '');
+}
+
 function resolveCommandDir(rawDir, fallback) {
   const candidates = [rawDir, fallback, _projectDir, process.cwd()];
   for (const candidate of candidates) {
@@ -649,7 +736,20 @@ function normalizePrUrl(rawPrUrl, cwd = _projectDir || process.cwd()) {
   if (typeof rawPrUrl !== 'string') return '';
   const trimmed = rawPrUrl.trim();
   if (!trimmed) return '';
-  if (PR_URL_RE.test(trimmed)) return trimmed;
+  if (PR_URL_RE.test(trimmed)) {
+    const prNumber = extractPrNumber(trimmed);
+    const projectRepoPath = getProjectGitHubRepoPath(cwd);
+    const providedRepoPath = parseGitHubRepoFromPrUrl(trimmed);
+    if (
+      prNumber
+      && projectRepoPath
+      && providedRepoPath
+      && providedRepoPath.toLowerCase() !== projectRepoPath.toLowerCase()
+    ) {
+      return `https://github.com/${projectRepoPath}/pull/${prNumber}`;
+    }
+    return trimmed;
+  }
 
   const normalizedMatch = extractPrNumber(trimmed);
   if (!normalizedMatch) return trimmed;
@@ -1235,7 +1335,12 @@ function createConnectionHandler(handlers) {
           validateCommand(cmd);
           handleCommand(cmd, conn, handlers);
         } catch (e) {
-          respond(conn, { error: e.message });
+          const descriptionErrorCode = getRequestDescriptionErrorCode(e);
+          if (descriptionErrorCode) {
+            respond(conn, { ok: false, error: descriptionErrorCode });
+          } else {
+            respond(conn, { error: e.message });
+          }
         }
       }
     });
@@ -1306,6 +1411,22 @@ function respond(conn, data) {
   } catch {}
 }
 
+function createUrgentFixRequest(description) {
+  return db.getDb().transaction(() => {
+    const id = db.createRequest(description);
+    db.updateRequest(id, { tier: 2, status: 'decomposed' });
+    const taskId = db.createTask({
+      request_id: id,
+      subject: `Fix: ${description}`,
+      description,
+      priority: 'urgent',
+      tier: 2,
+    });
+    db.updateTask(taskId, { status: 'ready' });
+    return { request_id: id, task_id: taskId };
+  })();
+}
+
 function handleCommand(cmd, conn, handlers) {
   const { command, args } = cmd;
 
@@ -1319,19 +1440,7 @@ function handleCommand(cmd, conn, handlers) {
         break;
       }
       case 'fix': {
-        const fixResult = db.getDb().transaction(() => {
-          const id = db.createRequest(args.description);
-          db.updateRequest(id, { tier: 2, status: 'decomposed' });
-          const taskId = db.createTask({
-            request_id: id,
-            subject: `Fix: ${args.description}`,
-            description: args.description,
-            priority: 'urgent',
-            tier: 2,
-          });
-          db.updateTask(taskId, { status: 'ready' });
-          return { request_id: id, task_id: taskId };
-        })();
+        const fixResult = createUrgentFixRequest(args.description);
         respond(conn, { ok: true, ...fixResult });
         break;
       }
@@ -1706,17 +1815,38 @@ function handleCommand(cmd, conn, handlers) {
 
       // === ALLOCATOR commands ===
       case 'ready-tasks': {
+        terminalizeMalformedScaffoldArtifactsSafe();
         const tasks = db.getReadyTasks();
         respond(conn, { ok: true, tasks: tasks.map(toReadyTaskJson) });
         break;
       }
       case 'assign-task': {
+        terminalizeMalformedScaffoldArtifactsSafe();
         const { task_id: assignTaskId, worker_id: assignWorkerId } = args;
         // Atomic assignment: same pattern as allocator.js assignTaskToWorker
         const assignResult = db.getDb().transaction(() => {
           const freshTask = db.getTask(assignTaskId);
           const freshWorker = db.getWorker(assignWorkerId);
           if (!freshTask || freshTask.status !== 'ready' || freshTask.assigned_to) return { ok: false, reason: 'task_not_ready' };
+          const parentRequest = db.getRequest(freshTask.request_id);
+          if (!parentRequest) {
+            return { ok: false, reason: 'parent_request_not_assignable' };
+          }
+          const parentRequestStatus = String(parentRequest.status || '').trim().toLowerCase();
+          if (parentRequestStatus === 'completed' || parentRequestStatus === 'failed') {
+            return {
+              ok: false,
+              reason: 'parent_request_terminal',
+              parent_request_status: parentRequestStatus,
+            };
+          }
+          if (!db.isRequestAssignableStatus(parentRequest.status)) {
+            return {
+              ok: false,
+              reason: 'parent_request_not_assignable',
+              parent_request_status: parentRequestStatus || null,
+            };
+          }
           if (!freshWorker || freshWorker.status !== 'idle') return { ok: false, reason: 'worker_not_idle' };
 
           db.updateTask(assignTaskId, { status: 'assigned', assigned_to: assignWorkerId });
@@ -1731,7 +1861,11 @@ function handleCommand(cmd, conn, handlers) {
         })();
 
         if (!assignResult.ok) {
-          respond(conn, { ok: false, error: assignResult.reason });
+          const responsePayload = { ok: false, error: assignResult.reason };
+          if (assignResult.parent_request_status) {
+            responsePayload.parent_request_status = assignResult.parent_request_status;
+          }
+          respond(conn, responsePayload);
           break;
         }
 
@@ -1979,16 +2113,19 @@ function handleCommand(cmd, conn, handlers) {
         }
 
         const supersessionBackfill = backfillSupersededLoopRequestsSafe();
+        const malformedScaffold = terminalizeMalformedScaffoldArtifactsSafe();
         db.log('coordinator', 'repair', {
           reset_workers: stuck.changes,
           orphaned_tasks: orphaned.changes,
           supersession_backfill: supersessionBackfill,
+          malformed_scaffold: malformedScaffold,
         });
         respond(conn, {
           ok: true,
           reset_workers: stuck.changes,
           orphaned_tasks: orphaned.changes,
           supersession_backfill: supersessionBackfill,
+          malformed_scaffold: malformedScaffold,
         });
         break;
       }
@@ -2253,10 +2390,29 @@ function handleCommand(cmd, conn, handlers) {
         }
         const loopId = db.createLoop(prompt);
         if (handlers.onLoopCreated) {
+          let launchResult;
           try {
-            handlers.onLoopCreated(loopId, prompt);
+            launchResult = handlers.onLoopCreated(loopId, prompt);
           } catch (spawnErr) {
             respond(conn, failClosedLoopLaunch(loopId, spawnErr));
+            break;
+          }
+          if (isPromiseLike(launchResult)) {
+            Promise.resolve(launchResult)
+              .then((resolvedLaunchResult) => {
+                if (resolvedLaunchResult && resolvedLaunchResult.ok === false) {
+                  respond(conn, normalizeLoopLaunchFailureResponse(loopId, resolvedLaunchResult));
+                  return;
+                }
+                respond(conn, { ok: true, loop_id: loopId });
+              })
+              .catch((spawnErr) => {
+                respond(conn, failClosedLoopLaunch(loopId, spawnErr));
+              });
+            break;
+          }
+          if (launchResult && launchResult.ok === false) {
+            respond(conn, normalizeLoopLaunchFailureResponse(loopId, launchResult));
             break;
           }
         }
@@ -2445,10 +2601,13 @@ module.exports = {
   validateRequestDescription,
   normalizeRequestDescription,
   isRequestDescriptionTooLongError,
+  isInvalidRequestDescriptionError,
+  createUrgentFixRequest,
   failClosedLoopLaunch,
   LOOP_LAUNCH_FAILED,
   LOOP_LAUNCH_FAILED_MESSAGE,
   CHANGE_LOG_FIELDS,
+  INVALID_REQUEST_DESCRIPTION,
   MAX_REQUEST_DESCRIPTION_LENGTH,
   INVALID_REQUEST_DESCRIPTION_TOO_LONG,
 };
