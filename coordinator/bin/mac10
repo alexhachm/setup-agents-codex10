@@ -360,6 +360,14 @@ function looksLikePrInput(rawPr) {
   return PR_URL_RE.test(trimmed) || Boolean(extractPrNumber(trimmed));
 }
 
+function isSuspiciousTaskIdPrInput(rawPr, rawTaskId) {
+  const prNumber = extractPrNumber(rawPr);
+  if (!prNumber) return false;
+  const taskId = parseInt(rawTaskId, 10);
+  if (!Number.isInteger(taskId) || taskId <= 0) return false;
+  return Number(prNumber) === taskId;
+}
+
 function parseWorkerId(rawWorkerId) {
   const parsed = parseInt(rawWorkerId, 10);
   if (!Number.isInteger(parsed) || parsed <= 0) return null;
@@ -445,7 +453,7 @@ function resolveCompleteTaskBranch(requestedBranch, rawWorkerId, projectCwd = pr
   return '';
 }
 
-function parseCompleteTaskArgs(optionalArgs, rawWorkerId, projectCwd = process.cwd()) {
+function parseCompleteTaskArgs(optionalArgs, rawWorkerId, rawTaskId, projectCwd = process.cwd()) {
   const extras = Array.isArray(optionalArgs) ? optionalArgs : [];
   const first = typeof extras[0] === 'string' ? extras[0] : '';
   const second = typeof extras[1] === 'string' ? extras[1] : '';
@@ -458,6 +466,7 @@ function parseCompleteTaskArgs(optionalArgs, rawWorkerId, projectCwd = process.c
   const firstLooksPr = looksLikePrInput(first);
   const firstLooksBranch = looksLikeBranchInput(first, rawWorkerId);
   const secondLooksBranch = looksLikeBranchInput(second, rawWorkerId);
+  const firstSuspiciousTaskIdPr = firstLooksPr && isSuspiciousTaskIdPrInput(first, rawTaskId);
 
   if (extras.length === 1) {
     if (firstLooksPr) {
@@ -470,6 +479,10 @@ function parseCompleteTaskArgs(optionalArgs, rawWorkerId, projectCwd = process.c
   } else if (extras.length > 1 && !firstTrimmed && secondLooksBranch) {
     rawBranch = sanitizeBranchName(second);
     resultParts = extras.slice(2);
+  } else if (firstSuspiciousTaskIdPr && secondLooksBranch) {
+    rawBranch = sanitizeBranchName(second);
+    resultParts = extras.slice(2);
+    console.error(`[mac10] complete-task ignored suspicious PR input "${firstTrimmed}" matching task_id "${rawTaskId}"`);
   } else if (firstLooksPr) {
     rawPrUrl = firstTrimmed;
     if (secondLooksBranch) {
@@ -813,6 +826,7 @@ async function main() {
         const completionArgs = parseCompleteTaskArgs(
           argv.slice(3),
           argv[1],
+          parsedTaskId,
           completionProjectCwd,
         );
         result = await send(socketPath, 'complete-task', {
