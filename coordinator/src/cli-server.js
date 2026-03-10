@@ -620,6 +620,24 @@ function readWorkerBranchFromWorktree(worker) {
   }
 }
 
+function getTrackedWorktreeChanges(worktreePath) {
+  const cwd = typeof worktreePath === 'string' ? worktreePath.trim() : '';
+  if (!cwd || !fs.existsSync(cwd)) return [];
+  try {
+    const output = execFileSync('git', ['status', '--porcelain'], {
+      encoding: 'utf8',
+      cwd,
+      stdio: ['ignore', 'pipe', 'ignore'],
+    });
+    return output
+      .split('\n')
+      .map((line) => line.replace(/\r$/, ''))
+      .filter((line) => line && !line.startsWith('?? '));
+  } catch {
+    return [];
+  }
+}
+
 function branchExists(rawBranch, repositoryDir = process.cwd()) {
   const branch = sanitizeBranchName(rawBranch);
   if (!branch) return false;
@@ -1279,6 +1297,20 @@ function handleCommand(cmd, conn, handlers) {
       case 'complete-task': {
         const { worker_id, task_id, pr_url, result, branch } = args;
         const worker = db.getWorker(worker_id);
+        const trackedChanges = getTrackedWorktreeChanges(worker && worker.worktree_path);
+        if (trackedChanges.length > 0) {
+          db.log('coordinator', 'complete_task_rejected_dirty_worktree', {
+            worker_id,
+            task_id,
+            tracked_change_count: trackedChanges.length,
+            tracked_changes: trackedChanges.slice(0, 8),
+          });
+          respond(conn, {
+            ok: false,
+            error: 'Worker worktree has tracked git changes; commit or stash before complete-task.',
+          });
+          break;
+        }
         const completionPrNormalizationCwd = worker && worker.worktree_path
           ? worker.worktree_path
           : (_projectDir || process.cwd());

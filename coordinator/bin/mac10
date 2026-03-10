@@ -422,6 +422,22 @@ function readCurrentBranch(cwd = process.cwd()) {
   }
 }
 
+function getTrackedWorktreeChanges(cwd = process.cwd()) {
+  try {
+    const output = execFileSync('git', ['status', '--porcelain'], {
+      encoding: 'utf8',
+      cwd,
+      stdio: ['ignore', 'pipe', 'ignore'],
+    });
+    return output
+      .split('\n')
+      .map((line) => line.replace(/\r$/, ''))
+      .filter((line) => line && !line.startsWith('?? '));
+  } catch {
+    return [];
+  }
+}
+
 function resolveCompleteTaskBranch(requestedBranch, rawWorkerId, projectCwd = process.cwd()) {
   const normalizedRequested = sanitizeBranchName(requestedBranch || '');
   const canonicalWorkerBranch = getCanonicalWorkerBranch(rawWorkerId);
@@ -842,6 +858,18 @@ async function main() {
           parsedTaskId,
           completionProjectCwd,
         );
+        const trackedChanges = getTrackedWorktreeChanges(completionProjectCwd);
+        if (trackedChanges.length > 0) {
+          console.error('[mac10] complete-task aborted: tracked git changes detected in worktree.');
+          for (const line of trackedChanges.slice(0, 8)) {
+            console.error(`  ${line}`);
+          }
+          if (trackedChanges.length > 8) {
+            console.error(`  ...and ${trackedChanges.length - 8} more`);
+          }
+          console.error('[mac10] commit or stash tracked changes before completing the task.');
+          process.exit(1);
+        }
         result = await send(socketPath, 'complete-task', {
           worker_id: String(parsedWorkerId),
           task_id: parsedTaskId,
