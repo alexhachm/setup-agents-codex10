@@ -3,6 +3,8 @@
 const db = require('./db');
 const tmux = require('./tmux');
 const recovery = require('./recovery');
+const path = require('path');
+const { execFile } = require('child_process');
 
 let intervalId = null;
 let lastMailPurge = 0;
@@ -21,6 +23,12 @@ const MERGE_TIMEOUT_SEC = 300;
 const MERGE_CONFLICT_GRACE_SEC = 600;
 const MERGE_TIMEOUT_ERROR = `Merge timed out after ${MERGE_TIMEOUT_SEC / 60} minutes`;
 const SQLITE_DATETIME_PATTERN = /^(\d{4})-(\d{2})-(\d{2}) (\d{2}):(\d{2}):(\d{2})(?:\.(\d{1,3}))?$/;
+const LOOP_SENTINEL_PATH = path.join(
+  process.env.MAC10_SCRIPT_DIR || path.resolve(__dirname, '..', '..'),
+  'scripts',
+  'loop-sentinel.sh'
+);
+const LOOP_HEARTBEAT_STALE_SEC = 300;
 
 // Escalation thresholds (seconds since last heartbeat)
 // Override via DB config: watchdog_warn_sec, watchdog_nudge_sec, watchdog_triage_sec, watchdog_terminate_sec
@@ -91,6 +99,170 @@ function getAgeSeconds(now, timestamp, metadata = {}) {
   return (now - parsed) / 1000;
 }
 
+function getWorkerPid(worker) {
+  const pid = Number(worker && worker.pid);
+  return Number.isInteger(pid) && pid > 0 ? pid : null;
+}
+
+function getLoopPid(loop) {
+  const pid = Number(loop && loop.pid);
+  return Number.isInteger(pid) && pid > 0 ? pid : null;
+}
+
+function isPidAlive(pid) {
+  if (!Number.isInteger(pid) || pid <= 0) return false;
+  try {
+    process.kill(pid, 0);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+function terminatePid(pid) {
+  if (!Number.isInteger(pid) || pid <= 0) {
+    return { verified: false, reason: 'invalid_pid', pid };
+  }
+
+  if (!isPidAlive(pid)) {
+    return { verified: true, method: 'pid_already_dead', pid };
+  }
+
+  try {
+    process.kill(pid, 'SIGTERM');
+  } catch (error) {
+    const errorCode = error && error.code ? error.code : String(error);
+    return { verified: false, reason: `sigterm_failed:${errorCode}`, pid };
+  }
+
+  if (!isPidAlive(pid)) {
+    return { verified: true, method: 'pid_sigterm', pid };
+  }
+
+  try {
+    process.kill(pid, 'SIGKILL');
+  } catch (error) {
+    const errorCode = error && error.code ? error.code : String(error);
+    return {
+      verified: false,
+      reason: `sigkill_failed:${errorCode}`,
+      pid,
+    };
+  }
+
+  if (!isPidAlive(pid)) {
+    return { verified: true, method: 'pid_sigkill', pid };
+  }
+
+  return { verified: false, reason: 'pid_still_running', pid };
+}
+
+function terminateWorkerRuntime(worker) {
+  const windowName = `worker-${worker.id}`;
+
+  if (tmux.isAvailable() && worker.tmux_window) {
+    tmux.killWindow(windowName);
+    if (!tmux.isPaneAlive(windowName)) {
+      return {
+        verified: true,
+        method: 'tmux_kill',
+        window: windowName,
+      };
+    }
+  }
+
+  if (!tmux.isAvailable()) {
+    const pid = getWorkerPid(worker);
+    if (pid === null) {
+      return { verified: false, reason: 'missing_worker_pid', window: windowName };
+    }
+    const result = terminatePid(pid);
+    return {
+      ...result,
+      method: result.method || result.reason,
+      pid,
+      window: windowName,
+    };
+  }
+
+  return {
+    verified: false,
+    reason: 'termination_not_available',
+    window: windowName,
+  };
+}
+
+function getLoopLaunchMode(loop) {
+  if (loop.tmux_window) return 'tmux';
+  if (loop.tmux_session === 'non_tmux') return 'non_tmux';
+  return 'non_tmux';
+}
+
+function recoverNonTmuxLoop(loop, projectDir, reason) {
+  try {
+    const child = execFile('bash', [LOOP_SENTINEL_PATH, String(loop.id), projectDir], {
+      cwd: projectDir,
+      detached: true,
+      stdio: 'ignore',
+      env: { ...process.env },
+    });
+
+    if (!child || !child.pid) {
+      return {
+        recovered: false,
+        reason: `loop_recovery_missing_pid:${reason}`,
+      };
+    }
+
+    child.unref();
+    db.updateLoop(loop.id, {
+      tmux_session: 'non_tmux',
+      tmux_window: null,
+      pid: child.pid,
+      last_heartbeat: new Date().toISOString(),
+    });
+
+    db.log('coordinator', 'loop_sentinel_respawned', {
+      loop_id: loop.id,
+      mode: 'non_tmux',
+      reason,
+      pid: child.pid,
+    });
+    return { recovered: true, pid: child.pid };
+  } catch (error) {
+    return {
+      recovered: false,
+      reason: `loop_recovery_failed:${reason}:${error.message}`,
+    };
+  }
+}
+
+function failClosedLoop(loop, reason) {
+  db.updateLoop(loop.id, {
+    status: 'failed',
+    stopped_at: new Date().toISOString(),
+  });
+  db.log('coordinator', 'loop_failed_closed', {
+    loop_id: loop.id,
+    reason,
+  });
+}
+
+function notifyAllocatorTerminationFailure(worker, details, staleSec) {
+  db.log('coordinator', 'watchdog_terminate_failed', {
+    worker_id: worker.id,
+    stale_sec: staleSec,
+    task_id: worker.current_task_id,
+    details,
+  });
+  db.sendMail('allocator', 'watchdog_terminate_failed', {
+    worker_id: worker.id,
+    stale_sec: staleSec,
+    task_id: worker.current_task_id,
+    details,
+  });
+}
+
 function start(projectDir) {
   const intervalMs = parseInt(db.getConfig('watchdog_interval_ms')) || 10000;
 
@@ -137,12 +309,13 @@ function tick(projectDir) {
     }
 
     // ZFC death detection: check if tmux pane is actually alive
+    const tmuxAvailable = tmux.isAvailable();
     const windowName = `worker-${worker.id}`;
-    const paneAlive = tmux.isPaneAlive(windowName);
+    const paneAlive = tmuxAvailable ? tmux.isPaneAlive(windowName) : true;
 
-    if (!paneAlive && worker.status !== 'idle' && worker.status !== 'completed_task') {
+    if (tmuxAvailable && !paneAlive && worker.status !== 'idle' && worker.status !== 'completed_task') {
       // Process died unexpectedly
-      handleDeath(worker, 'tmux_pane_dead');
+      handleDeath(worker, 'tmux_pane_dead', true);
       continue;
     }
 
@@ -165,7 +338,12 @@ function tick(projectDir) {
         : getThresholds().terminate;
       if (completedAgo > 30) {
         // Reset to idle so allocator can reuse
-        db.updateWorker(worker.id, { status: 'idle', current_task_id: null });
+        db.updateWorker(worker.id, {
+          status: 'idle',
+          current_task_id: null,
+          claimed_by: null,
+          claimed_at: null,
+        });
         db.log('coordinator', 'worker_auto_reset', { worker_id: worker.id });
       }
     }
@@ -214,9 +392,18 @@ function escalate(worker, staleSec, projectDir) {
       worker_id: worker.id,
       stale_sec: staleSec,
     });
-    tmux.killWindow(windowName);
-    handleDeath(worker, 'heartbeat_timeout');
-    lastEscalationLevel.delete(worker.id);
+    const terminationResult = terminateWorkerRuntime(worker);
+    if (terminationResult.verified) {
+      handleDeath(worker, 'heartbeat_timeout', true);
+      lastEscalationLevel.delete(worker.id);
+      return;
+    }
+
+    const alreadyFailing = prevLevel >= 4;
+    if (!alreadyFailing) {
+      notifyAllocatorTerminationFailure(worker, terminationResult, staleSec);
+      lastEscalationLevel.set(worker.id, 4);
+    }
 
   } else if (staleSec >= THRESHOLDS.triage && prevLevel < 3) {
     // Level 3: Triage — capture output, log for analysis (once per escalation)
@@ -252,12 +439,26 @@ function escalate(worker, staleSec, projectDir) {
   }
 }
 
-function handleDeath(worker, reason) {
+function handleDeath(worker, reason, runtimeTerminated = false) {
   db.log('coordinator', 'worker_death', {
     worker_id: worker.id,
     reason,
     task_id: worker.current_task_id,
   });
+
+  if (!runtimeTerminated) {
+    db.log('coordinator', 'worker_death_unverified', {
+      worker_id: worker.id,
+      reason,
+      task_id: worker.current_task_id,
+    });
+    db.sendMail('allocator', 'worker_death_unverified', {
+      worker_id: worker.id,
+      reason,
+      task_id: worker.current_task_id,
+    });
+    return;
+  }
 
   // If worker had a task, conditionally mark it for reassignment
   // Uses a single conditional UPDATE to avoid TOCTOU race with worker's complete-task
@@ -277,6 +478,8 @@ function handleDeath(worker, reason) {
   db.updateWorker(worker.id, {
     status: 'idle',
     current_task_id: null,
+    claimed_by: null,
+    claimed_at: null,
     pid: null,
   });
 }
@@ -303,18 +506,27 @@ function releaseStaleClaimsCheck(now) {
   ).all();
 
   for (const worker of claimedWorkers) {
-    // Use last_heartbeat or created_at as claim timestamp proxy
-    const claimTime = worker.last_heartbeat || worker.created_at;
-    if (!claimTime) {
+    if (!worker.claimed_at) {
+      db.log('coordinator', 'stale_claim_released', {
+        worker_id: worker.id,
+        reason: 'missing_claim_timestamp',
+      });
       db.releaseWorker(worker.id);
-      db.log('coordinator', 'stale_claim_released', { worker_id: worker.id, reason: 'no_timestamp' });
       continue;
     }
-    const staleSec = getAgeSeconds(now, claimTime, {
+    const staleSec = getAgeSeconds(now, worker.claimed_at, {
       worker_id: worker.id,
       scope: 'release_stale_claim',
+      claim_source: 'claimed_at',
     });
-    if (staleSec === null) continue;
+    if (staleSec === null) {
+      db.log('coordinator', 'stale_claim_released', {
+        worker_id: worker.id,
+        reason: 'invalid_claim_timestamp',
+      });
+      db.releaseWorker(worker.id);
+      continue;
+    }
     if (staleSec > 120) {
       db.releaseWorker(worker.id);
       db.log('coordinator', 'stale_claim_released', { worker_id: worker.id, stale_sec: staleSec });
@@ -536,40 +748,60 @@ function monitorLoops(projectDir) {
   const now = Date.now();
 
   for (const loop of loops) {
-    if (!loop.tmux_window) continue;
-
-    const paneAlive = tmux.isPaneAlive(loop.tmux_window);
-
-    if (!paneAlive) {
-      // Sentinel died — respawn it
-      db.log('coordinator', 'loop_sentinel_dead', { loop_id: loop.id, window: loop.tmux_window });
-
-      const path = require('path');
-      const scriptDir = process.env.MAC10_SCRIPT_DIR || path.resolve(__dirname, '..', '..');
-      const sentinelPath = path.join(scriptDir, 'scripts', 'loop-sentinel.sh');
-
-      try {
-        tmux.createWindow(loop.tmux_window, `bash "${sentinelPath}" ${loop.id} "${projectDir}"`, projectDir);
-        db.updateLoop(loop.id, {
-          tmux_session: tmux.SESSION,
-          last_heartbeat: new Date().toISOString(),
-        });
-        db.log('coordinator', 'loop_sentinel_respawned', { loop_id: loop.id });
-      } catch (e) {
-        db.log('coordinator', 'loop_respawn_error', { loop_id: loop.id, error: e.message });
+    const loopMode = getLoopLaunchMode(loop);
+    if (loopMode === 'tmux') {
+      const paneAlive = tmux.isPaneAlive(loop.tmux_window);
+      if (!paneAlive) {
+        // Sentinel died — respawn it (tmux behavior unchanged)
+        db.log('coordinator', 'loop_sentinel_dead', { loop_id: loop.id, window: loop.tmux_window });
+        try {
+          tmux.createWindow(loop.tmux_window, `bash "${LOOP_SENTINEL_PATH}" ${loop.id} "${projectDir}"`, projectDir);
+          db.updateLoop(loop.id, {
+            tmux_session: tmux.SESSION,
+            tmux_window: loop.tmux_window,
+            pid: null,
+            last_heartbeat: new Date().toISOString(),
+          });
+          db.log('coordinator', 'loop_sentinel_respawned', { loop_id: loop.id, mode: 'tmux' });
+        } catch (e) {
+          db.log('coordinator', 'loop_respawn_error', { loop_id: loop.id, mode: 'tmux', error: e.message });
+        }
+      }
+    } else {
+      const loopPid = getLoopPid(loop);
+      if (!loopPid) {
+        const reason = 'missing_loop_pid';
+        db.log('coordinator', 'loop_process_missing', { loop_id: loop.id, mode: 'non_tmux' });
+        const recoveryResult = recoverNonTmuxLoop(loop, projectDir, reason);
+        if (!recoveryResult.recovered) {
+          failClosedLoop(loop, reason);
+          db.log('coordinator', 'loop_fail_closed', { loop_id: loop.id, mode: 'non_tmux', reason: recoveryResult.reason });
+        }
+      } else if (!isPidAlive(loopPid)) {
+        const reason = 'loop_process_dead';
+        db.log('coordinator', 'loop_process_dead', { loop_id: loop.id, mode: 'non_tmux', pid: loopPid });
+        const recoveryResult = recoverNonTmuxLoop(loop, projectDir, reason);
+        if (!recoveryResult.recovered) {
+          failClosedLoop(loop, reason);
+          db.log('coordinator', 'loop_fail_closed', { loop_id: loop.id, mode: 'non_tmux', reason: recoveryResult.reason });
+        }
+      } else if (loop.tmux_session !== 'non_tmux') {
+        // Backfill launch mode metadata for legacy loop rows
+        db.updateLoop(loop.id, { tmux_session: 'non_tmux' });
       }
     }
 
-    // Log warning for stale heartbeats (>5 min) but don't terminate — sentinel auto-restarts
+    // Log warning for stale heartbeats (>5 min) but don't terminate
     if (loop.last_heartbeat) {
       const staleSec = getAgeSeconds(now, loop.last_heartbeat, {
         loop_id: loop.id,
         scope: 'loop_heartbeat_age',
       });
       if (staleSec === null) continue;
-      if (staleSec > 300) {
+      if (staleSec > LOOP_HEARTBEAT_STALE_SEC) {
         db.log('coordinator', 'loop_heartbeat_stale', {
           loop_id: loop.id,
+          mode: loopMode,
           stale_sec: Math.round(staleSec),
         });
       }
