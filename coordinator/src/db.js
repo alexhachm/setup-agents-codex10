@@ -7,6 +7,47 @@ const crypto = require('crypto');
 
 let db = null;
 const NAMESPACE = process.env.MAC10_NAMESPACE || 'mac10';
+const SQLITE_TIMESTAMP_RE = /^(\d{4}-\d{2}-\d{2}) (\d{2}:\d{2}:\d{2})(\.\d+)?$/;
+const ISO_TIMESTAMP_WITHOUT_ZONE_RE = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d+)?$/;
+
+function parseCoordinatorTimestamp(value) {
+  if (value === null || value === undefined) return null;
+  if (value instanceof Date) {
+    return Number.isNaN(value.getTime()) ? null : value;
+  }
+  if (typeof value === 'number') {
+    if (!Number.isFinite(value)) return null;
+    // Tolerate both epoch-seconds and epoch-milliseconds inputs.
+    const epochMs = Math.abs(value) < 1e11 ? value * 1000 : value;
+    const date = new Date(epochMs);
+    return Number.isNaN(date.getTime()) ? null : date;
+  }
+  if (typeof value !== 'string') return null;
+
+  const raw = value.trim();
+  if (!raw) return null;
+
+  const sqliteMatch = raw.match(SQLITE_TIMESTAMP_RE);
+  if (sqliteMatch) {
+    const normalized = `${sqliteMatch[1]}T${sqliteMatch[2]}${sqliteMatch[3] || ''}Z`;
+    const sqliteDate = new Date(normalized);
+    return Number.isNaN(sqliteDate.getTime()) ? null : sqliteDate;
+  }
+
+  if (ISO_TIMESTAMP_WITHOUT_ZONE_RE.test(raw)) {
+    const implicitUtcDate = new Date(`${raw}Z`);
+    return Number.isNaN(implicitUtcDate.getTime()) ? null : implicitUtcDate;
+  }
+
+  const date = new Date(raw);
+  return Number.isNaN(date.getTime()) ? null : date;
+}
+
+function coordinatorAgeMs(timestamp, nowMs = Date.now()) {
+  const parsed = parseCoordinatorTimestamp(timestamp);
+  if (!parsed) return null;
+  return Math.max(0, nowMs - parsed.getTime());
+}
 
 const VALID_COLUMNS = Object.freeze({
   requests: new Set(['description', 'tier', 'status', 'result', 'completed_at', 'loop_id']),
@@ -631,6 +672,7 @@ function listLoopRequests(loopId) {
 
 module.exports = {
   init, close, getDb,
+  coordinatorAgeMs,
   createRequest, getRequest, updateRequest, listRequests,
   createTask, getTask, updateTask, listTasks, getReadyTasks, checkAndPromoteTasks,
   registerWorker, getWorker, updateWorker, getIdleWorkers, getAllWorkers, claimWorker, releaseWorker, checkRequestCompletion,

@@ -248,8 +248,14 @@ function formatDetails(details) {
 }
 
 function formatMergeAge(createdAt, includeAgo = false) {
-  const ageMs = coordinatorAgeMs(createdAt);
-  if (ageMs === null) return '';
+  if (typeof coordinatorAgeMs !== 'function') return '';
+  let ageMs;
+  try {
+    ageMs = coordinatorAgeMs(createdAt);
+  } catch {
+    return '';
+  }
+  if (!Number.isFinite(ageMs)) return '';
   const suffix = includeAgo ? ' ago' : '';
   return `${Math.round(ageMs / 60000)}m${suffix}`;
 }
