@@ -20,6 +20,7 @@ const THRESHOLDS = Object.freeze({
 const MERGE_TIMEOUT_SEC = 300;
 const MERGE_CONFLICT_GRACE_SEC = 600;
 const MERGE_TIMEOUT_ERROR = `Merge timed out after ${MERGE_TIMEOUT_SEC / 60} minutes`;
+const SQLITE_DATETIME_PATTERN = /^(\d{4})-(\d{2})-(\d{2}) (\d{2}):(\d{2}):(\d{2})(?:\.(\d{1,3}))?$/;
 
 // Escalation thresholds (seconds since last heartbeat)
 // Override via DB config: watchdog_warn_sec, watchdog_nudge_sec, watchdog_triage_sec, watchdog_terminate_sec
@@ -30,6 +31,64 @@ function getThresholds() {
     triage:    parseInt(db.getConfig('watchdog_triage_sec'))    || THRESHOLDS.triage,
     terminate: parseInt(db.getConfig('watchdog_terminate_sec')) || THRESHOLDS.terminate,
   };
+}
+
+function parseTimestampMs(timestamp) {
+  if (timestamp instanceof Date) {
+    const time = timestamp.getTime();
+    return Number.isFinite(time) ? time : null;
+  }
+
+  if (typeof timestamp === 'number') {
+    return Number.isFinite(timestamp) ? timestamp : null;
+  }
+
+  if (typeof timestamp !== 'string') return null;
+
+  const value = timestamp.trim();
+  if (!value) return null;
+
+  const sqliteMatch = value.match(SQLITE_DATETIME_PATTERN);
+  if (sqliteMatch) {
+    const year = Number(sqliteMatch[1]);
+    const month = Number(sqliteMatch[2]);
+    const day = Number(sqliteMatch[3]);
+    const hour = Number(sqliteMatch[4]);
+    const minute = Number(sqliteMatch[5]);
+    const second = Number(sqliteMatch[6]);
+    const millis = sqliteMatch[7] ? Number(sqliteMatch[7].padEnd(3, '0')) : 0;
+    const parsed = Date.UTC(year, month - 1, day, hour, minute, second, millis);
+    const parsedDate = new Date(parsed);
+
+    // Reject impossible dates/times (Date.UTC auto-normalizes overflows).
+    if (
+      parsedDate.getUTCFullYear() !== year ||
+      parsedDate.getUTCMonth() !== month - 1 ||
+      parsedDate.getUTCDate() !== day ||
+      parsedDate.getUTCHours() !== hour ||
+      parsedDate.getUTCMinutes() !== minute ||
+      parsedDate.getUTCSeconds() !== second ||
+      parsedDate.getUTCMilliseconds() !== millis
+    ) {
+      return null;
+    }
+    return parsed;
+  }
+
+  const parsed = Date.parse(value);
+  return Number.isFinite(parsed) ? parsed : null;
+}
+
+function getAgeSeconds(now, timestamp, metadata = {}) {
+  const parsed = parseTimestampMs(timestamp);
+  if (parsed === null) {
+    db.log('coordinator', 'watchdog_invalid_timestamp', {
+      ...metadata,
+      timestamp: String(timestamp).slice(0, 120),
+    });
+    return null;
+  }
+  return (now - parsed) / 1000;
 }
 
 function start(projectDir) {
@@ -251,7 +310,11 @@ function releaseStaleClaimsCheck(now) {
       db.log('coordinator', 'stale_claim_released', { worker_id: worker.id, reason: 'no_timestamp' });
       continue;
     }
-    const staleSec = (now - new Date(claimTime).getTime()) / 1000;
+    const staleSec = getAgeSeconds(now, claimTime, {
+      worker_id: worker.id,
+      scope: 'release_stale_claim',
+    });
+    if (staleSec === null) continue;
     if (staleSec > 120) {
       db.releaseWorker(worker.id);
       db.log('coordinator', 'stale_claim_released', { worker_id: worker.id, stale_sec: staleSec });
@@ -301,7 +364,11 @@ function recoverStaleIntegrations(now, options = {}) {
 
     // Case 1: No merge_queue entries and integrating > 15 minutes → complete (e.g. tier1 tasks)
     if (merges.length === 0) {
-      const integratingAge = (now - new Date(req.updated_at).getTime()) / 1000;
+      const integratingAge = getAgeSeconds(now, req.updated_at, {
+        request_id: req.id,
+        scope: 'integration_age',
+      });
+      if (integratingAge === null) continue;
       if (integratingAge > 900) { // 15 minutes
         db.updateRequest(req.id, {
           status: 'completed',
@@ -325,7 +392,12 @@ function recoverStaleIntegrations(now, options = {}) {
     for (const m of merges) {
       const statusAnchor = m.updated_at || m.created_at;
       if (m.status === 'merging' && statusAnchor) {
-        const mergeAge = (now - new Date(statusAnchor).getTime()) / 1000;
+        const mergeAge = getAgeSeconds(now, statusAnchor, {
+          request_id: req.id,
+          merge_id: m.id,
+          scope: 'merge_age',
+        });
+        if (mergeAge === null) continue;
         if (mergeAge > MERGE_TIMEOUT_SEC) {
           db.updateMerge(m.id, { status: 'conflict', error: MERGE_TIMEOUT_ERROR });
           db.sendMail('allocator', 'merge_failed', {
@@ -382,10 +454,15 @@ function recoverStaleIntegrations(now, options = {}) {
       const oldestConflict = freshMerges
         .filter(m => m.status === 'conflict')
         .reduce((oldest, m) => {
-          const age = now - new Date(m.updated_at || m.created_at).getTime();
-          return age > oldest ? age : oldest;
+          const ageSec = getAgeSeconds(now, m.updated_at || m.created_at, {
+            request_id: req.id,
+            merge_id: m.id,
+            scope: 'conflict_age',
+          });
+          if (ageSec === null) return oldest;
+          return ageSec > oldest ? ageSec : oldest;
         }, 0);
-      const conflictAgeSec = oldestConflict / 1000;
+      const conflictAgeSec = oldestConflict;
 
       if (conflictAgeSec < MERGE_CONFLICT_GRACE_SEC) { // 10-minute grace period for allocator
         continue;
@@ -436,6 +513,7 @@ function recoverStaleIntegrations(now, options = {}) {
 
 function monitorLoops(projectDir) {
   const loops = db.listLoops('active');
+  const now = Date.now();
 
   for (const loop of loops) {
     if (!loop.tmux_window) continue;
@@ -464,7 +542,11 @@ function monitorLoops(projectDir) {
 
     // Log warning for stale heartbeats (>5 min) but don't terminate — sentinel auto-restarts
     if (loop.last_heartbeat) {
-      const staleSec = (Date.now() - new Date(loop.last_heartbeat).getTime()) / 1000;
+      const staleSec = getAgeSeconds(now, loop.last_heartbeat, {
+        loop_id: loop.id,
+        scope: 'loop_heartbeat_age',
+      });
+      if (staleSec === null) continue;
       if (staleSec > 300) {
         db.log('coordinator', 'loop_heartbeat_stale', {
           loop_id: loop.id,
