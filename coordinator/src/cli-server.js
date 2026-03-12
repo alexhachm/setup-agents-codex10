@@ -21,6 +21,14 @@ function getConfigValue(getConfig, key, fallback) {
   return trimmed === '' ? fallback : trimmed;
 }
 
+function getExplicitConfigValue(getConfig, key) {
+  if (typeof getConfig !== 'function') return null;
+  const value = getConfig(key);
+  if (value === undefined || value === null) return null;
+  const trimmed = String(value).trim();
+  return trimmed === '' ? null : trimmed;
+}
+
 function getFallbackDefaultModel(getConfig, routingClass) {
   const sparkModel = getConfigValue(getConfig, 'model_spark', 'gpt-5.3-codex-spark');
   if (routingClass === 'spark') return sparkModel;
@@ -101,7 +109,8 @@ function fallbackModelRouter() {
       const routingShift = getFallbackRoutingShift(routingClass, effectiveClass);
 
       const defaultModel = getFallbackDefaultModel(getConfig, effectiveClass);
-      const configuredModel = getConfigValue(getConfig, `model_${effectiveClass}`, defaultModel);
+      const explicitModelOverride = getExplicitConfigValue(getConfig, `model_${effectiveClass}`);
+      const configuredModel = explicitModelOverride || defaultModel;
       const routingReason = routingShift === 'downscale'
         ? `fallback-budget-downgrade:${routingClass}->${effectiveClass}`
         : routingShift === 'upscale'
@@ -111,7 +120,9 @@ function fallbackModelRouter() {
         ? `budget-downgrade:model_${effectiveClass}`
         : routingShift === 'upscale'
           ? `budget-upgrade:model_${effectiveClass}`
-          : `fallback-routing:model_${effectiveClass}`;
+          : explicitModelOverride
+            ? 'config-fallback'
+            : 'fallback-default';
       return {
         routing_class: routingClass,
         model: configuredModel,
