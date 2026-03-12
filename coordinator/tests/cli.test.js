@@ -93,6 +93,19 @@ function getAllocatorAssignmentDetails(taskId) {
   return null;
 }
 
+function getCoordinatorRequestQueuedEvents(requestId) {
+  const entries = db.getLog(500, 'coordinator');
+  return entries.filter((entry) => {
+    if (entry.action !== 'request_queued') return false;
+    try {
+      const details = JSON.parse(entry.details);
+      return details && details.request_id === requestId;
+    } catch {
+      return false;
+    }
+  });
+}
+
 describe('CLI Server', () => {
   it('should respond to ping', async () => {
     const result = await sendCommand('ping', {});
@@ -108,6 +121,19 @@ describe('CLI Server', () => {
     const req = db.getRequest(result.request_id);
     assert.strictEqual(req.description, 'Add login page');
     assert.strictEqual(req.status, 'pending');
+  });
+
+  it('should emit a single architect new_request mail and one request_queued event for request creation', async () => {
+    const result = await sendCommand('request', { description: 'Single architect notification' });
+    assert.strictEqual(result.ok, true);
+
+    const architectMessages = db.checkMail('architect', false)
+      .filter((message) => message.payload && message.payload.request_id === result.request_id);
+    assert.strictEqual(architectMessages.length, 1);
+    assert.strictEqual(architectMessages[0].type, 'new_request');
+
+    const queuedEvents = getCoordinatorRequestQueuedEvents(result.request_id);
+    assert.strictEqual(queuedEvents.length, 1);
   });
 
   it('should create an urgent fix', async () => {
@@ -479,6 +505,26 @@ describe('CLI Server', () => {
     const loop = db.getLoop(created.loop_id);
     assert.ok(loop);
     assert.strictEqual(loop.status, 'stopped');
+  });
+
+  it('should emit a single architect new_request mail and one request_queued event for loop-request creation', async () => {
+    const createdLoop = await sendCommand('loop', { prompt: 'Create loop request once' });
+    assert.strictEqual(createdLoop.ok, true);
+
+    const loopRequest = await sendCommand('loop-request', {
+      loop_id: createdLoop.loop_id,
+      description: 'Loop request notification dedupe',
+    });
+    assert.strictEqual(loopRequest.ok, true);
+    assert.strictEqual(loopRequest.deduplicated, false);
+
+    const architectMessages = db.checkMail('architect', false)
+      .filter((message) => message.payload && message.payload.request_id === loopRequest.request_id);
+    assert.strictEqual(architectMessages.length, 1);
+    assert.strictEqual(architectMessages[0].type, 'new_request');
+
+    const queuedEvents = getCoordinatorRequestQueuedEvents(loopRequest.request_id);
+    assert.strictEqual(queuedEvents.length, 1);
   });
 
   it('should label default fallback assignments as fallback-default in response and logs', async () => {
