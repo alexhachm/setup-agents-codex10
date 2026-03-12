@@ -57,9 +57,12 @@ function resolveFallbackRoutingClass(task) {
   const priority = String(task && task.priority || '').toLowerCase();
   const subject = String(task && task.subject || '').toLowerCase();
   const description = String(task && task.description || '').toLowerCase();
+  if (tier >= 4) return 'xhigh';
   if (tier >= 3) return 'high';
-  if (priority === 'urgent' || priority === 'high') return 'high';
+  if (priority === 'urgent') return 'xhigh';
+  if (priority === 'high') return 'high';
   if (subject.includes('merge') || subject.includes('conflict') || description.includes('refactor')) return 'mid';
+  if (priority === 'low' && (subject.includes('docs') || description.includes('typo'))) return 'mini';
   return 'spark';
 }
 
