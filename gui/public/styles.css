@@ -144,6 +144,57 @@ h2 {
 
 .task-item .task-subject { font-weight: 600; }
 .task-item .task-meta { color: #8b949e; font-size: 11px; margin-top: 4px; }
+.task-item .task-chip-row {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  margin-top: 8px;
+}
+
+.task-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  min-height: 18px;
+  max-width: 100%;
+  padding: 0 8px;
+  border-radius: 999px;
+  border: 1px solid #30363d;
+  background: #0d1117;
+  color: #c9d1d9;
+  font-size: 10px;
+  line-height: 1;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.task-chip-label {
+  text-transform: uppercase;
+  letter-spacing: 0.4px;
+  color: #8b949e;
+}
+
+.task-chip-budget {
+  background: #1c2d3f;
+  border-color: #30363d;
+}
+
+.task-budget-indicator {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  margin-bottom: 10px;
+  align-items: center;
+}
+
+.task-budget-title {
+  font-size: 10px;
+  font-weight: 600;
+  letter-spacing: 0.4px;
+  color: #8b949e;
+  text-transform: uppercase;
+}
 
 #log-panel { max-height: 300px; overflow-y: auto; }
 
@@ -854,4 +905,7 @@ h2 {
   .setup-field input[type="text"] { min-width: unset; width: 100%; }
   #setup-form { flex-direction: column; align-items: stretch; }
   .modal-content { min-width: unset; margin: 16px; }
+  .task-budget-indicator { margin-bottom: 8px; }
+  .task-item .task-chip-row { gap: 5px; }
+  .task-chip { font-size: 9px; }
 }
