@@ -287,6 +287,29 @@ describe('CLI Server', () => {
     assert.strictEqual(sparkAssignmentLog.model_source, 'fallback-default');
   });
 
+  it('should persist routing telemetry fields on the task row after assignment', async () => {
+    db.registerWorker(1, '/wt-1', 'agent-1');
+
+    const taskId = createReadyTask({
+      subject: 'Complex migration',
+      description: 'Deep refactor across modules',
+      priority: 'high',
+      tier: 3,
+    });
+
+    const assignment = await sendCommand('assign-task', { task_id: taskId, worker_id: 1 });
+    assert.strictEqual(assignment.ok, true);
+
+    const task = db.getTask(taskId);
+    assert.ok(task);
+    assert.ok(task.routing_class);
+    assert.ok(task.routed_model);
+    assert.ok(task.reasoning_effort);
+    assert.strictEqual(task.routing_class, assignment.routing.class);
+    assert.strictEqual(task.routed_model, assignment.routing.model);
+    assert.strictEqual(task.reasoning_effort, assignment.routing.reasoning_effort);
+  });
+
   it('should label explicit model overrides as config-fallback in response and logs', async () => {
     db.registerWorker(1, '/wt-1', 'agent-1');
     db.registerWorker(2, '/wt-2', 'agent-2');
