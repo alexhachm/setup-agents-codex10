@@ -745,4 +745,77 @@ describe('CLI Server', () => {
     assert.strictEqual(healthyHighAssignment.routing.reasoning_effort, 'effort-xhigh');
     assert.strictEqual(healthyHighAssignment.routing.routing_reason, 'fallback-budget-upgrade:high->xhigh');
   });
+
+  it('should honor model_xhigh/model_mini and per-class reasoning updates on direct fallback classes', async () => {
+    db.registerWorker(1, '/wt-1', 'agent-1');
+    db.registerWorker(2, '/wt-2', 'agent-2');
+    db.registerWorker(3, '/wt-3', 'agent-3');
+    db.registerWorker(4, '/wt-4', 'agent-4');
+
+    await setConfigValue('model_xhigh', 'xhigh-model-v1');
+    await setConfigValue('model_mini', 'mini-model-v1');
+    await setConfigValue('reasoning_xhigh', 'xhigh-effort-v1');
+    await setConfigValue('reasoning_mini', 'mini-effort-v1');
+
+    const firstXhighTaskId = createReadyTask({
+      subject: 'Escalated fallback routing',
+      description: 'Critical cross-system coordination',
+      priority: 'normal',
+      tier: 4,
+    });
+    const firstMiniTaskId = createReadyTask({
+      subject: 'Docs cleanup pass',
+      description: 'Fix typo in worker instructions',
+      priority: 'low',
+      tier: 1,
+    });
+
+    const firstXhighAssignment = await sendCommand('assign-task', { task_id: firstXhighTaskId, worker_id: 1 });
+    assert.strictEqual(firstXhighAssignment.ok, true);
+    assert.strictEqual(firstXhighAssignment.routing.class, 'xhigh');
+    assert.strictEqual(firstXhighAssignment.routing.model, 'xhigh-model-v1');
+    assert.strictEqual(firstXhighAssignment.routing.model_source, 'config-fallback');
+    assert.strictEqual(firstXhighAssignment.routing.reasoning_effort, 'xhigh-effort-v1');
+    assert.strictEqual(firstXhighAssignment.routing.routing_reason, 'fallback-routing:class-default');
+
+    const firstMiniAssignment = await sendCommand('assign-task', { task_id: firstMiniTaskId, worker_id: 2 });
+    assert.strictEqual(firstMiniAssignment.ok, true);
+    assert.strictEqual(firstMiniAssignment.routing.class, 'mini');
+    assert.strictEqual(firstMiniAssignment.routing.model, 'mini-model-v1');
+    assert.strictEqual(firstMiniAssignment.routing.model_source, 'config-fallback');
+    assert.strictEqual(firstMiniAssignment.routing.reasoning_effort, 'mini-effort-v1');
+    assert.strictEqual(firstMiniAssignment.routing.routing_reason, 'fallback-routing:class-default');
+
+    await setConfigValue('model_xhigh', 'xhigh-model-v2');
+    await setConfigValue('model_mini', 'mini-model-v2');
+    await setConfigValue('reasoning_xhigh', 'xhigh-effort-v2');
+    await setConfigValue('reasoning_mini', 'mini-effort-v2');
+
+    const secondXhighTaskId = createReadyTask({
+      subject: 'Escalated fallback routing round two',
+      description: 'Critical cross-system coordination follow-up',
+      priority: 'normal',
+      tier: 4,
+    });
+    const secondMiniTaskId = createReadyTask({
+      subject: 'Docs cleanup pass two',
+      description: 'Fix typo in operator instructions',
+      priority: 'low',
+      tier: 1,
+    });
+
+    const secondXhighAssignment = await sendCommand('assign-task', { task_id: secondXhighTaskId, worker_id: 3 });
+    assert.strictEqual(secondXhighAssignment.ok, true);
+    assert.strictEqual(secondXhighAssignment.routing.class, 'xhigh');
+    assert.strictEqual(secondXhighAssignment.routing.model, 'xhigh-model-v2');
+    assert.strictEqual(secondXhighAssignment.routing.model_source, 'config-fallback');
+    assert.strictEqual(secondXhighAssignment.routing.reasoning_effort, 'xhigh-effort-v2');
+
+    const secondMiniAssignment = await sendCommand('assign-task', { task_id: secondMiniTaskId, worker_id: 4 });
+    assert.strictEqual(secondMiniAssignment.ok, true);
+    assert.strictEqual(secondMiniAssignment.routing.class, 'mini');
+    assert.strictEqual(secondMiniAssignment.routing.model, 'mini-model-v2');
+    assert.strictEqual(secondMiniAssignment.routing.model_source, 'config-fallback');
+    assert.strictEqual(secondMiniAssignment.routing.reasoning_effort, 'mini-effort-v2');
+  });
 });
