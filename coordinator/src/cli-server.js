@@ -700,6 +700,10 @@ function resolveCompletionBranch(worker, reportedBranch, fallbackWorkerId = null
   return { branch: requestedBranch, mismatch: false, requestedBranch, workerBranch };
 }
 
+function isMergeOwnershipCollisionReason(reason) {
+  return reason === 'existing_pr_owned_by_other_request' || reason === 'duplicate_pr_owned_by_other_request';
+}
+
 function queueMergeWithRecovery({
   request_id,
   task_id,
@@ -786,18 +790,34 @@ function queueMergeWithRecovery({
       LIMIT 1
     `).get(resolvedPrUrl, enqueueResult.lastInsertRowid, request_id, task_id, branch);
     if (existingDuplicatePrOwner) {
-      db.log('coordinator', 'merge_queue_duplicate_pr_ownership_preserved', {
+      db.getDb().prepare('DELETE FROM merge_queue WHERE id = ?').run(enqueueResult.lastInsertRowid);
+      db.log('coordinator', 'merge_queue_duplicate_pr_ownership_rejected', {
         request_id,
         task_id,
         pr_url: resolvedPrUrl,
         branch,
-        new_merge_id: enqueueResult.lastInsertRowid,
+        duplicate_merge_id: enqueueResult.lastInsertRowid,
         existing_merge_id: existingDuplicatePrOwner.id,
         existing_request_id: existingDuplicatePrOwner.request_id,
         existing_task_id: existingDuplicatePrOwner.task_id,
         existing_branch: existingDuplicatePrOwner.branch,
         existing_status: existingDuplicatePrOwner.status,
       });
+      return {
+        queued: false,
+        inserted: false,
+        refreshed: false,
+        retried: false,
+        reason: 'duplicate_pr_owned_by_other_request',
+        merge_id: existingDuplicatePrOwner.id,
+        duplicate_merge_id: enqueueResult.lastInsertRowid,
+        existing_request_id: existingDuplicatePrOwner.request_id,
+        existing_task_id: existingDuplicatePrOwner.task_id,
+        existing_branch: existingDuplicatePrOwner.branch,
+        existing_status: existingDuplicatePrOwner.status,
+        resolved_pr_url: resolvedPrUrl,
+        pr_resolution_source: resolvedPr.source,
+      };
     }
     return {
       queued: true,
@@ -837,6 +857,7 @@ function queueMergeWithRecovery({
         existing_request_id: existingByPr.request_id,
         existing_task_id: existingByPr.task_id,
         existing_branch: existingByPr.branch,
+        existing_status: existingByPr.status,
         resolved_pr_url: resolvedPrUrl,
         pr_resolution_source: resolvedPr.source,
       };
@@ -1306,20 +1327,13 @@ function handleCommand(cmd, conn, handlers) {
           result: result || null,
           completed_at: new Date().toISOString(),
         });
-        // Increment tasks_completed counter on worker
-        const workerRow = db.getWorker(worker_id);
-        const tasksCompleted = (workerRow ? workerRow.tasks_completed : 0) + 1;
-        db.updateWorker(worker_id, {
-          status: 'completed_task',
-          current_task_id: null,
-          tasks_completed: tasksCompleted,
-        });
         const completedTask = db.getTask(task_id);
         // Enqueue merge if PR exists (must be a valid URL, not a status string like "already_merged")
         const queueBranch = sanitizeBranchName(resolvedBranch.branch || completedTask.branch || (worker && worker.branch) || '');
         let completionPrUrl = normalizedPrUrl;
+        let queueResult = null;
         if (completedTask && queueBranch) {
-          const queueResult = queueMergeWithRecovery({
+          queueResult = queueMergeWithRecovery({
             request_id: completedTask.request_id,
             task_id,
             pr_url: normalizedPrUrl,
@@ -1342,6 +1356,82 @@ function handleCommand(cmd, conn, handlers) {
             });
           }
         }
+        if (queueResult && isMergeOwnershipCollisionReason(queueResult.reason)) {
+          const failureReason = queueResult.reason;
+          const failureError = `merge_queue:${failureReason}`;
+          const failureTimestamp = new Date().toISOString();
+          db.updateTask(task_id, {
+            status: 'failed',
+            pr_url: completionPrUrl || null,
+            branch: queueBranch || resolvedBranch.branch || null,
+            result: failureError,
+            completed_at: failureTimestamp,
+          });
+          db.updateWorker(worker_id, { status: 'idle', current_task_id: null });
+          const failedTask = db.getTask(task_id);
+          const routingMeta = failedTask ? {
+            subject: failedTask.subject,
+            description: failedTask.description,
+            domain: failedTask.domain,
+            files: failedTask.files,
+            tier: failedTask.tier,
+            assigned_to: failedTask.assigned_to,
+          } : null;
+          db.sendMail('allocator', 'task_failed', {
+            worker_id,
+            task_id,
+            request_id: failedTask ? failedTask.request_id : null,
+            error: failureError,
+            subject: routingMeta ? routingMeta.subject : null,
+            domain: routingMeta ? routingMeta.domain : null,
+            files: routingMeta ? routingMeta.files : null,
+            tier: routingMeta ? routingMeta.tier : null,
+            assigned_to: routingMeta ? routingMeta.assigned_to : null,
+            original_task: routingMeta,
+          });
+          db.sendMail('architect', 'task_failed', {
+            worker_id,
+            task_id,
+            request_id: failedTask ? failedTask.request_id : null,
+            error: failureError,
+            original_task: routingMeta,
+          });
+          db.log('coordinator', 'merge_queue_ownership_collision_rejected', {
+            request_id: failedTask ? failedTask.request_id : null,
+            worker_id,
+            task_id,
+            reason: failureReason,
+            pr_url: queueResult.resolved_pr_url || completionPrUrl || normalizedPrUrl || null,
+            branch: queueBranch || null,
+            merge_id: queueResult.merge_id || null,
+            duplicate_merge_id: queueResult.duplicate_merge_id || null,
+            existing_request_id: queueResult.existing_request_id || null,
+            existing_task_id: queueResult.existing_task_id || null,
+            existing_branch: queueResult.existing_branch || null,
+            existing_status: queueResult.existing_status || null,
+          });
+          db.log(`worker-${worker_id}`, 'task_failed', { task_id, error: failureError });
+          respond(conn, {
+            ok: false,
+            error: 'merge_queue_rejected',
+            reason: failureReason,
+            merge_id: queueResult.merge_id || null,
+            duplicate_merge_id: queueResult.duplicate_merge_id || null,
+            existing_request_id: queueResult.existing_request_id || null,
+            existing_task_id: queueResult.existing_task_id || null,
+            existing_branch: queueResult.existing_branch || null,
+            existing_status: queueResult.existing_status || null,
+          });
+          break;
+        }
+        // Increment tasks_completed counter on worker
+        const workerRow = db.getWorker(worker_id);
+        const tasksCompleted = (workerRow ? workerRow.tasks_completed : 0) + 1;
+        db.updateWorker(worker_id, {
+          status: 'completed_task',
+          current_task_id: null,
+          tasks_completed: tasksCompleted,
+        });
         if (completionPrUrl && completionPrUrl !== (pr_url || '')) {
           db.log('coordinator', 'complete_task_pr_url_normalized', {
             task_id,
@@ -1626,6 +1716,7 @@ function handleCommand(cmd, conn, handlers) {
         const tasks = db.listTasks({ request_id: reqId, status: 'completed' });
         const latestCompletedTaskState = db.getRequestLatestCompletedTaskCursor(reqId);
         let queued = 0;
+        const queueFailures = [];
         for (const task of tasks) {
           const worker = task.assigned_to ? db.getWorker(task.assigned_to) : null;
           const taskPrNormalizationCwd = worker && worker.worktree_path
@@ -1654,6 +1745,70 @@ function handleCommand(cmd, conn, handlers) {
             if (queuedPrUrl && queuedPrUrl !== task.pr_url) {
               db.updateTask(task.id, { pr_url: queuedPrUrl });
             }
+            if (isMergeOwnershipCollisionReason(queueResult.reason)) {
+              const failureReason = queueResult.reason;
+              const failureError = `merge_queue:${failureReason}`;
+              const failureTimestamp = new Date().toISOString();
+              db.updateTask(task.id, {
+                status: 'failed',
+                pr_url: queuedPrUrl || null,
+                branch: mergeBranch,
+                result: failureError,
+                completed_at: failureTimestamp,
+              });
+              const failedTask = db.getTask(task.id);
+              const routingMeta = failedTask ? {
+                subject: failedTask.subject,
+                description: failedTask.description,
+                domain: failedTask.domain,
+                files: failedTask.files,
+                tier: failedTask.tier,
+                assigned_to: failedTask.assigned_to,
+              } : null;
+              db.sendMail('allocator', 'task_failed', {
+                worker_id: task.assigned_to || null,
+                task_id: task.id,
+                request_id: failedTask ? failedTask.request_id : reqId,
+                error: failureError,
+                subject: routingMeta ? routingMeta.subject : null,
+                domain: routingMeta ? routingMeta.domain : null,
+                files: routingMeta ? routingMeta.files : null,
+                tier: routingMeta ? routingMeta.tier : null,
+                assigned_to: routingMeta ? routingMeta.assigned_to : null,
+                original_task: routingMeta,
+              });
+              db.sendMail('architect', 'task_failed', {
+                worker_id: task.assigned_to || null,
+                task_id: task.id,
+                request_id: failedTask ? failedTask.request_id : reqId,
+                error: failureError,
+                original_task: routingMeta,
+              });
+              db.log('coordinator', 'integrate_merge_queue_ownership_collision_rejected', {
+                request_id: reqId,
+                task_id: task.id,
+                reason: failureReason,
+                pr_url: queuedPrUrl || null,
+                branch: mergeBranch,
+                merge_id: queueResult.merge_id || null,
+                duplicate_merge_id: queueResult.duplicate_merge_id || null,
+                existing_request_id: queueResult.existing_request_id || null,
+                existing_task_id: queueResult.existing_task_id || null,
+                existing_branch: queueResult.existing_branch || null,
+                existing_status: queueResult.existing_status || null,
+              });
+              queueFailures.push({
+                task_id: task.id,
+                reason: failureReason,
+                merge_id: queueResult.merge_id || null,
+                duplicate_merge_id: queueResult.duplicate_merge_id || null,
+                existing_request_id: queueResult.existing_request_id || null,
+                existing_task_id: queueResult.existing_task_id || null,
+                existing_branch: queueResult.existing_branch || null,
+                existing_status: queueResult.existing_status || null,
+              });
+              continue;
+            }
             if (queueResult.queued) queued++;
             if (queueResult.refreshed) {
               db.log('coordinator', 'merge_queue_entry_refreshed', {
@@ -1667,6 +1822,16 @@ function handleCommand(cmd, conn, handlers) {
               });
             }
           }
+        }
+        if (queueFailures.length > 0) {
+          respond(conn, {
+            ok: false,
+            error: 'merge_queue_rejected',
+            request_id: reqId,
+            merges_queued: queued,
+            failures: queueFailures,
+          });
+          break;
         }
         if (queued > 0) {
           db.updateRequest(reqId, { status: 'integrating' });

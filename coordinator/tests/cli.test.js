@@ -195,6 +195,103 @@ describe('CLI Server', () => {
     assert.strictEqual(db.getWorker(1).status, 'completed_task');
   });
 
+  it('should reject complete-task when a PR URL is already owned by another request', async () => {
+    db.registerWorker(1, '/wt-1', 'agent-1');
+    db.registerWorker(2, '/wt-2', 'agent-2');
+
+    const requestA = db.createRequest('Request A');
+    const taskA = db.createTask({ request_id: requestA, subject: 'Task A', description: 'Do A' });
+    const requestB = db.createRequest('Request B');
+    const taskB = db.createTask({ request_id: requestB, subject: 'Task B', description: 'Do B' });
+
+    db.updateTask(taskA, { status: 'assigned', assigned_to: 1 });
+    db.updateTask(taskB, { status: 'assigned', assigned_to: 2 });
+    db.updateWorker(1, { status: 'assigned', current_task_id: taskA });
+    db.updateWorker(2, { status: 'assigned', current_task_id: taskB });
+
+    const first = await sendCommand('complete-task', {
+      worker_id: '1',
+      task_id: String(taskA),
+      pr_url: 'https://github.com/org/repo/pull/42',
+      branch: 'agent-1',
+      result: 'Task A done',
+    });
+    assert.strictEqual(first.ok, true);
+
+    const second = await sendCommand('complete-task', {
+      worker_id: '2',
+      task_id: String(taskB),
+      pr_url: 'https://github.com/org/repo/pull/42',
+      branch: 'agent-2',
+      result: 'Task B done',
+    });
+    assert.strictEqual(second.ok, false);
+    assert.strictEqual(second.error, 'merge_queue_rejected');
+    assert.strictEqual(second.reason, 'duplicate_pr_owned_by_other_request');
+
+    const failedTask = db.getTask(taskB);
+    assert.strictEqual(failedTask.status, 'failed');
+    assert.match(failedTask.result, /duplicate_pr_owned_by_other_request/);
+    assert.strictEqual(db.getWorker(2).status, 'idle');
+    assert.strictEqual(db.getWorker(2).tasks_completed, 0);
+    assert.notStrictEqual(db.getRequest(requestB).status, 'completed');
+
+    const rows = db.getDb().prepare(`
+      SELECT request_id, task_id
+      FROM merge_queue
+      WHERE pr_url = ?
+      ORDER BY id ASC
+    `).all('https://github.com/org/repo/pull/42');
+    assert.strictEqual(rows.length, 1);
+    assert.strictEqual(rows[0].request_id, requestA);
+    assert.strictEqual(rows[0].task_id, taskA);
+  });
+
+  it('should fail integrate when completed tasks reuse a PR URL owned by another request', async () => {
+    const requestA = db.createRequest('Request A');
+    const taskA = db.createTask({ request_id: requestA, subject: 'Task A', description: 'Do A' });
+    db.updateTask(taskA, {
+      status: 'completed',
+      pr_url: 'https://github.com/org/repo/pull/77',
+      branch: 'agent-1',
+      completed_at: new Date().toISOString(),
+    });
+
+    const queueFirst = await sendCommand('integrate', { request_id: requestA });
+    assert.strictEqual(queueFirst.ok, true);
+    assert.strictEqual(queueFirst.merges_queued, 1);
+
+    const requestB = db.createRequest('Request B');
+    const taskB = db.createTask({ request_id: requestB, subject: 'Task B', description: 'Do B' });
+    db.updateTask(taskB, {
+      status: 'completed',
+      pr_url: 'https://github.com/org/repo/pull/77',
+      branch: 'agent-2',
+      completed_at: new Date().toISOString(),
+    });
+
+    const integrateSecond = await sendCommand('integrate', { request_id: requestB });
+    assert.strictEqual(integrateSecond.ok, false);
+    assert.strictEqual(integrateSecond.error, 'merge_queue_rejected');
+    assert.strictEqual(integrateSecond.failures.length, 1);
+    assert.strictEqual(integrateSecond.failures[0].reason, 'duplicate_pr_owned_by_other_request');
+
+    const failedTask = db.getTask(taskB);
+    assert.strictEqual(failedTask.status, 'failed');
+    assert.match(failedTask.result, /duplicate_pr_owned_by_other_request/);
+    assert.notStrictEqual(db.getRequest(requestB).status, 'completed');
+
+    const rows = db.getDb().prepare(`
+      SELECT request_id, task_id
+      FROM merge_queue
+      WHERE pr_url = ?
+      ORDER BY id ASC
+    `).all('https://github.com/org/repo/pull/77');
+    assert.strictEqual(rows.length, 1);
+    assert.strictEqual(rows[0].request_id, requestA);
+    assert.strictEqual(rows[0].task_id, taskA);
+  });
+
   it('should handle inbox', async () => {
     db.sendMail('architect', 'test_msg', { data: 'hello' });
 
