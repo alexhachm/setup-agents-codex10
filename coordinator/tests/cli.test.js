@@ -326,6 +326,65 @@ describe('CLI Server', () => {
     assert.strictEqual(sparkAssignmentLog.model_source, 'config-fallback');
   });
 
+  it('should honor model_codex_spark for spark routing when model_spark is unset', async () => {
+    db.registerWorker(1, '/wt-1', 'agent-1');
+
+    db.setConfig('model_spark', '');
+    db.setConfig('model_codex_spark', 'spark-alias-only-model');
+
+    const sparkTaskId = createReadyTask({
+      subject: 'Minor cleanup',
+      description: 'Small log update',
+      priority: 'low',
+      tier: 1,
+    });
+
+    const sparkAssignment = await sendCommand('assign-task', { task_id: sparkTaskId, worker_id: 1 });
+    assert.strictEqual(sparkAssignment.ok, true);
+    assert.strictEqual(sparkAssignment.routing.model, 'spark-alias-only-model');
+    assert.strictEqual(sparkAssignment.routing.model_source, 'config-fallback');
+
+    const sparkAssignmentLog = getAllocatorAssignmentDetails(sparkTaskId);
+    assert.ok(sparkAssignmentLog);
+    assert.strictEqual(sparkAssignmentLog.model, 'spark-alias-only-model');
+    assert.strictEqual(sparkAssignmentLog.model_source, 'config-fallback');
+  });
+
+  it('should mirror spark model alias writes for set-config and route using either spark key', async () => {
+    db.registerWorker(1, '/wt-1', 'agent-1');
+    db.registerWorker(2, '/wt-2', 'agent-2');
+
+    await setConfigValue('model_codex_spark', 'spark-model-via-codex-key');
+    assert.strictEqual(db.getConfig('model_codex_spark'), 'spark-model-via-codex-key');
+    assert.strictEqual(db.getConfig('model_spark'), 'spark-model-via-codex-key');
+
+    const sparkTaskViaCodexKey = createReadyTask({
+      subject: 'Minor cleanup',
+      description: 'Small log update',
+      priority: 'low',
+      tier: 1,
+    });
+    const sparkAssignmentViaCodexKey = await sendCommand('assign-task', { task_id: sparkTaskViaCodexKey, worker_id: 1 });
+    assert.strictEqual(sparkAssignmentViaCodexKey.ok, true);
+    assert.strictEqual(sparkAssignmentViaCodexKey.routing.model, 'spark-model-via-codex-key');
+    assert.strictEqual(sparkAssignmentViaCodexKey.routing.model_source, 'config-fallback');
+
+    await setConfigValue('model_spark', 'spark-model-via-spark-key');
+    assert.strictEqual(db.getConfig('model_spark'), 'spark-model-via-spark-key');
+    assert.strictEqual(db.getConfig('model_codex_spark'), 'spark-model-via-spark-key');
+
+    const sparkTaskViaSparkKey = createReadyTask({
+      subject: 'Minor cleanup 2',
+      description: 'Small log update 2',
+      priority: 'low',
+      tier: 1,
+    });
+    const sparkAssignmentViaSparkKey = await sendCommand('assign-task', { task_id: sparkTaskViaSparkKey, worker_id: 2 });
+    assert.strictEqual(sparkAssignmentViaSparkKey.ok, true);
+    assert.strictEqual(sparkAssignmentViaSparkKey.routing.model, 'spark-model-via-spark-key');
+    assert.strictEqual(sparkAssignmentViaSparkKey.routing.model_source, 'config-fallback');
+  });
+
   it('should downscale high and mid routing when flagship budget is constrained', async () => {
     db.registerWorker(1, '/wt-1', 'agent-1');
     db.registerWorker(2, '/wt-2', 'agent-2');
