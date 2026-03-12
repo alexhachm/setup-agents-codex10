@@ -844,6 +844,121 @@ describe('CLI Server', () => {
     assert.strictEqual(recoveredHighLog.reasoning_effort, 'xhigh-effort');
   });
 
+  it('should downscale routing from scalar budget keys when routing_budget_state JSON is absent', async () => {
+    db.registerWorker(1, '/wt-1', 'agent-1');
+    db.registerWorker(2, '/wt-2', 'agent-2');
+
+    await setConfigValue('model_high', 'high-model');
+    await setConfigValue('model_mid', 'mid-model');
+    await setConfigValue('model_spark', 'spark-model');
+    await setConfigValue('model_mini', 'mini-model');
+    await setConfigValue('reasoning_spark', 'spark-effort');
+    await setConfigValue('reasoning_mini', 'mini-effort');
+
+    db.setConfig('routing_budget_flagship_remaining', ' 12 ');
+    db.setConfig('routing_budget_flagship_threshold', '12');
+    db.setConfig('flagship_budget_remaining', '120');
+    db.setConfig('flagship_budget_threshold', '10');
+
+    const highTaskId = createReadyTask({
+      subject: 'Scalar constrained high route',
+      description: 'Critical merge refactor path',
+      priority: 'high',
+      tier: 3,
+    });
+    const midTaskId = createReadyTask({
+      subject: 'Scalar constrained merge route',
+      description: 'Resolve merge conflict in branch stack',
+      tier: 2,
+    });
+
+    const highAssignment = await sendCommand('assign-task', { task_id: highTaskId, worker_id: 1 });
+    assert.strictEqual(highAssignment.ok, true);
+    assert.strictEqual(highAssignment.routing.class, 'high');
+    assert.strictEqual(highAssignment.routing.model, 'mini-model');
+    assert.strictEqual(highAssignment.routing.model_source, 'budget-downgrade:model_mini');
+    assert.strictEqual(highAssignment.routing.reasoning_effort, 'mini-effort');
+    assert.strictEqual(highAssignment.routing.routing_reason, 'fallback-budget-downgrade:high->mini');
+
+    const midAssignment = await sendCommand('assign-task', { task_id: midTaskId, worker_id: 2 });
+    assert.strictEqual(midAssignment.ok, true);
+    assert.strictEqual(midAssignment.routing.class, 'mid');
+    assert.strictEqual(midAssignment.routing.model, 'spark-model');
+    assert.strictEqual(midAssignment.routing.model_source, 'budget-downgrade:model_spark');
+    assert.strictEqual(midAssignment.routing.reasoning_effort, 'spark-effort');
+    assert.strictEqual(midAssignment.routing.routing_reason, 'fallback-budget-downgrade:mid->spark');
+
+    const highAssignmentLog = getAllocatorAssignmentDetails(highTaskId);
+    assert.ok(highAssignmentLog);
+    assert.strictEqual(highAssignmentLog.model_source, 'budget-downgrade:model_mini');
+    assert.strictEqual(highAssignmentLog.routing_reason, 'fallback-budget-downgrade:high->mini');
+    assert.strictEqual(highAssignmentLog.reasoning_effort, 'mini-effort');
+  });
+
+  it('should upgrade routing from legacy scalar budget keys when routing_budget_state JSON is absent', async () => {
+    db.registerWorker(1, '/wt-1', 'agent-1');
+
+    await setConfigValue('model_xhigh', 'xhigh-model');
+    await setConfigValue('model_high', 'high-model');
+    await setConfigValue('reasoning_xhigh', 'xhigh-effort');
+
+    db.setConfig('routing_budget_flagship_remaining', '');
+    db.setConfig('routing_budget_flagship_threshold', '  ');
+    db.setConfig('flagship_budget_remaining', ' 35 ');
+    db.setConfig('flagship_budget_threshold', '20');
+
+    const highTaskId = createReadyTask({
+      subject: 'Legacy scalar healthy budget routing',
+      description: 'Critical orchestrator update',
+      priority: 'high',
+      tier: 3,
+    });
+
+    const assignment = await sendCommand('assign-task', { task_id: highTaskId, worker_id: 1 });
+    assert.strictEqual(assignment.ok, true);
+    assert.strictEqual(assignment.routing.class, 'high');
+    assert.strictEqual(assignment.routing.model, 'xhigh-model');
+    assert.strictEqual(assignment.routing.model_source, 'budget-upgrade:model_xhigh');
+    assert.strictEqual(assignment.routing.reasoning_effort, 'xhigh-effort');
+    assert.strictEqual(assignment.routing.routing_reason, 'fallback-budget-upgrade:high->xhigh');
+    assert.strictEqual(assignment.routing.reason, 'fallback-budget-upgrade:high->xhigh');
+
+    const assignmentLog = getAllocatorAssignmentDetails(highTaskId);
+    assert.ok(assignmentLog);
+    assert.strictEqual(assignmentLog.model_source, 'budget-upgrade:model_xhigh');
+    assert.strictEqual(assignmentLog.routing_reason, 'fallback-budget-upgrade:high->xhigh');
+    assert.strictEqual(assignmentLog.reasoning_effort, 'xhigh-effort');
+  });
+
+  it('should keep routing_budget_state JSON precedence over scalar fallback keys', async () => {
+    db.registerWorker(1, '/wt-1', 'agent-1');
+
+    await setConfigValue('model_xhigh', 'xhigh-model');
+    await setConfigValue('model_mini', 'mini-model');
+    await setConfigValue('reasoning_xhigh', 'xhigh-effort');
+
+    db.setConfig('routing_budget_flagship_remaining', '5');
+    db.setConfig('routing_budget_flagship_threshold', '10');
+    db.setConfig('routing_budget_state', JSON.stringify({
+      flagship: { remaining: 40, threshold: 10 },
+    }));
+
+    const highTaskId = createReadyTask({
+      subject: 'JSON precedence over scalar fallback',
+      description: 'Critical worker orchestration',
+      priority: 'high',
+      tier: 3,
+    });
+
+    const assignment = await sendCommand('assign-task', { task_id: highTaskId, worker_id: 1 });
+    assert.strictEqual(assignment.ok, true);
+    assert.strictEqual(assignment.routing.class, 'high');
+    assert.strictEqual(assignment.routing.model, 'xhigh-model');
+    assert.strictEqual(assignment.routing.model_source, 'budget-upgrade:model_xhigh');
+    assert.strictEqual(assignment.routing.reasoning_effort, 'xhigh-effort');
+    assert.strictEqual(assignment.routing.routing_reason, 'fallback-budget-upgrade:high->xhigh');
+  });
+
   it('should apply reasoning config per selected effective class', async () => {
     db.registerWorker(1, '/wt-1', 'agent-1');
     db.registerWorker(2, '/wt-2', 'agent-2');

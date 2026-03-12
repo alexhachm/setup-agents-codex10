@@ -97,12 +97,42 @@ function getFallbackReasoningEffort(getConfig, effectiveClass) {
   return getConfigValue(getConfig, `reasoning_${effectiveClass}`, defaultEffort);
 }
 
+function parseBudgetScalarFallback(getConfig) {
+  if (typeof getConfig !== 'function') {
+    return { parsed: null, remaining: null, threshold: null };
+  }
+  const routingRemaining = parseBudgetNumber(getConfig(ROUTING_BUDGET_REMAINING_KEY));
+  const routingThreshold = parseBudgetNumber(getConfig(ROUTING_BUDGET_THRESHOLD_KEY));
+  const remaining = routingRemaining !== null
+    ? routingRemaining
+    : parseBudgetNumber(getConfig(LEGACY_BUDGET_REMAINING_KEY));
+  const threshold = routingThreshold !== null
+    ? routingThreshold
+    : parseBudgetNumber(getConfig(LEGACY_BUDGET_THRESHOLD_KEY));
+  if (remaining === null && threshold === null) {
+    return { parsed: null, remaining: null, threshold: null };
+  }
+  const parsed = { flagship: {} };
+  if (remaining !== null) parsed.flagship.remaining = remaining;
+  if (threshold !== null) parsed.flagship.threshold = threshold;
+  return { parsed, remaining, threshold };
+}
+
 function fallbackModelRouter() {
   const fallbackStateSource = 'coordinator-fallback-model-router';
   return {
     getBudgetState(getConfig) {
       const rawState = parseBudgetStateConfig(typeof getConfig === 'function' ? getConfig(ROUTING_BUDGET_STATE_KEY) : null);
-      if (!rawState.parsed) return null;
+      if (!rawState.parsed) {
+        const scalarState = parseBudgetScalarFallback(getConfig);
+        if (!scalarState.parsed) return null;
+        return {
+          source: fallbackStateSource,
+          parsed: scalarState.parsed,
+          remaining: scalarState.remaining,
+          threshold: scalarState.threshold,
+        };
+      }
       return {
         source: fallbackStateSource,
         parsed: rawState.parsed,
