@@ -98,13 +98,13 @@ describe('Request completion tracking', () => {
     assert.strictEqual(incompleteAfter.length, 0);
   });
 
-  it('should not complete request from merge success until all tasks are terminal', () => {
+  it('should keep request integrating when merges are done but a sibling task is assigned', () => {
     const reqId = db.createRequest('Feature');
     const mergedTaskId = db.createTask({ request_id: reqId, subject: 'Merged task', description: 'Already done' });
-    const pendingTaskId = db.createTask({ request_id: reqId, subject: 'Pending task', description: 'Still running' });
+    const assignedTaskId = db.createTask({ request_id: reqId, subject: 'Assigned task', description: 'Still running' });
 
     db.updateTask(mergedTaskId, { status: 'completed' });
-    db.updateTask(pendingTaskId, { status: 'in_progress' });
+    db.updateTask(assignedTaskId, { status: 'assigned' });
     db.updateRequest(reqId, { status: 'integrating' });
 
     db.enqueueMerge({
@@ -133,9 +133,29 @@ describe('Request completion tracking', () => {
       }
     });
     assert.strictEqual(completionLogBefore.length, 0);
+  });
 
-    db.updateTask(pendingTaskId, { status: 'completed' });
-    merger.onTaskCompleted(pendingTaskId);
+  it('should emit request_completed exactly once when final task becomes terminal', () => {
+    const reqId = db.createRequest('Feature');
+    const mergedTaskId = db.createTask({ request_id: reqId, subject: 'Merged task', description: 'Already done' });
+    const inProgressTaskId = db.createTask({ request_id: reqId, subject: 'In-progress task', description: 'Still running' });
+
+    db.updateTask(mergedTaskId, { status: 'completed' });
+    db.updateTask(inProgressTaskId, { status: 'in_progress' });
+    db.updateRequest(reqId, { status: 'integrating' });
+
+    db.enqueueMerge({
+      request_id: reqId,
+      task_id: mergedTaskId,
+      pr_url: 'https://github.com/org/repo/pull/102',
+      branch: 'agent-1',
+    });
+
+    merger.processQueue(tmpDir, () => ({ success: true }));
+
+    db.updateTask(inProgressTaskId, { status: 'completed' });
+    merger.onTaskCompleted(inProgressTaskId);
+    merger.onTaskCompleted(inProgressTaskId);
 
     const requestAfterTasksDone = db.getRequest(reqId);
     assert.strictEqual(requestAfterTasksDone.status, 'completed');
