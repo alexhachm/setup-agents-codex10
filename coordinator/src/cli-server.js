@@ -21,6 +21,13 @@ function getConfigValue(getConfig, key, fallback) {
   return trimmed === '' ? fallback : trimmed;
 }
 
+function getFallbackDefaultModel(getConfig, routingClass) {
+  const sparkModel = getConfigValue(getConfig, 'model_spark', 'gpt-5.3-codex-spark');
+  if (routingClass === 'spark') return sparkModel;
+  if (routingClass === 'mini') return getConfigValue(getConfig, 'model_mini', sparkModel);
+  return getConfigValue(getConfig, 'model_flagship', 'gpt-5.3-codex');
+}
+
 function resolveFallbackRoutingClass(task) {
   const tier = Number(task && task.tier) || 0;
   const priority = String(task && task.priority || '').toLowerCase();
@@ -60,20 +67,22 @@ function fallbackModelRouter() {
       let effectiveClass = routingClass;
       if (budgetConstrained && routingClass === 'high') effectiveClass = 'mini';
       else if (budgetConstrained && routingClass === 'mid') effectiveClass = 'spark';
+      const budgetDowngraded = effectiveClass !== routingClass;
 
-      const sparkDefaultModel = getConfigValue(getConfig, 'model_spark', 'gpt-5.3-codex-spark');
-      const defaultModel = effectiveClass === 'mini'
-        ? getConfigValue(getConfig, 'model_mini', sparkDefaultModel)
-        : (effectiveClass === 'spark'
-          ? sparkDefaultModel
-          : getConfigValue(getConfig, 'model_flagship', 'gpt-5.3-codex'));
+      const defaultModel = getFallbackDefaultModel(getConfig, effectiveClass);
       const configuredModel = getConfigValue(getConfig, `model_${effectiveClass}`, defaultModel);
-      const routingReason = 'Fell back to CLI routing shim (model-router unavailable)';
+      const routingReason = budgetDowngraded
+        ? `fallback-budget-downgrade:${routingClass}->${effectiveClass}`
+        : 'fallback-routing:class-default';
+      const modelSource = budgetDowngraded
+        ? `budget-downgrade:model_${effectiveClass}`
+        : `fallback-routing:model_${effectiveClass}`;
       return {
         routing_class: routingClass,
         model: configuredModel,
-        model_source: configuredModel === defaultModel ? 'config-fallback' : 'fallback-default',
+        model_source: modelSource,
         reasoning_effort: effectiveClass === 'high' || effectiveClass === 'xhigh' ? 'high' : 'low',
+        routing_reason: routingReason,
         reason: routingReason,
         budget_state: budget || null,
         budget_source: budget && budget.source ? budget.source : 'none',
@@ -1418,10 +1427,13 @@ function handleCommand(cmd, conn, handlers) {
         const assignedTask = db.getTask(assignTaskId);
         const assignedWorker = db.getWorker(assignWorkerId);
         const routingDecision = modelRouter.routeTask(assignedTask, { getConfig: db.getConfig });
+        const routingReason = routingDecision.routing_reason || routingDecision.reason || 'router:unspecified';
+        const modelSource = routingDecision.model_source || 'router:unspecified';
         const routingTelemetry = {
           budget_state: routingDecision.budget_state || null,
           budget_source: routingDecision.budget_source || 'none',
-          model_source: routingDecision.model_source || null,
+          model_source: modelSource,
+          routing_reason: routingReason,
           routing_precedence: routingDecision.routing_precedence || [],
         };
 
@@ -1463,7 +1475,7 @@ function handleCommand(cmd, conn, handlers) {
           model: routingDecision.model,
           model_source: routingTelemetry.model_source,
           reasoning_effort: routingDecision.reasoning_effort,
-          routing_reason: routingDecision.reason,
+          routing_reason: routingTelemetry.routing_reason,
           routing_precedence: routingTelemetry.routing_precedence,
           budget_state: routingTelemetry.budget_state,
           budget_source: routingTelemetry.budget_source,
@@ -1477,7 +1489,7 @@ function handleCommand(cmd, conn, handlers) {
           model: routingDecision.model,
           model_source: routingTelemetry.model_source,
           reasoning_effort: routingDecision.reasoning_effort,
-          routing_reason: routingDecision.reason,
+          routing_reason: routingTelemetry.routing_reason,
           routing_precedence: routingTelemetry.routing_precedence,
           budget_state: routingTelemetry.budget_state,
           budget_source: routingTelemetry.budget_source,
@@ -1492,7 +1504,8 @@ function handleCommand(cmd, conn, handlers) {
             model: routingDecision.model,
             model_source: routingTelemetry.model_source,
             reasoning_effort: routingDecision.reasoning_effort,
-            reason: routingDecision.reason,
+            routing_reason: routingTelemetry.routing_reason,
+            reason: routingTelemetry.routing_reason,
             precedence: routingTelemetry.routing_precedence,
           },
           assignment_token: assignedWorker ? assignedWorker.launched_at : null,

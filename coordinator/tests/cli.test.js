@@ -78,6 +78,21 @@ function createReadyTask({ subject, description, priority = 'normal', tier = 2 }
   return taskId;
 }
 
+function getAllocatorAssignmentDetails(taskId) {
+  const entries = db.getLog(200, 'allocator');
+  for (const entry of entries) {
+    if (entry.action !== 'task_assigned') continue;
+    let details = null;
+    try {
+      details = JSON.parse(entry.details);
+    } catch {
+      continue;
+    }
+    if (details && details.task_id === taskId) return details;
+  }
+  return null;
+}
+
 describe('CLI Server', () => {
   it('should respond to ping', async () => {
     const result = await sendCommand('ping', {});
@@ -267,13 +282,32 @@ describe('CLI Server', () => {
     assert.strictEqual(highAssignment.ok, true);
     assert.strictEqual(highAssignment.routing.class, 'high');
     assert.strictEqual(highAssignment.routing.model, 'mini-model');
+    assert.strictEqual(highAssignment.routing.model_source, 'budget-downgrade:model_mini');
     assert.strictEqual(highAssignment.routing.reasoning_effort, 'low');
+    assert.strictEqual(highAssignment.routing.routing_reason, 'fallback-budget-downgrade:high->mini');
+    assert.strictEqual(highAssignment.routing.reason, 'fallback-budget-downgrade:high->mini');
 
     const midAssignment = await sendCommand('assign-task', { task_id: midTaskId, worker_id: 2 });
     assert.strictEqual(midAssignment.ok, true);
     assert.strictEqual(midAssignment.routing.class, 'mid');
     assert.strictEqual(midAssignment.routing.model, 'spark-model');
+    assert.strictEqual(midAssignment.routing.model_source, 'budget-downgrade:model_spark');
     assert.strictEqual(midAssignment.routing.reasoning_effort, 'low');
+    assert.strictEqual(midAssignment.routing.routing_reason, 'fallback-budget-downgrade:mid->spark');
+    assert.strictEqual(midAssignment.routing.reason, 'fallback-budget-downgrade:mid->spark');
+
+    const worker1Messages = db.checkMail('worker-1', false);
+    const highAssignmentMail = worker1Messages.find((msg) => msg.type === 'task_assigned' && msg.payload.task_id === highTaskId);
+    assert.ok(highAssignmentMail);
+    assert.strictEqual(highAssignmentMail.payload.model_source, 'budget-downgrade:model_mini');
+    assert.strictEqual(highAssignmentMail.payload.routing_reason, 'fallback-budget-downgrade:high->mini');
+    assert.strictEqual(highAssignmentMail.payload.reasoning_effort, 'low');
+
+    const highAssignmentLog = getAllocatorAssignmentDetails(highTaskId);
+    assert.ok(highAssignmentLog);
+    assert.strictEqual(highAssignmentLog.model_source, 'budget-downgrade:model_mini');
+    assert.strictEqual(highAssignmentLog.routing_reason, 'fallback-budget-downgrade:high->mini');
+    assert.strictEqual(highAssignmentLog.reasoning_effort, 'low');
   });
 
   it('should restore normal routing after flagship budget recovers above threshold', async () => {
@@ -300,7 +334,9 @@ describe('CLI Server', () => {
     assert.strictEqual(constrainedAssignment.ok, true);
     assert.strictEqual(constrainedAssignment.routing.class, 'high');
     assert.strictEqual(constrainedAssignment.routing.model, 'mini-model');
+    assert.strictEqual(constrainedAssignment.routing.model_source, 'budget-downgrade:model_mini');
     assert.strictEqual(constrainedAssignment.routing.reasoning_effort, 'low');
+    assert.strictEqual(constrainedAssignment.routing.routing_reason, 'fallback-budget-downgrade:high->mini');
 
     await setConfigValue('routing_budget_state', JSON.stringify({
       flagship: { remaining: 30, threshold: 20 },
@@ -322,12 +358,16 @@ describe('CLI Server', () => {
     assert.strictEqual(recoveredHigh.ok, true);
     assert.strictEqual(recoveredHigh.routing.class, 'high');
     assert.strictEqual(recoveredHigh.routing.model, 'high-model');
+    assert.strictEqual(recoveredHigh.routing.model_source, 'fallback-routing:model_high');
     assert.strictEqual(recoveredHigh.routing.reasoning_effort, 'high');
+    assert.strictEqual(recoveredHigh.routing.routing_reason, 'fallback-routing:class-default');
 
     const recoveredMid = await sendCommand('assign-task', { task_id: recoveredMidTaskId, worker_id: 3 });
     assert.strictEqual(recoveredMid.ok, true);
     assert.strictEqual(recoveredMid.routing.class, 'mid');
     assert.strictEqual(recoveredMid.routing.model, 'mid-model');
+    assert.strictEqual(recoveredMid.routing.model_source, 'fallback-routing:model_mid');
     assert.strictEqual(recoveredMid.routing.reasoning_effort, 'low');
+    assert.strictEqual(recoveredMid.routing.routing_reason, 'fallback-routing:class-default');
   });
 });
