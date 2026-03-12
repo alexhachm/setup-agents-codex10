@@ -13,6 +13,9 @@ const PR_URL_RE = /^https:\/\/github\.com\/[a-zA-Z0-9._-]+\/[a-zA-Z0-9._-]+\/pul
 const PR_NUMBER_RE = /^#?(\d+)$/;
 const PR_REFERENCE_RE = /^(pull request|pull|pr)\s*#?(\d+)$/i;
 const WORKER_BRANCH_RE = /^agent-\d+$/;
+const INBOX_RECIPIENT_ALIASES = Object.freeze({
+  'master-3': 'allocator',
+});
 const COMPLETE_TASK_USAGE_FIELDS = Object.freeze({
   model: 'string',
   input_tokens: 'number',
@@ -100,6 +103,11 @@ function getTransportTimeoutMs(command, args) {
     return 302000;
   }
   return 30000;
+}
+
+function normalizeInboxRecipient(recipient) {
+  if (typeof recipient !== 'string') return recipient;
+  return INBOX_RECIPIENT_ALIASES[recipient] || recipient;
 }
 
 function send(target, command, args) {
@@ -944,8 +952,11 @@ async function main() {
         break;
 
       case 'inbox': {
-        if (!argv[1]) { console.error('Usage: mac10 inbox <recipient> [--block] [--peek] [--timeout=ms]'); process.exit(1); }
-        const recipient = argv[1];
+        if (!argv[1]) {
+          console.error('Usage: mac10 inbox <recipient> [--block] [--peek] [--timeout=ms] (canonical recipient: allocator; alias: master-3)');
+          process.exit(1);
+        }
+        const recipient = normalizeInboxRecipient(argv[1]);
         const block = argv.includes('--block');
         const peek = argv.includes('--peek');
         const timeoutArg = argv.find(a => a.startsWith('--timeout='));
@@ -1328,6 +1339,7 @@ ARCHITECT:
   tier1-complete <request_id> [result]
   ask-clarification <request_id> <question>
   inbox <recipient> [--block] [--peek] [--timeout=ms]
+                                canonical recipient: allocator (master-3 alias supported)
 
 ALLOCATOR:
   ready-tasks                    List tasks ready for assignment
