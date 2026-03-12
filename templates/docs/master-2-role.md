@@ -86,8 +86,16 @@ Only use this protocol for trivial docs-only edits. For code work, use Tier 2 or
 1. Check workers: `./.claude/scripts/codex10 worker-status` to find an idle worker and capture `raw_worker_id` (for example `worker-3`).
 2. Normalize to numeric for claim/assign/release: `worker_id="${raw_worker_id#worker-}"`.
 3. Claim atomically: `./.claude/scripts/codex10 claim-worker "$worker_id"`.
-4. Create task: `echo '{"request_id":"...","subject":"...","description":"...","domain":"...","tier":2,"priority":"normal","files":["file1.js","file2.js"],"validation":"npm run build"}' | ./.claude/scripts/codex10 create-task -`.
-5. Assign task with numeric worker ID: `./.claude/scripts/codex10 assign-task <task_id> "$worker_id"`.
+4. Create task and capture task ID:
+   ```bash
+   task_id="$(
+     echo '{"request_id":"...","subject":"...","description":"...","domain":"...","tier":2,"priority":"normal","files":["file1.js","file2.js"],"validation":"npm run build"}' \
+       | ./.claude/scripts/codex10 create-task - \
+       | awk '/Task created:/ {print $3}'
+   )"
+   [ -n "$task_id" ] || { echo "Failed to capture task_id from create-task output"; exit 1; }
+   ```
+5. Assign task with captured numeric ID: `./.claude/scripts/codex10 assign-task "$task_id" "$worker_id"`.
 6. Release claim: `./.claude/scripts/codex10 release-worker "$worker_id"`.
 7. Do not run `launch-worker.sh` after assignment; `assign-task` already wakes/spawns the worker.
 8. Log: `[TIER2_ASSIGN] request=[id] worker=[worker-N] task=[subject]`
@@ -146,8 +154,45 @@ Before resetting:
 - 4 Tier 1 executions in a session (implementation context pollution)
 - 6 Tier 3 decompositions in a session
 - Tier 2 assignments count as 0.5 toward decomposition count
-- Staleness: 5+ commits merged since last scan → incremental rescan first, full reset if >50% of domains affected
+- Staleness (executable procedure below)
 - Self-detected degradation (can't recall domain map accurately)
+
+### Staleness Procedure (Executable)
+Use this exact flow when checking whether your scan context is stale:
+
+```bash
+last_scan=$(jq -r '.scanned_at // "1970-01-01"' .claude/state/codebase-map.json 2>/dev/null)
+commits_since=$(git log --since="$last_scan" --oneline 2>/dev/null | wc -l | tr -d ' ')
+baseline_commit=$(git rev-list -1 --before="$last_scan" HEAD 2>/dev/null)
+if [ -n "$baseline_commit" ]; then
+  changed_files=$(git diff --name-only "$baseline_commit"..HEAD 2>/dev/null | sed '/^$/d' | sort -u)
+else
+  changed_files=$(git ls-files 2>/dev/null)
+fi
+changed_file_count=$(printf '%s\n' "$changed_files" | sed '/^$/d' | wc -l | tr -d ' ')
+total_domains=$(jq '(.domains // {}) | if type=="array" then length else (keys|length) end' .claude/state/codebase-map.json 2>/dev/null || echo 0)
+changed_domains=$(printf '%s\n' "$changed_files" | awk -F/ 'NF{print $1}' | sort -u | wc -l | tr -d ' ')
+```
+
+Escalate directly to full reset + `/scan-codebase` when any of these is true:
+- `commits_since >= 20`
+- `changed_file_count > 120`
+- `total_domains > 0` and `changed_domains * 2 >= total_domains`
+
+If `commits_since >= 5` and no full-reset condition is met:
+1. Write the review queue and inspect every listed file in a bounded pass:
+   ```bash
+   printf '%s\n' "$changed_files" | sed '/^$/d' > .claude/state/reports/master2-incremental-scan-files.txt
+   ```
+2. Refresh `codebase-map.json` scan timestamp:
+   ```bash
+   bash .claude/scripts/state-lock.sh .claude/state/codebase-map.json 'tmp=$(mktemp) && jq --arg ts "$(date -u +%Y-%m-%dT%H:%M:%SZ)" ".scanned_at=\$ts" .claude/state/codebase-map.json > "$tmp" && mv "$tmp" .claude/state/codebase-map.json'
+   ```
+3. Update impacted knowledge docs (at minimum `codebase-insights.md` if architecture understanding changed).
+4. Log the scan:
+   ```bash
+   echo "[$(date -u +%Y-%m-%dT%H:%M:%SZ)] [master-2] [INCREMENTAL_SCAN] commits=${commits_since} files=${changed_file_count} domains=${changed_domains}" >> .claude/logs/activity.log
+   ```
 
 ## Logging
 ```bash

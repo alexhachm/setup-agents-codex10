@@ -176,11 +176,16 @@ Go to Step 6.
 
 3. **Create and assign the task:**
    ```bash
-   echo '{"request_id":"[id]","subject":"[task title]","description":"DOMAIN: [domain]\nFILES: [files]\nVALIDATION: tier2\nTIER: 2\n\n[detailed requirements]\n\n[success criteria]","domain":"[domain]","tier":2,"priority":"normal","files":["file1.js","file2.js"],"validation":"npm run build"}' | ./.claude/scripts/codex10 create-task -
+   task_id="$(
+     echo '{"request_id":"[id]","subject":"[task title]","description":"DOMAIN: [domain]\nFILES: [files]\nVALIDATION: tier2\nTIER: 2\n\n[detailed requirements]\n\n[success criteria]","domain":"[domain]","tier":2,"priority":"normal","files":["file1.js","file2.js"],"validation":"npm run build"}' \
+       | ./.claude/scripts/codex10 create-task - \
+       | awk '/Task created:/ {print $3}'
+   )"
+   [ -n "$task_id" ] || { echo "Failed to capture task_id from create-task output"; exit 1; }
    ```
    Then assign with the normalized numeric worker id:
    ```bash
-   ./.claude/scripts/codex10 assign-task <task_id> "$worker_id"
+   ./.claude/scripts/codex10 assign-task "$task_id" "$worker_id"
    ```
 
 4. **Release claim:**
@@ -202,27 +207,25 @@ Go to Step 6.
 
 1. **THINK DEEPLY** — this is your core value. Take your time.
 2. Optional teammate burst (only when criteria above are met): run read-only teammate analysis, then synthesize findings yourself.
-3. If clarification needed, write to clarification-queue.json and wait for response (poll every 10s).
-4. Write decomposed tasks to codex10.task-queue.json:
+3. If clarification is needed, request it via coordinator and block for a reply:
    ```bash
-   bash .claude/scripts/state-lock.sh .claude/state/codex10.task-queue.json 'cat > .claude/state/codex10.task-queue.json << TASKS
-   {
-     "request_id": "[request_id]",
-     "decomposed_at": "[ISO timestamp]",
-     "tasks": [
-       {
-         "subject": "[task title]",
-         "description": "REQUEST_ID: [id]\nDOMAIN: [domain]\nFILES: [specific files]\nVALIDATION: tier3\nTIER: 3\n\n[detailed requirements]\n\n[success criteria]",
-         "domain": "[domain]",
-         "files": ["file1.js", "file2.js"],
-         "priority": "normal",
-         "depends_on": []
-       }
-     ]
-   }
-   TASKS'
+   ./.claude/scripts/codex10 ask-clarification <request_id> "[specific question]"
+   ./.claude/scripts/codex10 inbox architect --block
    ```
-5. Update codex10.handoff.json to `"decomposed"`
+4. Create each decomposed Tier 3 task via codex10 and capture IDs:
+   ```bash
+   task_id="$(
+     echo '{"request_id":"[id]","subject":"[task title]","description":"REQUEST_ID: [id]\nDOMAIN: [domain]\nFILES: [specific files]\nVALIDATION: tier3\nTIER: 3\n\n[detailed requirements]\n\n[success criteria]","domain":"[domain]","tier":3,"priority":"normal","files":["file1.js","file2.js"],"depends_on":[],"validation":"npm run build"}' \
+       | ./.claude/scripts/codex10 create-task - \
+       | awk '/Task created:/ {print $3}'
+   )"
+   [ -n "$task_id" ] || { echo "Failed to capture Tier 3 task ID"; exit 1; }
+   ```
+   Repeat for each subtask; use `depends_on` for serial dependencies.
+5. Record tier decision in coordinator state:
+   ```bash
+   ./.claude/scripts/codex10 triage <request_id> 3 "Decomposed into [N] tasks"
+   ```
 6. Signal Master-3:
    ```bash
    touch .claude/signals/.codex10.task-signal
@@ -264,9 +267,35 @@ Also check staleness:
 ```bash
 last_scan=$(jq -r '.scanned_at // "1970-01-01"' .claude/state/codebase-map.json 2>/dev/null)
 commits_since=$(git log --since="$last_scan" --oneline 2>/dev/null | wc -l | tr -d ' ')
+baseline_commit=$(git rev-list -1 --before="$last_scan" HEAD 2>/dev/null)
+if [ -n "$baseline_commit" ]; then
+  changed_files=$(git diff --name-only "$baseline_commit"..HEAD 2>/dev/null | sed '/^$/d' | sort -u)
+else
+  changed_files=$(git ls-files 2>/dev/null)
+fi
+changed_file_count=$(printf '%s\n' "$changed_files" | sed '/^$/d' | wc -l | tr -d ' ')
+total_domains=$(jq '(.domains // {}) | if type=="array" then length else (keys|length) end' .claude/state/codebase-map.json 2>/dev/null || echo 0)
+changed_domains=$(printf '%s\n' "$changed_files" | awk -F/ 'NF{print $1}' | sort -u | wc -l | tr -d ' ')
 ```
-If `commits_since >= 5`: do incremental rescan (read changed files, update map).
-If `commits_since >= 20` or changes span >50% of domains: full reset (Step 7).
+If `commits_since >= 20`: full reset (Step 7) immediately.
+If `changed_file_count > 120`: full reset (Step 7) immediately (incremental pass would be too broad).
+If `total_domains > 0` and `changed_domains * 2 >= total_domains`: full reset (Step 7) immediately.
+
+If `commits_since >= 5` and none of the full-reset conditions above fired, run this incremental rescan:
+1. Review changed files in a bounded pass:
+   ```bash
+   printf '%s\n' "$changed_files" | sed '/^$/d' > .claude/state/reports/master2-incremental-scan-files.txt
+   ```
+   Use this list as the review queue and inspect each file before continuing.
+2. Refresh `codebase-map.json` scan timestamp:
+   ```bash
+   bash .claude/scripts/state-lock.sh .claude/state/codebase-map.json 'tmp=$(mktemp) && jq --arg ts "$(date -u +%Y-%m-%dT%H:%M:%SZ)" ".scanned_at=\$ts" .claude/state/codebase-map.json > "$tmp" && mv "$tmp" .claude/state/codebase-map.json'
+   ```
+3. Update knowledge entries impacted by reviewed files (at minimum `codebase-insights.md` if architecture understanding changed).
+4. Log the incremental scan:
+   ```bash
+   echo "[$(date -u +%Y-%m-%dT%H:%M:%SZ)] [master-2] [INCREMENTAL_SCAN] commits=${commits_since} files=${changed_file_count} domains=${changed_domains}" >> .claude/logs/activity.log
+   ```
 
 ### Step 6: Wait and repeat
 
