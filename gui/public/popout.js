@@ -142,8 +142,63 @@
           (t.assigned_to ? ' &rarr; worker-' + escapeHtml(String(t.assigned_to)) : '') +
           (t.pr_url ? ' ' + renderPrLink(t.pr_url) : '') +
         '</div>' +
+        renderTaskTelemetryChips(t) +
         '</div>';
     }).join('');
+  }
+
+  function renderTaskTelemetryChips(task) {
+    var telemetry = readTaskTelemetry(task);
+    var chips = [];
+    if (telemetry.routingClass) chips.push(renderTelemetryChip('route', telemetry.routingClass));
+    if (telemetry.routedModel) chips.push(renderTelemetryChip('model', telemetry.routedModel));
+    if (telemetry.modelSource) chips.push(renderTelemetryChip('source', telemetry.modelSource));
+    if (telemetry.reasoningEffort) chips.push(renderTelemetryChip('effort', telemetry.reasoningEffort));
+    if (telemetry.usageModel) chips.push(renderTelemetryChip('usage', telemetry.usageModel));
+    if (telemetry.usageInputTokens) chips.push(renderTelemetryChip('in', telemetry.usageInputTokens));
+    if (telemetry.usageOutputTokens) chips.push(renderTelemetryChip('out', telemetry.usageOutputTokens));
+    if (telemetry.usageCachedTokens) chips.push(renderTelemetryChip('cached', telemetry.usageCachedTokens));
+    if (telemetry.usageTotalTokens) chips.push(renderTelemetryChip('total', telemetry.usageTotalTokens));
+    if (telemetry.usageCostUsd) chips.push(renderTelemetryChip('cost', telemetry.usageCostUsd));
+    if (chips.length === 0) return '';
+    return '<div class="task-chip-row">' + chips.join('') + '</div>';
+  }
+
+  function renderTelemetryChip(label, value) {
+    return '<span class="task-chip"><span class="task-chip-label">' + escapeHtml(label) + '</span>' + escapeHtml(value) + '</span>';
+  }
+
+  function readTaskTelemetry(task) {
+    var routing = task && task.routing && typeof task.routing === 'object' ? task.routing : null;
+    var usage = task && task.usage && typeof task.usage === 'object' ? task.usage : null;
+    return {
+      routingClass: pickTelemetryValue(task && task.routing_class, task && task.routingClass, routing && routing.class, routing && routing.routing_class),
+      routedModel: pickTelemetryValue(task && task.routed_model, task && task.routedModel, task && task.routing_model, task && task.routingModel, routing && routing.model),
+      modelSource: pickTelemetryValue(task && task.model_source, task && task.modelSource, task && task.routing_model_source, task && task.routingModelSource, routing && routing.model_source),
+      reasoningEffort: pickTelemetryValue(task && task.reasoning_effort, task && task.reasoningEffort, task && task.routing_reasoning_effort, task && task.routingReasoningEffort, routing && routing.reasoning_effort),
+      usageModel: pickTelemetryValue(task && task.usage_model, task && task.usageModel, usage && usage.model),
+      usageInputTokens: pickTelemetryValue(task && task.usage_input_tokens, task && task.usageInputTokens, usage && usage.input_tokens, usage && usage.inputTokens),
+      usageOutputTokens: pickTelemetryValue(task && task.usage_output_tokens, task && task.usageOutputTokens, usage && usage.output_tokens, usage && usage.outputTokens),
+      usageCachedTokens: pickTelemetryValue(task && task.usage_cached_tokens, task && task.usageCachedTokens, usage && usage.cached_tokens, usage && usage.cachedTokens),
+      usageTotalTokens: pickTelemetryValue(task && task.usage_total_tokens, task && task.usageTotalTokens, usage && usage.total_tokens, usage && usage.totalTokens),
+      usageCostUsd: pickTelemetryValue(task && task.usage_cost_usd, task && task.usageCostUsd, usage && usage.cost_usd, usage && usage.costUsd),
+    };
+  }
+
+  function pickTelemetryValue() {
+    var values = Array.prototype.slice.call(arguments);
+    for (var i = 0; i < values.length; i++) {
+      var normalized = normalizeTelemetryValue(values[i]);
+      if (normalized) return normalized;
+    }
+    return '';
+  }
+
+  function normalizeTelemetryValue(value) {
+    if (value === null || value === undefined) return '';
+    if (typeof value === 'string') return value.trim();
+    if (typeof value === 'number' || typeof value === 'boolean') return String(value);
+    return '';
   }
 
   function renderLog(data) {
