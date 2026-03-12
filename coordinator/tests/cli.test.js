@@ -15,6 +15,19 @@ let server;
 let socketPath;
 let loopCreatedEvents;
 
+function waitForCliServerReady() {
+  return new Promise((resolve) => {
+    const check = () => {
+      const conn = net.createConnection(socketPath, () => {
+        conn.end();
+        resolve();
+      });
+      conn.on('error', () => setTimeout(check, 50));
+    };
+    setTimeout(check, 50);
+  });
+}
+
 beforeEach(async () => {
   tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'mac10-cli-'));
   fs.mkdirSync(path.join(tmpDir, '.claude', 'state'), { recursive: true });
@@ -28,17 +41,7 @@ beforeEach(async () => {
     },
   });
   // Wait for server to be listening
-  await new Promise((resolve) => {
-    const check = () => {
-      const conn = net.createConnection(socketPath, () => {
-        conn.end();
-        resolve();
-      });
-      conn.on('error', () => setTimeout(check, 50));
-    };
-    // Give server a moment to bind
-    setTimeout(check, 50);
-  });
+  await waitForCliServerReady();
 });
 
 afterEach(() => {
@@ -578,10 +581,60 @@ describe('CLI Server', () => {
     assert.ok(task);
     assert.ok(task.routing_class);
     assert.ok(task.routed_model);
+    assert.ok(task.model_source);
     assert.ok(task.reasoning_effort);
     assert.strictEqual(task.routing_class, assignment.routing.class);
     assert.strictEqual(task.routed_model, assignment.routing.model);
+    assert.strictEqual(task.model_source, assignment.routing.model_source);
     assert.strictEqual(task.reasoning_effort, assignment.routing.reasoning_effort);
+  });
+
+  it('should rollback model_source and assignment state when assign-task spawn fails', async () => {
+    db.registerWorker(1, '/wt-1', 'agent-1');
+
+    const taskId = createReadyTask({
+      subject: 'Regression: spawn rollback',
+      description: 'Ensure model_source rollback occurs on spawn failure',
+      priority: 'high',
+      tier: 3,
+    });
+
+    db.updateTask(taskId, {
+      routing_class: 'legacy-class',
+      routed_model: 'legacy-model',
+      model_source: 'legacy-source',
+      reasoning_effort: 'legacy-effort',
+    });
+
+    cliServer.stop();
+    server = cliServer.start(tmpDir, {
+      onTaskCompleted: () => {},
+      onLoopCreated: (loopId, prompt) => {
+        loopCreatedEvents.push({ loopId, prompt });
+      },
+      onAssignTask: () => {
+        throw new Error('spawn failed for rollback regression');
+      },
+    });
+    await waitForCliServerReady();
+
+    const assignment = await sendCommand('assign-task', { task_id: taskId, worker_id: 1 });
+    assert.strictEqual(assignment.ok, false);
+    assert.match(assignment.error, /Failed to spawn worker: spawn failed for rollback regression/);
+
+    const task = db.getTask(taskId);
+    assert.ok(task);
+    assert.strictEqual(task.status, 'ready');
+    assert.strictEqual(task.assigned_to, null);
+    assert.strictEqual(task.routing_class, 'legacy-class');
+    assert.strictEqual(task.routed_model, 'legacy-model');
+    assert.strictEqual(task.model_source, 'legacy-source');
+    assert.strictEqual(task.reasoning_effort, 'legacy-effort');
+
+    const worker = db.getWorker(1);
+    assert.ok(worker);
+    assert.strictEqual(worker.status, 'idle');
+    assert.strictEqual(worker.current_task_id, null);
   });
 
   it('should label explicit model overrides as config-fallback in response and logs', async () => {

@@ -33,12 +33,12 @@ afterEach(() => {
   fs.rmSync(tmpDir, { recursive: true, force: true });
 });
 
-function requestStatus() {
+function requestJson(reqPath) {
   return new Promise((resolve, reject) => {
     const req = http.request({
       host: '127.0.0.1',
       port,
-      path: '/api/status',
+      path: reqPath,
       method: 'GET',
     }, (res) => {
       let data = '';
@@ -55,6 +55,10 @@ function requestStatus() {
     req.on('error', reject);
     req.end();
   });
+}
+
+function requestStatus() {
+  return requestJson('/api/status');
 }
 
 function findTask(payload, taskId) {
@@ -157,5 +161,57 @@ describe('Web status telemetry contract', () => {
     assert.strictEqual(task.routed_model, null);
     assert.strictEqual(task.model_source, null);
     assert.strictEqual(task.reasoning_effort, null);
+  });
+
+  it('returns hydrated model_source parity for /api/tasks and /api/requests/:id', async () => {
+    const reqId = db.createRequest('Model source parity request');
+
+    const taskWithRowModelSource = db.createTask({
+      request_id: reqId,
+      subject: 'Task with row model_source',
+      description: 'Task row model_source should win',
+      domain: 'coordinator-tests',
+      tier: 3,
+    });
+    db.updateTask(taskWithRowModelSource, {
+      model_source: 'row-model-source',
+    });
+
+    const taskWithFallbackModelSource = db.createTask({
+      request_id: reqId,
+      subject: 'Task with fallback model_source',
+      description: 'Allocator log fallback should hydrate model_source',
+      domain: 'coordinator-tests',
+      tier: 2,
+    });
+
+    db.log('allocator', 'task_assigned', {
+      task_id: taskWithFallbackModelSource,
+      routing_class: 'mid',
+      model: 'gpt-5.3',
+      model_source: 'log-model-source',
+      reasoning_effort: 'medium',
+    });
+
+    const tasksResult = await requestJson('/api/tasks');
+    assert.strictEqual(tasksResult.status, 200);
+    const tasksMap = new Map(tasksResult.body.map((task) => [task.id, task]));
+    assert.strictEqual(tasksMap.get(taskWithRowModelSource).model_source, 'row-model-source');
+    assert.strictEqual(tasksMap.get(taskWithFallbackModelSource).model_source, 'log-model-source');
+
+    const requestResult = await requestJson(`/api/requests/${reqId}`);
+    assert.strictEqual(requestResult.status, 200);
+    const requestTasksMap = new Map(requestResult.body.tasks.map((task) => [task.id, task]));
+    assert.strictEqual(requestTasksMap.get(taskWithRowModelSource).model_source, 'row-model-source');
+    assert.strictEqual(requestTasksMap.get(taskWithFallbackModelSource).model_source, 'log-model-source');
+
+    assert.strictEqual(
+      requestTasksMap.get(taskWithRowModelSource).model_source,
+      tasksMap.get(taskWithRowModelSource).model_source
+    );
+    assert.strictEqual(
+      requestTasksMap.get(taskWithFallbackModelSource).model_source,
+      tasksMap.get(taskWithFallbackModelSource).model_source
+    );
   });
 });
