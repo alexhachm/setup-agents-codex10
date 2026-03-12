@@ -154,6 +154,20 @@ describe('SQL column whitelist enforcement', () => {
     assert.strictEqual(task.status, 'ready');
     assert.strictEqual(task.domain, 'backend');
   });
+
+  it('should accept routing telemetry columns in updateTask', () => {
+    const reqId = db.createRequest('Test');
+    const taskId = db.createTask({ request_id: reqId, subject: 'T', description: 'D' });
+    db.updateTask(taskId, {
+      routing_class: 'high',
+      routed_model: 'gpt-5.3-codex',
+      reasoning_effort: 'high',
+    });
+    const task = db.getTask(taskId);
+    assert.strictEqual(task.routing_class, 'high');
+    assert.strictEqual(task.routed_model, 'gpt-5.3-codex');
+    assert.strictEqual(task.reasoning_effort, 'high');
+  });
 });
 
 // ---- 3. CLI server: command validation + payload limit ----
@@ -558,6 +572,31 @@ describe('Atomic task assignment via CLI', () => {
     assert.strictEqual(r2.ok, false);
     assert.strictEqual(db.getTask(t2).status, 'ready');
     assert.strictEqual(db.getTask(t2).assigned_to, null);
+  });
+
+  it('should persist non-null routing telemetry on task rows after assign-task', async () => {
+    db.registerWorker(1, '/wt-1', 'agent-1');
+    const reqId = db.createRequest('Routing telemetry');
+    const taskId = db.createTask({
+      request_id: reqId,
+      subject: 'Complex migration task',
+      description: 'Refactor routing behavior for fallback paths',
+      priority: 'high',
+      tier: 3,
+    });
+    db.updateTask(taskId, { status: 'ready' });
+
+    const assignment = await sendCommand('assign-task', { task_id: taskId, worker_id: 1 });
+    assert.strictEqual(assignment.ok, true);
+    assert.ok(assignment.routing);
+
+    const assignedTask = db.getTask(taskId);
+    assert.ok(assignedTask.routing_class);
+    assert.ok(assignedTask.routed_model);
+    assert.ok(assignedTask.reasoning_effort);
+    assert.strictEqual(assignedTask.routing_class, assignment.routing.class);
+    assert.strictEqual(assignedTask.routed_model, assignment.routing.model);
+    assert.strictEqual(assignedTask.reasoning_effort, assignment.routing.reasoning_effort);
   });
 });
 

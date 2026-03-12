@@ -88,7 +88,7 @@ function compareCompletedTaskCursors(left, right) {
 
 const VALID_COLUMNS = Object.freeze({
   requests: new Set(['description', 'tier', 'status', 'result', 'completed_at', 'loop_id']),
-  tasks: new Set(['request_id', 'subject', 'description', 'domain', 'files', 'priority', 'tier', 'depends_on', 'assigned_to', 'status', 'pr_url', 'branch', 'validation', 'overlap_with', 'started_at', 'completed_at', 'result']),
+  tasks: new Set(['request_id', 'subject', 'description', 'domain', 'files', 'priority', 'tier', 'depends_on', 'assigned_to', 'status', 'pr_url', 'branch', 'validation', 'overlap_with', 'routing_class', 'routed_model', 'reasoning_effort', 'started_at', 'completed_at', 'result']),
   workers: new Set(['status', 'domain', 'worktree_path', 'branch', 'tmux_session', 'tmux_window', 'pid', 'current_task_id', 'claimed_by', 'last_heartbeat', 'launched_at', 'tasks_completed']),
   merge_queue: new Set(['status', 'priority', 'completion_checkpoint', 'merged_at', 'error']),
   changes: new Set(['description', 'domain', 'file_path', 'function_name', 'tooltip', 'enabled', 'status']),
@@ -125,6 +125,21 @@ function ensureMergeQueueColumns(database) {
   database.exec("UPDATE merge_queue SET completion_checkpoint = COALESCE(completion_checkpoint, updated_at, datetime('now')) WHERE completion_checkpoint IS NULL");
 }
 
+function ensureTaskRoutingTelemetryColumns(database) {
+  const taskCols = database.prepare("PRAGMA table_info(tasks)").all().map((column) => column.name);
+  if (taskCols.length === 0) return;
+
+  if (!taskCols.includes('routing_class')) {
+    database.exec("ALTER TABLE tasks ADD COLUMN routing_class TEXT");
+  }
+  if (!taskCols.includes('routed_model')) {
+    database.exec("ALTER TABLE tasks ADD COLUMN routed_model TEXT");
+  }
+  if (!taskCols.includes('reasoning_effort')) {
+    database.exec("ALTER TABLE tasks ADD COLUMN reasoning_effort TEXT");
+  }
+}
+
 function getDbPath(projectDir) {
   const stateDir = path.join(projectDir, '.claude', 'state');
   fs.mkdirSync(stateDir, { recursive: true });
@@ -155,6 +170,7 @@ function init(projectDir) {
     if (!taskCols.includes('overlap_with')) {
       db.exec("ALTER TABLE tasks ADD COLUMN overlap_with TEXT");
     }
+    ensureTaskRoutingTelemetryColumns(db);
   }
   if (existingTables.includes('requests')) {
     const reqCols = db.prepare("PRAGMA table_info(requests)").all().map(c => c.name);
@@ -168,6 +184,7 @@ function init(projectDir) {
   const schema = fs.readFileSync(path.join(__dirname, 'schema.sql'), 'utf8');
   db.exec(schema);
   ensureMergeQueueColumns(db);
+  ensureTaskRoutingTelemetryColumns(db);
 
   // Store project dir in config
   db.prepare('UPDATE config SET value = ? WHERE key = ?').run(projectDir, 'project_dir');
