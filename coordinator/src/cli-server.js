@@ -1427,6 +1427,11 @@ function handleCommand(cmd, conn, handlers) {
         const assignedTask = db.getTask(assignTaskId);
         const assignedWorker = db.getWorker(assignWorkerId);
         const routingDecision = modelRouter.routeTask(assignedTask, { getConfig: db.getConfig });
+        db.updateTask(assignTaskId, {
+          routing_class: routingDecision.routing_class || null,
+          routed_model: routingDecision.model || null,
+          reasoning_effort: routingDecision.reasoning_effort || null,
+        });
         const routingReason = routingDecision.routing_reason || routingDecision.reason || 'router:unspecified';
         const modelSource = routingDecision.model_source || 'router:unspecified';
         const routingTelemetry = {
@@ -1446,6 +1451,9 @@ function handleCommand(cmd, conn, handlers) {
               db.updateTask(assignTaskId, {
                 status: assignResult.task.status,
                 assigned_to: assignResult.task.assigned_to,
+                routing_class: assignResult.task.routing_class ?? null,
+                routed_model: assignResult.task.routed_model ?? null,
+                reasoning_effort: assignResult.task.reasoning_effort ?? null,
               });
               db.updateWorker(assignWorkerId, {
                 status: assignResult.worker.status,
