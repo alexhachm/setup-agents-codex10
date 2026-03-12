@@ -21,6 +21,13 @@ const LAUNCH_READINESS_MAX_ATTEMPTS = 20;
 const LAUNCH_READINESS_RETRY_MS = 500;
 const LAUNCH_HTTP_TIMEOUT_MS = 1500;
 
+function parseStrictPositiveIntegerParam(value) {
+  if (typeof value !== 'string' || !/^\d+$/.test(value)) return null;
+  const parsed = Number(value);
+  if (!Number.isSafeInteger(parsed) || parsed <= 0) return null;
+  return parsed;
+}
+
 function sleep(ms) {
   return new Promise((resolve) => setTimeout(resolve, ms));
 }
@@ -311,7 +318,7 @@ function start(projectDir, port = 3100, scriptDir = null, handlers = {}) {
 
   app.delete('/api/presets/:id', (req, res) => {
     try {
-      const id = parseInt(req.params.id);
+      const id = parseStrictPositiveIntegerParam(req.params.id);
       if (!id) return res.status(400).json({ ok: false, error: 'Invalid preset id' });
       const deleted = db.deletePreset(id);
       if (!deleted) return res.status(404).json({ ok: false, error: 'Preset not found' });
@@ -744,7 +751,7 @@ function start(projectDir, port = 3100, scriptDir = null, handlers = {}) {
 
   app.patch('/api/changes/:id', (req, res) => {
     try {
-      const id = parseInt(req.params.id);
+      const id = parseStrictPositiveIntegerParam(req.params.id);
       if (!id) return res.status(400).json({ ok: false, error: 'Invalid change id' });
       const existing = db.getChange(id);
       if (!existing) return res.status(404).json({ ok: false, error: 'Change not found' });
