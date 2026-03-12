@@ -96,7 +96,7 @@ function onTaskCompleted(taskId) {
   }
 }
 
-function processQueue(projectDir) {
+function processQueue(projectDir, mergeExecutor = attemptMerge) {
   // Reset processing flag if stuck beyond timeout
   if (processing && processingStartedAt > 0 && (Date.now() - processingStartedAt) > PROCESSING_TIMEOUT_MS) {
     db.log('coordinator', 'merger_processing_timeout', { stuck_ms: Date.now() - processingStartedAt });
@@ -113,7 +113,7 @@ function processQueue(projectDir) {
     db.updateMerge(entry.id, { status: 'merging' });
     db.log('coordinator', 'merge_start', { merge_id: entry.id, branch: entry.branch, pr: entry.pr_url });
 
-    const result = attemptMerge(entry, projectDir);
+    const result = mergeExecutor(entry, projectDir);
 
     if (result.success) {
       db.updateMerge(entry.id, { status: 'merged', merged_at: new Date().toISOString() });
@@ -381,6 +381,15 @@ function checkRequestCompletion(requestId) {
 
   const allMerged = allMerges.every(m => m.status === 'merged');
   if (allMerged && allMerges.length > 0) {
+    const taskCompletion = db.checkRequestCompletion(requestId);
+    if (!taskCompletion.all_done) {
+      const request = db.getRequest(requestId);
+      if (request && request.status !== 'integrating' && request.status !== 'in_progress') {
+        db.updateRequest(requestId, { status: 'integrating' });
+      }
+      return;
+    }
+
     const result = `All ${allMerges.length} PR(s) merged successfully`;
     db.updateRequest(requestId, {
       status: 'completed',

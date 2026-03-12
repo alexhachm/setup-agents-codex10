@@ -7,6 +7,7 @@ const fs = require('fs');
 const os = require('os');
 
 const db = require('../src/db');
+const merger = require('../src/merger');
 
 let tmpDir;
 
@@ -95,5 +96,63 @@ describe('Request completion tracking', () => {
     const tasksAfter = db.listTasks({ request_id: reqId });
     const incompleteAfter = tasksAfter.filter(t => t.status !== 'completed' && t.status !== 'failed');
     assert.strictEqual(incompleteAfter.length, 0);
+  });
+
+  it('should not complete request from merge success until all tasks are terminal', () => {
+    const reqId = db.createRequest('Feature');
+    const mergedTaskId = db.createTask({ request_id: reqId, subject: 'Merged task', description: 'Already done' });
+    const pendingTaskId = db.createTask({ request_id: reqId, subject: 'Pending task', description: 'Still running' });
+
+    db.updateTask(mergedTaskId, { status: 'completed' });
+    db.updateTask(pendingTaskId, { status: 'in_progress' });
+    db.updateRequest(reqId, { status: 'integrating' });
+
+    db.enqueueMerge({
+      request_id: reqId,
+      task_id: mergedTaskId,
+      pr_url: 'https://github.com/org/repo/pull/101',
+      branch: 'agent-1',
+    });
+
+    merger.processQueue(tmpDir, () => ({ success: true }));
+
+    const requestAfterMerge = db.getRequest(reqId);
+    assert.strictEqual(requestAfterMerge.status, 'integrating');
+
+    const completionMailBefore = db.checkMail('master-1', false)
+      .filter((m) => m.type === 'request_completed' && m.payload.request_id === reqId);
+    assert.strictEqual(completionMailBefore.length, 0);
+
+    const completionLogBefore = db.getLog(50, 'coordinator').filter((entry) => {
+      if (entry.action !== 'request_completed') return false;
+      try {
+        const details = JSON.parse(entry.details || '{}');
+        return details.request_id === reqId;
+      } catch {
+        return false;
+      }
+    });
+    assert.strictEqual(completionLogBefore.length, 0);
+
+    db.updateTask(pendingTaskId, { status: 'completed' });
+    merger.onTaskCompleted(pendingTaskId);
+
+    const requestAfterTasksDone = db.getRequest(reqId);
+    assert.strictEqual(requestAfterTasksDone.status, 'completed');
+
+    const completionMailAfter = db.checkMail('master-1', false)
+      .filter((m) => m.type === 'request_completed' && m.payload.request_id === reqId);
+    assert.strictEqual(completionMailAfter.length, 1);
+
+    const completionLogAfter = db.getLog(50, 'coordinator').filter((entry) => {
+      if (entry.action !== 'request_completed') return false;
+      try {
+        const details = JSON.parse(entry.details || '{}');
+        return details.request_id === reqId;
+      } catch {
+        return false;
+      }
+    });
+    assert.strictEqual(completionLogAfter.length, 1);
   });
 });
