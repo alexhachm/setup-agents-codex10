@@ -88,7 +88,14 @@ function compareCompletedTaskCursors(left, right) {
 
 const VALID_COLUMNS = Object.freeze({
   requests: new Set(['description', 'tier', 'status', 'result', 'completed_at', 'loop_id']),
-  tasks: new Set(['request_id', 'subject', 'description', 'domain', 'files', 'priority', 'tier', 'depends_on', 'assigned_to', 'status', 'pr_url', 'branch', 'validation', 'overlap_with', 'routing_class', 'routed_model', 'reasoning_effort', 'started_at', 'completed_at', 'result']),
+  tasks: new Set([
+    'request_id', 'subject', 'description', 'domain', 'files', 'priority', 'tier', 'depends_on',
+    'assigned_to', 'status', 'pr_url', 'branch', 'validation', 'overlap_with',
+    'routing_class', 'routed_model', 'reasoning_effort',
+    'usage_model', 'usage_input_tokens', 'usage_output_tokens', 'usage_cached_tokens',
+    'usage_cache_creation_tokens', 'usage_total_tokens', 'usage_cost_usd',
+    'started_at', 'completed_at', 'result',
+  ]),
   workers: new Set(['status', 'domain', 'worktree_path', 'branch', 'tmux_session', 'tmux_window', 'pid', 'current_task_id', 'claimed_by', 'last_heartbeat', 'launched_at', 'tasks_completed']),
   merge_queue: new Set(['status', 'priority', 'completion_checkpoint', 'merged_at', 'error']),
   changes: new Set(['description', 'domain', 'file_path', 'function_name', 'tooltip', 'enabled', 'status']),
@@ -140,6 +147,33 @@ function ensureTaskRoutingTelemetryColumns(database) {
   }
 }
 
+function ensureTaskUsageTelemetryColumns(database) {
+  const taskCols = database.prepare("PRAGMA table_info(tasks)").all().map((column) => column.name);
+  if (taskCols.length === 0) return;
+
+  if (!taskCols.includes('usage_model')) {
+    database.exec("ALTER TABLE tasks ADD COLUMN usage_model TEXT");
+  }
+  if (!taskCols.includes('usage_input_tokens')) {
+    database.exec("ALTER TABLE tasks ADD COLUMN usage_input_tokens INTEGER");
+  }
+  if (!taskCols.includes('usage_output_tokens')) {
+    database.exec("ALTER TABLE tasks ADD COLUMN usage_output_tokens INTEGER");
+  }
+  if (!taskCols.includes('usage_cached_tokens')) {
+    database.exec("ALTER TABLE tasks ADD COLUMN usage_cached_tokens INTEGER");
+  }
+  if (!taskCols.includes('usage_cache_creation_tokens')) {
+    database.exec("ALTER TABLE tasks ADD COLUMN usage_cache_creation_tokens INTEGER");
+  }
+  if (!taskCols.includes('usage_total_tokens')) {
+    database.exec("ALTER TABLE tasks ADD COLUMN usage_total_tokens INTEGER");
+  }
+  if (!taskCols.includes('usage_cost_usd')) {
+    database.exec("ALTER TABLE tasks ADD COLUMN usage_cost_usd REAL");
+  }
+}
+
 function getDbPath(projectDir) {
   const stateDir = path.join(projectDir, '.claude', 'state');
   fs.mkdirSync(stateDir, { recursive: true });
@@ -171,6 +205,7 @@ function init(projectDir) {
       db.exec("ALTER TABLE tasks ADD COLUMN overlap_with TEXT");
     }
     ensureTaskRoutingTelemetryColumns(db);
+    ensureTaskUsageTelemetryColumns(db);
   }
   if (existingTables.includes('requests')) {
     const reqCols = db.prepare("PRAGMA table_info(requests)").all().map(c => c.name);
@@ -185,6 +220,7 @@ function init(projectDir) {
   db.exec(schema);
   ensureMergeQueueColumns(db);
   ensureTaskRoutingTelemetryColumns(db);
+  ensureTaskUsageTelemetryColumns(db);
 
   // Store project dir in config
   db.prepare('UPDATE config SET value = ? WHERE key = ?').run(projectDir, 'project_dir');

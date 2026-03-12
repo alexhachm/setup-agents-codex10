@@ -271,7 +271,7 @@ const COMMAND_SCHEMAS = {
   'my-task':           { required: ['worker_id'], types: { worker_id: 'string' } },
   'start-task':        { required: ['worker_id', 'task_id'], types: { worker_id: 'string' } },
   'heartbeat':         { required: ['worker_id'], types: { worker_id: 'string' } },
-  'complete-task':     { required: ['worker_id', 'task_id'], types: { worker_id: 'string' } },
+  'complete-task':     { required: ['worker_id', 'task_id'], types: { worker_id: 'string', usage: 'object' } },
   'fail-task':         { required: ['worker_id', 'task_id', 'error'], types: { worker_id: 'string', error: 'string' } },
   'distill':           { required: ['worker_id'], types: { worker_id: 'string' } },
   'inbox':             { required: ['recipient'], types: { recipient: 'string' } },
@@ -307,6 +307,26 @@ const COMMAND_SCHEMAS = {
   'loop-request':      { required: ['loop_id', 'description'], types: { loop_id: 'number', description: 'string' } },
   'loop-requests':     { required: ['loop_id'], types: { loop_id: 'number' } },
 };
+
+const COMPLETE_TASK_USAGE_FIELD_TYPES = Object.freeze({
+  model: 'string',
+  input_tokens: 'number',
+  output_tokens: 'number',
+  cached_tokens: 'number',
+  cache_creation_tokens: 'number',
+  total_tokens: 'number',
+  cost_usd: 'number',
+});
+
+const COMPLETE_TASK_USAGE_COLUMN_MAP = Object.freeze({
+  model: 'usage_model',
+  input_tokens: 'usage_input_tokens',
+  output_tokens: 'usage_output_tokens',
+  cached_tokens: 'usage_cached_tokens',
+  cache_creation_tokens: 'usage_cache_creation_tokens',
+  total_tokens: 'usage_total_tokens',
+  cost_usd: 'usage_cost_usd',
+});
 
 function parseBudgetNumber(value) {
   if (value === undefined || value === null) return null;
@@ -351,6 +371,60 @@ function mergeBudgetState(raw, overrides = {}) {
   }
   state.flagship = flagship;
   return state;
+}
+
+function normalizeCompleteTaskUsagePayload(rawUsage) {
+  if (rawUsage === undefined || rawUsage === null) return null;
+  if (!rawUsage || typeof rawUsage !== 'object' || Array.isArray(rawUsage)) {
+    throw new Error('Field "usage" must be an object');
+  }
+
+  const unknownFields = Object.keys(rawUsage)
+    .filter((field) => !Object.prototype.hasOwnProperty.call(COMPLETE_TASK_USAGE_FIELD_TYPES, field));
+  if (unknownFields.length) {
+    throw new Error(`Field "usage" contains unsupported keys: ${unknownFields.join(', ')}`);
+  }
+
+  const normalized = {};
+  for (const [field, expectedType] of Object.entries(COMPLETE_TASK_USAGE_FIELD_TYPES)) {
+    if (!Object.prototype.hasOwnProperty.call(rawUsage, field)) continue;
+    const value = rawUsage[field];
+    if (value === null) {
+      normalized[field] = null;
+      continue;
+    }
+    if (typeof value !== expectedType) {
+      throw new Error(`Field "usage.${field}" must be of type ${expectedType}`);
+    }
+    if (expectedType === 'string') {
+      const trimmed = value.trim();
+      if (!trimmed) throw new Error('Field "usage.model" cannot be empty');
+      normalized[field] = trimmed;
+      continue;
+    }
+    if (!Number.isFinite(value)) {
+      throw new Error(`Field "usage.${field}" must be a finite number`);
+    }
+    if (value < 0) {
+      throw new Error(`Field "usage.${field}" must be >= 0`);
+    }
+    if (field !== 'cost_usd' && !Number.isInteger(value)) {
+      throw new Error(`Field "usage.${field}" must be an integer`);
+    }
+    normalized[field] = value;
+  }
+
+  return normalized;
+}
+
+function mapUsagePayloadToTaskFields(usage) {
+  if (!usage || typeof usage !== 'object') return {};
+  const mapped = {};
+  for (const [usageKey, columnName] of Object.entries(COMPLETE_TASK_USAGE_COLUMN_MAP)) {
+    if (!Object.prototype.hasOwnProperty.call(usage, usageKey)) continue;
+    mapped[columnName] = usage[usageKey];
+  }
+  return mapped;
 }
 
 /** Parse a files field into an array. Handles arrays, JSON strings, and comma-separated strings. */
@@ -1008,6 +1082,9 @@ function validateCommand(cmd) {
     if (normalizedDomain) a.domain = normalizedDomain;
     else delete a.domain;
   }
+  if (command === 'complete-task' && Object.prototype.hasOwnProperty.call(a, 'usage')) {
+    a.usage = normalizeCompleteTaskUsagePayload(a.usage);
+  }
 }
 
 function getSocketPath(projectDir) {
@@ -1309,6 +1386,8 @@ function handleCommand(cmd, conn, handlers) {
       }
       case 'complete-task': {
         const { worker_id, task_id, pr_url, result, branch } = args;
+        const usage = normalizeCompleteTaskUsagePayload(args.usage);
+        const usageTaskFields = mapUsagePayloadToTaskFields(usage);
         const worker = db.getWorker(worker_id);
         const completionPrNormalizationCwd = worker && worker.worktree_path
           ? worker.worktree_path
@@ -1329,6 +1408,7 @@ function handleCommand(cmd, conn, handlers) {
           branch: resolvedBranch.branch,
           result: result || null,
           completed_at: new Date().toISOString(),
+          ...usageTaskFields,
         });
         const completedTask = db.getTask(task_id);
         // Enqueue merge if PR exists (must be a valid URL, not a status string like "already_merged")
@@ -1448,6 +1528,7 @@ function handleCommand(cmd, conn, handlers) {
           request_id: completedTask ? completedTask.request_id : null,
           pr_url: completionPrUrl,
           tasks_completed: tasksCompleted,
+          usage,
         });
         // Notify architect so it has visibility into Tier 2 outcomes
         db.sendMail('architect', 'task_completed', {
@@ -1455,11 +1536,13 @@ function handleCommand(cmd, conn, handlers) {
           request_id: completedTask ? completedTask.request_id : null,
           pr_url: completionPrUrl,
           result,
+          usage,
         });
         db.log(`worker-${worker_id}`, 'task_completed', {
           task_id,
           pr_url: completionPrUrl,
           result,
+          usage,
           tasks_completed: tasksCompleted,
         });
         // Notify handlers for merge check
