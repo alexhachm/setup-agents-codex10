@@ -91,7 +91,7 @@ const VALID_COLUMNS = Object.freeze({
   tasks: new Set([
     'request_id', 'subject', 'description', 'domain', 'files', 'priority', 'tier', 'depends_on',
     'assigned_to', 'status', 'pr_url', 'branch', 'validation', 'overlap_with',
-    'routing_class', 'routed_model', 'reasoning_effort',
+    'routing_class', 'routed_model', 'model_source', 'reasoning_effort',
     'usage_model', 'usage_input_tokens', 'usage_output_tokens', 'usage_cached_tokens',
     'usage_cache_creation_tokens', 'usage_total_tokens', 'usage_cost_usd',
     'started_at', 'completed_at', 'result',
@@ -141,6 +141,9 @@ function ensureTaskRoutingTelemetryColumns(database) {
   }
   if (!taskCols.includes('routed_model')) {
     database.exec("ALTER TABLE tasks ADD COLUMN routed_model TEXT");
+  }
+  if (!taskCols.includes('model_source')) {
+    database.exec("ALTER TABLE tasks ADD COLUMN model_source TEXT");
   }
   if (!taskCols.includes('reasoning_effort')) {
     database.exec("ALTER TABLE tasks ADD COLUMN reasoning_effort TEXT");
