@@ -29,7 +29,7 @@ function getExplicitConfigValue(getConfig, key) {
   return trimmed === '' ? null : trimmed;
 }
 
-const SPARK_MODEL_KEYS = Object.freeze(['model_spark', 'model_codex_spark']);
+const SPARK_MODEL_KEYS = Object.freeze(['model_codex_spark', 'model_spark']);
 
 function getSparkModelConfigValue(getConfig, fallback) {
   return getConfigValue(
