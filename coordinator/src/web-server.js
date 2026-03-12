@@ -179,12 +179,14 @@ function buildBudgetSnapshotFromConfig() {
     };
   }
 
-  const remaining = parseBudgetNumber(
-    db.getConfig(ROUTING_BUDGET_REMAINING_KEY) ?? db.getConfig(LEGACY_BUDGET_REMAINING_KEY)
-  );
-  const threshold = parseBudgetNumber(
-    db.getConfig(ROUTING_BUDGET_THRESHOLD_KEY) ?? db.getConfig(LEGACY_BUDGET_THRESHOLD_KEY)
-  );
+  const routingRemaining = parseBudgetNumber(db.getConfig(ROUTING_BUDGET_REMAINING_KEY));
+  const routingThreshold = parseBudgetNumber(db.getConfig(ROUTING_BUDGET_THRESHOLD_KEY));
+  const remaining = routingRemaining !== null
+    ? routingRemaining
+    : parseBudgetNumber(db.getConfig(LEGACY_BUDGET_REMAINING_KEY));
+  const threshold = routingThreshold !== null
+    ? routingThreshold
+    : parseBudgetNumber(db.getConfig(LEGACY_BUDGET_THRESHOLD_KEY));
   if (remaining === null && threshold === null) return null;
 
   const parsed = { flagship: {} };
