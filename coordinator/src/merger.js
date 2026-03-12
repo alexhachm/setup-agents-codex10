@@ -67,6 +67,7 @@ function onTaskCompleted(taskId) {
 
   const allTasks = db.listTasks({ request_id: task.request_id });
   const incomplete = allTasks.filter(t => t.status !== 'completed' && t.status !== 'failed');
+  const failedTasks = allTasks.filter(t => t.status === 'failed');
 
   if (incomplete.length === 0) {
     // Check for recoverable merges that should be retried — fix tasks may have resolved them.
@@ -104,6 +105,9 @@ function onTaskCompleted(taskId) {
       db.updateRequest(task.request_id, { status: 'integrating' });
       db.log('coordinator', 'request_ready_for_merge', { request_id: task.request_id });
     } else {
+      if (failedTasks.length > 0) {
+        return;
+      }
       // No PRs to merge — complete immediately (e.g. verification tasks, already-merged)
       const result = `All ${allTasks.length} task(s) completed (no PRs to merge)`;
       completeRequestIfTransition(task.request_id, result);
@@ -397,7 +401,8 @@ function checkRequestCompletion(requestId) {
   const allMerged = allMerges.every(m => m.status === 'merged');
   if (allMerged && allMerges.length > 0) {
     const taskCompletion = db.checkRequestCompletion(requestId);
-    if (!taskCompletion.all_done) {
+    const allTasksCompletedSuccessfully = taskCompletion.all_completed && taskCompletion.failed === 0;
+    if (!allTasksCompletedSuccessfully) {
       const request = db.getRequest(requestId);
       if (request && request.status !== 'integrating' && request.status !== 'in_progress') {
         db.updateRequest(requestId, { status: 'integrating' });

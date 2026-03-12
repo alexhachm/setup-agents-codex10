@@ -11,6 +11,24 @@ const merger = require('../src/merger');
 
 let tmpDir;
 
+function getRequestCompletionMailCount(requestId) {
+  return db.checkMail('master-1', false)
+    .filter((m) => m.type === 'request_completed' && m.payload.request_id === requestId)
+    .length;
+}
+
+function getRequestCompletionLogCount(requestId) {
+  return db.getLog(50, 'coordinator').filter((entry) => {
+    if (entry.action !== 'request_completed') return false;
+    try {
+      const details = JSON.parse(entry.details || '{}');
+      return details.request_id === requestId;
+    } catch {
+      return false;
+    }
+  }).length;
+}
+
 beforeEach(() => {
   tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'mac10-merge-'));
   fs.mkdirSync(path.join(tmpDir, '.claude', 'state'), { recursive: true });
@@ -98,6 +116,64 @@ describe('Request completion tracking', () => {
     assert.strictEqual(incompleteAfter.length, 0);
   });
 
+  it('should not complete when one task is completed and one is failed with no merge queue entries', () => {
+    const reqId = db.createRequest('Feature');
+    const completedTaskId = db.createTask({ request_id: reqId, subject: 'Completed task', description: 'Done' });
+    const failedTaskId = db.createTask({ request_id: reqId, subject: 'Failed task', description: 'Failed' });
+
+    db.updateRequest(reqId, { status: 'in_progress' });
+    db.updateTask(completedTaskId, { status: 'completed' });
+    db.updateTask(failedTaskId, { status: 'failed' });
+
+    merger.onTaskCompleted(failedTaskId);
+
+    const requestAfter = db.getRequest(reqId);
+    assert.notStrictEqual(requestAfter.status, 'completed');
+    assert.strictEqual(getRequestCompletionMailCount(reqId), 0);
+    assert.strictEqual(getRequestCompletionLogCount(reqId), 0);
+  });
+
+  it('should not emit request_completed when all tasks are failed', () => {
+    const reqId = db.createRequest('Feature');
+    const failedTaskId1 = db.createTask({ request_id: reqId, subject: 'Failed task 1', description: 'Failed' });
+    const failedTaskId2 = db.createTask({ request_id: reqId, subject: 'Failed task 2', description: 'Failed' });
+
+    db.updateRequest(reqId, { status: 'in_progress' });
+    db.updateTask(failedTaskId1, { status: 'failed' });
+    db.updateTask(failedTaskId2, { status: 'failed' });
+
+    merger.onTaskCompleted(failedTaskId2);
+
+    const requestAfter = db.getRequest(reqId);
+    assert.notStrictEqual(requestAfter.status, 'completed');
+    assert.strictEqual(getRequestCompletionMailCount(reqId), 0);
+    assert.strictEqual(getRequestCompletionLogCount(reqId), 0);
+  });
+
+  it('should keep request non-completed when merges are done but a sibling task is failed', () => {
+    const reqId = db.createRequest('Feature');
+    const mergedTaskId = db.createTask({ request_id: reqId, subject: 'Merged task', description: 'Done' });
+    const failedTaskId = db.createTask({ request_id: reqId, subject: 'Failed task', description: 'Failed' });
+
+    db.updateTask(mergedTaskId, { status: 'completed' });
+    db.updateTask(failedTaskId, { status: 'failed' });
+    db.updateRequest(reqId, { status: 'integrating' });
+
+    db.enqueueMerge({
+      request_id: reqId,
+      task_id: mergedTaskId,
+      pr_url: 'https://github.com/org/repo/pull/103',
+      branch: 'agent-1',
+    });
+
+    merger.processQueue(tmpDir, () => ({ success: true }));
+
+    const requestAfter = db.getRequest(reqId);
+    assert.notStrictEqual(requestAfter.status, 'completed');
+    assert.strictEqual(getRequestCompletionMailCount(reqId), 0);
+    assert.strictEqual(getRequestCompletionLogCount(reqId), 0);
+  });
+
   it('should keep request integrating when merges are done but a sibling task is assigned', () => {
     const reqId = db.createRequest('Feature');
     const mergedTaskId = db.createTask({ request_id: reqId, subject: 'Merged task', description: 'Already done' });
@@ -118,21 +194,8 @@ describe('Request completion tracking', () => {
 
     const requestAfterMerge = db.getRequest(reqId);
     assert.strictEqual(requestAfterMerge.status, 'integrating');
-
-    const completionMailBefore = db.checkMail('master-1', false)
-      .filter((m) => m.type === 'request_completed' && m.payload.request_id === reqId);
-    assert.strictEqual(completionMailBefore.length, 0);
-
-    const completionLogBefore = db.getLog(50, 'coordinator').filter((entry) => {
-      if (entry.action !== 'request_completed') return false;
-      try {
-        const details = JSON.parse(entry.details || '{}');
-        return details.request_id === reqId;
-      } catch {
-        return false;
-      }
-    });
-    assert.strictEqual(completionLogBefore.length, 0);
+    assert.strictEqual(getRequestCompletionMailCount(reqId), 0);
+    assert.strictEqual(getRequestCompletionLogCount(reqId), 0);
   });
 
   it('should emit request_completed exactly once when final task becomes terminal', () => {
@@ -159,20 +222,7 @@ describe('Request completion tracking', () => {
 
     const requestAfterTasksDone = db.getRequest(reqId);
     assert.strictEqual(requestAfterTasksDone.status, 'completed');
-
-    const completionMailAfter = db.checkMail('master-1', false)
-      .filter((m) => m.type === 'request_completed' && m.payload.request_id === reqId);
-    assert.strictEqual(completionMailAfter.length, 1);
-
-    const completionLogAfter = db.getLog(50, 'coordinator').filter((entry) => {
-      if (entry.action !== 'request_completed') return false;
-      try {
-        const details = JSON.parse(entry.details || '{}');
-        return details.request_id === reqId;
-      } catch {
-        return false;
-      }
-    });
-    assert.strictEqual(completionLogAfter.length, 1);
+    assert.strictEqual(getRequestCompletionMailCount(reqId), 1);
+    assert.strictEqual(getRequestCompletionLogCount(reqId), 1);
   });
 });
