@@ -23,7 +23,7 @@ Use only `./.claude/scripts/codex10 ...` for coordinator commands. Never invoke 
 tier1_count = 0       # Reset trigger at 4
 decomposition_count = 0  # Reset trigger at 6 (Tier 2 counts as 0.5)
 curation_due = false   # Set true every 2nd decomposition
-last_activity = now()  # For adaptive signal timeout
+last_activity_epoch = now_epoch()  # UNIX seconds for adaptive signal timeout
 backlog_threshold = 50 # Drain mode threshold
 ready_floor = 6        # Keep this many ready tasks when possible
 ```
@@ -150,7 +150,7 @@ Only use this path for trivial docs/prompt/comment edits. If the request touches
    echo "[$(date -u +%Y-%m-%dT%H:%M:%SZ)] [master-2] [TIER1_EXECUTE] id=[request_id] file=[files] pr=[PR URL]" >> .claude/logs/activity.log
    ```
    `tier1_count += 1`
-   `last_activity = now()`
+   `last_activity_epoch = now_epoch()`
 
 8. **Check reset trigger:** If `tier1_count >= 4`, go to Step 7 (reset).
 
@@ -199,7 +199,8 @@ Go to Step 6.
    echo "[$(date -u +%Y-%m-%dT%H:%M:%SZ)] [master-2] [TIER2_ASSIGN] id=[request_id] worker=worker-N task=\"[subject]\"" >> .claude/logs/activity.log
    ```
    `decomposition_count += 0.5`
-   `last_activity = now()`
+   `if decomposition_count is a whole even number (2, 4, 6, ...): curation_due = true`
+   `last_activity_epoch = now_epoch()`
 
 Go to Step 6.
 
@@ -235,7 +236,8 @@ Go to Step 6.
    echo "[$(date -u +%Y-%m-%dT%H:%M:%SZ)] [master-2] [DECOMPOSE_DONE] id=[request_id] tasks=[N] domains=[list]" >> .claude/logs/activity.log
    ```
    `decomposition_count += 1`
-   `last_activity = now()`
+   `if decomposition_count is a whole even number (2, 4, 6, ...): curation_due = true`
+   `last_activity_epoch = now_epoch()`
 
 8. **Check file overlaps between tasks:**
    ```bash
@@ -301,11 +303,16 @@ If `commits_since >= 5` and none of the full-reset conditions above fired, run t
 
 Adaptive signal timeout based on activity:
 ```bash
-# If you just processed a request → shorter timeout (stay responsive)
-# If nothing happened → longer timeout (save resources)
-bash .claude/scripts/signal-wait.sh .claude/signals/.codex10.handoff-signal 15
+now_epoch=$(date +%s)
+last_activity_epoch=${last_activity_epoch:-0}
+if [ $((now_epoch - last_activity_epoch)) -lt 30 ]; then
+  timeout=5
+else
+  timeout=15
+fi
+bash .claude/scripts/signal-wait.sh .claude/signals/.codex10.handoff-signal "$timeout"
 ```
-Use 5s timeout if `last_activity` was < 30s ago. Use 15s otherwise.
+Use 5s timeout if activity was < 30s ago. Use 15s otherwise.
 
 Go back to Step 1.
 
