@@ -1320,6 +1320,8 @@ ARCHITECT:
 ALLOCATOR:
   ready-tasks                    List tasks ready for assignment
   assign-task <task_id> <worker_id>  Assign task to worker (atomic)
+  claim-worker <worker_id> [claimer]  Mark worker as claimed for manual use
+  release-worker <worker_id>     Release worker claim
   worker-status                  Show all workers
   check-completion <request_id>  Check if all tasks for request are done
   check-overlaps <request_id>   Show file overlaps between tasks
