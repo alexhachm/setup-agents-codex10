@@ -191,8 +191,58 @@ describe('CLI Server', () => {
       result: 'Added the endpoint',
     });
     assert.strictEqual(result.ok, true);
-    assert.strictEqual(db.getTask(taskId).status, 'completed');
+    const completedTask = db.getTask(taskId);
+    assert.strictEqual(completedTask.status, 'completed');
+    assert.strictEqual(completedTask.usage_model, null);
+    assert.strictEqual(completedTask.usage_input_tokens, null);
+    assert.strictEqual(completedTask.usage_output_tokens, null);
+    assert.strictEqual(completedTask.usage_cached_tokens, null);
+    assert.strictEqual(completedTask.usage_cache_creation_tokens, null);
+    assert.strictEqual(completedTask.usage_total_tokens, null);
+    assert.strictEqual(completedTask.usage_cost_usd, null);
     assert.strictEqual(db.getWorker(1).status, 'completed_task');
+  });
+
+  it('should persist complete-task usage telemetry fields end-to-end', async () => {
+    db.registerWorker(1, '/wt-1', 'agent-1');
+    const reqId = db.createRequest('Feature with usage');
+    const taskId = db.createTask({ request_id: reqId, subject: 'Work', description: 'Do it with usage' });
+    db.updateTask(taskId, { status: 'assigned', assigned_to: 1 });
+    db.updateWorker(1, { status: 'assigned', current_task_id: taskId });
+
+    const usage = {
+      model: '  gpt-5-codex  ',
+      input_tokens: 1200,
+      output_tokens: 345,
+      cached_tokens: 67,
+      cache_creation_tokens: 45,
+      total_tokens: 1612,
+      cost_usd: 0.0456,
+    };
+
+    const result = await sendCommand('complete-task', {
+      worker_id: '1',
+      task_id: String(taskId),
+      pr_url: 'https://github.com/org/repo/pull/43',
+      branch: 'agent-1',
+      result: 'Added usage telemetry',
+      usage,
+    });
+    assert.strictEqual(result.ok, true);
+
+    const completedTask = db.getTask(taskId);
+    assert.strictEqual(completedTask.status, 'completed');
+    assert.strictEqual(completedTask.usage_model, 'gpt-5-codex');
+    assert.strictEqual(completedTask.usage_input_tokens, usage.input_tokens);
+    assert.strictEqual(completedTask.usage_output_tokens, usage.output_tokens);
+    assert.strictEqual(completedTask.usage_cached_tokens, usage.cached_tokens);
+    assert.strictEqual(completedTask.usage_cache_creation_tokens, usage.cache_creation_tokens);
+    assert.strictEqual(completedTask.usage_total_tokens, usage.total_tokens);
+    assert.strictEqual(completedTask.usage_cost_usd, usage.cost_usd);
+
+    const completedWorker = db.getWorker(1);
+    assert.strictEqual(completedWorker.status, 'completed_task');
+    assert.strictEqual(completedWorker.tasks_completed, 1);
   });
 
   it('should reject complete-task when a PR URL is already owned by another request', async () => {
