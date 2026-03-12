@@ -253,6 +253,79 @@ describe('CLI Server', () => {
     assert.strictEqual(loop.status, 'stopped');
   });
 
+  it('should label default fallback assignments as fallback-default in response and logs', async () => {
+    db.registerWorker(1, '/wt-1', 'agent-1');
+    db.registerWorker(2, '/wt-2', 'agent-2');
+
+    const highTaskId = createReadyTask({
+      subject: 'Complex migration',
+      description: 'Deep refactor across modules',
+      priority: 'high',
+      tier: 3,
+    });
+    const sparkTaskId = createReadyTask({
+      subject: 'Minor cleanup',
+      description: 'Small log update',
+      priority: 'low',
+      tier: 1,
+    });
+
+    const highAssignment = await sendCommand('assign-task', { task_id: highTaskId, worker_id: 1 });
+    assert.strictEqual(highAssignment.ok, true);
+    assert.strictEqual(highAssignment.routing.model_source, 'fallback-default');
+
+    const sparkAssignment = await sendCommand('assign-task', { task_id: sparkTaskId, worker_id: 2 });
+    assert.strictEqual(sparkAssignment.ok, true);
+    assert.strictEqual(sparkAssignment.routing.model_source, 'fallback-default');
+
+    const highAssignmentLog = getAllocatorAssignmentDetails(highTaskId);
+    assert.ok(highAssignmentLog);
+    assert.strictEqual(highAssignmentLog.model_source, 'fallback-default');
+
+    const sparkAssignmentLog = getAllocatorAssignmentDetails(sparkTaskId);
+    assert.ok(sparkAssignmentLog);
+    assert.strictEqual(sparkAssignmentLog.model_source, 'fallback-default');
+  });
+
+  it('should label explicit model overrides as config-fallback in response and logs', async () => {
+    db.registerWorker(1, '/wt-1', 'agent-1');
+    db.registerWorker(2, '/wt-2', 'agent-2');
+
+    await setConfigValue('model_high', 'high-override-model');
+    await setConfigValue('model_spark', 'spark-override-model');
+
+    const highTaskId = createReadyTask({
+      subject: 'Complex migration',
+      description: 'Deep refactor across modules',
+      priority: 'high',
+      tier: 3,
+    });
+    const sparkTaskId = createReadyTask({
+      subject: 'Minor cleanup',
+      description: 'Small log update',
+      priority: 'low',
+      tier: 1,
+    });
+
+    const highAssignment = await sendCommand('assign-task', { task_id: highTaskId, worker_id: 1 });
+    assert.strictEqual(highAssignment.ok, true);
+    assert.strictEqual(highAssignment.routing.model, 'high-override-model');
+    assert.strictEqual(highAssignment.routing.model_source, 'config-fallback');
+
+    const sparkAssignment = await sendCommand('assign-task', { task_id: sparkTaskId, worker_id: 2 });
+    assert.strictEqual(sparkAssignment.ok, true);
+    assert.strictEqual(sparkAssignment.routing.model, 'spark-override-model');
+    assert.strictEqual(sparkAssignment.routing.model_source, 'config-fallback');
+
+    const highAssignmentLog = getAllocatorAssignmentDetails(highTaskId);
+    assert.ok(highAssignmentLog);
+    assert.strictEqual(highAssignmentLog.model_source, 'config-fallback');
+
+    const sparkAssignmentLog = getAllocatorAssignmentDetails(sparkTaskId);
+    assert.ok(sparkAssignmentLog);
+    assert.strictEqual(sparkAssignmentLog.model_source, 'config-fallback');
+  });
+
   it('should downscale high and mid routing when flagship budget is constrained', async () => {
     db.registerWorker(1, '/wt-1', 'agent-1');
     db.registerWorker(2, '/wt-2', 'agent-2');
@@ -373,7 +446,7 @@ describe('CLI Server', () => {
     assert.strictEqual(recoveredMid.ok, true);
     assert.strictEqual(recoveredMid.routing.class, 'mid');
     assert.strictEqual(recoveredMid.routing.model, 'mid-model');
-    assert.strictEqual(recoveredMid.routing.model_source, 'fallback-routing:model_mid');
+    assert.strictEqual(recoveredMid.routing.model_source, 'config-fallback');
     assert.strictEqual(recoveredMid.routing.reasoning_effort, 'mid-effort');
     assert.strictEqual(recoveredMid.routing.routing_reason, 'fallback-routing:class-default');
 
