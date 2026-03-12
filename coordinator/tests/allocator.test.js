@@ -137,6 +137,7 @@ describe('Request completion tracking', () => {
     // Not done yet
     let result = db.checkRequestCompletion(reqId);
     assert.strictEqual(result.all_done, false);
+    assert.strictEqual(result.all_completed, false);
     assert.strictEqual(result.total, 2);
     assert.strictEqual(result.completed, 0);
 
@@ -144,12 +145,30 @@ describe('Request completion tracking', () => {
     db.updateTask(t1, { status: 'completed' });
     result = db.checkRequestCompletion(reqId);
     assert.strictEqual(result.all_done, false);
+    assert.strictEqual(result.all_completed, false);
     assert.strictEqual(result.completed, 1);
 
     // Complete the other
     db.updateTask(t2, { status: 'completed' });
     result = db.checkRequestCompletion(reqId);
     assert.strictEqual(result.all_done, true);
+    assert.strictEqual(result.all_completed, true);
     assert.strictEqual(result.completed, 2);
+  });
+
+  it('should treat mixed completed and failed tasks as not done', () => {
+    const reqId = db.createRequest('Mixed completion');
+    const t1 = db.createTask({ request_id: reqId, subject: 'T1', description: 'D1' });
+    const t2 = db.createTask({ request_id: reqId, subject: 'T2', description: 'D2' });
+
+    db.updateTask(t1, { status: 'completed' });
+    db.updateTask(t2, { status: 'failed' });
+
+    const result = db.checkRequestCompletion(reqId);
+    assert.strictEqual(result.total, 2);
+    assert.strictEqual(result.completed, 1);
+    assert.strictEqual(result.failed, 1);
+    assert.strictEqual(result.all_completed, false);
+    assert.strictEqual(result.all_done, false);
   });
 });

@@ -1794,8 +1794,12 @@ function handleCommand(cmd, conn, handlers) {
         const reqId = args.request_id;
         const forceRetry = args.retry_terminal === true || args.force_retry === true;
         const completion = db.checkRequestCompletion(reqId);
-        if (!completion.all_done) {
-          respond(conn, { ok: false, error: 'Not all tasks completed', ...completion });
+        const canIntegrate = completion.all_completed === true && completion.failed === 0;
+        if (!canIntegrate) {
+          const error = completion.failed > 0
+            ? 'Request has failed tasks'
+            : 'Not all tasks completed';
+          respond(conn, { ok: false, error, ...completion });
           break;
         }
         // Queue merges for each completed task's branch/PR
