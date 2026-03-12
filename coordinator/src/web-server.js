@@ -11,6 +11,11 @@ const instanceRegistry = require('./instance-registry');
 
 const REPO_RE = /^(https?:\/\/github\.com\/)?[a-zA-Z0-9._-]+\/[a-zA-Z0-9._-]+(\.git)?$/;
 const SAFE_PATH_RE = /^(?:\/|[A-Za-z]:[\\/])[a-zA-Z0-9._\\/: -]+$/;
+const ROUTING_BUDGET_STATE_KEY = 'routing_budget_state';
+const ROUTING_BUDGET_REMAINING_KEY = 'routing_budget_flagship_remaining';
+const ROUTING_BUDGET_THRESHOLD_KEY = 'routing_budget_flagship_threshold';
+const LEGACY_BUDGET_REMAINING_KEY = 'flagship_budget_remaining';
+const LEGACY_BUDGET_THRESHOLD_KEY = 'flagship_budget_threshold';
 
 let server = null;
 let wss = null;
@@ -124,6 +129,174 @@ function cleanupFailedLaunch(pid, port) {
   try { instanceRegistry.deregister(port); } catch {}
 }
 
+function parseBudgetNumber(value) {
+  if (value === undefined || value === null) return null;
+  if (typeof value === 'number') return Number.isFinite(value) ? value : null;
+  const trimmed = String(value).trim();
+  if (!trimmed) return null;
+  const parsed = Number(trimmed);
+  return Number.isFinite(parsed) ? parsed : null;
+}
+
+function parseJsonObject(rawValue) {
+  if (rawValue === undefined || rawValue === null) return null;
+  if (typeof rawValue === 'object') return rawValue;
+  const trimmed = String(rawValue).trim();
+  if (!trimmed) return null;
+  try {
+    const parsed = JSON.parse(trimmed);
+    return parsed && typeof parsed === 'object' ? parsed : null;
+  } catch {
+    return null;
+  }
+}
+
+function normalizeRoutingField(value) {
+  if (value === undefined || value === null) return null;
+  const trimmed = String(value).trim();
+  return trimmed ? trimmed : null;
+}
+
+function normalizeBudgetState(value) {
+  const parsed = parseJsonObject(value);
+  return parsed && typeof parsed === 'object' ? parsed : null;
+}
+
+function buildBudgetSnapshotFromConfig() {
+  const parsedState = parseJsonObject(db.getConfig(ROUTING_BUDGET_STATE_KEY));
+  if (parsedState) {
+    const flagship = parsedState.flagship && typeof parsedState.flagship === 'object'
+      ? parsedState.flagship
+      : parsedState;
+    return {
+      state: {
+        source: 'config:routing_budget_state',
+        parsed: parsedState,
+        remaining: parseBudgetNumber(flagship.remaining),
+        threshold: parseBudgetNumber(flagship.threshold),
+      },
+      source: 'config:routing_budget_state',
+    };
+  }
+
+  const remaining = parseBudgetNumber(
+    db.getConfig(ROUTING_BUDGET_REMAINING_KEY) ?? db.getConfig(LEGACY_BUDGET_REMAINING_KEY)
+  );
+  const threshold = parseBudgetNumber(
+    db.getConfig(ROUTING_BUDGET_THRESHOLD_KEY) ?? db.getConfig(LEGACY_BUDGET_THRESHOLD_KEY)
+  );
+  if (remaining === null && threshold === null) return null;
+
+  const parsed = { flagship: {} };
+  if (remaining !== null) parsed.flagship.remaining = remaining;
+  if (threshold !== null) parsed.flagship.threshold = threshold;
+  return {
+    state: {
+      source: 'config:budget_thresholds',
+      parsed,
+      remaining,
+      threshold,
+    },
+    source: 'config:budget_thresholds',
+  };
+}
+
+function parseTaskAssignedTelemetry(detailsRaw) {
+  const details = parseJsonObject(detailsRaw);
+  if (!details) return null;
+
+  const taskId = Number.parseInt(details.task_id, 10);
+  if (!Number.isInteger(taskId) || taskId <= 0) return null;
+
+  const budgetState = normalizeBudgetState(details.budget_state);
+  return {
+    task_id: taskId,
+    routing_class: normalizeRoutingField(details.routing_class),
+    routed_model: normalizeRoutingField(details.model ?? details.routed_model),
+    model_source: normalizeRoutingField(details.model_source),
+    reasoning_effort: normalizeRoutingField(details.reasoning_effort),
+    budget_state: budgetState,
+    budget_source: normalizeRoutingField(details.budget_source) || normalizeRoutingField(budgetState && budgetState.source),
+  };
+}
+
+function buildTaskTelemetryMap(tasks) {
+  const taskIds = new Set();
+  for (const task of tasks) {
+    const taskId = Number.parseInt(task && task.id, 10);
+    if (Number.isInteger(taskId) && taskId > 0) taskIds.add(taskId);
+  }
+
+  const byTaskId = new Map();
+  let latestBudget = null;
+  const taskAssignedLogs = db.getDb().prepare(
+    "SELECT details FROM activity_log WHERE actor = 'allocator' AND action = 'task_assigned' ORDER BY id DESC"
+  );
+  for (const row of taskAssignedLogs.iterate()) {
+    const telemetry = parseTaskAssignedTelemetry(row.details);
+    if (!telemetry) continue;
+
+    if (!latestBudget && (telemetry.budget_state || telemetry.budget_source)) {
+      latestBudget = {
+        state: telemetry.budget_state || null,
+        source: telemetry.budget_source || 'activity_log:allocator.task_assigned',
+      };
+    }
+
+    if (!taskIds.has(telemetry.task_id) || byTaskId.has(telemetry.task_id)) {
+      if (taskIds.size > 0 && byTaskId.size === taskIds.size && latestBudget) break;
+      continue;
+    }
+    byTaskId.set(telemetry.task_id, telemetry);
+
+    if (taskIds.size > 0 && byTaskId.size === taskIds.size && latestBudget) break;
+  }
+
+  return { byTaskId, latestBudget };
+}
+
+function pickRoutingField(taskValue, fallbackValue) {
+  return normalizeRoutingField(taskValue) || normalizeRoutingField(fallbackValue);
+}
+
+function buildStatePayload({ includeLogs = false, includeLoops = false } = {}) {
+  const requests = db.listRequests();
+  const workers = db.getAllWorkers();
+  const tasks = db.listTasks();
+  const telemetry = buildTaskTelemetryMap(tasks);
+
+  const hydratedTasks = tasks.map((task) => {
+    const taskId = Number.parseInt(task && task.id, 10);
+    const fallback = telemetry.byTaskId.get(taskId) || null;
+    return {
+      ...task,
+      routing_class: pickRoutingField(task.routing_class, fallback && fallback.routing_class),
+      routed_model: pickRoutingField(task.routed_model, fallback && fallback.routed_model),
+      model_source: normalizeRoutingField(fallback && fallback.model_source),
+      reasoning_effort: pickRoutingField(task.reasoning_effort, fallback && fallback.reasoning_effort),
+    };
+  });
+
+  const configBudget = buildBudgetSnapshotFromConfig();
+  const routingBudgetState = configBudget
+    ? configBudget.state
+    : (telemetry.latestBudget && telemetry.latestBudget.state) || null;
+  const routingBudgetSource = configBudget
+    ? configBudget.source
+    : (telemetry.latestBudget && telemetry.latestBudget.source) || 'none';
+
+  const payload = {
+    requests,
+    workers,
+    tasks: hydratedTasks,
+    routing_budget_state: routingBudgetState,
+    routing_budget_source: routingBudgetSource,
+  };
+  if (includeLogs) payload.logs = db.getLog(20);
+  if (includeLoops) payload.loops = db.listLoops();
+  return payload;
+}
+
 function start(projectDir, port = 3100, scriptDir = null, handlers = {}) {
   const app = express();
   const namespace = process.env.MAC10_NAMESPACE || 'mac10';
@@ -164,11 +337,7 @@ function start(projectDir, port = 3100, scriptDir = null, handlers = {}) {
   // API endpoints
   app.get('/api/status', (req, res) => {
     try {
-      const requests = db.listRequests();
-      const workers = db.getAllWorkers();
-      const tasks = db.listTasks();
-      const logs = db.getLog(20);
-      res.json({ requests, workers, tasks, logs });
+      res.json(buildStatePayload({ includeLogs: true }));
     } catch (e) {
       res.status(500).json({ error: e.message });
     }
@@ -831,12 +1000,7 @@ function start(projectDir, port = 3100, scriptDir = null, handlers = {}) {
     try {
       ws.send(JSON.stringify({
         type: 'init',
-        data: {
-          requests: db.listRequests(),
-          workers: db.getAllWorkers(),
-          tasks: db.listTasks(),
-          loops: db.listLoops(),
-        },
+        data: buildStatePayload({ includeLoops: true }),
       }));
     } catch {}
   });
@@ -845,12 +1009,7 @@ function start(projectDir, port = 3100, scriptDir = null, handlers = {}) {
   broadcastIntervalId = setInterval(() => {
     broadcast({
       type: 'state',
-      data: {
-        requests: db.listRequests(),
-        workers: db.getAllWorkers(),
-        tasks: db.listTasks(),
-        loops: db.listLoops(),
-      },
+      data: buildStatePayload({ includeLoops: true }),
     });
   }, 2000);
 
