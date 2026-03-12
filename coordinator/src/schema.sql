@@ -39,6 +39,7 @@ CREATE TABLE IF NOT EXISTS tasks (
   overlap_with TEXT,  -- JSON array of task IDs sharing files
   routing_class TEXT,
   routed_model TEXT,
+  model_source TEXT,
   reasoning_effort TEXT,
   usage_model TEXT,
   usage_input_tokens INTEGER,
