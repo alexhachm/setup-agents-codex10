@@ -66,6 +66,18 @@ function sendCommand(command, args) {
   });
 }
 
+async function setConfigValue(key, value) {
+  const result = await sendCommand('set-config', { key, value: String(value) });
+  assert.strictEqual(result.ok, true, `set-config should succeed for ${key}`);
+}
+
+function createReadyTask({ subject, description, priority = 'normal', tier = 2 }) {
+  const requestId = db.createRequest(`Req: ${subject}`);
+  const taskId = db.createTask({ request_id: requestId, subject, description, priority, tier });
+  db.checkAndPromoteTasks();
+  return taskId;
+}
+
 describe('CLI Server', () => {
   it('should respond to ping', async () => {
     const result = await sendCommand('ping', {});
@@ -224,5 +236,98 @@ describe('CLI Server', () => {
     const loop = db.getLoop(created.loop_id);
     assert.ok(loop);
     assert.strictEqual(loop.status, 'stopped');
+  });
+
+  it('should downscale high and mid routing when flagship budget is constrained', async () => {
+    db.registerWorker(1, '/wt-1', 'agent-1');
+    db.registerWorker(2, '/wt-2', 'agent-2');
+
+    await setConfigValue('model_flagship', 'flagship-model');
+    await setConfigValue('model_high', 'high-model');
+    await setConfigValue('model_mid', 'mid-model');
+    await setConfigValue('model_spark', 'spark-model');
+    await setConfigValue('model_mini', 'mini-model');
+    await setConfigValue('routing_budget_state', JSON.stringify({
+      flagship: { remaining: 25, threshold: 25 },
+    }));
+
+    const highTaskId = createReadyTask({
+      subject: 'Complex migration',
+      description: 'Deep refactor across modules',
+      priority: 'high',
+      tier: 3,
+    });
+    const midTaskId = createReadyTask({
+      subject: 'Resolve merge conflict',
+      description: 'Merge integration branch into main',
+      tier: 2,
+    });
+
+    const highAssignment = await sendCommand('assign-task', { task_id: highTaskId, worker_id: 1 });
+    assert.strictEqual(highAssignment.ok, true);
+    assert.strictEqual(highAssignment.routing.class, 'high');
+    assert.strictEqual(highAssignment.routing.model, 'mini-model');
+    assert.strictEqual(highAssignment.routing.reasoning_effort, 'low');
+
+    const midAssignment = await sendCommand('assign-task', { task_id: midTaskId, worker_id: 2 });
+    assert.strictEqual(midAssignment.ok, true);
+    assert.strictEqual(midAssignment.routing.class, 'mid');
+    assert.strictEqual(midAssignment.routing.model, 'spark-model');
+    assert.strictEqual(midAssignment.routing.reasoning_effort, 'low');
+  });
+
+  it('should restore normal routing after flagship budget recovers above threshold', async () => {
+    db.registerWorker(1, '/wt-1', 'agent-1');
+    db.registerWorker(2, '/wt-2', 'agent-2');
+    db.registerWorker(3, '/wt-3', 'agent-3');
+
+    await setConfigValue('model_flagship', 'flagship-model');
+    await setConfigValue('model_high', 'high-model');
+    await setConfigValue('model_mid', 'mid-model');
+    await setConfigValue('model_spark', 'spark-model');
+    await setConfigValue('model_mini', 'mini-model');
+    await setConfigValue('routing_budget_state', JSON.stringify({
+      flagship: { remaining: 10, threshold: 20 },
+    }));
+
+    const constrainedHighTaskId = createReadyTask({
+      subject: 'Urgent conflict resolution',
+      description: 'Critical branch merge',
+      priority: 'high',
+      tier: 3,
+    });
+    const constrainedAssignment = await sendCommand('assign-task', { task_id: constrainedHighTaskId, worker_id: 1 });
+    assert.strictEqual(constrainedAssignment.ok, true);
+    assert.strictEqual(constrainedAssignment.routing.class, 'high');
+    assert.strictEqual(constrainedAssignment.routing.model, 'mini-model');
+    assert.strictEqual(constrainedAssignment.routing.reasoning_effort, 'low');
+
+    await setConfigValue('routing_budget_state', JSON.stringify({
+      flagship: { remaining: 30, threshold: 20 },
+    }));
+
+    const recoveredHighTaskId = createReadyTask({
+      subject: 'Urgent routing verification',
+      description: 'Complex worker orchestration',
+      priority: 'high',
+      tier: 3,
+    });
+    const recoveredMidTaskId = createReadyTask({
+      subject: 'Refactor merge helper',
+      description: 'Refactor merge helper utilities',
+      tier: 2,
+    });
+
+    const recoveredHigh = await sendCommand('assign-task', { task_id: recoveredHighTaskId, worker_id: 2 });
+    assert.strictEqual(recoveredHigh.ok, true);
+    assert.strictEqual(recoveredHigh.routing.class, 'high');
+    assert.strictEqual(recoveredHigh.routing.model, 'high-model');
+    assert.strictEqual(recoveredHigh.routing.reasoning_effort, 'high');
+
+    const recoveredMid = await sendCommand('assign-task', { task_id: recoveredMidTaskId, worker_id: 3 });
+    assert.strictEqual(recoveredMid.ok, true);
+    assert.strictEqual(recoveredMid.routing.class, 'mid');
+    assert.strictEqual(recoveredMid.routing.model, 'mid-model');
+    assert.strictEqual(recoveredMid.routing.reasoning_effort, 'low');
   });
 });

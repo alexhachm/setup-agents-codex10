@@ -48,17 +48,32 @@ function fallbackModelRouter() {
     routeTask(task = {}, opts = {}) {
       const getConfig = opts.getConfig;
       const routingClass = resolveFallbackRoutingClass(task);
-      const defaultModel = routingClass === 'spark'
-        ? getConfigValue(getConfig, 'model_spark', 'gpt-5.3-codex-spark')
-        : getConfigValue(getConfig, 'model_flagship', 'gpt-5.3-codex');
-      const configuredModel = getConfigValue(getConfig, `model_${routingClass}`, defaultModel);
       const budget = this.getBudgetState(getConfig);
+      const parsedState = budget && budget.parsed && typeof budget.parsed === 'object' ? budget.parsed : null;
+      const flagshipState = parsedState && parsedState.flagship && typeof parsedState.flagship === 'object'
+        ? parsedState.flagship
+        : null;
+      const remaining = parseBudgetNumber(flagshipState ? flagshipState.remaining : budget && budget.remaining);
+      const threshold = parseBudgetNumber(flagshipState ? flagshipState.threshold : budget && budget.threshold);
+      const budgetConstrained = remaining !== null && threshold !== null && remaining <= threshold;
+
+      let effectiveClass = routingClass;
+      if (budgetConstrained && routingClass === 'high') effectiveClass = 'mini';
+      else if (budgetConstrained && routingClass === 'mid') effectiveClass = 'spark';
+
+      const sparkDefaultModel = getConfigValue(getConfig, 'model_spark', 'gpt-5.3-codex-spark');
+      const defaultModel = effectiveClass === 'mini'
+        ? getConfigValue(getConfig, 'model_mini', sparkDefaultModel)
+        : (effectiveClass === 'spark'
+          ? sparkDefaultModel
+          : getConfigValue(getConfig, 'model_flagship', 'gpt-5.3-codex'));
+      const configuredModel = getConfigValue(getConfig, `model_${effectiveClass}`, defaultModel);
       const routingReason = 'Fell back to CLI routing shim (model-router unavailable)';
       return {
         routing_class: routingClass,
         model: configuredModel,
         model_source: configuredModel === defaultModel ? 'config-fallback' : 'fallback-default',
-        reasoning_effort: routingClass === 'high' ? 'high' : 'low',
+        reasoning_effort: effectiveClass === 'high' || effectiveClass === 'xhigh' ? 'high' : 'low',
         reason: routingReason,
         budget_state: budget || null,
         budget_source: budget && budget.source ? budget.source : 'none',
