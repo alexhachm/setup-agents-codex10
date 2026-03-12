@@ -179,12 +179,14 @@ function buildBudgetSnapshotFromConfig() {
     };
   }
 
-  const remaining = parseBudgetNumber(
-    db.getConfig(ROUTING_BUDGET_REMAINING_KEY) ?? db.getConfig(LEGACY_BUDGET_REMAINING_KEY)
-  );
-  const threshold = parseBudgetNumber(
-    db.getConfig(ROUTING_BUDGET_THRESHOLD_KEY) ?? db.getConfig(LEGACY_BUDGET_THRESHOLD_KEY)
-  );
+  const routingRemaining = parseBudgetNumber(db.getConfig(ROUTING_BUDGET_REMAINING_KEY));
+  const routingThreshold = parseBudgetNumber(db.getConfig(ROUTING_BUDGET_THRESHOLD_KEY));
+  const remaining = routingRemaining !== null
+    ? routingRemaining
+    : parseBudgetNumber(db.getConfig(LEGACY_BUDGET_REMAINING_KEY));
+  const threshold = routingThreshold !== null
+    ? routingThreshold
+    : parseBudgetNumber(db.getConfig(LEGACY_BUDGET_THRESHOLD_KEY));
   if (remaining === null && threshold === null) return null;
 
   const parsed = { flagship: {} };
@@ -275,11 +277,15 @@ function hydrateTasks(tasks, telemetry = null) {
   return { tasks: hydratedTasks, telemetry: taskTelemetry };
 }
 
+function listHydratedTasks(taskFilter = undefined, telemetry = null) {
+  const tasks = db.listTasks(taskFilter);
+  return hydrateTasks(tasks, telemetry);
+}
+
 function buildStatePayload({ includeLogs = false, includeLoops = false } = {}) {
   const requests = db.listRequests();
   const workers = db.getAllWorkers();
-  const tasks = db.listTasks();
-  const { tasks: hydratedTasks, telemetry } = hydrateTasks(tasks);
+  const { tasks: hydratedTasks, telemetry } = listHydratedTasks();
 
   const configBudget = buildBudgetSnapshotFromConfig();
   const routingBudgetState = configBudget
@@ -359,8 +365,7 @@ function start(projectDir, port = 3100, scriptDir = null, handlers = {}) {
     try {
       const request = db.getRequest(req.params.id);
       if (!request) return res.status(404).json({ error: 'Not found' });
-      const tasks = db.listTasks({ request_id: req.params.id });
-      const { tasks: hydratedTasks } = hydrateTasks(tasks);
+      const { tasks: hydratedTasks } = listHydratedTasks({ request_id: req.params.id });
       res.json({ ...request, tasks: hydratedTasks });
     } catch (e) {
       res.status(500).json({ error: e.message });
@@ -377,8 +382,7 @@ function start(projectDir, port = 3100, scriptDir = null, handlers = {}) {
 
   app.get('/api/tasks', (req, res) => {
     try {
-      const tasks = db.listTasks(req.query);
-      const { tasks: hydratedTasks } = hydrateTasks(tasks);
+      const { tasks: hydratedTasks } = listHydratedTasks(req.query);
       res.json(hydratedTasks);
     } catch (e) {
       res.status(500).json({ error: e.message });

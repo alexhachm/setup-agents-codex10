@@ -6,9 +6,11 @@ const path = require('path');
 const fs = require('fs');
 const os = require('os');
 const net = require('net');
+const http = require('http');
 
 const db = require('../src/db');
 const cliServer = require('../src/cli-server');
+const webServer = require('../src/web-server');
 
 let tmpDir;
 let server;
@@ -66,6 +68,30 @@ function sendCommand(command, args) {
     });
     conn.on('error', reject);
     conn.setTimeout(5000, () => { conn.end(); reject(new Error('Timeout')); });
+  });
+}
+
+function requestWebJson(port, reqPath) {
+  return new Promise((resolve, reject) => {
+    const req = http.request({
+      host: '127.0.0.1',
+      port,
+      path: reqPath,
+      method: 'GET',
+    }, (res) => {
+      let data = '';
+      res.on('data', (chunk) => {
+        data += chunk.toString();
+      });
+      res.on('end', () => {
+        resolve({
+          status: res.statusCode,
+          body: data ? JSON.parse(data) : {},
+        });
+      });
+    });
+    req.on('error', reject);
+    req.end();
   });
 }
 
@@ -981,6 +1007,60 @@ describe('CLI Server', () => {
     assert.strictEqual(assignmentLog.model_source, 'budget-upgrade:model_xhigh');
     assert.strictEqual(assignmentLog.routing_reason, 'fallback-budget-upgrade:high->xhigh');
     assert.strictEqual(assignmentLog.reasoning_effort, 'xhigh-effort');
+  });
+
+  it('should expose legacy scalar fallback budget snapshot in /api/status when routing scalar values are blank', async () => {
+    const reqId = db.createRequest('Legacy scalar snapshot parity request');
+    const taskId = db.createTask({
+      request_id: reqId,
+      subject: 'Task with allocator telemetry',
+      description: 'Used to verify task hydration alongside budget snapshot fallback',
+      domain: 'coordinator-surface',
+      tier: 2,
+    });
+
+    db.log('allocator', 'task_assigned', {
+      task_id: taskId,
+      routing_class: 'mini',
+      model: 'gpt-5.3-mini',
+      model_source: 'fallback-default',
+      reasoning_effort: 'low',
+      budget_state: { flagship: { remaining: 3, threshold: 10 } },
+      budget_source: 'activity_log:allocator.task_assigned',
+    });
+
+    db.setConfig('routing_budget_flagship_remaining', '   ');
+    db.setConfig('routing_budget_flagship_threshold', '\t');
+    db.setConfig('flagship_budget_remaining', ' 35 ');
+    db.setConfig('flagship_budget_threshold', '20');
+
+    const web = webServer.start(tmpDir, 0);
+    await new Promise((resolve, reject) => {
+      web.once('listening', resolve);
+      web.once('error', reject);
+    });
+    const webPort = web.address().port;
+
+    try {
+      const statusResult = await requestWebJson(webPort, '/api/status');
+      assert.strictEqual(statusResult.status, 200);
+      assert.strictEqual(statusResult.body.routing_budget_source, 'config:budget_thresholds');
+      assert.deepStrictEqual(statusResult.body.routing_budget_state, {
+        source: 'config:budget_thresholds',
+        parsed: { flagship: { remaining: 35, threshold: 20 } },
+        remaining: 35,
+        threshold: 20,
+      });
+
+      const task = statusResult.body.tasks.find((entry) => entry.id === taskId);
+      assert.ok(task);
+      assert.strictEqual(task.routing_class, 'mini');
+      assert.strictEqual(task.routed_model, 'gpt-5.3-mini');
+      assert.strictEqual(task.model_source, 'fallback-default');
+      assert.strictEqual(task.reasoning_effort, 'low');
+    } finally {
+      webServer.stop();
+    }
   });
 
   it('should keep routing_budget_state JSON precedence over scalar fallback keys', async () => {
