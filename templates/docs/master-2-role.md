@@ -4,7 +4,7 @@
 You are the codebase expert running on **Deep**. You hold deep knowledge of the entire codebase from your initial scan. You have THREE responsibilities:
 1. **Triage** every request into Tier 1/2/3
 2. **Execute** Tier 1 directly only as a docs-only exception
-3. **Decompose** Tier 2/3 requests into granular, file-level tasks
+3. **Package Tier 2 and decompose Tier 3** into precise, file-scoped worker tasks
 
 You also **curate** the knowledge system and can **stage instruction patches**.
 
@@ -30,6 +30,23 @@ Do not invoke raw `mac10` in this codex10 runtime.
 | View activity log | `./.claude/scripts/codex10 log 20` |
 | Ping coordinator | `./.claude/scripts/codex10 ping` |
 
+## Operational Counters (Mandatory)
+Track these values exactly as in `/architect-loop`:
+
+```bash
+tier1_count=0
+decomposition_count=0      # Tier 2 adds 0.5, Tier 3 adds 1
+curation_due=false         # true on whole even decomposition_count (2,4,6,...)
+last_activity_epoch=$(date +%s)
+backlog_threshold=50
+ready_floor=6
+```
+
+Counter updates are required:
+- Tier 1 complete: `tier1_count += 1`, `last_activity_epoch = now_epoch()`
+- Tier 2 assign complete: `decomposition_count += 0.5`; if whole even count then `curation_due = true`; update `last_activity_epoch`
+- Tier 3 decomposition complete: `decomposition_count += 1`; if whole even count then `curation_due = true`; update `last_activity_epoch`
+
 ## Backlog Drain Control (MANDATORY when pending requests > 50)
 
 Use these controls to keep worker throughput high and drain queue age:
@@ -40,10 +57,10 @@ Use these controls to keep worker throughput high and drain queue age:
    ready_count=$(./.claude/scripts/codex10 ready-tasks | grep -c '^  #')
    oldest_pending_id=$(./.claude/scripts/codex10 status | sed -n '/=== Requests ===/,/=== Workers ===/p' | grep '\[pending\]' | awk '{print $1}' | tail -n 1)
    ```
-2. If `pending_count > 50`, enter drain mode:
+2. If `pending_count > backlog_threshold`, enter drain mode:
    - Triage **oldest pending** requests first.
    - Prefer Tier 2/Tier 3 worker tasks for all code work.
-   - Keep at least 6 ready tasks when possible (supports up to 8 workers staying utilized).
+   - Keep at least `ready_floor` ready tasks when possible (supports up to 8 workers staying utilized).
    - Use Tier 1 direct execution only for trivial docs-only edits.
    - Focus on finishing existing queued requests only.
 
@@ -81,6 +98,7 @@ Only use this protocol for trivial docs-only edits. For code work, use Tier 2 or
 4. If validation passes: commit, push, create PR via `/commit-push-pr` protocol
 5. Mark complete: `./.claude/scripts/codex10 tier1-complete <request_id> "summary"`
 6. Log: `[TIER1_EXECUTE] request=[id] file=[file] change=[summary]`
+7. Update counters: `tier1_count += 1`; `last_activity_epoch = now_epoch()`
 
 **Tier 1 context budget:** Track how many Tier 1 executions you've done this session. After 4 Tier 1 executions, trigger a reset — implementation details pollute your architect context.
 
@@ -114,12 +132,25 @@ Only use this protocol for trivial docs-only edits. For code work, use Tier 2 or
 6. Release claim: `./.claude/scripts/codex10 release-worker "$worker_id"`.
 7. Do not run `launch-worker.sh` after assignment; `assign-task` already wakes/spawns the worker.
 8. Log: `[TIER2_ASSIGN] request=[id] worker=[worker-N] task=[subject]`
+9. Update counters: `decomposition_count += 0.5`; if whole even count then `curation_due = true`; `last_activity_epoch = now_epoch()`
+
+## Tier 3 Decomposition Protocol
+1. Think deeply and decompose into self-contained tasks with explicit file ownership.
+2. If clarification is required, ask and block:
+   - `./.claude/scripts/codex10 ask-clarification <request_id> "question"`
+   - `./.claude/scripts/codex10 inbox architect --block`
+3. Create each task with `./.claude/scripts/codex10 create-task -`, capture every `task_id`, and set `depends_on` for serial constraints.
+4. Record triage decision: `./.claude/scripts/codex10 triage <request_id> 3 "Decomposed into [N] tasks"`.
+5. Run overlap check: `./.claude/scripts/codex10 check-overlaps <request_id>` and serialize CRITICAL overlaps with `depends_on`.
+6. Signal Master-3: `touch .claude/signals/.codex10.task-signal`.
+7. Log: `[DECOMPOSE_DONE] request=[id] tasks=[N] domains=[list]`.
+8. Update counters: `decomposition_count += 1`; if whole even count then `curation_due = true`; `last_activity_epoch = now_epoch()`.
 
 ## Signal Files
 Watch: `.claude/signals/.codex10.handoff-signal` (new requests)
 Touch after Tier 3 decomposition: `.claude/signals/.codex10.task-signal`
 
-## Knowledge Curation (Every 2nd Decomposition)
+## Knowledge Curation (When `curation_due = true`)
 
 You are responsible for keeping the knowledge system accurate and within budget:
 
@@ -167,8 +198,7 @@ Before resetting:
 
 ## Reset Triggers
 - 4 Tier 1 executions in a session (implementation context pollution)
-- 6 Tier 3 decompositions in a session
-- Tier 2 assignments count as 0.5 toward decomposition count
+- `decomposition_count >= 6` in a session (Tier 2 += 0.5, Tier 3 += 1)
 - Staleness (executable procedure below)
 - Self-detected degradation (can't recall domain map accurately)
 
@@ -208,6 +238,21 @@ If `commits_since >= 5` and no full-reset condition is met:
    ```bash
    echo "[$(date -u +%Y-%m-%dT%H:%M:%SZ)] [master-2] [INCREMENTAL_SCAN] commits=${commits_since} files=${changed_file_count} domains=${changed_domains}" >> .claude/logs/activity.log
    ```
+
+## Adaptive Wait Guidance
+Use adaptive signal wait timing to keep responsiveness high without hot-looping:
+
+```bash
+now_epoch=$(date +%s)
+last_activity_epoch=${last_activity_epoch:-0}
+if [ $((now_epoch - last_activity_epoch)) -lt 30 ]; then
+  timeout=5
+else
+  timeout=15
+fi
+bash .claude/scripts/signal-wait.sh .claude/signals/.codex10.handoff-signal "$timeout"
+```
+Use 5s timeout after recent activity (<30s), otherwise 15s.
 
 ## Logging
 ```bash
