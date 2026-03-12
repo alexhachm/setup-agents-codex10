@@ -27,6 +27,27 @@ let processingStartedAt = 0;
 const PROCESSING_TIMEOUT_MS = 300000; // 5 minutes — reset flag if stuck
 let mergerIntervalId = null;
 
+function completeRequestIfTransition(requestId, result) {
+  const completionTimestamp = new Date().toISOString();
+  const updateResult = db.getDb().prepare(`
+    UPDATE requests
+    SET status = 'completed',
+        completed_at = ?,
+        result = ?,
+        updated_at = datetime('now')
+    WHERE id = ?
+      AND status != 'completed'
+  `).run(completionTimestamp, result, requestId);
+
+  if (updateResult.changes === 0) {
+    return false;
+  }
+
+  db.sendMail('master-1', 'request_completed', { request_id: requestId, result });
+  db.log('coordinator', 'request_completed', { request_id: requestId });
+  return true;
+}
+
 function start(projectDir) {
   // Merger is triggered by task completions, but also runs periodic checks
   mergerIntervalId = setInterval(() => {
@@ -85,13 +106,7 @@ function onTaskCompleted(taskId) {
     } else {
       // No PRs to merge — complete immediately (e.g. verification tasks, already-merged)
       const result = `All ${allTasks.length} task(s) completed (no PRs to merge)`;
-      db.updateRequest(task.request_id, {
-        status: 'completed',
-        completed_at: new Date().toISOString(),
-        result,
-      });
-      db.sendMail('master-1', 'request_completed', { request_id: task.request_id, result });
-      db.log('coordinator', 'request_completed', { request_id: task.request_id });
+      completeRequestIfTransition(task.request_id, result);
     }
   }
 }
@@ -391,17 +406,8 @@ function checkRequestCompletion(requestId) {
     }
 
     const result = `All ${allMerges.length} PR(s) merged successfully`;
-    db.updateRequest(requestId, {
-      status: 'completed',
-      completed_at: new Date().toISOString(),
-      result,
-    });
-    // Notify Master-1 so the user learns the request is done
-    db.sendMail('master-1', 'request_completed', {
-      request_id: requestId,
-      result,
-    });
-    db.log('coordinator', 'request_completed', { request_id: requestId });
+    // Notify Master-1 only on a real transition into completed.
+    completeRequestIfTransition(requestId, result);
   }
 }
 
