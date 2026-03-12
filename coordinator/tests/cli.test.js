@@ -342,6 +342,87 @@ describe('CLI Server', () => {
     assert.strictEqual(rows[0].task_id, taskA);
   });
 
+  it('should block integrate when a request has mixed completed and failed tasks', async () => {
+    const requestId = db.createRequest('Mixed outcomes');
+    const taskCompleted = db.createTask({ request_id: requestId, subject: 'Task A', description: 'Done' });
+    const taskFailed = db.createTask({ request_id: requestId, subject: 'Task B', description: 'Failed' });
+    const timestamp = new Date().toISOString();
+
+    db.updateTask(taskCompleted, {
+      status: 'completed',
+      pr_url: 'https://github.com/org/repo/pull/201',
+      branch: 'agent-1',
+      completed_at: timestamp,
+    });
+    db.updateTask(taskFailed, {
+      status: 'failed',
+      result: 'test failure',
+      completed_at: timestamp,
+    });
+
+    const completion = await sendCommand('check-completion', { request_id: requestId });
+    assert.strictEqual(completion.ok, true);
+    assert.strictEqual(completion.total, 2);
+    assert.strictEqual(completion.completed, 1);
+    assert.strictEqual(completion.failed, 1);
+    assert.strictEqual(completion.all_completed, false);
+    assert.strictEqual(completion.all_done, false);
+
+    const integrate = await sendCommand('integrate', { request_id: requestId });
+    assert.strictEqual(integrate.ok, false);
+    assert.strictEqual(integrate.error, 'Request has failed tasks');
+    assert.strictEqual(integrate.total, 2);
+    assert.strictEqual(integrate.completed, 1);
+    assert.strictEqual(integrate.failed, 1);
+    assert.strictEqual(integrate.all_completed, false);
+    assert.strictEqual(integrate.all_done, false);
+
+    const queued = db.getDb().prepare('SELECT COUNT(*) as count FROM merge_queue WHERE request_id = ?').get(requestId);
+    assert.strictEqual(queued.count, 0);
+  });
+
+  it('should integrate when all request tasks are completed with no failures', async () => {
+    const requestId = db.createRequest('All completed');
+    const taskA = db.createTask({ request_id: requestId, subject: 'Task A', description: 'Done A' });
+    const taskB = db.createTask({ request_id: requestId, subject: 'Task B', description: 'Done B' });
+    const timestamp = new Date().toISOString();
+
+    db.updateTask(taskA, {
+      status: 'completed',
+      pr_url: 'https://github.com/org/repo/pull/301',
+      branch: 'agent-1',
+      completed_at: timestamp,
+    });
+    db.updateTask(taskB, {
+      status: 'completed',
+      pr_url: 'https://github.com/org/repo/pull/302',
+      branch: 'agent-2',
+      completed_at: timestamp,
+    });
+
+    const completion = await sendCommand('check-completion', { request_id: requestId });
+    assert.strictEqual(completion.ok, true);
+    assert.strictEqual(completion.total, 2);
+    assert.strictEqual(completion.completed, 2);
+    assert.strictEqual(completion.failed, 0);
+    assert.strictEqual(completion.all_completed, true);
+    assert.strictEqual(completion.all_done, true);
+
+    const integrate = await sendCommand('integrate', { request_id: requestId });
+    assert.strictEqual(integrate.ok, true);
+    assert.strictEqual(integrate.request_id, requestId);
+    assert.strictEqual(integrate.merges_queued, 2);
+
+    const queuedRows = db.getDb().prepare(`
+      SELECT task_id
+      FROM merge_queue
+      WHERE request_id = ?
+      ORDER BY task_id ASC
+    `).all(requestId);
+    assert.strictEqual(queuedRows.length, 2);
+    assert.deepStrictEqual(queuedRows.map((row) => row.task_id), [taskA, taskB].sort((a, b) => a - b));
+  });
+
   it('should handle inbox', async () => {
     db.sendMail('architect', 'test_msg', { data: 'hello' });
 

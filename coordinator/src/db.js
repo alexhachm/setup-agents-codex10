@@ -414,12 +414,18 @@ function checkRequestCompletion(requestId) {
       COALESCE(SUM(CASE WHEN status = 'failed' THEN 1 ELSE 0 END), 0) as failed
     FROM tasks WHERE request_id = ?
   `).get(requestId);
+  const total = Number(row.total) || 0;
+  const completed = Number(row.completed) || 0;
+  const failed = Number(row.failed) || 0;
+  const allCompleted = total > 0 && completed === total;
+  const allFailed = total > 0 && failed === total;
   return {
     request_id: requestId,
-    total: row.total,
-    completed: row.completed,
-    failed: row.failed,
-    all_done: row.completed + row.failed >= row.total && row.total > 0,
+    total,
+    completed,
+    failed,
+    all_completed: allCompleted,
+    all_done: allCompleted || allFailed,
   };
 }
 

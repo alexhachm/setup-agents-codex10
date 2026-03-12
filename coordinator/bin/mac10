@@ -23,6 +23,16 @@ const COMPLETE_TASK_USAGE_FIELDS = Object.freeze({
   cost_usd: 'number',
 });
 
+function completionStatusLabel(completion) {
+  const total = Number(completion && completion.total) || 0;
+  const completed = Number(completion && completion.completed) || 0;
+  const failed = Number(completion && completion.failed) || 0;
+  if (total > 0 && completed === total && failed === 0) return 'ALL DONE';
+  if (total > 0 && failed === total && completed === 0) return 'ALL FAILED';
+  if (completed > 0 && failed > 0) return 'MIXED (HAS FAILURES)';
+  return '';
+}
+
 function namespacedCandidates(baseName) {
   if (NAMESPACE === 'mac10') return [baseName];
   const dot = baseName.indexOf('.');
@@ -1029,7 +1039,9 @@ async function main() {
           request_id: argv[1],
         });
         if (result.ok) {
-          console.log(`Request ${result.request_id}: ${result.completed}/${result.total} completed, ${result.failed} failed${result.all_done ? ' — ALL DONE' : ''}`);
+          const statusLabel = completionStatusLabel(result);
+          const suffix = statusLabel ? ` — ${statusLabel}` : '';
+          console.log(`Request ${result.request_id}: ${result.completed}/${result.total} completed, ${result.failed} failed${suffix}`);
         } else console.error(result.error);
         break;
 
