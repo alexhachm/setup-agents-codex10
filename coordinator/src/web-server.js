@@ -259,23 +259,27 @@ function pickRoutingField(taskValue, fallbackValue) {
   return normalizeRoutingField(taskValue) || normalizeRoutingField(fallbackValue);
 }
 
-function buildStatePayload({ includeLogs = false, includeLoops = false } = {}) {
-  const requests = db.listRequests();
-  const workers = db.getAllWorkers();
-  const tasks = db.listTasks();
-  const telemetry = buildTaskTelemetryMap(tasks);
-
+function hydrateTasks(tasks, telemetry = null) {
+  const taskTelemetry = telemetry || buildTaskTelemetryMap(tasks);
   const hydratedTasks = tasks.map((task) => {
     const taskId = Number.parseInt(task && task.id, 10);
-    const fallback = telemetry.byTaskId.get(taskId) || null;
+    const fallback = taskTelemetry.byTaskId.get(taskId) || null;
     return {
       ...task,
       routing_class: pickRoutingField(task.routing_class, fallback && fallback.routing_class),
       routed_model: pickRoutingField(task.routed_model, fallback && fallback.routed_model),
-      model_source: normalizeRoutingField(fallback && fallback.model_source),
+      model_source: pickRoutingField(task.model_source, fallback && fallback.model_source),
       reasoning_effort: pickRoutingField(task.reasoning_effort, fallback && fallback.reasoning_effort),
     };
   });
+  return { tasks: hydratedTasks, telemetry: taskTelemetry };
+}
+
+function buildStatePayload({ includeLogs = false, includeLoops = false } = {}) {
+  const requests = db.listRequests();
+  const workers = db.getAllWorkers();
+  const tasks = db.listTasks();
+  const { tasks: hydratedTasks, telemetry } = hydrateTasks(tasks);
 
   const configBudget = buildBudgetSnapshotFromConfig();
   const routingBudgetState = configBudget
@@ -356,7 +360,8 @@ function start(projectDir, port = 3100, scriptDir = null, handlers = {}) {
       const request = db.getRequest(req.params.id);
       if (!request) return res.status(404).json({ error: 'Not found' });
       const tasks = db.listTasks({ request_id: req.params.id });
-      res.json({ ...request, tasks });
+      const { tasks: hydratedTasks } = hydrateTasks(tasks);
+      res.json({ ...request, tasks: hydratedTasks });
     } catch (e) {
       res.status(500).json({ error: e.message });
     }
@@ -372,7 +377,9 @@ function start(projectDir, port = 3100, scriptDir = null, handlers = {}) {
 
   app.get('/api/tasks', (req, res) => {
     try {
-      res.json(db.listTasks(req.query));
+      const tasks = db.listTasks(req.query);
+      const { tasks: hydratedTasks } = hydrateTasks(tasks);
+      res.json(hydratedTasks);
     } catch (e) {
       res.status(500).json({ error: e.message });
     }
