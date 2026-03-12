@@ -39,6 +39,37 @@ function resolveFallbackRoutingClass(task) {
   return 'spark';
 }
 
+const FALLBACK_ROUTING_SCALE = Object.freeze(['mini', 'spark', 'mid', 'high', 'xhigh']);
+const FALLBACK_REASONING_DEFAULTS = Object.freeze({
+  xhigh: 'high',
+  high: 'high',
+  mid: 'low',
+  spark: 'low',
+  mini: 'low',
+});
+
+function resolveFallbackEffectiveClass(routingClass, { budgetConstrained, budgetHealthy }) {
+  if (budgetConstrained) {
+    if (routingClass === 'high') return 'mini';
+    if (routingClass === 'mid') return 'spark';
+  }
+  if (budgetHealthy && routingClass === 'high') return 'xhigh';
+  return routingClass;
+}
+
+function getFallbackRoutingShift(routingClass, effectiveClass) {
+  if (routingClass === effectiveClass) return 'none';
+  const routingIndex = FALLBACK_ROUTING_SCALE.indexOf(routingClass);
+  const effectiveIndex = FALLBACK_ROUTING_SCALE.indexOf(effectiveClass);
+  if (routingIndex < 0 || effectiveIndex < 0) return 'none';
+  return effectiveIndex > routingIndex ? 'upscale' : 'downscale';
+}
+
+function getFallbackReasoningEffort(getConfig, effectiveClass) {
+  const defaultEffort = FALLBACK_REASONING_DEFAULTS[effectiveClass] || 'low';
+  return getConfigValue(getConfig, `reasoning_${effectiveClass}`, defaultEffort);
+}
+
 function fallbackModelRouter() {
   const fallbackStateSource = 'coordinator-fallback-model-router';
   return {
@@ -62,26 +93,30 @@ function fallbackModelRouter() {
         : null;
       const remaining = parseBudgetNumber(flagshipState ? flagshipState.remaining : budget && budget.remaining);
       const threshold = parseBudgetNumber(flagshipState ? flagshipState.threshold : budget && budget.threshold);
-      const budgetConstrained = remaining !== null && threshold !== null && remaining <= threshold;
+      const hasBudgetSignal = remaining !== null && threshold !== null;
+      const budgetConstrained = hasBudgetSignal && remaining <= threshold;
+      const budgetHealthy = hasBudgetSignal && remaining > threshold;
 
-      let effectiveClass = routingClass;
-      if (budgetConstrained && routingClass === 'high') effectiveClass = 'mini';
-      else if (budgetConstrained && routingClass === 'mid') effectiveClass = 'spark';
-      const budgetDowngraded = effectiveClass !== routingClass;
+      const effectiveClass = resolveFallbackEffectiveClass(routingClass, { budgetConstrained, budgetHealthy });
+      const routingShift = getFallbackRoutingShift(routingClass, effectiveClass);
 
       const defaultModel = getFallbackDefaultModel(getConfig, effectiveClass);
       const configuredModel = getConfigValue(getConfig, `model_${effectiveClass}`, defaultModel);
-      const routingReason = budgetDowngraded
+      const routingReason = routingShift === 'downscale'
         ? `fallback-budget-downgrade:${routingClass}->${effectiveClass}`
-        : 'fallback-routing:class-default';
-      const modelSource = budgetDowngraded
+        : routingShift === 'upscale'
+          ? `fallback-budget-upgrade:${routingClass}->${effectiveClass}`
+          : 'fallback-routing:class-default';
+      const modelSource = routingShift === 'downscale'
         ? `budget-downgrade:model_${effectiveClass}`
-        : `fallback-routing:model_${effectiveClass}`;
+        : routingShift === 'upscale'
+          ? `budget-upgrade:model_${effectiveClass}`
+          : `fallback-routing:model_${effectiveClass}`;
       return {
         routing_class: routingClass,
         model: configuredModel,
         model_source: modelSource,
-        reasoning_effort: effectiveClass === 'high' || effectiveClass === 'xhigh' ? 'high' : 'low',
+        reasoning_effort: getFallbackReasoningEffort(getConfig, effectiveClass),
         routing_reason: routingReason,
         reason: routingReason,
         budget_state: budget || null,
