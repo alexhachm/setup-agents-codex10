@@ -37,6 +37,9 @@ CREATE TABLE IF NOT EXISTS tasks (
   branch TEXT,
   validation TEXT,  -- JSON: what checks to run
   overlap_with TEXT,  -- JSON array of task IDs sharing files
+  routing_class TEXT,
+  routed_model TEXT,
+  reasoning_effort TEXT,
   created_at TEXT NOT NULL DEFAULT (datetime('now')),
   updated_at TEXT NOT NULL DEFAULT (datetime('now')),
   started_at TEXT,
