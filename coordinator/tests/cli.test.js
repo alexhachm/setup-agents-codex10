@@ -262,6 +262,8 @@ describe('CLI Server', () => {
     await setConfigValue('model_mid', 'mid-model');
     await setConfigValue('model_spark', 'spark-model');
     await setConfigValue('model_mini', 'mini-model');
+    await setConfigValue('reasoning_spark', 'spark-effort');
+    await setConfigValue('reasoning_mini', 'mini-effort');
     await setConfigValue('routing_budget_state', JSON.stringify({
       flagship: { remaining: 25, threshold: 25 },
     }));
@@ -283,7 +285,7 @@ describe('CLI Server', () => {
     assert.strictEqual(highAssignment.routing.class, 'high');
     assert.strictEqual(highAssignment.routing.model, 'mini-model');
     assert.strictEqual(highAssignment.routing.model_source, 'budget-downgrade:model_mini');
-    assert.strictEqual(highAssignment.routing.reasoning_effort, 'low');
+    assert.strictEqual(highAssignment.routing.reasoning_effort, 'mini-effort');
     assert.strictEqual(highAssignment.routing.routing_reason, 'fallback-budget-downgrade:high->mini');
     assert.strictEqual(highAssignment.routing.reason, 'fallback-budget-downgrade:high->mini');
 
@@ -292,7 +294,7 @@ describe('CLI Server', () => {
     assert.strictEqual(midAssignment.routing.class, 'mid');
     assert.strictEqual(midAssignment.routing.model, 'spark-model');
     assert.strictEqual(midAssignment.routing.model_source, 'budget-downgrade:model_spark');
-    assert.strictEqual(midAssignment.routing.reasoning_effort, 'low');
+    assert.strictEqual(midAssignment.routing.reasoning_effort, 'spark-effort');
     assert.strictEqual(midAssignment.routing.routing_reason, 'fallback-budget-downgrade:mid->spark');
     assert.strictEqual(midAssignment.routing.reason, 'fallback-budget-downgrade:mid->spark');
 
@@ -301,13 +303,13 @@ describe('CLI Server', () => {
     assert.ok(highAssignmentMail);
     assert.strictEqual(highAssignmentMail.payload.model_source, 'budget-downgrade:model_mini');
     assert.strictEqual(highAssignmentMail.payload.routing_reason, 'fallback-budget-downgrade:high->mini');
-    assert.strictEqual(highAssignmentMail.payload.reasoning_effort, 'low');
+    assert.strictEqual(highAssignmentMail.payload.reasoning_effort, 'mini-effort');
 
     const highAssignmentLog = getAllocatorAssignmentDetails(highTaskId);
     assert.ok(highAssignmentLog);
     assert.strictEqual(highAssignmentLog.model_source, 'budget-downgrade:model_mini');
     assert.strictEqual(highAssignmentLog.routing_reason, 'fallback-budget-downgrade:high->mini');
-    assert.strictEqual(highAssignmentLog.reasoning_effort, 'low');
+    assert.strictEqual(highAssignmentLog.reasoning_effort, 'mini-effort');
   });
 
   it('should restore normal routing after flagship budget recovers above threshold', async () => {
@@ -316,10 +318,14 @@ describe('CLI Server', () => {
     db.registerWorker(3, '/wt-3', 'agent-3');
 
     await setConfigValue('model_flagship', 'flagship-model');
+    await setConfigValue('model_xhigh', 'xhigh-model');
     await setConfigValue('model_high', 'high-model');
     await setConfigValue('model_mid', 'mid-model');
     await setConfigValue('model_spark', 'spark-model');
     await setConfigValue('model_mini', 'mini-model');
+    await setConfigValue('reasoning_xhigh', 'xhigh-effort');
+    await setConfigValue('reasoning_mini', 'mini-effort');
+    await setConfigValue('reasoning_mid', 'mid-effort');
     await setConfigValue('routing_budget_state', JSON.stringify({
       flagship: { remaining: 10, threshold: 20 },
     }));
@@ -335,7 +341,7 @@ describe('CLI Server', () => {
     assert.strictEqual(constrainedAssignment.routing.class, 'high');
     assert.strictEqual(constrainedAssignment.routing.model, 'mini-model');
     assert.strictEqual(constrainedAssignment.routing.model_source, 'budget-downgrade:model_mini');
-    assert.strictEqual(constrainedAssignment.routing.reasoning_effort, 'low');
+    assert.strictEqual(constrainedAssignment.routing.reasoning_effort, 'mini-effort');
     assert.strictEqual(constrainedAssignment.routing.routing_reason, 'fallback-budget-downgrade:high->mini');
 
     await setConfigValue('routing_budget_state', JSON.stringify({
@@ -357,17 +363,110 @@ describe('CLI Server', () => {
     const recoveredHigh = await sendCommand('assign-task', { task_id: recoveredHighTaskId, worker_id: 2 });
     assert.strictEqual(recoveredHigh.ok, true);
     assert.strictEqual(recoveredHigh.routing.class, 'high');
-    assert.strictEqual(recoveredHigh.routing.model, 'high-model');
-    assert.strictEqual(recoveredHigh.routing.model_source, 'fallback-routing:model_high');
-    assert.strictEqual(recoveredHigh.routing.reasoning_effort, 'high');
-    assert.strictEqual(recoveredHigh.routing.routing_reason, 'fallback-routing:class-default');
+    assert.strictEqual(recoveredHigh.routing.model, 'xhigh-model');
+    assert.strictEqual(recoveredHigh.routing.model_source, 'budget-upgrade:model_xhigh');
+    assert.strictEqual(recoveredHigh.routing.reasoning_effort, 'xhigh-effort');
+    assert.strictEqual(recoveredHigh.routing.routing_reason, 'fallback-budget-upgrade:high->xhigh');
+    assert.strictEqual(recoveredHigh.routing.reason, 'fallback-budget-upgrade:high->xhigh');
 
     const recoveredMid = await sendCommand('assign-task', { task_id: recoveredMidTaskId, worker_id: 3 });
     assert.strictEqual(recoveredMid.ok, true);
     assert.strictEqual(recoveredMid.routing.class, 'mid');
     assert.strictEqual(recoveredMid.routing.model, 'mid-model');
     assert.strictEqual(recoveredMid.routing.model_source, 'fallback-routing:model_mid');
-    assert.strictEqual(recoveredMid.routing.reasoning_effort, 'low');
+    assert.strictEqual(recoveredMid.routing.reasoning_effort, 'mid-effort');
     assert.strictEqual(recoveredMid.routing.routing_reason, 'fallback-routing:class-default');
+
+    const worker2Messages = db.checkMail('worker-2', false);
+    const recoveredHighMail = worker2Messages.find((msg) => msg.type === 'task_assigned' && msg.payload.task_id === recoveredHighTaskId);
+    assert.ok(recoveredHighMail);
+    assert.strictEqual(recoveredHighMail.payload.model_source, 'budget-upgrade:model_xhigh');
+    assert.strictEqual(recoveredHighMail.payload.routing_reason, 'fallback-budget-upgrade:high->xhigh');
+    assert.strictEqual(recoveredHighMail.payload.reasoning_effort, 'xhigh-effort');
+
+    const recoveredHighLog = getAllocatorAssignmentDetails(recoveredHighTaskId);
+    assert.ok(recoveredHighLog);
+    assert.strictEqual(recoveredHighLog.model_source, 'budget-upgrade:model_xhigh');
+    assert.strictEqual(recoveredHighLog.routing_reason, 'fallback-budget-upgrade:high->xhigh');
+    assert.strictEqual(recoveredHighLog.reasoning_effort, 'xhigh-effort');
+  });
+
+  it('should apply reasoning config per selected effective class', async () => {
+    db.registerWorker(1, '/wt-1', 'agent-1');
+    db.registerWorker(2, '/wt-2', 'agent-2');
+    db.registerWorker(3, '/wt-3', 'agent-3');
+    db.registerWorker(4, '/wt-4', 'agent-4');
+    db.registerWorker(5, '/wt-5', 'agent-5');
+
+    await setConfigValue('model_xhigh', 'xhigh-model');
+    await setConfigValue('model_high', 'high-model');
+    await setConfigValue('model_mid', 'mid-model');
+    await setConfigValue('model_spark', 'spark-model');
+    await setConfigValue('model_mini', 'mini-model');
+    await setConfigValue('reasoning_xhigh', 'effort-xhigh');
+    await setConfigValue('reasoning_high', 'effort-high');
+    await setConfigValue('reasoning_mid', 'effort-mid');
+    await setConfigValue('reasoning_spark', 'effort-spark');
+    await setConfigValue('reasoning_mini', 'effort-mini');
+
+    await setConfigValue('routing_budget_state', JSON.stringify({ flagship: { remaining: 9, threshold: 10 } }));
+    const constrainedHighTaskId = createReadyTask({
+      subject: 'Constrained complexity routing',
+      description: 'Critical routing path',
+      priority: 'high',
+      tier: 3,
+    });
+    const constrainedHighAssignment = await sendCommand('assign-task', { task_id: constrainedHighTaskId, worker_id: 1 });
+    assert.strictEqual(constrainedHighAssignment.ok, true);
+    assert.strictEqual(constrainedHighAssignment.routing.model, 'mini-model');
+    assert.strictEqual(constrainedHighAssignment.routing.reasoning_effort, 'effort-mini');
+
+    await setConfigValue('routing_budget_state', JSON.stringify({}));
+    const highTaskId = createReadyTask({
+      subject: 'High complexity no budget signal',
+      description: 'Critical migration path',
+      priority: 'high',
+      tier: 3,
+    });
+    const midTaskId = createReadyTask({
+      subject: 'Merge helper update',
+      description: 'Refactor merge helper modules',
+      tier: 2,
+    });
+    const sparkTaskId = createReadyTask({
+      subject: 'Minor cleanup',
+      description: 'Adjust logs',
+      tier: 1,
+      priority: 'low',
+    });
+
+    const highAssignment = await sendCommand('assign-task', { task_id: highTaskId, worker_id: 2 });
+    assert.strictEqual(highAssignment.ok, true);
+    assert.strictEqual(highAssignment.routing.model, 'high-model');
+    assert.strictEqual(highAssignment.routing.reasoning_effort, 'effort-high');
+
+    const midAssignment = await sendCommand('assign-task', { task_id: midTaskId, worker_id: 3 });
+    assert.strictEqual(midAssignment.ok, true);
+    assert.strictEqual(midAssignment.routing.model, 'mid-model');
+    assert.strictEqual(midAssignment.routing.reasoning_effort, 'effort-mid');
+
+    const sparkAssignment = await sendCommand('assign-task', { task_id: sparkTaskId, worker_id: 4 });
+    assert.strictEqual(sparkAssignment.ok, true);
+    assert.strictEqual(sparkAssignment.routing.model, 'spark-model');
+    assert.strictEqual(sparkAssignment.routing.reasoning_effort, 'effort-spark');
+
+    await setConfigValue('routing_budget_state', JSON.stringify({ flagship: { remaining: 30, threshold: 10 } }));
+    const healthyHighTaskId = createReadyTask({
+      subject: 'Healthy budget complex routing',
+      description: 'Critical worker orchestration',
+      priority: 'high',
+      tier: 3,
+    });
+    const healthyHighAssignment = await sendCommand('assign-task', { task_id: healthyHighTaskId, worker_id: 5 });
+    assert.strictEqual(healthyHighAssignment.ok, true);
+    assert.strictEqual(healthyHighAssignment.routing.model, 'xhigh-model');
+    assert.strictEqual(healthyHighAssignment.routing.model_source, 'budget-upgrade:model_xhigh');
+    assert.strictEqual(healthyHighAssignment.routing.reasoning_effort, 'effort-xhigh');
+    assert.strictEqual(healthyHighAssignment.routing.routing_reason, 'fallback-budget-upgrade:high->xhigh');
   });
 });
