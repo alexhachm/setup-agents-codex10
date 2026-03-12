@@ -243,8 +243,8 @@ function bridgeToHandoff(requestId, description, type = 'bug-fix') {
     // Touch signal file to wake architect (signal-wait.sh approach)
     fs.closeSync(fs.openSync(signalPath, 'a'));
     fs.utimesSync(signalPath, new Date(), new Date());
-    // Also send to architect inbox (mac10 inbox architect --block approach)
-    try { db.sendMail('architect', 'request_queued', { request_id: requestId }); } catch {}
+    // Record queueing in coordinator activity log; request creation already emits architect new_request mail.
+    db.log('coordinator', 'request_queued', { request_id: requestId });
   } catch (e) {
     // Non-fatal — log but don't crash coordinator
     console.error('[coordinator] handoff bridge error:', e.message);
