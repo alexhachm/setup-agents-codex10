@@ -76,8 +76,8 @@
       try {
         const msg = JSON.parse(event.data);
         if (msg.type === 'init' || msg.type === 'state') {
-          tab.state = msg.data;
-          if (tab.id === activeTabId) renderState(msg.data);
+          tab.state = mergeBudgetSnapshot(tab.state, msg.data);
+          if (tab.id === activeTabId) renderState(tab.state);
         } else if (msg.type === 'request_created') {
           if (tab.id === activeTabId) fetchTabStatus(tab);
         } else if (msg.type === 'setup_log') {
@@ -225,9 +225,10 @@
   // --- Render functions (unchanged logic, operate on active tab data) ---
 
   function renderState(data) {
-    renderWorkers(data.workers || []);
-    renderRequests(data.requests || []);
-    renderTasks(data.tasks || []);
+    const state = data && typeof data === 'object' ? data : {};
+    renderWorkers(Array.isArray(state.workers) ? state.workers : []);
+    renderRequests(Array.isArray(state.requests) ? state.requests : []);
+    renderTasks(Array.isArray(state.tasks) ? state.tasks : [], state);
   }
 
   function renderWorkers(workers) {
@@ -262,14 +263,15 @@
     `).join('');
   }
 
-  function renderTasks(tasks) {
+  function renderTasks(tasks, state) {
     const el = document.getElementById('tasks-list');
-    const active = tasks.filter(t => t.status !== 'completed');
+    const active = tasks.filter(t => t && t.status !== 'completed');
+    const budgetIndicator = renderBudgetIndicator(state);
     if (active.length === 0) {
-      el.innerHTML = '<div style="color:#8b949e;font-size:13px">No active tasks</div>';
+      el.innerHTML = `${budgetIndicator}<div style="color:#8b949e;font-size:13px">No active tasks</div>`;
       return;
     }
-    el.innerHTML = active.slice(0, 30).map(t => `
+    el.innerHTML = budgetIndicator + active.slice(0, 30).map(t => `
       <div class="task-item">
         <span style="color:#58a6ff">#${t.id}</span>
         <span class="worker-status badge-${t.status}">${t.status}</span>
@@ -279,8 +281,114 @@
           ${t.assigned_to ? `&rarr; worker-${escapeHtml(String(t.assigned_to))}` : ''}
           ${t.pr_url ? renderPrLink(t.pr_url) : ''}
         </div>
+        ${renderTaskTelemetryChips(t)}
       </div>
     `).join('');
+  }
+
+  function renderTaskTelemetryChips(task) {
+    const telemetry = readTaskTelemetry(task);
+    const chips = [];
+    if (telemetry.routingClass) chips.push(renderTelemetryChip('route', telemetry.routingClass));
+    if (telemetry.routedModel) chips.push(renderTelemetryChip('model', telemetry.routedModel));
+    if (telemetry.modelSource) chips.push(renderTelemetryChip('source', telemetry.modelSource));
+    if (telemetry.reasoningEffort) chips.push(renderTelemetryChip('effort', telemetry.reasoningEffort));
+    if (chips.length === 0) return '';
+    return `<div class="task-chip-row">${chips.join('')}</div>`;
+  }
+
+  function renderTelemetryChip(label, value) {
+    return `<span class="task-chip"><span class="task-chip-label">${escapeHtml(label)}</span>${escapeHtml(value)}</span>`;
+  }
+
+  function readTaskTelemetry(task) {
+    const routing = task && task.routing && typeof task.routing === 'object' ? task.routing : null;
+    return {
+      routingClass: pickTelemetryValue(task && task.routing_class, task && task.routingClass, routing && routing.class, routing && routing.routing_class),
+      routedModel: pickTelemetryValue(task && task.routed_model, task && task.routedModel, task && task.routing_model, task && task.routingModel, routing && routing.model),
+      modelSource: pickTelemetryValue(task && task.model_source, task && task.modelSource, task && task.routing_model_source, task && task.routingModelSource, routing && routing.model_source),
+      reasoningEffort: pickTelemetryValue(task && task.reasoning_effort, task && task.reasoningEffort, task && task.routing_reasoning_effort, task && task.routingReasoningEffort, routing && routing.reasoning_effort),
+    };
+  }
+
+  function pickTelemetryValue(...values) {
+    for (const candidate of values) {
+      const normalized = normalizeTelemetryValue(candidate);
+      if (normalized) return normalized;
+    }
+    return '';
+  }
+
+  function normalizeTelemetryValue(value) {
+    if (value === null || value === undefined) return '';
+    if (typeof value === 'string') return value.trim();
+    if (typeof value === 'number' || typeof value === 'boolean') return String(value);
+    return '';
+  }
+
+  function renderBudgetIndicator(state) {
+    const snapshot = getBudgetSnapshot(state);
+    if (!snapshot) return '';
+    const summary = describeBudgetState(snapshot.state);
+    return `
+      <div class="task-budget-indicator">
+        <span class="task-budget-title">Budget</span>
+        <span class="task-chip task-chip-budget"><span class="task-chip-label">source</span>${escapeHtml(snapshot.source || 'unknown')}</span>
+        <span class="task-chip task-chip-budget"><span class="task-chip-label">state</span>${escapeHtml(summary || 'available')}</span>
+      </div>
+    `;
+  }
+
+  function getBudgetSnapshot(state) {
+    const data = state && typeof state === 'object' ? state : {};
+    const source = pickTelemetryValue(
+      data.routing_budget_source,
+      data.budget_source,
+      data.routingBudgetSource
+    );
+    const parsedState = parseBudgetState(
+      data.routing_budget_state !== undefined ? data.routing_budget_state :
+        (data.budget_state !== undefined ? data.budget_state : data.routingBudgetState)
+    );
+    if (!source && parsedState === null) return null;
+    return { source, state: parsedState };
+  }
+
+  function parseBudgetState(value) {
+    if (value === null || value === undefined) return null;
+    if (typeof value === 'string') {
+      const trimmed = value.trim();
+      if (!trimmed) return null;
+      if (trimmed.startsWith('{') || trimmed.startsWith('[')) {
+        try {
+          return JSON.parse(trimmed);
+        } catch {
+          return trimmed;
+        }
+      }
+      return trimmed;
+    }
+    if (typeof value === 'object') return value;
+    if (typeof value === 'number' || typeof value === 'boolean') return String(value);
+    return null;
+  }
+
+  function describeBudgetState(state) {
+    if (state === null || state === undefined) return '';
+    if (typeof state === 'string') return state;
+    if (typeof state === 'number' || typeof state === 'boolean') return String(state);
+    if (typeof state !== 'object') return '';
+    const flagship = state.flagship && typeof state.flagship === 'object' ? state.flagship : null;
+    if (flagship) {
+      const remaining = Number(flagship.remaining);
+      const threshold = Number(flagship.threshold);
+      if (Number.isFinite(remaining) && Number.isFinite(threshold)) {
+        const status = remaining <= threshold ? 'constrained' : 'healthy';
+        return `${status} (${remaining}/${threshold})`;
+      }
+    }
+    const keys = Object.keys(state).slice(0, 3);
+    return keys.length > 0 ? `keys: ${keys.join(', ')}` : 'present';
   }
 
   function renderLog(logs) {
@@ -323,13 +431,26 @@
     tabFetch(tab, '/api/status')
       .then(r => r.json())
       .then(data => {
-        tab.state = data;
+        tab.state = mergeBudgetSnapshot(tab.state, data);
         if (tab.id === activeTabId) {
-          renderState(data);
-          renderLog(data.logs || []);
+          renderState(tab.state);
+          renderLog(Array.isArray(tab.state.logs) ? tab.state.logs : []);
         }
       })
       .catch(err => console.error('Status fetch failed:', err));
+  }
+
+  function mergeBudgetSnapshot(previousState, nextState) {
+    const previous = previousState && typeof previousState === 'object' ? previousState : {};
+    const next = nextState && typeof nextState === 'object' ? nextState : {};
+    const merged = { ...next };
+    const budgetKeys = ['routing_budget_state', 'routing_budget_source', 'budget_state', 'budget_source', 'routingBudgetState', 'routingBudgetSource'];
+    for (const key of budgetKeys) {
+      if (!Object.prototype.hasOwnProperty.call(merged, key) && Object.prototype.hasOwnProperty.call(previous, key)) {
+        merged[key] = previous[key];
+      }
+    }
+    return merged;
   }
 
   function fetchTabConfig(tab) {
