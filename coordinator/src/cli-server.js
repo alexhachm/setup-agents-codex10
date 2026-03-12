@@ -29,8 +29,24 @@ function getExplicitConfigValue(getConfig, key) {
   return trimmed === '' ? null : trimmed;
 }
 
+const SPARK_MODEL_KEYS = Object.freeze(['model_spark', 'model_codex_spark']);
+
+function getSparkModelConfigValue(getConfig, fallback) {
+  return getConfigValue(
+    getConfig,
+    SPARK_MODEL_KEYS[0],
+    getConfigValue(getConfig, SPARK_MODEL_KEYS[1], fallback)
+  );
+}
+
+function getExplicitSparkModelOverride(getConfig) {
+  const primary = getExplicitConfigValue(getConfig, SPARK_MODEL_KEYS[0]);
+  if (primary) return primary;
+  return getExplicitConfigValue(getConfig, SPARK_MODEL_KEYS[1]);
+}
+
 function getFallbackDefaultModel(getConfig, routingClass) {
-  const sparkModel = getConfigValue(getConfig, 'model_spark', 'gpt-5.3-codex-spark');
+  const sparkModel = getSparkModelConfigValue(getConfig, 'gpt-5.3-codex-spark');
   if (routingClass === 'spark') return sparkModel;
   if (routingClass === 'mini') return getConfigValue(getConfig, 'model_mini', sparkModel);
   return getConfigValue(getConfig, 'model_flagship', 'gpt-5.3-codex');
@@ -109,7 +125,9 @@ function fallbackModelRouter() {
       const routingShift = getFallbackRoutingShift(routingClass, effectiveClass);
 
       const defaultModel = getFallbackDefaultModel(getConfig, effectiveClass);
-      const explicitModelOverride = getExplicitConfigValue(getConfig, `model_${effectiveClass}`);
+      const explicitModelOverride = effectiveClass === 'spark'
+        ? getExplicitSparkModelOverride(getConfig)
+        : getExplicitConfigValue(getConfig, `model_${effectiveClass}`);
       const configuredModel = explicitModelOverride || defaultModel;
       const routingReason = routingShift === 'downscale'
         ? `fallback-budget-downgrade:${routingClass}->${effectiveClass}`
@@ -2051,6 +2069,7 @@ function handleCommand(cmd, conn, handlers) {
         const dbConn = db.getDb();
         const upsertConfig = dbConn.prepare('INSERT INTO config(key, value) VALUES(?,?) ON CONFLICT(key) DO UPDATE SET value=excluded.value');
         let storedValue = String(value);
+        const isSparkModelKey = SPARK_MODEL_KEYS.includes(key);
         if (key === 'max_workers') {
           storedValue = String(clampWorkerLimit(value));
           upsertConfig.run('max_workers', storedValue);
@@ -2062,7 +2081,13 @@ function handleCommand(cmd, conn, handlers) {
               storedValue = JSON.stringify(parsedState.parsed);
             }
           }
-          upsertConfig.run(key, storedValue);
+          if (isSparkModelKey) {
+            for (const sparkModelKey of SPARK_MODEL_KEYS) {
+              upsertConfig.run(sparkModelKey, storedValue);
+            }
+          } else {
+            upsertConfig.run(key, storedValue);
+          }
         }
 
         if (key === ROUTING_BUDGET_STATE_KEY) {
