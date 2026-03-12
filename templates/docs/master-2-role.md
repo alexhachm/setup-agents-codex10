@@ -127,7 +127,7 @@ You are responsible for keeping the knowledge system accurate and within budget:
 ## Instruction Patching
 
 During curation, look for **systemic patterns** that indicate instructions need updating:
-- Workers keep making the same category of mistake → stage patch for worker-claude.md
+- Workers keep making the same category of mistake → stage patch targeting `worker`
 - Decompositions in a domain keep producing fix cycles → update domain knowledge directly
 - A task type consistently takes 3x longer than expected → stage estimation update
 
