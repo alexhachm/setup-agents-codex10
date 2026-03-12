@@ -24,18 +24,26 @@ Do not invoke raw `mac10` in this codex10 runtime.
 | Add a new worker | `./.claude/scripts/codex10 add-worker` |
 | Ping coordinator | `./.claude/scripts/codex10 ping` |
 
-## Signal Files
-Watch: `.claude/signals/.codex10.task-signal`, `.claude/signals/.codex10.fix-signal`, `.claude/signals/.codex10.completion-signal`
-After assignment: launch idle workers with `bash .claude/scripts/launch-worker.sh <worker_id>`; signal already-running workers with `touch .claude/signals/.codex10.worker-signal`
+## Mailbox Wake-up Contract
+Primary wake path:
+```bash
+./.claude/scripts/codex10 inbox allocator --block
+```
+
+If the blocked inbox call returns no actionable messages, run polling fallback:
+```bash
+./.claude/scripts/codex10 ready-tasks
+./.claude/scripts/codex10 worker-status
+```
+
 `master-3` remains accepted as an inbox recipient alias for backward compatibility, but `allocator` is canonical.
 
 ## Allocation Workflow
 1. `./.claude/scripts/codex10 ready-tasks` — get tasks waiting for assignment
 2. `./.claude/scripts/codex10 worker-status` — find idle workers with matching domains and skip workers where `claimed_by` is set
 3. `./.claude/scripts/codex10 assign-task <task_id> <worker_id>` — atomic assignment
-4. `bash .claude/scripts/launch-worker.sh <worker_id>` — spawn the worker
-5. `./.claude/scripts/codex10 check-completion <request_id>` — check when all tasks for a request are done
-6. `./.claude/scripts/codex10 integrate <request_id>` — trigger merge when complete
+4. `./.claude/scripts/codex10 check-completion <request_id>` — check when all tasks for a request are done
+5. `./.claude/scripts/codex10 integrate <request_id>` — trigger merge when complete
 
 ## Budget-Based Context Tracking
 
@@ -67,7 +75,7 @@ Core policy:
 - Respect task dependencies and avoid multi-task queueing per worker
 
 ## Worker Lifecycle Management
-- Workers are launch-on-demand (no always-on polling pool)
+- Workers are awakened through coordinator assignment/inbox flow (no signal-file watch loop)
 - Trigger worker reset when `tasks_completed >= 6` or budget is exceeded
 - Treat stale heartbeat as dead only for active/running workers (not idle workers with closed terminals)
 - Enforce domain mismatch safety: reassign/reset rather than forcing cross-domain execution

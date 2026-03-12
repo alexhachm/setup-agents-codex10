@@ -44,8 +44,8 @@ Monitoring via codex10 commands:
 • codex10 worker-status → Worker heartbeats and availability
 • codex10 check-completion → Task completion for integration
 
-Using signal-based waking (instant response).
-Adaptive polling: 3s when active, 10s when idle.
+Using mailbox-blocking wake-up via `codex10 inbox allocator --block`.
+Polling fallback: `codex10 ready-tasks` + `codex10 worker-status` (3s when active, 10s when idle).
 ```
 
 Update codex10.agent-health.json:
@@ -59,17 +59,19 @@ Then begin the loop.
 
 **Repeat these steps forever:**
 
-### Step 1: Wait for signals (adaptive timeout)
+### Step 1: Mailbox-blocking wake-up (adaptive fallback)
 ```bash
-# Adaptive: 3s when active (just processed something), 10s when idle
-# This restores v7's adaptive polling adapted to the signal framework
-bash .claude/scripts/signal-wait.sh .claude/signals/.codex10.task-signal 10 &
-bash .claude/scripts/signal-wait.sh .claude/signals/.codex10.fix-signal 10 &
-bash .claude/scripts/signal-wait.sh .claude/signals/.codex10.completion-signal 10 &
-wait -n 2>/dev/null || true
+# Primary wake path: block on allocator mailbox (fix/task/merge events)
+./.claude/scripts/codex10 inbox allocator --block || true
 ```
 
-Use 3s timeout if `last_activity` was < 30s ago. Use 10s otherwise.
+If the blocked inbox call returns no actionable work, run polling fallback:
+```bash
+./.claude/scripts/codex10 ready-tasks
+./.claude/scripts/codex10 worker-status
+```
+
+Use 3s polling fallback cadence if `last_activity` was < 30s ago. Use 10s otherwise.
 
 `polling_cycle += 1`
 
@@ -90,6 +92,8 @@ If there are tasks to allocate:
    ```bash
    ./.claude/scripts/codex10 assign-task <task_id> <worker_id>
    ```
+   - If `assign-task` returns `worker_not_idle`, treat that worker as non-assignable for this cycle: do not spin-retry and do not queue behind that worker.
+   - Refresh `worker-status`, leave the task unassigned, and either pick another idle worker now or defer/recheck next cycle.
 6. Log each allocation with reasoning
 7. `context_budget += 50 per task allocated`
 8. `last_activity = now()`
@@ -145,6 +149,7 @@ For each active request_id, check whether all tasks are done:
 ```
 
 If all tasks for a request are completed:
+0. **Assignment-first gate:** if `codex10 ready-tasks` returns any ready task, defer integration this cycle and continue assignment flow.
 1. Trigger integration:
    ```bash
    ./.claude/scripts/codex10 integrate <request_id>
@@ -152,6 +157,12 @@ If all tasks for a request are completed:
 2. Merger/validator pipeline owns validation, push, and signaling after `integrate`. Do not run validators manually, do not push directly, and do not emit handoff signals from allocator flow.
 3. `context_budget += 100`
 4. `last_activity = now()`
+
+### Merge Priority Policy
+
+- Assignment throughput is higher priority than merge throughput.
+- Keep workers fed first; defer integration while runnable tasks exist.
+- Low-effort routed work (`spark` / `mini` / `reasoning_effort=low`) may be merged directly on worker completion by coordinator runtime. Treat these as already merge-handled unless a `merge_failed` message appears.
 
 ### Step 6: Heartbeat check (every 3rd cycle)
 If `polling_cycle % 3 == 0`:
@@ -212,17 +223,17 @@ If Master-2 status is "resetting", `sleep 30` and check again.
 ## Allocation Rules (STRICT)
 
 **Rule 1: Domain matching is STRICT** — only file-level coupling counts
-**Rule 2: Fresh context > queued context** — prefer idle workers when busy worker has 2+ completed tasks
+**Rule 2: Idle-only assignment > stale context** — `assign-task` only succeeds for `idle` workers; assign only to workers currently `idle`, and if the preferred worker is non-idle, leave the task unassigned, defer, and recheck
 **Rule 3: Allocation order:**
-1. Fix for specific worker → that worker
-2. Exact same files, 0-1 tasks completed → queue to them
-3. Idle worker available (no `claimed_by`) → assign to idle (PREFER THIS)
-4. All busy, 2+ completed → least-loaded
-5. Last resort: queue behind heavily-loaded
+1. Fix for specific worker → assign only if that worker is `idle`; otherwise leave unassigned, defer, and recheck next cycle
+2. Exact same files, 0-1 tasks completed → reuse that worker only when `idle`; otherwise pick another idle worker
+3. Idle worker available (no `claimed_by`) → assign to the best idle candidate (PREFER THIS)
+4. No idle workers available → do not assign; leave unassigned, defer, and recheck on next loop
+5. If assignment races and target becomes non-idle (`worker_not_idle`) → refresh status, leave unassigned, and defer to next loop (no busy-worker queueing)
 
 **Rule 4: Fix tasks go to SAME worker**
 **Rule 5: Respect depends_on**
-**Rule 6: NEVER queue more than 1 task per worker**
+**Rule 6: NEVER queue behind busy workers** — queue-behind is unsupported by `assign-task`; leave task unassigned and retry allocation only when a worker is `idle`
 **Rule 7: Skip workers with `claimed_by` set** — Master-2 Tier 2 in progress
 
 ## Creating Tasks
