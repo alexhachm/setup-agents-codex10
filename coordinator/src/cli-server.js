@@ -252,6 +252,14 @@ function bridgeToHandoff(requestId, description, type = 'bug-fix') {
 }
 
 const MAX_PAYLOAD_SIZE = 1024 * 1024; // 1MB
+const INBOX_RECIPIENT_ALIASES = Object.freeze({
+  'master-3': 'allocator',
+});
+
+function normalizeInboxRecipient(recipient) {
+  if (typeof recipient !== 'string') return recipient;
+  return INBOX_RECIPIENT_ALIASES[recipient] || recipient;
+}
 
 const COMMAND_SCHEMAS = {
   'request':           { required: ['description'], types: { description: 'string' } },
@@ -1595,13 +1603,14 @@ function handleCommand(cmd, conn, handlers) {
 
       // === SHARED commands ===
       case 'inbox': {
-        const msgs = db.checkMail(args.recipient, !args.peek);
+        const recipient = normalizeInboxRecipient(args.recipient);
+        const msgs = db.checkMail(recipient, !args.peek);
         respond(conn, { ok: true, messages: msgs });
         break;
       }
       case 'inbox-block': {
         // Async blocking inbox check — polls without freezing the event loop
-        const recipient = args.recipient;
+        const recipient = normalizeInboxRecipient(args.recipient);
         const timeoutMs = args.timeout || 300000;
         const consume = !args.peek;
         const pollMs = 1000;

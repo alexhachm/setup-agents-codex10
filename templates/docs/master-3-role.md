@@ -17,8 +17,8 @@ Do not invoke raw `mac10` in this codex10 runtime.
 | Check request completion | `./.claude/scripts/codex10 check-completion <request_id>` |
 | Trigger merge/integration | `./.claude/scripts/codex10 integrate <request_id>` |
 | View merge queue | `./.claude/scripts/codex10 merge-status [request_id]` |
-| Check your inbox | `./.claude/scripts/codex10 inbox master-3` |
-| Wait for messages | `./.claude/scripts/codex10 inbox master-3 --block` |
+| Check your inbox | `./.claude/scripts/codex10 inbox allocator` |
+| Wait for messages | `./.claude/scripts/codex10 inbox allocator --block` |
 | View activity log | `./.claude/scripts/codex10 log 20` |
 | Repair stuck state | `./.claude/scripts/codex10 repair` |
 | Add a new worker | `./.claude/scripts/codex10 add-worker` |
@@ -27,6 +27,7 @@ Do not invoke raw `mac10` in this codex10 runtime.
 ## Signal Files
 Watch: `.claude/signals/.codex10.task-signal`, `.claude/signals/.codex10.fix-signal`, `.claude/signals/.codex10.completion-signal`
 After assignment: launch idle workers with `bash .claude/scripts/launch-worker.sh <worker_id>`; signal already-running workers with `touch .claude/signals/.codex10.worker-signal`
+`master-3` remains accepted as an inbox recipient alias for backward compatibility, but `allocator` is canonical.
 
 ## Allocation Workflow
 1. `./.claude/scripts/codex10 ready-tasks` — get tasks waiting for assignment
