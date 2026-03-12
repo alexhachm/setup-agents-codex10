@@ -326,11 +326,11 @@ describe('CLI Server', () => {
     assert.strictEqual(sparkAssignmentLog.model_source, 'config-fallback');
   });
 
-  it('should honor model_codex_spark for spark routing when model_spark is unset', async () => {
+  it('should prefer model_codex_spark for spark routing when both spark aliases are set', async () => {
     db.registerWorker(1, '/wt-1', 'agent-1');
 
-    db.setConfig('model_spark', '');
-    db.setConfig('model_codex_spark', 'spark-alias-only-model');
+    db.setConfig('model_spark', 'spark-legacy-model');
+    db.setConfig('model_codex_spark', 'spark-codex-model');
 
     const sparkTaskId = createReadyTask({
       subject: 'Minor cleanup',
@@ -341,12 +341,36 @@ describe('CLI Server', () => {
 
     const sparkAssignment = await sendCommand('assign-task', { task_id: sparkTaskId, worker_id: 1 });
     assert.strictEqual(sparkAssignment.ok, true);
-    assert.strictEqual(sparkAssignment.routing.model, 'spark-alias-only-model');
+    assert.strictEqual(sparkAssignment.routing.model, 'spark-codex-model');
     assert.strictEqual(sparkAssignment.routing.model_source, 'config-fallback');
 
     const sparkAssignmentLog = getAllocatorAssignmentDetails(sparkTaskId);
     assert.ok(sparkAssignmentLog);
-    assert.strictEqual(sparkAssignmentLog.model, 'spark-alias-only-model');
+    assert.strictEqual(sparkAssignmentLog.model, 'spark-codex-model');
+    assert.strictEqual(sparkAssignmentLog.model_source, 'config-fallback');
+  });
+
+  it('should remain compatible with model_spark when model_codex_spark is unset', async () => {
+    db.registerWorker(1, '/wt-1', 'agent-1');
+
+    db.setConfig('model_codex_spark', '');
+    db.setConfig('model_spark', 'spark-legacy-model');
+
+    const sparkTaskId = createReadyTask({
+      subject: 'Minor cleanup',
+      description: 'Small log update',
+      priority: 'low',
+      tier: 1,
+    });
+
+    const sparkAssignment = await sendCommand('assign-task', { task_id: sparkTaskId, worker_id: 1 });
+    assert.strictEqual(sparkAssignment.ok, true);
+    assert.strictEqual(sparkAssignment.routing.model, 'spark-legacy-model');
+    assert.strictEqual(sparkAssignment.routing.model_source, 'config-fallback');
+
+    const sparkAssignmentLog = getAllocatorAssignmentDetails(sparkTaskId);
+    assert.ok(sparkAssignmentLog);
+    assert.strictEqual(sparkAssignmentLog.model, 'spark-legacy-model');
     assert.strictEqual(sparkAssignmentLog.model_source, 'config-fallback');
   });
 
