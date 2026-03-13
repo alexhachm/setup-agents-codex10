@@ -110,7 +110,10 @@ const VALID_COLUMNS = Object.freeze({
     'routing_class', 'routed_model', 'model_source', 'reasoning_effort',
     'usage_model', 'usage_input_tokens', 'usage_output_tokens', 'usage_reasoning_tokens',
     'usage_accepted_prediction_tokens', 'usage_rejected_prediction_tokens', 'usage_cached_tokens',
-    'usage_cache_creation_tokens', 'usage_total_tokens', 'usage_cost_usd',
+    'usage_cache_creation_tokens',
+    'usage_cache_creation_ephemeral_5m_input_tokens',
+    'usage_cache_creation_ephemeral_1h_input_tokens',
+    'usage_total_tokens', 'usage_cost_usd',
     'started_at', 'completed_at', 'result',
   ]),
   workers: new Set(['status', 'domain', 'worktree_path', 'branch', 'tmux_session', 'tmux_window', 'pid', 'current_task_id', 'claimed_by', 'last_heartbeat', 'launched_at', 'tasks_completed']),
@@ -194,6 +197,12 @@ function ensureTaskUsageTelemetryColumns(database) {
   }
   if (!taskCols.includes('usage_cache_creation_tokens')) {
     database.exec("ALTER TABLE tasks ADD COLUMN usage_cache_creation_tokens INTEGER");
+  }
+  if (!taskCols.includes('usage_cache_creation_ephemeral_5m_input_tokens')) {
+    database.exec("ALTER TABLE tasks ADD COLUMN usage_cache_creation_ephemeral_5m_input_tokens INTEGER");
+  }
+  if (!taskCols.includes('usage_cache_creation_ephemeral_1h_input_tokens')) {
+    database.exec("ALTER TABLE tasks ADD COLUMN usage_cache_creation_ephemeral_1h_input_tokens INTEGER");
   }
   if (!taskCols.includes('usage_total_tokens')) {
     database.exec("ALTER TABLE tasks ADD COLUMN usage_total_tokens INTEGER");

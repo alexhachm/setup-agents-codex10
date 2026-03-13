@@ -49,6 +49,8 @@ CREATE TABLE IF NOT EXISTS tasks (
   usage_rejected_prediction_tokens INTEGER,
   usage_cached_tokens INTEGER,
   usage_cache_creation_tokens INTEGER,
+  usage_cache_creation_ephemeral_5m_input_tokens INTEGER,
+  usage_cache_creation_ephemeral_1h_input_tokens INTEGER,
   usage_total_tokens INTEGER,
   usage_cost_usd REAL,
   created_at TEXT NOT NULL DEFAULT (datetime('now')),
