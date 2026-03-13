@@ -46,6 +46,43 @@ function resolveDomainKnowledgePath(domain, knowledgeDir) {
   return filePath;
 }
 
+function parseValidationSpec(validation) {
+  if (validation === undefined || validation === null) return null;
+
+  if (typeof validation === 'string') {
+    const trimmed = validation.trim();
+    if (!trimmed) return null;
+    try {
+      return parseValidationSpec(JSON.parse(trimmed));
+    } catch {
+      return { type: 'string', value: trimmed };
+    }
+  }
+
+  if (Array.isArray(validation)) {
+    return {
+      type: 'array',
+      value: validation
+        .filter((entry) => typeof entry === 'string' && entry.trim())
+        .map((entry) => entry.trim()),
+    };
+  }
+
+  if (typeof validation === 'object') {
+    return { type: 'object', value: validation };
+  }
+
+  return { type: 'string', value: String(validation) };
+}
+
+function isTierValidationShorthand(value) {
+  return typeof value === 'string' && /^tier[23]$/i.test(value.trim());
+}
+
+function appendValidationNoImplicitBuildNote(lines) {
+  lines.push('- Note: Validation shorthand (`tier2`/`tier3`) is metadata only. Run task-provided commands and never assume implicit `npm run build`.');
+}
+
 function buildTaskOverlay(task, worker, projectDir) {
   const lines = [
     '# Current Task',
@@ -76,20 +113,82 @@ function buildTaskOverlay(task, worker, projectDir) {
     }
   }
 
-  if (task.validation) {
-    let val;
-    try {
-      val = typeof task.validation === 'string' ? JSON.parse(task.validation) : task.validation;
-    } catch { val = null; }
-    if (val) {
-      lines.push('## Validation');
-      lines.push('');
-      if (val.build_cmd) lines.push(`- Build: \`${val.build_cmd}\``);
-      if (val.test_cmd) lines.push(`- Test: \`${val.test_cmd}\``);
-      if (val.lint_cmd) lines.push(`- Lint: \`${val.lint_cmd}\``);
-      if (val.custom) lines.push(`- Custom: ${val.custom}`);
-      lines.push('');
+  const validationSpec = parseValidationSpec(task.validation);
+  if (validationSpec) {
+    lines.push('## Validation');
+    lines.push('');
+
+    let hasCommand = false;
+    let usedTierShorthand = false;
+
+    if (validationSpec.type === 'string') {
+      if (isTierValidationShorthand(validationSpec.value)) {
+        usedTierShorthand = true;
+        lines.push(`- Validation metadata: \`${validationSpec.value}\``);
+      } else {
+        hasCommand = true;
+        lines.push(`- Command: \`${validationSpec.value}\``);
+      }
+    } else if (validationSpec.type === 'array') {
+      if (validationSpec.value.length > 0) {
+        hasCommand = true;
+        for (const command of validationSpec.value) {
+          lines.push(`- Command: \`${command}\``);
+        }
+      } else {
+        lines.push('- Validation metadata: empty command list');
+      }
+    } else {
+      const val = validationSpec.value;
+      if (val.build_cmd) {
+        hasCommand = true;
+        lines.push(`- Build: \`${val.build_cmd}\``);
+      }
+      if (val.test_cmd) {
+        hasCommand = true;
+        lines.push(`- Test: \`${val.test_cmd}\``);
+      }
+      if (val.lint_cmd) {
+        hasCommand = true;
+        lines.push(`- Lint: \`${val.lint_cmd}\``);
+      }
+      if (typeof val.command === 'string' && val.command.trim()) {
+        hasCommand = true;
+        lines.push(`- Command: \`${val.command.trim()}\``);
+      }
+      if (Array.isArray(val.commands)) {
+        const commands = val.commands
+          .filter((entry) => typeof entry === 'string' && entry.trim())
+          .map((entry) => entry.trim());
+        if (commands.length > 0) {
+          hasCommand = true;
+          for (const command of commands) {
+            lines.push(`- Command: \`${command}\``);
+          }
+        }
+      }
+      if (typeof val.custom === 'string' && val.custom.trim()) {
+        hasCommand = true;
+        lines.push(`- Custom: ${val.custom.trim()}`);
+      }
+      if (typeof val.tier === 'string' && isTierValidationShorthand(val.tier)) {
+        usedTierShorthand = true;
+        lines.push(`- Validation metadata: \`${val.tier.trim()}\``);
+      }
+      if (!hasCommand && !usedTierShorthand) {
+        try {
+          lines.push(`- Validation metadata: \`${JSON.stringify(val)}\``);
+        } catch {
+          lines.push('- Validation metadata: [unserializable object]');
+        }
+      }
     }
+
+    if (!hasCommand || usedTierShorthand) {
+      appendValidationNoImplicitBuildNote(lines);
+    }
+
+    lines.push('');
   }
 
   // Add knowledge context if available
@@ -164,7 +263,7 @@ You are a coding worker in the mac10 multi-agent system. You receive tasks from 
 5. **Report completion.** Run \`mac10 complete-task <worker_id> <task_id> [pr_url] [branch] [result] [--usage JSON]\` and include usage telemetry when available.
 6. **On failure.** Run \`mac10 fail-task <worker_id> <task_id> <error_description>\`.
 7. **Stay in your domain.** Only modify files related to your assigned domain.
-8. **Validate before shipping.** Build and test your changes before creating a PR.
+8. **Validate before shipping.** Run only explicit task-provided commands. If validation is \`tier2\`/\`tier3\`, treat it as metadata and do not assume implicit \`npm run build\`.
 `;
 }
 
