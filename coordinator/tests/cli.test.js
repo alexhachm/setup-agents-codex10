@@ -1636,6 +1636,93 @@ describe('CLI Server', () => {
     assert.strictEqual(loop.status, 'stopped');
   });
 
+  it('should reject loop-checkpoint for non-active loops without mutating loop state', async () => {
+    for (const status of ['stopped', 'paused']) {
+      const created = await sendCommand('loop', { prompt: `Checkpoint guard ${status}` });
+      assert.strictEqual(created.ok, true);
+
+      const baselineHeartbeat = new Date(Date.now() - 60000).toISOString();
+      const baselineCheckpoint = `baseline-${status}`;
+      db.updateLoop(created.loop_id, {
+        status,
+        iteration_count: 3,
+        last_checkpoint: baselineCheckpoint,
+        last_heartbeat: baselineHeartbeat,
+      });
+
+      const checkpoint = await sendCommand('loop-checkpoint', {
+        loop_id: created.loop_id,
+        summary: 'should not persist',
+      });
+      assert.strictEqual(checkpoint.ok, false);
+      assert.strictEqual(checkpoint.error, `Loop is ${status}, not active`);
+
+      const loop = db.getLoop(created.loop_id);
+      assert.strictEqual(loop.status, status);
+      assert.strictEqual(loop.iteration_count, 3);
+      assert.strictEqual(loop.last_checkpoint, baselineCheckpoint);
+      assert.strictEqual(loop.last_heartbeat, baselineHeartbeat);
+    }
+  });
+
+  it('should reject loop-heartbeat for non-active loops without mutating last_heartbeat', async () => {
+    for (const status of ['stopped', 'paused', 'failed']) {
+      const created = await sendCommand('loop', { prompt: `Heartbeat guard ${status}` });
+      assert.strictEqual(created.ok, true);
+
+      const baselineHeartbeat = new Date(Date.now() - 60000).toISOString();
+      db.updateLoop(created.loop_id, {
+        status,
+        last_heartbeat: baselineHeartbeat,
+      });
+
+      const heartbeat = await sendCommand('loop-heartbeat', { loop_id: created.loop_id });
+      assert.strictEqual(heartbeat.ok, false);
+      assert.strictEqual(heartbeat.error, `Loop is ${status}, not active`);
+
+      const loop = db.getLoop(created.loop_id);
+      assert.strictEqual(loop.status, status);
+      assert.strictEqual(loop.last_heartbeat, baselineHeartbeat);
+    }
+  });
+
+  it('should keep active loop checkpoint and heartbeat behavior unchanged', async () => {
+    const created = await sendCommand('loop', { prompt: 'Active loop checkpoint/heartbeat behavior' });
+    assert.strictEqual(created.ok, true);
+
+    const initialHeartbeat = new Date(Date.now() - 60000).toISOString();
+    db.updateLoop(created.loop_id, {
+      status: 'active',
+      iteration_count: 2,
+      last_checkpoint: 'previous checkpoint',
+      last_heartbeat: initialHeartbeat,
+    });
+
+    const checkpoint = await sendCommand('loop-checkpoint', {
+      loop_id: created.loop_id,
+      summary: 'iteration-3 checkpoint',
+    });
+    assert.strictEqual(checkpoint.ok, true);
+    assert.strictEqual(checkpoint.iteration, 3);
+
+    const afterCheckpoint = db.getLoop(created.loop_id);
+    assert.strictEqual(afterCheckpoint.status, 'active');
+    assert.strictEqual(afterCheckpoint.iteration_count, 3);
+    assert.strictEqual(afterCheckpoint.last_checkpoint, 'iteration-3 checkpoint');
+    assert.notStrictEqual(afterCheckpoint.last_heartbeat, initialHeartbeat);
+
+    const checkpointHeartbeat = afterCheckpoint.last_heartbeat;
+    await new Promise((resolve) => setTimeout(resolve, 5));
+
+    const heartbeat = await sendCommand('loop-heartbeat', { loop_id: created.loop_id });
+    assert.strictEqual(heartbeat.ok, true);
+    assert.strictEqual(heartbeat.status, 'active');
+
+    const afterHeartbeat = db.getLoop(created.loop_id);
+    assert.strictEqual(afterHeartbeat.status, 'active');
+    assert.notStrictEqual(afterHeartbeat.last_heartbeat, checkpointHeartbeat);
+  });
+
   it('should emit a single architect new_request mail and one request_queued event for loop-request creation', async () => {
     const createdLoop = await sendCommand('loop', { prompt: 'Create loop request once' });
     assert.strictEqual(createdLoop.ok, true);
