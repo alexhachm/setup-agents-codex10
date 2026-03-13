@@ -2717,6 +2717,33 @@ describe('CLI Server', () => {
     assert.strictEqual(highAssignmentLog.reasoning_effort, 'mini-effort');
   });
 
+  it('should downscale routing from scalar budget keys when routing_budget_state JSON has invalid array shape', async () => {
+    db.registerWorker(1, '/wt-1', 'agent-1');
+
+    await setConfigValue('model_high', 'high-model');
+    await setConfigValue('model_mini', 'mini-model');
+    await setConfigValue('reasoning_mini', 'mini-effort');
+
+    db.setConfig('routing_budget_state', '[]');
+    db.setConfig('routing_budget_flagship_remaining', '7');
+    db.setConfig('routing_budget_flagship_threshold', '10');
+
+    const highTaskId = createReadyTask({
+      subject: 'Invalid array budget shape should not block scalar fallback',
+      description: 'Critical merge refactor routing path',
+      priority: 'high',
+      tier: 3,
+    });
+
+    const assignment = await sendCommand('assign-task', { task_id: highTaskId, worker_id: 1 });
+    assert.strictEqual(assignment.ok, true);
+    assert.strictEqual(assignment.routing.class, 'high');
+    assert.strictEqual(assignment.routing.model, 'mini-model');
+    assert.strictEqual(assignment.routing.model_source, 'budget-downgrade:model_mini');
+    assert.strictEqual(assignment.routing.reasoning_effort, 'mini-effort');
+    assert.strictEqual(assignment.routing.routing_reason, 'fallback-budget-downgrade:high->mini');
+  });
+
   it('should upgrade routing from legacy scalar budget keys when routing_budget_state JSON is absent', async () => {
     db.registerWorker(1, '/wt-1', 'agent-1');
 
@@ -2801,6 +2828,33 @@ describe('CLI Server', () => {
       assert.strictEqual(task.routed_model, 'gpt-5.3-mini');
       assert.strictEqual(task.model_source, 'fallback-default');
       assert.strictEqual(task.reasoning_effort, 'low');
+    } finally {
+      webServer.stop();
+    }
+  });
+
+  it('should expose scalar fallback budget snapshot in /api/status when routing_budget_state JSON has invalid array shape', async () => {
+    db.setConfig('routing_budget_state', '[]');
+    db.setConfig('routing_budget_flagship_remaining', '8');
+    db.setConfig('routing_budget_flagship_threshold', '10');
+
+    const web = webServer.start(tmpDir, 0);
+    await new Promise((resolve, reject) => {
+      web.once('listening', resolve);
+      web.once('error', reject);
+    });
+    const webPort = web.address().port;
+
+    try {
+      const statusResult = await requestWebJson(webPort, '/api/status');
+      assert.strictEqual(statusResult.status, 200);
+      assert.strictEqual(statusResult.body.routing_budget_source, 'config:budget_thresholds');
+      assert.deepStrictEqual(statusResult.body.routing_budget_state, {
+        source: 'config:budget_thresholds',
+        parsed: { flagship: { remaining: 8, threshold: 10 } },
+        remaining: 8,
+        threshold: 10,
+      });
     } finally {
       webServer.stop();
     }
