@@ -173,8 +173,35 @@ fi
 cp "$SCRIPT_DIR/templates/worker-claude.md" "$CLAUDE_DIR/worker-agents.md"
 
 # Scripts
+extract_loop_precheck_signature() {
+  local file="$1"
+  awk '
+    /# Pre-check: skip Codex spawn if requests are still in-flight/ { in_block=1 }
+    in_block {
+      gsub(/[[:space:]]+/, "", $0)
+      printf "%s", $0
+    }
+    in_block && /ACTIVE_COUNT="\$\{ACTIVE_COUNT:-0\}"/ { exit }
+  ' "$file" 2>/dev/null || true
+}
+
+LOOP_SENTINEL_SOURCE="$SCRIPT_DIR/scripts/loop-sentinel.sh"
+RUNTIME_LOOP_SENTINEL="$SCRIPT_DIR/.codex/scripts/loop-sentinel.sh"
+if [ -f "$RUNTIME_LOOP_SENTINEL" ]; then
+  TRACKED_LOOP_SIG="$(extract_loop_precheck_signature "$LOOP_SENTINEL_SOURCE")"
+  RUNTIME_LOOP_SIG="$(extract_loop_precheck_signature "$RUNTIME_LOOP_SENTINEL")"
+  if [ -n "$TRACKED_LOOP_SIG" ] && [ -n "$RUNTIME_LOOP_SIG" ] && [ "$TRACKED_LOOP_SIG" != "$RUNTIME_LOOP_SIG" ]; then
+    echo "  WARNING: loop-sentinel parser drift detected; preserving .codex mirror parser during setup copy."
+    LOOP_SENTINEL_SOURCE="$RUNTIME_LOOP_SENTINEL"
+  fi
+fi
+
 for s in worker-sentinel.sh loop-sentinel.sh launch-worker.sh signal-wait.sh state-lock.sh; do
-  cp "$SCRIPT_DIR/scripts/$s" "$CLAUDE_DIR/scripts/"
+  SRC="$SCRIPT_DIR/scripts/$s"
+  if [ "$s" = "loop-sentinel.sh" ]; then
+    SRC="$LOOP_SENTINEL_SOURCE"
+  fi
+  cp "$SRC" "$CLAUDE_DIR/scripts/"
 done
 chmod +x "$CLAUDE_DIR/scripts/"*.sh
 
