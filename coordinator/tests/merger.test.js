@@ -351,4 +351,56 @@ describe('Overlap validation command selection', () => {
     assert.ok(commands.includes('npm run validate:task'));
     assert.ok(!commands.includes('npm run build'));
   });
+
+  it('should execute shell-style task.validation commands with compound operators', () => {
+    const { commandLog } = setupMockMergeCli();
+    fs.mkdirSync(path.join(tmpDir, 'coordinator'), { recursive: true });
+    db.setConfig('merge_validation', 'true');
+
+    const { pendingMergeId } = seedOverlapMergeTask('cd coordinator && npm test -- cli.test.js');
+    merger.processQueue(tmpDir);
+
+    const pendingMerge = db.getDb().prepare('SELECT status, error FROM merge_queue WHERE id = ?').get(pendingMergeId);
+    assert.strictEqual(pendingMerge.status, 'merged');
+    assert.strictEqual(pendingMerge.error, null);
+
+    const commands = fs.existsSync(commandLog) ? fs.readFileSync(commandLog, 'utf8') : '';
+    assert.ok(commands.includes('npm test -- cli.test.js'));
+  });
+
+  it('should preserve quoted args in shell-style task.validation commands', () => {
+    setupMockMergeCli();
+    db.setConfig('merge_validation', 'true');
+
+    const outputFile = path.join(tmpDir, 'quoted-output.txt');
+    const { pendingMergeId } = seedOverlapMergeTask(`printf "%s" "quoted value" > "${outputFile}"`);
+    merger.processQueue(tmpDir);
+
+    const pendingMerge = db.getDb().prepare('SELECT status, error FROM merge_queue WHERE id = ?').get(pendingMergeId);
+    assert.strictEqual(pendingMerge.status, 'merged');
+    assert.strictEqual(pendingMerge.error, null);
+    assert.strictEqual(fs.readFileSync(outputFile, 'utf8'), 'quoted value');
+  });
+
+  it('should continue supporting structured build/test/lint validation command objects', () => {
+    const { commandLog } = setupMockMergeCli();
+    db.setConfig('merge_validation', 'true');
+
+    const validation = JSON.stringify({
+      build_cmd: 'npm run build:task',
+      test_cmd: 'npm run test:task',
+      lint_cmd: 'npm run lint:task',
+    });
+    const { pendingMergeId } = seedOverlapMergeTask(validation);
+    merger.processQueue(tmpDir);
+
+    const pendingMerge = db.getDb().prepare('SELECT status, error FROM merge_queue WHERE id = ?').get(pendingMergeId);
+    assert.strictEqual(pendingMerge.status, 'merged');
+    assert.strictEqual(pendingMerge.error, null);
+
+    const commands = fs.existsSync(commandLog) ? fs.readFileSync(commandLog, 'utf8') : '';
+    assert.ok(commands.includes('npm run build:task'));
+    assert.ok(commands.includes('npm run test:task'));
+    assert.ok(commands.includes('npm run lint:task'));
+  });
 });

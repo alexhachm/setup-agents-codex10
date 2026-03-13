@@ -22,6 +22,17 @@ function safeExec(file, args, cwd) {
   return execFileSync(file, args, { encoding: 'utf8', cwd, timeout: 60000 }).trim();
 }
 
+function safeShellExec(command, cwd) {
+  if (process.platform === 'win32') {
+    return execFileSync('cmd.exe', ['/d', '/s', '/c', command], {
+      encoding: 'utf8',
+      cwd,
+      timeout: 60000,
+    }).trim();
+  }
+  return execFileSync('sh', ['-c', command], { encoding: 'utf8', cwd, timeout: 60000 }).trim();
+}
+
 let processing = false;
 let processingStartedAt = 0;
 const PROCESSING_TIMEOUT_MS = 300000; // 5 minutes — reset flag if stuck
@@ -260,21 +271,46 @@ function tryRebase(entry, projectDir) {
 }
 
 function parseValidationCommand(command) {
-  if (typeof command !== 'string' || !command.trim()) return null;
-  const parts = command.trim().split(/\s+/);
-  if (parts.length === 0) return null;
-  return { file: parts[0], args: parts.slice(1) };
+  if (typeof command === 'string') {
+    const trimmed = command.trim();
+    if (!trimmed) return null;
+    return { shell: trimmed };
+  }
+
+  if (!command || typeof command !== 'object') return null;
+  if (typeof command.file !== 'string' || !command.file.trim()) return null;
+  if (command.args !== undefined && !Array.isArray(command.args)) return null;
+
+  const args = Array.isArray(command.args)
+    ? command.args.filter((arg) => typeof arg === 'string')
+    : [];
+  return { file: command.file.trim(), args };
+}
+
+function runValidationCommand(command, cwd) {
+  if (command.shell) {
+    safeShellExec(command.shell, cwd);
+    return;
+  }
+  safeExec(command.file, command.args, cwd);
 }
 
 function getTaskValidationCommands(taskValidation) {
   if (!taskValidation) return [];
 
   let parsedValidation = taskValidation;
-  if (typeof taskValidation === 'string') {
-    try {
-      parsedValidation = JSON.parse(taskValidation);
-    } catch {
-      parsedValidation = taskValidation;
+  if (typeof parsedValidation === 'string') {
+    for (let i = 0; i < 3; i += 1) {
+      const trimmed = parsedValidation.trim();
+      if (!trimmed) break;
+      try {
+        const next = JSON.parse(trimmed);
+        if (next === parsedValidation) break;
+        parsedValidation = next;
+        if (typeof parsedValidation !== 'string') break;
+      } catch {
+        break;
+      }
     }
   }
 
@@ -346,13 +382,13 @@ function runOverlapValidation(entry, projectDir) {
     if (wtPath) {
       // Validate directly in worktree (branch already checked out)
       if (defaultValidation.command) {
-        safeExec(defaultValidation.command.file, defaultValidation.command.args, wtPath);
+        runValidationCommand(defaultValidation.command, wtPath);
       }
     } else {
       // Fallback: old behavior
       safeExec('git', ['checkout', entry.branch], projectDir);
       if (defaultValidation.command) {
-        safeExec(defaultValidation.command.file, defaultValidation.command.args, projectDir);
+        runValidationCommand(defaultValidation.command, projectDir);
       }
     }
 
@@ -371,7 +407,7 @@ function runOverlapValidation(entry, projectDir) {
     }
 
     for (const command of taskValidationCommands) {
-      safeExec(command.file, command.args, validationDir);
+      runValidationCommand(command, validationDir);
     }
 
     if (!wtPath) {
