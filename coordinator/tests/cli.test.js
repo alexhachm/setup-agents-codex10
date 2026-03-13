@@ -553,6 +553,8 @@ describe('CLI Server', () => {
     assert.strictEqual(completedTask.usage_model, null);
     assert.strictEqual(completedTask.usage_input_tokens, null);
     assert.strictEqual(completedTask.usage_output_tokens, null);
+    assert.strictEqual(completedTask.usage_input_audio_tokens, null);
+    assert.strictEqual(completedTask.usage_output_audio_tokens, null);
     assert.strictEqual(completedTask.usage_reasoning_tokens, null);
     assert.strictEqual(completedTask.usage_accepted_prediction_tokens, null);
     assert.strictEqual(completedTask.usage_rejected_prediction_tokens, null);
@@ -706,6 +708,8 @@ describe('CLI Server', () => {
       model: '  gpt-5-codex  ',
       input_tokens: 1200,
       output_tokens: 345,
+      input_audio_tokens: 45,
+      output_audio_tokens: 23,
       reasoning_tokens: 89,
       accepted_prediction_tokens: 21,
       rejected_prediction_tokens: 34,
@@ -730,6 +734,8 @@ describe('CLI Server', () => {
     assert.strictEqual(completedTask.usage_model, 'gpt-5-codex');
     assert.strictEqual(completedTask.usage_input_tokens, usage.input_tokens);
     assert.strictEqual(completedTask.usage_output_tokens, usage.output_tokens);
+    assert.strictEqual(completedTask.usage_input_audio_tokens, usage.input_audio_tokens);
+    assert.strictEqual(completedTask.usage_output_audio_tokens, usage.output_audio_tokens);
     assert.strictEqual(completedTask.usage_reasoning_tokens, usage.reasoning_tokens);
     assert.strictEqual(completedTask.usage_accepted_prediction_tokens, usage.accepted_prediction_tokens);
     assert.strictEqual(completedTask.usage_rejected_prediction_tokens, usage.rejected_prediction_tokens);
@@ -855,6 +861,8 @@ describe('CLI Server', () => {
       model: '  gpt-5-codex  ',
       input_tokens: 1200,
       output_tokens: 345,
+      input_audio_tokens: 45,
+      output_audio_tokens: 23,
       reasoning_tokens: 89,
       accepted_prediction_tokens: 21,
       rejected_prediction_tokens: 34,
@@ -867,6 +875,8 @@ describe('CLI Server', () => {
       model: 'gpt-5-codex',
       input_tokens: 1200,
       output_tokens: 345,
+      input_audio_tokens: 45,
+      output_audio_tokens: 23,
       reasoning_tokens: 89,
       accepted_prediction_tokens: 21,
       rejected_prediction_tokens: 34,
@@ -879,14 +889,15 @@ describe('CLI Server', () => {
       model: 'gpt-5-codex',
       prompt_tokens: 1200,
       completion_tokens: 345,
-      input_tokens_details: { cached_tokens: 67 },
-      prompt_tokens_details: { cached_tokens: 67 },
+      input_tokens_details: { cached_tokens: 67, audio_tokens: 45 },
+      prompt_tokens_details: { cached_tokens: 67, audio_tokens: 45 },
       completion_tokens_details: {
         reasoning_tokens: 89,
+        audio_tokens: 23,
         accepted_prediction_tokens: 21,
         rejected_prediction_tokens: 34,
       },
-      output_tokens_details: { reasoning_tokens: 89 },
+      output_tokens_details: { reasoning_tokens: 89, audio_tokens: 23 },
       cache_creation_tokens: 45,
       total_tokens: 1612,
       cost_usd: 0.0456,
@@ -931,6 +942,8 @@ describe('CLI Server', () => {
       'usage_model',
       'usage_input_tokens',
       'usage_output_tokens',
+      'usage_input_audio_tokens',
+      'usage_output_audio_tokens',
       'usage_reasoning_tokens',
       'usage_accepted_prediction_tokens',
       'usage_rejected_prediction_tokens',
@@ -950,6 +963,8 @@ describe('CLI Server', () => {
       model: 'gpt-5-codex',
       input_tokens: 1200,
       output_tokens: 345,
+      input_audio_tokens: 45,
+      output_audio_tokens: 23,
       reasoning_tokens: 89,
       accepted_prediction_tokens: 21,
       rejected_prediction_tokens: 34,
@@ -1094,6 +1109,8 @@ describe('CLI Server', () => {
       model: 'gpt-5-codex',
       input_tokens: 1200,
       output_tokens: 345,
+      input_audio_tokens: 45,
+      output_audio_tokens: 23,
       reasoning_tokens: 89,
       accepted_prediction_tokens: 21,
       rejected_prediction_tokens: 34,
@@ -1106,6 +1123,8 @@ describe('CLI Server', () => {
       model: 'gpt-5-codex',
       input_tokens: 1200,
       output_tokens: 345,
+      input_audio_tokens: 45,
+      output_audio_tokens: 23,
       reasoning_tokens: 89,
       accepted_prediction_tokens: 21,
       rejected_prediction_tokens: 34,
@@ -1118,14 +1137,15 @@ describe('CLI Server', () => {
       model: 'gpt-5-codex',
       prompt_tokens: 1200,
       completion_tokens: 345,
-      input_tokens_details: { cached_tokens: 67 },
-      prompt_tokens_details: { cached_tokens: 67 },
+      input_tokens_details: { cached_tokens: 67, audio_tokens: 45 },
+      prompt_tokens_details: { cached_tokens: 67, audio_tokens: 45 },
       completion_tokens_details: {
         reasoning_tokens: 89,
+        audio_tokens: 23,
         accepted_prediction_tokens: 21,
         rejected_prediction_tokens: 34,
       },
-      output_tokens_details: { reasoning_tokens: 89 },
+      output_tokens_details: { reasoning_tokens: 89, audio_tokens: 23 },
       cache_creation_tokens: 45,
       total_tokens: 1612,
       cost_usd: 0.0456,
@@ -1167,6 +1187,8 @@ describe('CLI Server', () => {
       'usage_model',
       'usage_input_tokens',
       'usage_output_tokens',
+      'usage_input_audio_tokens',
+      'usage_output_audio_tokens',
       'usage_reasoning_tokens',
       'usage_accepted_prediction_tokens',
       'usage_rejected_prediction_tokens',

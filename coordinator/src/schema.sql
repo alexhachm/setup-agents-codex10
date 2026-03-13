@@ -44,6 +44,8 @@ CREATE TABLE IF NOT EXISTS tasks (
   usage_model TEXT,
   usage_input_tokens INTEGER,
   usage_output_tokens INTEGER,
+  usage_input_audio_tokens INTEGER,
+  usage_output_audio_tokens INTEGER,
   usage_reasoning_tokens INTEGER,
   usage_accepted_prediction_tokens INTEGER,
   usage_rejected_prediction_tokens INTEGER,
