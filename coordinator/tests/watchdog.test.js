@@ -180,4 +180,114 @@ describe('Stale integration recovery', () => {
     );
     assert.ok(failureMail.length >= 1);
   });
+
+  it('sends per-merge allocator notifications with rich context for terminal failed merges', () => {
+    db.registerWorker(1, '/wt-1', 'agent-1');
+
+    const requestId = db.createRequest('Terminal merge failure notifications');
+    db.updateRequest(requestId, { status: 'integrating' });
+
+    const failedTaskAlphaId = db.createTask({
+      request_id: requestId,
+      subject: 'Fix alpha merge',
+      description: 'Alpha merge remediation',
+      domain: 'coordinator-routing',
+      files: ['coordinator/src/watchdog.js', 'coordinator/tests/watchdog.test.js'],
+      tier: 2,
+    });
+    db.updateTask(failedTaskAlphaId, { status: 'completed', assigned_to: 1 });
+
+    const mergedTaskId = db.createTask({
+      request_id: requestId,
+      subject: 'Already merged task',
+      description: 'Successful path',
+      domain: 'coordinator-routing',
+      files: ['coordinator/src/merger.js'],
+      tier: 2,
+    });
+    db.updateTask(mergedTaskId, { status: 'completed', assigned_to: 1 });
+
+    const failedTaskBetaId = db.createTask({
+      request_id: requestId,
+      subject: 'Fix beta merge',
+      description: 'Beta merge remediation',
+      domain: 'coordinator-routing',
+      files: ['coordinator/src/cli-server.js'],
+      tier: 3,
+    });
+    db.updateTask(failedTaskBetaId, { status: 'completed', assigned_to: 1 });
+
+    const failedMergeAlpha = db.enqueueMerge({
+      request_id: requestId,
+      task_id: failedTaskAlphaId,
+      pr_url: 'https://example.com/pr/alpha',
+      branch: 'agent-1/alpha-failed',
+      priority: 0,
+    });
+    const mergedMerge = db.enqueueMerge({
+      request_id: requestId,
+      task_id: mergedTaskId,
+      pr_url: 'https://example.com/pr/success',
+      branch: 'agent-2/merged',
+      priority: 0,
+    });
+    const failedMergeBeta = db.enqueueMerge({
+      request_id: requestId,
+      task_id: failedTaskBetaId,
+      pr_url: 'https://example.com/pr/beta',
+      branch: 'agent-3/beta-failed',
+      priority: 0,
+    });
+
+    db.updateMerge(failedMergeAlpha.lastInsertRowid, { status: 'failed', error: 'alpha checks failed' });
+    db.updateMerge(mergedMerge.lastInsertRowid, { status: 'merged', merged_at: new Date().toISOString() });
+    db.updateMerge(failedMergeBeta.lastInsertRowid, { status: 'failed', error: 'beta branch protection blocked' });
+
+    // Expire remediation grace so watchdog executes Case 4 terminal-failure handling.
+    db.getDb().prepare(
+      "UPDATE merge_queue SET updated_at = datetime('now', '-11 minutes') WHERE id IN (?, ?)"
+    ).run(failedMergeAlpha.lastInsertRowid, failedMergeBeta.lastInsertRowid);
+
+    tick(tmpDir);
+
+    const request = db.getRequest(requestId);
+    assert.strictEqual(request.status, 'failed');
+
+    const allocatorFailureMails = db.checkMail('allocator', false).filter(
+      (mail) => mail.type === 'merge_failed' && mail.payload.request_id === requestId
+    );
+    assert.strictEqual(allocatorFailureMails.length, 2);
+
+    const payloadByMergeId = new Map(
+      allocatorFailureMails.map((mail) => [mail.payload.merge_id, mail.payload])
+    );
+
+    const alphaPayload = payloadByMergeId.get(failedMergeAlpha.lastInsertRowid);
+    assert.ok(alphaPayload);
+    assert.strictEqual(alphaPayload.task_id, failedTaskAlphaId);
+    assert.strictEqual(alphaPayload.branch, 'agent-1/alpha-failed');
+    assert.strictEqual(alphaPayload.pr_url, 'https://example.com/pr/alpha');
+    assert.strictEqual(alphaPayload.error, 'alpha checks failed');
+    assert.deepStrictEqual(alphaPayload.original_task, {
+      subject: 'Fix alpha merge',
+      domain: 'coordinator-routing',
+      files: '["coordinator/src/watchdog.js","coordinator/tests/watchdog.test.js"]',
+      tier: 2,
+      assigned_to: 1,
+    });
+
+    const betaPayload = payloadByMergeId.get(failedMergeBeta.lastInsertRowid);
+    assert.ok(betaPayload);
+    assert.strictEqual(betaPayload.task_id, failedTaskBetaId);
+    assert.strictEqual(betaPayload.branch, 'agent-3/beta-failed');
+    assert.strictEqual(betaPayload.pr_url, 'https://example.com/pr/beta');
+    assert.strictEqual(betaPayload.error, 'beta branch protection blocked');
+    assert.deepStrictEqual(betaPayload.original_task, {
+      subject: 'Fix beta merge',
+      domain: 'coordinator-routing',
+      files: '["coordinator/src/cli-server.js"]',
+      tier: 3,
+      assigned_to: 1,
+    });
+  });
 });
