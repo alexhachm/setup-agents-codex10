@@ -7,7 +7,7 @@ const fs = require('fs');
 const os = require('os');
 const net = require('net');
 const http = require('http');
-const { execFile } = require('child_process');
+const { execFile, execFileSync } = require('child_process');
 
 const db = require('../src/db');
 const cliServer = require('../src/cli-server');
@@ -129,6 +129,41 @@ function runMac10Cli(args) {
       });
     });
   });
+}
+
+function runGit(args, cwd = tmpDir) {
+  return execFileSync('git', args, {
+    cwd,
+    encoding: 'utf8',
+    stdio: ['ignore', 'pipe', 'pipe'],
+  }).trim();
+}
+
+function initStatusGitRepo({ divergeFromOriginMain = false, makeDirty = false } = {}) {
+  runGit(['init', '--initial-branch=main']);
+  runGit(['config', 'user.email', 'status-tests@example.com']);
+  runGit(['config', 'user.name', 'Status Tests']);
+
+  fs.writeFileSync(path.join(tmpDir, '.gitignore'), '.claude/\norigin.git/\n');
+  const trackedFile = path.join(tmpDir, 'status-telemetry.txt');
+  fs.writeFileSync(trackedFile, 'baseline\n');
+  runGit(['add', '.gitignore', 'status-telemetry.txt']);
+  runGit(['commit', '-m', 'initial status telemetry commit']);
+
+  const remotePath = path.join(tmpDir, 'origin.git');
+  runGit(['init', '--bare', remotePath]);
+  runGit(['remote', 'add', 'origin', remotePath]);
+  runGit(['push', '-u', 'origin', 'main']);
+
+  if (divergeFromOriginMain) {
+    fs.appendFileSync(trackedFile, 'local drift\n');
+    runGit(['add', 'status-telemetry.txt']);
+    runGit(['commit', '-m', 'local drift']);
+  }
+
+  if (makeDirty) {
+    fs.writeFileSync(path.join(tmpDir, 'dirty-status-file.txt'), 'dirty worktree\n');
+  }
 }
 
 async function setConfigValue(key, value) {
@@ -285,6 +320,48 @@ describe('CLI Server', () => {
     assert.strictEqual(result.ok, true);
     assert.ok(result.requests.length >= 1);
     assert.strictEqual(result.workers.length, 1);
+    assert.ok(result.source_revision);
+    for (const key of ['current_branch', 'head_commit', 'origin_main_commit', 'ahead_count', 'behind_count', 'dirty_worktree']) {
+      assert.ok(Object.prototype.hasOwnProperty.call(result.source_revision, key));
+    }
+  });
+
+  it('should gracefully fallback source_revision when git metadata is unavailable', async () => {
+    const result = await sendCommand('status', {});
+    assert.strictEqual(result.ok, true);
+    assert.deepStrictEqual(result.source_revision, {
+      current_branch: null,
+      head_commit: null,
+      origin_main_commit: null,
+      ahead_count: null,
+      behind_count: null,
+      dirty_worktree: null,
+    });
+  });
+
+  it('should expose source_revision telemetry when git metadata is available', async () => {
+    initStatusGitRepo();
+
+    const result = await sendCommand('status', {});
+    assert.strictEqual(result.ok, true);
+    assert.strictEqual(result.source_revision.current_branch, 'main');
+    assert.match(result.source_revision.head_commit, /^[0-9a-f]{40}$/);
+    assert.match(result.source_revision.origin_main_commit, /^[0-9a-f]{40}$/);
+    assert.strictEqual(result.source_revision.ahead_count, 0);
+    assert.strictEqual(result.source_revision.behind_count, 0);
+    assert.strictEqual(result.source_revision.dirty_worktree, false);
+  });
+
+  it('should render source_revision warning in CLI status output when revision drift exists', async () => {
+    initStatusGitRepo({ divergeFromOriginMain: true, makeDirty: true });
+
+    const result = await runMac10Cli(['status']);
+    assert.strictEqual(result.status, 0, result.stderr);
+    assert.strictEqual(result.stderr, '');
+    assert.match(result.stdout, /Source Revision: branch:main/);
+    assert.match(result.stdout, /ahead:1/);
+    assert.match(result.stdout, /worktree:dirty/);
+    assert.match(result.stdout, /WARNING: Source revision drift detected/);
   });
 
   it('should keep status request rows single-line and preserve clean descriptions', async () => {

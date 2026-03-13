@@ -804,6 +804,59 @@ function sanitizeBranchName(rawBranch) {
   return trimmed;
 }
 
+function createUnknownSourceRevision() {
+  return {
+    current_branch: null,
+    head_commit: null,
+    origin_main_commit: null,
+    ahead_count: null,
+    behind_count: null,
+    dirty_worktree: null,
+  };
+}
+
+function runGitCommand(args, cwd) {
+  try {
+    const output = execFileSync('git', args, {
+      encoding: 'utf8',
+      cwd,
+      stdio: ['ignore', 'pipe', 'ignore'],
+    });
+    return String(output || '').trim();
+  } catch {
+    return null;
+  }
+}
+
+function parseGitCount(value) {
+  const parsed = Number.parseInt(String(value || '').trim(), 10);
+  return Number.isInteger(parsed) ? parsed : null;
+}
+
+function getSourceRevision(cwd = _projectDir || process.cwd()) {
+  const sourceRevision = createUnknownSourceRevision();
+  const currentBranch = runGitCommand(['branch', '--show-current'], cwd);
+  if (currentBranch) sourceRevision.current_branch = sanitizeBranchName(currentBranch) || currentBranch;
+
+  const headCommit = runGitCommand(['rev-parse', 'HEAD'], cwd);
+  if (headCommit) sourceRevision.head_commit = headCommit;
+
+  const originMainCommit = runGitCommand(['rev-parse', 'origin/main'], cwd);
+  if (originMainCommit) sourceRevision.origin_main_commit = originMainCommit;
+
+  const revisionCounts = runGitCommand(['rev-list', '--left-right', '--count', 'HEAD...origin/main'], cwd);
+  if (revisionCounts) {
+    const [aheadRaw, behindRaw] = revisionCounts.split(/\s+/).filter(Boolean);
+    sourceRevision.ahead_count = parseGitCount(aheadRaw);
+    sourceRevision.behind_count = parseGitCount(behindRaw);
+  }
+
+  const statusPorcelain = runGitCommand(['status', '--porcelain'], cwd);
+  if (statusPorcelain !== null) sourceRevision.dirty_worktree = statusPorcelain.length > 0;
+
+  return sourceRevision;
+}
+
 function parseGitHubRepoFromRemoteUrl(remoteUrl) {
   const trimmed = String(remoteUrl || '').trim();
   if (!trimmed) return '';
@@ -1549,6 +1602,7 @@ function handleCommand(cmd, conn, handlers) {
         const workers = db.getAllWorkers();
         const tasks = db.listTasks();
         const project_dir = db.getConfig('project_dir') || '';
+        const source_revision = getSourceRevision(project_dir || _projectDir || process.cwd());
         const merges = db.getDb().prepare(
           "SELECT * FROM merge_queue WHERE status != 'merged' ORDER BY id DESC"
         ).all();
@@ -1559,6 +1613,7 @@ function handleCommand(cmd, conn, handlers) {
           workers,
           tasks,
           project_dir,
+          source_revision,
           merges,
           budget_state: routingBudget,
           budget_source: routingBudget ? (routingBudget.source || 'none') : 'none',
