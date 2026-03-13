@@ -46,6 +46,71 @@ function resolveDomainKnowledgePath(domain, knowledgeDir) {
   return filePath;
 }
 
+function parseTaskValidation(rawValidation) {
+  if (rawValidation === null || rawValidation === undefined || rawValidation === '') return null;
+  if (typeof rawValidation !== 'string') return rawValidation;
+  const trimmed = rawValidation.trim();
+  if (!trimmed) return null;
+  try {
+    return JSON.parse(trimmed);
+  } catch {
+    return trimmed;
+  }
+}
+
+function isTierValidationLabel(value) {
+  return typeof value === 'string' && /^tier[0-9]+$/i.test(value.trim());
+}
+
+function appendValidationSection(lines, rawValidation) {
+  const validation = parseTaskValidation(rawValidation);
+  if (!validation) return;
+
+  lines.push('## Validation');
+  lines.push('');
+
+  const appendNoImplicitBuildNote = () => {
+    lines.push('- Note: Run only explicit task validation commands; do not infer implicit `npm run build`.');
+  };
+
+  if (typeof validation === 'string') {
+    if (isTierValidationLabel(validation)) {
+      lines.push(`- Validation metadata: \`${validation.trim()}\` (workflow label, not a shell command).`);
+      appendNoImplicitBuildNote();
+      lines.push('');
+      return;
+    }
+    lines.push(`- Command: \`${validation}\``);
+    appendNoImplicitBuildNote();
+    lines.push('');
+    return;
+  }
+
+  if (Array.isArray(validation)) {
+    const commands = [];
+    const metadata = [];
+    for (const entry of validation) {
+      if (typeof entry !== 'string') continue;
+      if (isTierValidationLabel(entry)) metadata.push(entry.trim());
+      else commands.push(entry);
+    }
+    for (const command of commands) lines.push(`- Command: \`${command}\``);
+    for (const label of metadata) lines.push(`- Validation metadata: \`${label}\` (workflow label, not a shell command).`);
+    appendNoImplicitBuildNote();
+    lines.push('');
+    return;
+  }
+
+  if (typeof validation === 'object') {
+    if (validation.build_cmd) lines.push(`- Build: \`${validation.build_cmd}\``);
+    if (validation.test_cmd) lines.push(`- Test: \`${validation.test_cmd}\``);
+    if (validation.lint_cmd) lines.push(`- Lint: \`${validation.lint_cmd}\``);
+    if (validation.custom) lines.push(`- Custom: ${validation.custom}`);
+    appendNoImplicitBuildNote();
+    lines.push('');
+  }
+}
+
 function buildTaskOverlay(task, worker, projectDir) {
   const lines = [
     '# Current Task',
@@ -76,21 +141,7 @@ function buildTaskOverlay(task, worker, projectDir) {
     }
   }
 
-  if (task.validation) {
-    let val;
-    try {
-      val = typeof task.validation === 'string' ? JSON.parse(task.validation) : task.validation;
-    } catch { val = null; }
-    if (val) {
-      lines.push('## Validation');
-      lines.push('');
-      if (val.build_cmd) lines.push(`- Build: \`${val.build_cmd}\``);
-      if (val.test_cmd) lines.push(`- Test: \`${val.test_cmd}\``);
-      if (val.lint_cmd) lines.push(`- Lint: \`${val.lint_cmd}\``);
-      if (val.custom) lines.push(`- Custom: ${val.custom}`);
-      lines.push('');
-    }
-  }
+  appendValidationSection(lines, task.validation);
 
   // Add knowledge context if available
   const knowledgeDir = path.join(projectDir, '.claude', 'knowledge');
@@ -164,7 +215,7 @@ You are a coding worker in the mac10 multi-agent system. You receive tasks from 
 5. **Report completion.** Run \`mac10 complete-task <worker_id> <task_id> [pr_url] [branch] [result] [--usage JSON]\` and include usage telemetry when available.
 6. **On failure.** Run \`mac10 fail-task <worker_id> <task_id> <error_description>\`.
 7. **Stay in your domain.** Only modify files related to your assigned domain.
-8. **Validate before shipping.** Build and test your changes before creating a PR.
+8. **Validate before shipping.** Run explicit task validation commands; tier labels such as \`tier2\`/ \`tier3\` are metadata and do not imply \`npm run build\`.
 `;
 }
 

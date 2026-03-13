@@ -218,6 +218,60 @@ describe('Overlay domain path safety', () => {
   });
 });
 
+describe('Overlay validation guidance', () => {
+  it('should render tier shorthand validation as metadata with no-implicit-build guidance', () => {
+    const content = overlay.buildTaskOverlay({
+      id: 1,
+      request_id: 'req-1',
+      subject: 'Tier metadata task',
+      tier: 2,
+      priority: 'normal',
+      description: 'desc',
+      validation: JSON.stringify(['tier2']),
+    }, { id: 1, branch: 'agent-1', worktree_path: '/wt-1' }, tmpDir);
+
+    assert.ok(content.includes('Validation metadata: `tier2` (workflow label, not a shell command).'));
+    assert.ok(content.includes('do not infer implicit `npm run build`'));
+  });
+
+  it('should render string validation commands directly', () => {
+    const content = overlay.buildTaskOverlay({
+      id: 1,
+      request_id: 'req-1',
+      subject: 'String validation task',
+      tier: 2,
+      priority: 'normal',
+      description: 'desc',
+      validation: 'cd coordinator && npm test -- tests/cli.test.js',
+    }, { id: 1, branch: 'agent-1', worktree_path: '/wt-1' }, tmpDir);
+
+    assert.ok(content.includes('## Validation'));
+    assert.ok(content.includes('- Command: `cd coordinator && npm test -- tests/cli.test.js`'));
+    assert.ok(content.includes('do not infer implicit `npm run build`'));
+  });
+
+  it('should keep structured validation object rendering', () => {
+    const content = overlay.buildTaskOverlay({
+      id: 1,
+      request_id: 'req-1',
+      subject: 'Object validation task',
+      tier: 2,
+      priority: 'normal',
+      description: 'desc',
+      validation: JSON.stringify({
+        build_cmd: 'npm run compile',
+        test_cmd: 'npm test',
+        lint_cmd: 'npm run lint',
+      }),
+    }, { id: 1, branch: 'agent-1', worktree_path: '/wt-1' }, tmpDir);
+
+    assert.ok(content.includes('- Build: `npm run compile`'));
+    assert.ok(content.includes('- Test: `npm test`'));
+    assert.ok(content.includes('- Lint: `npm run lint`'));
+    assert.ok(content.includes('do not infer implicit `npm run build`'));
+  });
+});
+
 describe('CLI server security', () => {
   let server;
   let socketPath;
