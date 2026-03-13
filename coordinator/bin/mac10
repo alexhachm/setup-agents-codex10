@@ -21,6 +21,8 @@ const COMPLETE_TASK_USAGE_FIELDS = Object.freeze({
   input_tokens: 'number',
   output_tokens: 'number',
   reasoning_tokens: 'number',
+  accepted_prediction_tokens: 'number',
+  rejected_prediction_tokens: 'number',
   cached_tokens: 'number',
   cache_creation_tokens: 'number',
   total_tokens: 'number',
@@ -33,27 +35,44 @@ const COMPLETE_TASK_USAGE_ALIASES = Object.freeze({
   cache_read_input_tokens: 'cached_tokens',
 });
 const COMPLETE_TASK_USAGE_DETAIL_ALIASES = Object.freeze({
-  input_tokens_details: { canonicalField: 'cached_tokens', detailField: 'cached_tokens' },
-  prompt_tokens_details: { canonicalField: 'cached_tokens', detailField: 'cached_tokens' },
-  completion_tokens_details: { canonicalField: 'reasoning_tokens', detailField: 'reasoning_tokens' },
-  output_tokens_details: { canonicalField: 'reasoning_tokens', detailField: 'reasoning_tokens' },
+  input_tokens_details: Object.freeze([
+    { canonicalField: 'cached_tokens', detailField: 'cached_tokens' },
+  ]),
+  prompt_tokens_details: Object.freeze([
+    { canonicalField: 'cached_tokens', detailField: 'cached_tokens' },
+  ]),
+  completion_tokens_details: Object.freeze([
+    { canonicalField: 'reasoning_tokens', detailField: 'reasoning_tokens' },
+    { canonicalField: 'accepted_prediction_tokens', detailField: 'accepted_prediction_tokens' },
+    { canonicalField: 'rejected_prediction_tokens', detailField: 'rejected_prediction_tokens' },
+  ]),
+  output_tokens_details: Object.freeze([
+    { canonicalField: 'reasoning_tokens', detailField: 'reasoning_tokens' },
+  ]),
 });
 
-function normalizeCompleteTaskUsageEntry(rawField, rawValue) {
+function normalizeCompleteTaskUsageEntries(rawField, rawValue) {
   if (Object.prototype.hasOwnProperty.call(COMPLETE_TASK_USAGE_DETAIL_ALIASES, rawField)) {
-    const detailAlias = COMPLETE_TASK_USAGE_DETAIL_ALIASES[rawField];
+    const detailAliases = COMPLETE_TASK_USAGE_DETAIL_ALIASES[rawField];
     if (rawValue === null) {
-      return { canonicalField: detailAlias.canonicalField, value: null };
+      return detailAliases.map((detailAlias) => ({ canonicalField: detailAlias.canonicalField, value: null }));
     }
     if (!rawValue || typeof rawValue !== 'object' || Array.isArray(rawValue)) {
       throw new Error(`complete-task usage field "${rawField}" must be an object`);
     }
-    if (!Object.prototype.hasOwnProperty.call(rawValue, detailAlias.detailField)) {
-      return null;
+    const normalizedEntries = [];
+    for (const detailAlias of detailAliases) {
+      if (!Object.prototype.hasOwnProperty.call(rawValue, detailAlias.detailField)) {
+        continue;
+      }
+      normalizedEntries.push({
+        canonicalField: detailAlias.canonicalField,
+        value: rawValue[detailAlias.detailField],
+      });
     }
-    return { canonicalField: detailAlias.canonicalField, value: rawValue[detailAlias.detailField] };
+    return normalizedEntries;
   }
-  return { canonicalField: COMPLETE_TASK_USAGE_ALIASES[rawField] || rawField, value: rawValue };
+  return [{ canonicalField: COMPLETE_TASK_USAGE_ALIASES[rawField] || rawField, value: rawValue }];
 }
 
 function completionStatusLabel(completion) {
@@ -527,16 +546,17 @@ function parseCompleteTaskUsage(rawUsage) {
 
   const aliasNormalized = {};
   for (const [rawField, value] of Object.entries(parsed)) {
-    const normalizedEntry = normalizeCompleteTaskUsageEntry(rawField, value);
-    if (!normalizedEntry) continue;
-    const { canonicalField, value: canonicalValue } = normalizedEntry;
-    if (
-      Object.prototype.hasOwnProperty.call(aliasNormalized, canonicalField)
-      && aliasNormalized[canonicalField] !== canonicalValue
-    ) {
-      throw new Error(`complete-task usage contains conflicting values for "${canonicalField}"`);
+    const normalizedEntries = normalizeCompleteTaskUsageEntries(rawField, value);
+    for (const normalizedEntry of normalizedEntries) {
+      const { canonicalField, value: canonicalValue } = normalizedEntry;
+      if (
+        Object.prototype.hasOwnProperty.call(aliasNormalized, canonicalField)
+        && aliasNormalized[canonicalField] !== canonicalValue
+      ) {
+        throw new Error(`complete-task usage contains conflicting values for "${canonicalField}"`);
+      }
+      aliasNormalized[canonicalField] = canonicalValue;
     }
-    aliasNormalized[canonicalField] = canonicalValue;
   }
 
   const unknownFields = Object.keys(aliasNormalized)

@@ -45,6 +45,8 @@ CREATE TABLE IF NOT EXISTS tasks (
   usage_input_tokens INTEGER,
   usage_output_tokens INTEGER,
   usage_reasoning_tokens INTEGER,
+  usage_accepted_prediction_tokens INTEGER,
+  usage_rejected_prediction_tokens INTEGER,
   usage_cached_tokens INTEGER,
   usage_cache_creation_tokens INTEGER,
   usage_total_tokens INTEGER,

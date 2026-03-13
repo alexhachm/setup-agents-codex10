@@ -429,6 +429,8 @@ const COMPLETE_TASK_USAGE_FIELD_TYPES = Object.freeze({
   input_tokens: 'number',
   output_tokens: 'number',
   reasoning_tokens: 'number',
+  accepted_prediction_tokens: 'number',
+  rejected_prediction_tokens: 'number',
   cached_tokens: 'number',
   cache_creation_tokens: 'number',
   total_tokens: 'number',
@@ -441,10 +443,20 @@ const COMPLETE_TASK_USAGE_FIELD_ALIASES = Object.freeze({
   cache_read_input_tokens: 'cached_tokens',
 });
 const COMPLETE_TASK_USAGE_DETAIL_ALIASES = Object.freeze({
-  input_tokens_details: { canonicalField: 'cached_tokens', detailField: 'cached_tokens' },
-  prompt_tokens_details: { canonicalField: 'cached_tokens', detailField: 'cached_tokens' },
-  completion_tokens_details: { canonicalField: 'reasoning_tokens', detailField: 'reasoning_tokens' },
-  output_tokens_details: { canonicalField: 'reasoning_tokens', detailField: 'reasoning_tokens' },
+  input_tokens_details: Object.freeze([
+    { canonicalField: 'cached_tokens', detailField: 'cached_tokens' },
+  ]),
+  prompt_tokens_details: Object.freeze([
+    { canonicalField: 'cached_tokens', detailField: 'cached_tokens' },
+  ]),
+  completion_tokens_details: Object.freeze([
+    { canonicalField: 'reasoning_tokens', detailField: 'reasoning_tokens' },
+    { canonicalField: 'accepted_prediction_tokens', detailField: 'accepted_prediction_tokens' },
+    { canonicalField: 'rejected_prediction_tokens', detailField: 'rejected_prediction_tokens' },
+  ]),
+  output_tokens_details: Object.freeze([
+    { canonicalField: 'reasoning_tokens', detailField: 'reasoning_tokens' },
+  ]),
 });
 
 const COMPLETE_TASK_USAGE_COLUMN_MAP = Object.freeze({
@@ -452,6 +464,8 @@ const COMPLETE_TASK_USAGE_COLUMN_MAP = Object.freeze({
   input_tokens: 'usage_input_tokens',
   output_tokens: 'usage_output_tokens',
   reasoning_tokens: 'usage_reasoning_tokens',
+  accepted_prediction_tokens: 'usage_accepted_prediction_tokens',
+  rejected_prediction_tokens: 'usage_rejected_prediction_tokens',
   cached_tokens: 'usage_cached_tokens',
   cache_creation_tokens: 'usage_cache_creation_tokens',
   total_tokens: 'usage_total_tokens',
@@ -506,23 +520,41 @@ function mergeBudgetState(raw, overrides = {}) {
 function normalizeCompleteTaskUsageAliasEntries(rawUsage) {
   const aliasNormalized = {};
   for (const [rawField, rawValue] of Object.entries(rawUsage)) {
-    let canonicalField = COMPLETE_TASK_USAGE_FIELD_ALIASES[rawField] || rawField;
-    let canonicalValue = rawValue;
     if (Object.prototype.hasOwnProperty.call(COMPLETE_TASK_USAGE_DETAIL_ALIASES, rawField)) {
-      const detailAlias = COMPLETE_TASK_USAGE_DETAIL_ALIASES[rawField];
-      canonicalField = detailAlias.canonicalField;
+      const detailAliases = COMPLETE_TASK_USAGE_DETAIL_ALIASES[rawField];
+      const detailEntries = [];
       if (rawValue === null) {
-        canonicalValue = null;
+        for (const detailAlias of detailAliases) {
+          detailEntries.push({ canonicalField: detailAlias.canonicalField, canonicalValue: null });
+        }
       } else {
         if (!rawValue || typeof rawValue !== 'object' || Array.isArray(rawValue)) {
           throw new Error(`Field "usage.${rawField}" must be an object`);
         }
-        if (!Object.prototype.hasOwnProperty.call(rawValue, detailAlias.detailField)) {
-          continue;
+        for (const detailAlias of detailAliases) {
+          if (!Object.prototype.hasOwnProperty.call(rawValue, detailAlias.detailField)) {
+            continue;
+          }
+          detailEntries.push({
+            canonicalField: detailAlias.canonicalField,
+            canonicalValue: rawValue[detailAlias.detailField],
+          });
         }
-        canonicalValue = rawValue[detailAlias.detailField];
       }
+      for (const { canonicalField, canonicalValue } of detailEntries) {
+        if (
+          Object.prototype.hasOwnProperty.call(aliasNormalized, canonicalField)
+          && aliasNormalized[canonicalField] !== canonicalValue
+        ) {
+          throw new Error(`Field "usage" contains conflicting values for key "${canonicalField}"`);
+        }
+        aliasNormalized[canonicalField] = canonicalValue;
+      }
+      continue;
     }
+
+    const canonicalField = COMPLETE_TASK_USAGE_FIELD_ALIASES[rawField] || rawField;
+    const canonicalValue = rawValue;
     if (
       Object.prototype.hasOwnProperty.call(aliasNormalized, canonicalField)
       && aliasNormalized[canonicalField] !== canonicalValue
