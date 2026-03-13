@@ -186,6 +186,24 @@ function getWorkerTaskStartedEvents(workerId, taskId) {
   });
 }
 
+function getCoordinatorOwnershipMismatchEvents(command, workerId, taskId) {
+  const entries = db.getLog(500, 'coordinator');
+  const normalizedWorkerId = workerId === undefined || workerId === null ? null : String(workerId);
+  const normalizedTaskId = taskId === undefined || taskId === null ? null : String(taskId);
+  return entries.filter((entry) => {
+    if (entry.action !== 'ownership_mismatch') return false;
+    try {
+      const details = JSON.parse(entry.details);
+      if (!details || details.command !== command) return false;
+      if (normalizedWorkerId && String(details.worker_id) !== normalizedWorkerId) return false;
+      if (normalizedTaskId && String(details.task_id) !== normalizedTaskId) return false;
+      return true;
+    } catch {
+      return false;
+    }
+  });
+}
+
 describe('CLI Server', () => {
   it('should respond to ping', async () => {
     const result = await sendCommand('ping', {});
@@ -378,12 +396,16 @@ describe('CLI Server', () => {
 
     const result = await sendCommand('start-task', { worker_id: '1', task_id: String(taskId) });
     assert.strictEqual(result.ok, false);
-    assert.strictEqual(result.error, 'task_not_assigned');
+    assert.strictEqual(result.error, 'ownership_mismatch');
+    assert.strictEqual(result.reason, 'task_assignment_mismatch');
 
     const task = db.getTask(taskId);
     assert.strictEqual(task.status, 'assigned');
     assert.strictEqual(task.started_at, null);
+    assert.strictEqual(db.getWorker(1).current_task_id, taskId);
+    assert.strictEqual(db.getWorker(2).current_task_id, taskId);
     assert.strictEqual(getWorkerTaskStartedEvents(1, taskId).length, 0);
+    assert.strictEqual(getCoordinatorOwnershipMismatchEvents('start-task', 1, taskId).length, 1);
   });
 
   it('should treat duplicate start-task calls on owned in-progress task as idempotent', async () => {
@@ -462,6 +484,99 @@ describe('CLI Server', () => {
     const completedWorker = db.getWorker(1);
     assert.strictEqual(completedWorker.status, 'completed_task');
     assert.strictEqual(completedWorker.tasks_completed, 1);
+  });
+
+  it('should reject complete-task when task is assigned to another worker and preserve ownership state', async () => {
+    db.registerWorker(1, '/wt-1', 'agent-1');
+    db.registerWorker(2, '/wt-2', 'agent-2');
+    const reqId = db.createRequest('Complete-task ownership guard');
+    const taskId = db.createTask({ request_id: reqId, subject: 'Task ownership', description: 'Worker 2 owns this task' });
+    const startedAt = '2026-01-01T10:00:00.000Z';
+    db.updateTask(taskId, {
+      status: 'in_progress',
+      assigned_to: 2,
+      started_at: startedAt,
+      branch: null,
+      pr_url: null,
+      result: null,
+      completed_at: null,
+    });
+    db.updateWorker(1, { status: 'busy', current_task_id: taskId, tasks_completed: 0 });
+    db.updateWorker(2, { status: 'busy', current_task_id: taskId, tasks_completed: 3 });
+
+    const result = await sendCommand('complete-task', {
+      worker_id: '1',
+      task_id: String(taskId),
+      pr_url: 'https://github.com/org/repo/pull/99',
+      branch: 'agent-1',
+      result: 'Attempted takeover',
+    });
+    assert.strictEqual(result.ok, false);
+    assert.strictEqual(result.error, 'ownership_mismatch');
+    assert.strictEqual(result.reason, 'task_assignment_mismatch');
+
+    const task = db.getTask(taskId);
+    assert.strictEqual(task.status, 'in_progress');
+    assert.strictEqual(task.assigned_to, 2);
+    assert.strictEqual(task.started_at, startedAt);
+    assert.strictEqual(task.pr_url, null);
+    assert.strictEqual(task.branch, null);
+    assert.strictEqual(task.completed_at, null);
+    assert.strictEqual(task.result, null);
+
+    const workerOne = db.getWorker(1);
+    assert.strictEqual(workerOne.status, 'busy');
+    assert.strictEqual(workerOne.current_task_id, taskId);
+    assert.strictEqual(workerOne.tasks_completed, 0);
+
+    const workerTwo = db.getWorker(2);
+    assert.strictEqual(workerTwo.status, 'busy');
+    assert.strictEqual(workerTwo.current_task_id, taskId);
+    assert.strictEqual(workerTwo.tasks_completed, 3);
+
+    assert.strictEqual(getCoordinatorOwnershipMismatchEvents('complete-task', 1, taskId).length, 1);
+  });
+
+  it('should reject fail-task when task is assigned to another worker and preserve ownership state', async () => {
+    db.registerWorker(1, '/wt-1', 'agent-1');
+    db.registerWorker(2, '/wt-2', 'agent-2');
+    const reqId = db.createRequest('Fail-task ownership guard');
+    const taskId = db.createTask({ request_id: reqId, subject: 'Task ownership', description: 'Worker 2 owns this task' });
+    const startedAt = '2026-01-01T11:00:00.000Z';
+    db.updateTask(taskId, {
+      status: 'in_progress',
+      assigned_to: 2,
+      started_at: startedAt,
+      result: null,
+      completed_at: null,
+    });
+    db.updateWorker(1, { status: 'busy', current_task_id: taskId });
+    db.updateWorker(2, { status: 'busy', current_task_id: taskId });
+
+    const result = await sendCommand('fail-task', {
+      worker_id: '1',
+      task_id: String(taskId),
+      error: 'Attempted unauthorized failure',
+    });
+    assert.strictEqual(result.ok, false);
+    assert.strictEqual(result.error, 'ownership_mismatch');
+    assert.strictEqual(result.reason, 'task_assignment_mismatch');
+
+    const task = db.getTask(taskId);
+    assert.strictEqual(task.status, 'in_progress');
+    assert.strictEqual(task.assigned_to, 2);
+    assert.strictEqual(task.started_at, startedAt);
+    assert.strictEqual(task.completed_at, null);
+    assert.strictEqual(task.result, null);
+
+    const workerOne = db.getWorker(1);
+    assert.strictEqual(workerOne.status, 'busy');
+    assert.strictEqual(workerOne.current_task_id, taskId);
+    const workerTwo = db.getWorker(2);
+    assert.strictEqual(workerTwo.status, 'busy');
+    assert.strictEqual(workerTwo.current_task_id, taskId);
+
+    assert.strictEqual(getCoordinatorOwnershipMismatchEvents('fail-task', 1, taskId).length, 1);
   });
 
   it('should persist identical usage values for canonical API payloads and alias-only CLI payloads', async () => {

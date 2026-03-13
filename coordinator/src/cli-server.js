@@ -765,6 +765,59 @@ function parseWorkerId(rawWorkerId) {
   return parsed;
 }
 
+function parseTaskId(rawTaskId) {
+  const parsed = parseInt(rawTaskId, 10);
+  if (!Number.isInteger(parsed) || parsed <= 0) return null;
+  return parsed;
+}
+
+function validateWorkerTaskOwnership(command, rawWorkerId, rawTaskId) {
+  const worker = db.getWorker(rawWorkerId);
+  const task = db.getTask(rawTaskId);
+  const parsedWorkerId = parseWorkerId(rawWorkerId);
+  const parsedTaskId = parseTaskId(rawTaskId);
+
+  let reason = null;
+  if (!worker) {
+    reason = 'worker_not_found';
+  } else if (!task) {
+    reason = 'task_not_found';
+  } else {
+    const parsedAssignedWorkerId = parseWorkerId(task.assigned_to);
+    const parsedCurrentTaskId = parseTaskId(worker.current_task_id);
+    if (parsedWorkerId === null || parsedAssignedWorkerId === null || parsedAssignedWorkerId !== parsedWorkerId) {
+      reason = 'task_assignment_mismatch';
+    } else if (parsedTaskId === null || parsedCurrentTaskId === null || parsedCurrentTaskId !== parsedTaskId) {
+      reason = 'worker_current_task_mismatch';
+    }
+  }
+
+  if (reason) {
+    db.log('coordinator', 'ownership_mismatch', {
+      command,
+      worker_id: rawWorkerId || null,
+      task_id: rawTaskId || null,
+      reason,
+      task_assigned_to: task ? task.assigned_to : null,
+      worker_current_task_id: worker ? worker.current_task_id : null,
+    });
+    return {
+      ok: false,
+      response: { ok: false, error: 'ownership_mismatch', reason },
+      worker: null,
+      task: null,
+    };
+  }
+
+  return {
+    ok: true,
+    worker,
+    task,
+    worker_id: parsedWorkerId,
+    task_id: parsedTaskId,
+  };
+}
+
 function canonicalBranchForWorkerId(rawWorkerId) {
   const workerId = parseWorkerId(rawWorkerId);
   if (workerId === null) return '';
@@ -1422,24 +1475,12 @@ function handleCommand(cmd, conn, handlers) {
       }
       case 'start-task': {
         const { worker_id, task_id } = args;
-        const worker = db.getWorker(worker_id);
-        if (!worker) {
-          respond(conn, { ok: false, error: 'Worker not found' });
+        const ownership = validateWorkerTaskOwnership('start-task', worker_id, task_id);
+        if (!ownership.ok) {
+          respond(conn, ownership.response);
           break;
         }
-
-        const task = db.getTask(task_id);
-        if (!task) {
-          respond(conn, { ok: false, error: 'Task not found' });
-          break;
-        }
-
-        const parsedWorkerId = parseWorkerId(worker_id);
-        const parsedAssignedWorkerId = parseWorkerId(task.assigned_to);
-        if (parsedWorkerId === null || parsedAssignedWorkerId === null || parsedAssignedWorkerId !== parsedWorkerId) {
-          respond(conn, { ok: false, error: 'task_not_assigned' });
-          break;
-        }
+        const { task } = ownership;
 
         if (task.status === 'completed' || task.status === 'failed') {
           respond(conn, { ok: false, error: 'task_not_startable' });
@@ -1486,9 +1527,14 @@ function handleCommand(cmd, conn, handlers) {
       }
       case 'complete-task': {
         const { worker_id, task_id, pr_url, result, branch } = args;
+        const ownership = validateWorkerTaskOwnership('complete-task', worker_id, task_id);
+        if (!ownership.ok) {
+          respond(conn, ownership.response);
+          break;
+        }
+        const worker = ownership.worker;
         const usage = normalizeCompleteTaskUsagePayload(args.usage);
         const usageTaskFields = mapUsagePayloadToTaskFields(usage);
-        const worker = db.getWorker(worker_id);
         const completionPrNormalizationCwd = worker && worker.worktree_path
           ? worker.worktree_path
           : (_projectDir || process.cwd());
@@ -1652,7 +1698,12 @@ function handleCommand(cmd, conn, handlers) {
       }
       case 'fail-task': {
         const { worker_id: wid, task_id: tid, error } = args;
-        const failedTask = db.getTask(tid);
+        const ownership = validateWorkerTaskOwnership('fail-task', wid, tid);
+        if (!ownership.ok) {
+          respond(conn, ownership.response);
+          break;
+        }
+        const failedTask = ownership.task;
         const routingMeta = failedTask ? {
           subject: failedTask.subject,
           description: failedTask.description,
