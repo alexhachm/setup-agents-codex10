@@ -564,10 +564,31 @@ function recoverStaleIntegrations(now, options = {}) {
         request_id: req.id,
         error: `Merge failures: ${details}`,
       });
-      db.sendMail('allocator', 'merge_failed', {
-        request_id: req.id,
-        error: details,
-      });
+      for (const failedMerge of failedMerges) {
+        const sourceTask = failedMerge.task_id ? db.getTask(failedMerge.task_id) : null;
+        db.sendMail('allocator', 'merge_failed', {
+          request_id: req.id,
+          merge_id: failedMerge.id,
+          task_id: failedMerge.task_id,
+          branch: failedMerge.branch,
+          pr_url: failedMerge.pr_url,
+          status: failedMerge.status,
+          reason: 'stale_integration_terminal_failure',
+          subject: sourceTask ? sourceTask.subject : null,
+          domain: sourceTask ? sourceTask.domain : null,
+          files: sourceTask ? sourceTask.files : null,
+          tier: sourceTask ? sourceTask.tier : null,
+          assigned_to: sourceTask ? sourceTask.assigned_to : null,
+          original_task: sourceTask ? {
+            subject: sourceTask.subject,
+            domain: sourceTask.domain,
+            files: sourceTask.files,
+            tier: sourceTask.tier,
+            assigned_to: sourceTask.assigned_to,
+          } : null,
+          error: failedMerge.error || `Merge failed: ${failedMerge.status}`,
+        });
+      }
       db.log('coordinator', 'stale_integration_recovered', {
         request_id: req.id,
         reason: 'merge_failures',
