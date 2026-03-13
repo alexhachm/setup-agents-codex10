@@ -38,8 +38,6 @@ If the blocked inbox call returns no actionable messages, run polling fallback:
 
 Do not wait on `.codex10.task-signal`, `.codex10.fix-signal`, or `.codex10.completion-signal`; these signal files are deprecated and not produced in codex10 runtime.
 
-`master-3` remains accepted as an inbox recipient alias for backward compatibility, but `allocator` is canonical.
-
 ## Allocation Workflow
 1. `./.codex/scripts/codex10 ready-tasks` — get tasks waiting for assignment
 2. `./.codex/scripts/codex10 worker-status` — find idle workers with matching domains and skip workers where `claimed_by` is set
