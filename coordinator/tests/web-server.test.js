@@ -214,4 +214,50 @@ describe('Web status telemetry contract', () => {
       tasksMap.get(taskWithFallbackModelSource).model_source
     );
   });
+
+  it('exposes persisted usage_payload_json and parsed usage payload in status/task APIs', async () => {
+    const reqId = db.createRequest('Usage payload exposure request');
+    const taskId = db.createTask({
+      request_id: reqId,
+      subject: 'Task with raw usage payload',
+      description: 'Usage payload should round-trip through API surfaces',
+      domain: 'coordinator-telemetry',
+      tier: 2,
+    });
+    const usagePayload = {
+      model: 'gpt-5-codex',
+      input_tokens: 123,
+      output_tokens: 45,
+      total_tokens: 168,
+      cost_usd: 0.0168,
+      service_tier: 'priority',
+      thoughts_token_count: 4,
+    };
+    db.updateTask(taskId, {
+      usage_payload_json: JSON.stringify(usagePayload),
+    });
+
+    const statusResult = await requestStatus();
+    assert.strictEqual(statusResult.status, 200);
+    const statusTask = findTask(statusResult.body, taskId);
+    assert.ok(statusTask);
+    assert.strictEqual(statusTask.usage_payload_json, JSON.stringify(usagePayload));
+    assert.deepStrictEqual(statusTask.usage, usagePayload);
+    assert.deepStrictEqual(statusTask.usage_payload, usagePayload);
+    assert.deepStrictEqual(statusTask.usagePayload, usagePayload);
+
+    const tasksResult = await requestJson('/api/tasks');
+    assert.strictEqual(tasksResult.status, 200);
+    const tasksTask = tasksResult.body.find((task) => task.id === taskId);
+    assert.ok(tasksTask);
+    assert.strictEqual(tasksTask.usage_payload_json, JSON.stringify(usagePayload));
+    assert.deepStrictEqual(tasksTask.usage, usagePayload);
+
+    const requestResult = await requestJson(`/api/requests/${reqId}`);
+    assert.strictEqual(requestResult.status, 200);
+    const requestTask = requestResult.body.tasks.find((task) => task.id === taskId);
+    assert.ok(requestTask);
+    assert.strictEqual(requestTask.usage_payload_json, JSON.stringify(usagePayload));
+    assert.deepStrictEqual(requestTask.usage, usagePayload);
+  });
 });

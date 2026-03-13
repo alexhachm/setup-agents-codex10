@@ -156,6 +156,21 @@ function normalizeRoutingField(value) {
   return trimmed ? trimmed : null;
 }
 
+function parseUsagePayloadJson(value) {
+  if (value === undefined || value === null) return null;
+  if (typeof value === 'object') {
+    return isPlainObject(value) ? value : null;
+  }
+  const trimmed = String(value).trim();
+  if (!trimmed) return null;
+  try {
+    const parsed = JSON.parse(trimmed);
+    return isPlainObject(parsed) ? parsed : null;
+  } catch {
+    return null;
+  }
+}
+
 function normalizeUsdNumber(value) {
   const parsed = Number(value);
   return Number.isFinite(parsed) ? parsed : 0;
@@ -280,12 +295,16 @@ function hydrateTasks(tasks, telemetry = null) {
   const hydratedTasks = tasks.map((task) => {
     const taskId = Number.parseInt(task && task.id, 10);
     const fallback = taskTelemetry.byTaskId.get(taskId) || null;
+    const usagePayload = parseUsagePayloadJson(task && task.usage_payload_json);
+    const usageObject = isPlainObject(task && task.usage) ? task.usage : usagePayload;
     return {
       ...task,
       routing_class: pickRoutingField(task.routing_class, fallback && fallback.routing_class),
       routed_model: pickRoutingField(task.routed_model, fallback && fallback.routed_model),
       model_source: pickRoutingField(task.model_source, fallback && fallback.model_source),
       reasoning_effort: pickRoutingField(task.reasoning_effort, fallback && fallback.reasoning_effort),
+      ...(usageObject ? { usage: usageObject } : {}),
+      ...(usagePayload ? { usage_payload: usagePayload, usagePayload } : {}),
     };
   });
   return { tasks: hydratedTasks, telemetry: taskTelemetry };

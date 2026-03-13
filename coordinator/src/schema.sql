@@ -42,6 +42,7 @@ CREATE TABLE IF NOT EXISTS tasks (
   model_source TEXT,
   reasoning_effort TEXT,
   usage_model TEXT,
+  usage_payload_json TEXT,
   usage_input_tokens INTEGER,
   usage_output_tokens INTEGER,
   usage_input_audio_tokens INTEGER,
