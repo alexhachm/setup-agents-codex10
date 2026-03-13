@@ -46,6 +46,47 @@ function resolveDomainKnowledgePath(domain, knowledgeDir) {
   return filePath;
 }
 
+function formatValidationScalar(value) {
+  if (typeof value === 'string') {
+    const trimmed = value.trim();
+    return trimmed ? trimmed : null;
+  }
+  if (typeof value === 'number' || typeof value === 'boolean') {
+    return String(value);
+  }
+  return null;
+}
+
+function normalizeValidationPayload(validation) {
+  if (validation == null) return null;
+
+  let parsed = validation;
+  if (typeof parsed === 'string') {
+    const trimmed = parsed.trim();
+    if (!trimmed) return null;
+    try {
+      parsed = JSON.parse(trimmed);
+    } catch {
+      return { type: 'string', value: trimmed };
+    }
+  }
+
+  if (Array.isArray(parsed)) {
+    const commands = parsed
+      .map((item) => formatValidationScalar(item) || JSON.stringify(item))
+      .filter((item) => item && item !== 'null');
+    if (commands.length === 0) return null;
+    return { type: 'array', commands };
+  }
+
+  if (parsed && typeof parsed === 'object') {
+    return { type: 'object', value: parsed };
+  }
+
+  const scalar = formatValidationScalar(parsed);
+  return scalar ? { type: 'string', value: scalar } : null;
+}
+
 function buildTaskOverlay(task, worker, projectDir) {
   const lines = [
     '# Current Task',
@@ -76,20 +117,52 @@ function buildTaskOverlay(task, worker, projectDir) {
     }
   }
 
-  if (task.validation) {
-    let val;
-    try {
-      val = typeof task.validation === 'string' ? JSON.parse(task.validation) : task.validation;
-    } catch { val = null; }
-    if (val) {
-      lines.push('## Validation');
-      lines.push('');
-      if (val.build_cmd) lines.push(`- Build: \`${val.build_cmd}\``);
-      if (val.test_cmd) lines.push(`- Test: \`${val.test_cmd}\``);
-      if (val.lint_cmd) lines.push(`- Lint: \`${val.lint_cmd}\``);
-      if (val.custom) lines.push(`- Custom: ${val.custom}`);
-      lines.push('');
+  const validation = normalizeValidationPayload(task.validation);
+  if (validation) {
+    lines.push('## Validation');
+    lines.push('');
+    lines.push('- Note: `validation` shorthand (for example `tier2` / `tier3`) is workflow metadata. Run explicit task commands only; never infer implicit `npm run build`.');
+    if (validation.type === 'string') {
+      lines.push(`- Validation: \`${validation.value}\``);
+    } else if (validation.type === 'array') {
+      for (const command of validation.commands) {
+        lines.push(`- Command: \`${command}\``);
+      }
+    } else {
+      const val = validation.value;
+      let hasStructuredField = false;
+      if (val.build_cmd) {
+        lines.push(`- Build: \`${val.build_cmd}\``);
+        hasStructuredField = true;
+      }
+      if (val.test_cmd) {
+        lines.push(`- Test: \`${val.test_cmd}\``);
+        hasStructuredField = true;
+      }
+      if (val.lint_cmd) {
+        lines.push(`- Lint: \`${val.lint_cmd}\``);
+        hasStructuredField = true;
+      }
+      if (Array.isArray(val.custom)) {
+        for (const customEntry of val.custom) {
+          const custom = formatValidationScalar(customEntry) || JSON.stringify(customEntry);
+          if (custom && custom !== 'null') {
+            lines.push(`- Custom: ${custom}`);
+            hasStructuredField = true;
+          }
+        }
+      } else if (val.custom != null) {
+        const custom = formatValidationScalar(val.custom) || JSON.stringify(val.custom);
+        if (custom && custom !== 'null') {
+          lines.push(`- Custom: ${custom}`);
+          hasStructuredField = true;
+        }
+      }
+      if (!hasStructuredField) {
+        lines.push(`- Payload: \`${JSON.stringify(val)}\``);
+      }
     }
+    lines.push('');
   }
 
   // Add knowledge context if available
