@@ -25,6 +25,10 @@ const COMPLETE_TASK_USAGE_FIELDS = Object.freeze({
   total_tokens: 'number',
   cost_usd: 'number',
 });
+const COMPLETE_TASK_USAGE_ALIASES = Object.freeze({
+  cache_creation_input_tokens: 'cache_creation_tokens',
+  cache_read_input_tokens: 'cached_tokens',
+});
 
 function completionStatusLabel(completion) {
   const total = Number(completion && completion.total) || 0;
@@ -495,7 +499,16 @@ function parseCompleteTaskUsage(rawUsage) {
     throw new Error('complete-task usage must be a JSON object');
   }
 
-  const unknownFields = Object.keys(parsed)
+  const aliasNormalized = {};
+  for (const [rawField, value] of Object.entries(parsed)) {
+    const canonicalField = COMPLETE_TASK_USAGE_ALIASES[rawField] || rawField;
+    if (Object.prototype.hasOwnProperty.call(aliasNormalized, canonicalField) && aliasNormalized[canonicalField] !== value) {
+      throw new Error(`complete-task usage contains conflicting values for "${canonicalField}"`);
+    }
+    aliasNormalized[canonicalField] = value;
+  }
+
+  const unknownFields = Object.keys(aliasNormalized)
     .filter((field) => !Object.prototype.hasOwnProperty.call(COMPLETE_TASK_USAGE_FIELDS, field));
   if (unknownFields.length) {
     throw new Error(`complete-task usage contains unsupported field(s): ${unknownFields.join(', ')}`);
@@ -503,8 +516,8 @@ function parseCompleteTaskUsage(rawUsage) {
 
   const normalized = {};
   for (const [field, expectedType] of Object.entries(COMPLETE_TASK_USAGE_FIELDS)) {
-    if (!Object.prototype.hasOwnProperty.call(parsed, field)) continue;
-    const value = parsed[field];
+    if (!Object.prototype.hasOwnProperty.call(aliasNormalized, field)) continue;
+    const value = aliasNormalized[field];
     if (value === null) {
       normalized[field] = null;
       continue;
