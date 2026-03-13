@@ -17,6 +17,7 @@ let tmpDir;
 let server;
 let socketPath;
 let loopCreatedEvents;
+let originalNpmConfigIfPresent;
 
 function waitForCliServerReady() {
   return new Promise((resolve) => {
@@ -32,6 +33,7 @@ function waitForCliServerReady() {
 }
 
 beforeEach(async () => {
+  originalNpmConfigIfPresent = process.env.npm_config_if_present;
   tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'mac10-cli-'));
   fs.mkdirSync(path.join(tmpDir, '.claude', 'state'), { recursive: true });
   db.init(tmpDir);
@@ -50,6 +52,11 @@ beforeEach(async () => {
 afterEach(() => {
   cliServer.stop();
   db.close();
+  if (originalNpmConfigIfPresent === undefined) {
+    delete process.env.npm_config_if_present;
+  } else {
+    process.env.npm_config_if_present = originalNpmConfigIfPresent;
+  }
   fs.rmSync(tmpDir, { recursive: true, force: true });
 });
 
@@ -276,6 +283,34 @@ describe('CLI Server', () => {
     const result = await sendCommand('ping', {});
     assert.strictEqual(result.ok, true);
     assert.ok(result.ts);
+  });
+
+  it('should default npm_config_if_present to true at startup when unset', async () => {
+    delete process.env.npm_config_if_present;
+    cliServer.stop();
+    server = cliServer.start(tmpDir, {
+      onTaskCompleted: () => {},
+      onLoopCreated: (loopId, prompt) => {
+        loopCreatedEvents.push({ loopId, prompt });
+      },
+    });
+    await waitForCliServerReady();
+
+    assert.strictEqual(process.env.npm_config_if_present, 'true');
+  });
+
+  it('should preserve explicit npm_config_if_present overrides at startup', async () => {
+    process.env.npm_config_if_present = 'false';
+    cliServer.stop();
+    server = cliServer.start(tmpDir, {
+      onTaskCompleted: () => {},
+      onLoopCreated: (loopId, prompt) => {
+        loopCreatedEvents.push({ loopId, prompt });
+      },
+    });
+    await waitForCliServerReady();
+
+    assert.strictEqual(process.env.npm_config_if_present, 'false');
   });
 
   it('should create a request', async () => {
