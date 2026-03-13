@@ -1423,7 +1423,7 @@ describe('CLI Server', () => {
 
     const loopRequest = await sendCommand('loop-request', {
       loop_id: createdLoop.loop_id,
-      description: 'Loop request notification dedupe',
+      description: 'Update loop-request notification dedupe in coordinator/src/db.js so coordinator/tests/cli.test.js coverage keeps a single architect new_request emission and one request_queued event, because production incident triage can stall when duplicate queue signals hide true pending work.',
     });
     assert.strictEqual(loopRequest.ok, true);
     assert.strictEqual(loopRequest.deduplicated, false);
@@ -1443,13 +1443,13 @@ describe('CLI Server', () => {
 
     const clean = await sendCommand('loop-request', {
       loop_id: createdLoop.loop_id,
-      description: 'Clean loop request summary',
+      description: 'Update loop-request row formatting in coordinator/bin/mac10 and coordinator/src/db.js so CLI output stays single-line under control characters, because production on-call triage can misread status rows and delay incident response when newline injection appears.',
     });
     assert.strictEqual(clean.ok, true);
 
     const malicious = await sendCommand('loop-request', {
       loop_id: createdLoop.loop_id,
-      description: 'Malicious loop row\n  999 [failed] T9 injected\tcol\rret\u0001ctrl',
+      description: 'Replace coordinator/bin/mac10 row rendering; 999 [failed] T9 injected\tcol\rret\u0001ctrl. Production incident risk: control-char spoofing can hide real loop status during on-call triage, so sanitize and preserve single-line output for request rows.',
     });
     assert.strictEqual(malicious.ok, true);
 
@@ -1466,11 +1466,65 @@ describe('CLI Server', () => {
     const maliciousRow = rows.find((line) => line.includes(String(malicious.request_id)));
     assert.ok(cleanRow);
     assert.ok(maliciousRow);
-    assert.match(cleanRow, /Clean loop request summary/);
-    assert.match(maliciousRow, /999 \[failed\] T9 injected/);
+    assert.match(cleanRow, /Update loop-request row formatting/);
+    assert.match(maliciousRow, /999 \[failed\] T9/);
     assert.ok(!maliciousRow.includes('\t'));
     assert.ok(!maliciousRow.includes('\r'));
     assert.ok(!result.stdout.includes('\n  999 [failed] T9 injected\tcol\rret'));
+  });
+
+  it('should accept Replace-starting loop requests when WHERE/WHY quality signals are present', async () => {
+    const createdLoop = await sendCommand('loop', { prompt: 'WHAT verb Replace regression' });
+    assert.strictEqual(createdLoop.ok, true);
+
+    const description = 'Replace loop-request WHAT verb detection in coordinator/src/db.js and add regression coverage in coordinator/tests/cli.test.js so concrete submissions are not rejected, because production request throughput and incident remediation can be delayed by false quality-gate suppression.';
+    const loopRequest = await sendCommand('loop-request', {
+      loop_id: createdLoop.loop_id,
+      description,
+    });
+    assert.strictEqual(loopRequest.ok, true);
+    assert.strictEqual(loopRequest.deduplicated, false);
+    assert.ok(loopRequest.request_id);
+
+    const qualityRejections = db.getLog(200, 'loop')
+      .filter((entry) => entry.action === 'loop_request_rejected_quality')
+      .map((entry) => {
+        try {
+          return JSON.parse(entry.details);
+        } catch {
+          return null;
+        }
+      })
+      .filter(Boolean)
+      .filter((details) => details.loop_id === createdLoop.loop_id);
+    assert.strictEqual(qualityRejections.length, 0);
+  });
+
+  it('should keep rejecting vague loop requests that lack concrete WHERE signals', async () => {
+    const createdLoop = await sendCommand('loop', { prompt: 'Reject vague loop request' });
+    assert.strictEqual(createdLoop.ok, true);
+
+    const suppressed = await sendCommand('loop-request', {
+      loop_id: createdLoop.loop_id,
+      description: 'Improve overall request quality and make production behavior better quickly.',
+    });
+    assert.strictEqual(suppressed.ok, true);
+    assert.strictEqual(suppressed.request_id, null);
+    assert.strictEqual(db.listLoopRequests(createdLoop.loop_id).length, 0);
+
+    const qualityRejections = db.getLog(200, 'loop')
+      .filter((entry) => entry.action === 'loop_request_rejected_quality')
+      .map((entry) => {
+        try {
+          return JSON.parse(entry.details);
+        } catch {
+          return null;
+        }
+      })
+      .filter(Boolean)
+      .filter((details) => details.loop_id === createdLoop.loop_id);
+    assert.strictEqual(qualityRejections.length, 1);
+    assert.match(qualityRejections[0].reason, /missing concrete file path signal \(WHERE\)/);
   });
 
   it('should reject assign-task for claimed workers without mutating task or claim state', async () => {

@@ -809,24 +809,85 @@ function stopLoop(id) {
 
 // --- Loop-request helpers ---
 
+const LOOP_REQUEST_FILE_SIGNAL_RE = /\b(?:[a-z0-9._-]+\/)+[a-z0-9._-]+(?:\.[a-z0-9]{1,12})?\b/i;
+const LOOP_REQUEST_WHAT_SIGNAL_RE = /\b(add|remove|update|fix|prevent|refactor|validate|guard|handle|enforce|dedup|dedupe|retry|throttle|cache|instrument|harden|optimi[sz]e|replace|sync|align|extend|improve)\b/i;
+const LOOP_REQUEST_WHY_SIGNAL_RE = /\b(production|prod|incident|outage|risk|regression|failure|downtime|availability|integrity|security|data\s+loss|overspend|latency|throughput)\b/i;
+
+function normalizeLoopRequestText(value) {
+  return String(value || '')
+    .replace(/[\u0000-\u001f\u007f]+/g, ' ')
+    .replace(/\s+/g, ' ')
+    .trim();
+}
+
+function parseIntConfig(key, fallback, { min = 0, max = Number.MAX_SAFE_INTEGER } = {}) {
+  const raw = getConfig(key);
+  if (raw === null || raw === undefined || String(raw).trim() === '') return fallback;
+  const parsed = Number.parseInt(String(raw).trim(), 10);
+  if (!Number.isFinite(parsed)) return fallback;
+  if (parsed < min) return min;
+  if (parsed > max) return max;
+  return parsed;
+}
+
+function evaluateLoopRequestQuality(description, minDescriptionChars = 180) {
+  const text = normalizeLoopRequestText(description);
+  const issues = [];
+  if (text.length < minDescriptionChars) {
+    issues.push(`description too short (${text.length} < ${minDescriptionChars})`);
+  }
+  if (!LOOP_REQUEST_FILE_SIGNAL_RE.test(text)) {
+    issues.push('missing concrete file path signal (WHERE)');
+  }
+  if (!LOOP_REQUEST_WHAT_SIGNAL_RE.test(text)) {
+    issues.push('missing concrete change verb (WHAT)');
+  }
+  if (!LOOP_REQUEST_WHY_SIGNAL_RE.test(text)) {
+    issues.push('missing production impact/risk signal (WHY)');
+  }
+  return { ok: issues.length === 0, issues };
+}
+
 function createLoopRequest(description, loopId) {
+  const normalizedDescription = normalizeLoopRequestText(description);
+  const qualityGateEnabled = String(getConfig('loop_request_quality_gate') || 'true').toLowerCase() !== 'false';
+  const minDescriptionChars = parseIntConfig('loop_request_min_description_chars', 180, { min: 80, max: 5000 });
+
+  if (qualityGateEnabled) {
+    const quality = evaluateLoopRequestQuality(normalizedDescription, minDescriptionChars);
+    if (!quality.ok) {
+      log('loop', 'loop_request_rejected_quality', {
+        loop_id: loopId,
+        reason: quality.issues.join('; '),
+        description: normalizedDescription.slice(0, 300),
+      });
+      return {
+        id: null,
+        deduplicated: true,
+        suppressed: true,
+        reason: 'quality_gate',
+        details: quality.issues,
+      };
+    }
+  }
+
   const d = getDb();
   const txn = d.transaction(() => {
     // Check for active (non-completed/failed) request from same loop with same description
     const existing = d.prepare(`
       SELECT id FROM requests
       WHERE loop_id = ? AND description = ? AND status NOT IN ('completed', 'failed')
-    `).get(loopId, description);
+    `).get(loopId, normalizedDescription);
     if (existing) {
       return { id: existing.id, deduplicated: true };
     }
     const id = 'req-' + crypto.randomBytes(4).toString('hex');
     d.prepare(`
       INSERT INTO requests (id, description, loop_id) VALUES (?, ?, ?)
-    `).run(id, description, loopId);
-    sendMail('architect', 'new_request', { request_id: id, description, loop_id: loopId });
-    sendMail('master-1', 'request_acknowledged', { request_id: id, description, loop_id: loopId });
-    log('loop', 'loop_request_created', { request_id: id, loop_id: loopId, description });
+    `).run(id, normalizedDescription, loopId);
+    sendMail('architect', 'new_request', { request_id: id, description: normalizedDescription, loop_id: loopId });
+    sendMail('master-1', 'request_acknowledged', { request_id: id, description: normalizedDescription, loop_id: loopId });
+    log('loop', 'loop_request_created', { request_id: id, loop_id: loopId, description: normalizedDescription });
     return { id, deduplicated: false };
   });
   return txn();
@@ -851,5 +912,6 @@ module.exports = {
   findOverlappingTasks, getOverlapsForRequest, hasOverlappingMergedTasks,
   createChange, getChange, listChanges, updateChange,
   createLoop, getLoop, updateLoop, listLoops, stopLoop,
+  evaluateLoopRequestQuality,
   createLoopRequest, listLoopRequests,
 };
