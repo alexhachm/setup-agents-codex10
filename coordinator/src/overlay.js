@@ -46,6 +46,20 @@ function resolveDomainKnowledgePath(domain, knowledgeDir) {
   return filePath;
 }
 
+function parseTaskValidation(validation) {
+  if (!validation) return null;
+  if (typeof validation === 'object') return validation;
+  if (typeof validation !== 'string') return null;
+  const trimmed = validation.trim();
+  if (!trimmed) return null;
+  try {
+    return JSON.parse(trimmed);
+  } catch {
+    // Support shorthand validation payloads (for example "tier2").
+    return trimmed;
+  }
+}
+
 function buildTaskOverlay(task, worker, projectDir) {
   const lines = [
     '# Current Task',
@@ -76,20 +90,21 @@ function buildTaskOverlay(task, worker, projectDir) {
     }
   }
 
-  if (task.validation) {
-    let val;
-    try {
-      val = typeof task.validation === 'string' ? JSON.parse(task.validation) : task.validation;
-    } catch { val = null; }
-    if (val) {
-      lines.push('## Validation');
-      lines.push('');
-      if (val.build_cmd) lines.push(`- Build: \`${val.build_cmd}\``);
-      if (val.test_cmd) lines.push(`- Test: \`${val.test_cmd}\``);
-      if (val.lint_cmd) lines.push(`- Lint: \`${val.lint_cmd}\``);
-      if (val.custom) lines.push(`- Custom: ${val.custom}`);
-      lines.push('');
+  const validation = parseTaskValidation(task.validation);
+  if (validation) {
+    lines.push('## Validation');
+    lines.push('');
+    if (typeof validation === 'string') {
+      lines.push(`- Validation: \`${validation}\``);
+      lines.push('- Validation shorthand values are routing hints, not shell commands.');
+    } else {
+      if (validation.build_cmd) lines.push(`- Build: \`${validation.build_cmd}\``);
+      if (validation.test_cmd) lines.push(`- Test: \`${validation.test_cmd}\``);
+      if (validation.lint_cmd) lines.push(`- Lint: \`${validation.lint_cmd}\``);
+      if (validation.custom) lines.push(`- Custom: ${validation.custom}`);
     }
+    lines.push('- Follow task-provided validation only; do not assume `npm run build`.');
+    lines.push('');
   }
 
   // Add knowledge context if available
@@ -131,6 +146,7 @@ function buildTaskOverlay(task, worker, projectDir) {
   lines.push('- `mac10 heartbeat <worker_id>` — Send heartbeat (every 30s during work)');
   lines.push('- `mac10 complete-task <worker_id> <task_id> [pr_url] [branch] [result] [--usage JSON]` — Report completion (include usage telemetry when available)');
   lines.push('- `mac10 fail-task <worker_id> <task_id> <error>` — Report failure');
+  lines.push('- Follow task validation instructions exactly; do not run implicit `npm run build` commands.');
   lines.push('');
 
   return lines.join('\n');
@@ -164,7 +180,7 @@ You are a coding worker in the mac10 multi-agent system. You receive tasks from 
 5. **Report completion.** Run \`mac10 complete-task <worker_id> <task_id> [pr_url] [branch] [result] [--usage JSON]\` and include usage telemetry when available.
 6. **On failure.** Run \`mac10 fail-task <worker_id> <task_id> <error_description>\`.
 7. **Stay in your domain.** Only modify files related to your assigned domain.
-8. **Validate before shipping.** Build and test your changes before creating a PR.
+8. **Validate before shipping.** Run task-provided validation commands before creating a PR (no implicit \`npm run build\`).
 `;
 }
 
