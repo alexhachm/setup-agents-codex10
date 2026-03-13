@@ -151,7 +151,7 @@ done
 mkdir -p "$CLAUDE_DIR/docs"
 cp "$SCRIPT_DIR/templates/docs/"*.md "$CLAUDE_DIR/docs/"
 
-# Force-refresh key orchestration prompts/guidance on setup reruns.
+# Force-refresh key orchestration prompts/guidance on setup reruns (including allocator role doc mirror).
 cp "$SCRIPT_DIR/templates/commands/allocate-loop.md" "$CLAUDE_DIR/commands/allocate-loop.md"
 cp "$SCRIPT_DIR/templates/commands/allocate-loop.md" "$CLAUDE_DIR/commands-codex10/allocate-loop.md"
 cp "$SCRIPT_DIR/templates/commands/architect-loop.md" "$CLAUDE_DIR/commands/architect-loop.md"
