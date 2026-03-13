@@ -182,6 +182,7 @@ Escalate directly to full reset + `/scan-codebase` when any of these is true:
 If `commits_since >= 5` and no full-reset condition is met:
 1. Write the review queue and inspect every listed file in a bounded pass:
    ```bash
+   mkdir -p .claude/state/reports
    printf '%s\n' "$changed_files" | sed '/^$/d' > .claude/state/reports/master2-incremental-scan-files.txt
    ```
 2. Refresh `codebase-map.json` scan timestamp:
