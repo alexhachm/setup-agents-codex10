@@ -32,7 +32,7 @@ Read these files to learn from previous work:
 Determine your worker ID from the git branch (`agent-N` → worker N).
 
 ```bash
-WORKER_ID=$(git branch --show-current | sed 's/agent-//')
+WORKER_ID=$(git branch --show-current | sed -E 's/^agent-([0-9]+).*/\1/')
 ```
 
 Fetch your assigned task:
@@ -78,7 +78,7 @@ On conflict: `git rebase --abort && git reset --hard origin/main`
    ```bash
    ./.claude/scripts/codex10 heartbeat $WORKER_ID
    ```
-5. **Self-verify**: run the build/test commands from the task's validation field
+5. **Self-verify**: run only explicit validation commands listed in the task payload/description. Treat tier shorthand metadata (for example `tier2`) as non-executable and never infer implicit `npm run build`.
 
 ## Step 6: Validate
 
@@ -91,6 +91,7 @@ Validation depends on the task tier:
 
 - If `build-validator` reports `VALIDATION_FAILED` → fix the issue and re-validate
 - If `verify-app` reports `VERIFICATION_FAILED` → fix the issue and re-validate
+- Validation shorthand like `tier2`/`tier3` is workflow metadata, not a shell command.
 - Only proceed to shipping when all applicable validators pass
 
 ## Step 7: Ship
@@ -102,6 +103,8 @@ Run `/commit-push-pr` to create the PR.
 After the PR is created:
 
 ```bash
+./.claude/scripts/codex10 complete-task $WORKER_ID $TASK_ID [pr_url] [branch] [result] [--usage JSON]
+# Example with usage telemetry:
 ./.claude/scripts/codex10 complete-task $WORKER_ID $TASK_ID "$PR_URL" "$BRANCH" "Brief result summary" --usage '{"model":"gpt-5","input_tokens":1200,"output_tokens":350,"cached_input_tokens":90,"total_tokens":1550,"cost_usd":0.42}'
 ```
 

@@ -46,6 +46,117 @@ function resolveDomainKnowledgePath(domain, knowledgeDir) {
   return filePath;
 }
 
+function isTierValidationShorthand(value) {
+  return typeof value === 'string' && /^tier\d+$/i.test(value.trim());
+}
+
+function parseValidationPayload(validation) {
+  if (validation == null) return null;
+  let parsed = validation;
+
+  if (typeof parsed === 'string') {
+    const trimmed = parsed.trim();
+    if (!trimmed) return null;
+    parsed = trimmed;
+    for (let i = 0; i < 2; i += 1) {
+      if (typeof parsed !== 'string') break;
+      try {
+        const next = JSON.parse(parsed);
+        if (next === parsed) break;
+        parsed = next;
+      } catch {
+        break;
+      }
+    }
+    if (typeof parsed === 'string') parsed = parsed.trim();
+  }
+
+  return parsed;
+}
+
+function appendValidationSection(lines, validation) {
+  const parsed = parseValidationPayload(validation);
+  if (!parsed) return;
+
+  const noImplicitBuildNote = '- Note: Tier validation metadata is not an executable shell command. Run only explicit task validation commands (no implicit `npm run build`).';
+
+  lines.push('## Validation');
+  lines.push('');
+
+  if (typeof parsed === 'string') {
+    if (isTierValidationShorthand(parsed)) {
+      lines.push(`- Metadata: \`${parsed}\``);
+      lines.push(noImplicitBuildNote);
+    } else {
+      lines.push(`- Command: \`${parsed}\``);
+    }
+    lines.push('');
+    return;
+  }
+
+  if (Array.isArray(parsed)) {
+    const values = parsed
+      .map((item) => (typeof item === 'string' ? item.trim() : ''))
+      .filter(Boolean);
+    let hasTierMetadata = false;
+    for (const value of values) {
+      if (isTierValidationShorthand(value)) {
+        hasTierMetadata = true;
+        lines.push(`- Metadata: \`${value}\``);
+      } else {
+        lines.push(`- Command: \`${value}\``);
+      }
+    }
+    if (values.length === 0) lines.push(`- Raw: \`${JSON.stringify(parsed)}\``);
+    if (hasTierMetadata) lines.push(noImplicitBuildNote);
+    lines.push('');
+    return;
+  }
+
+  if (typeof parsed === 'object') {
+    let hasLine = false;
+    let hasTierMetadata = false;
+
+    if (typeof parsed.build_cmd === 'string' && parsed.build_cmd.trim()) {
+      lines.push(`- Build: \`${parsed.build_cmd.trim()}\``);
+      hasLine = true;
+    }
+    if (typeof parsed.test_cmd === 'string' && parsed.test_cmd.trim()) {
+      lines.push(`- Test: \`${parsed.test_cmd.trim()}\``);
+      hasLine = true;
+    }
+    if (typeof parsed.lint_cmd === 'string' && parsed.lint_cmd.trim()) {
+      lines.push(`- Lint: \`${parsed.lint_cmd.trim()}\``);
+      hasLine = true;
+    }
+    if (typeof parsed.command === 'string' && parsed.command.trim()) {
+      lines.push(`- Command: \`${parsed.command.trim()}\``);
+      hasLine = true;
+    }
+    if (Array.isArray(parsed.commands)) {
+      const commands = parsed.commands
+        .map((item) => (typeof item === 'string' ? item.trim() : ''))
+        .filter(Boolean);
+      for (const command of commands) {
+        lines.push(`- Command: \`${command}\``);
+        hasLine = true;
+      }
+    }
+    if (typeof parsed.custom === 'string' && parsed.custom.trim()) {
+      lines.push(`- Custom: ${parsed.custom.trim()}`);
+      hasLine = true;
+    }
+    if (typeof parsed.tier === 'string' && isTierValidationShorthand(parsed.tier)) {
+      lines.push(`- Metadata: \`${parsed.tier.trim()}\``);
+      hasLine = true;
+      hasTierMetadata = true;
+    }
+    if (!hasLine) lines.push(`- Raw: \`${JSON.stringify(parsed)}\``);
+    if (hasTierMetadata) lines.push(noImplicitBuildNote);
+    lines.push('');
+  }
+}
+
 function buildTaskOverlay(task, worker, projectDir) {
   const lines = [
     '# Current Task',
@@ -76,21 +187,7 @@ function buildTaskOverlay(task, worker, projectDir) {
     }
   }
 
-  if (task.validation) {
-    let val;
-    try {
-      val = typeof task.validation === 'string' ? JSON.parse(task.validation) : task.validation;
-    } catch { val = null; }
-    if (val) {
-      lines.push('## Validation');
-      lines.push('');
-      if (val.build_cmd) lines.push(`- Build: \`${val.build_cmd}\``);
-      if (val.test_cmd) lines.push(`- Test: \`${val.test_cmd}\``);
-      if (val.lint_cmd) lines.push(`- Lint: \`${val.lint_cmd}\``);
-      if (val.custom) lines.push(`- Custom: ${val.custom}`);
-      lines.push('');
-    }
-  }
+  appendValidationSection(lines, task.validation);
 
   // Add knowledge context if available
   const knowledgeDir = path.join(projectDir, '.claude', 'knowledge');
