@@ -395,6 +395,24 @@ function formatRequestSummaryDescription(description) {
   return sanitizeSingleLineCell(description).slice(0, 60);
 }
 
+function normalizeLoopRequestsPayload(payload) {
+  if (!payload || typeof payload !== 'object') {
+    return { ok: false, error: 'Invalid loop-requests response', requests: [] };
+  }
+  const requests = Array.isArray(payload.requests) ? payload.requests : [];
+  return { ...payload, requests };
+}
+
+function printLoopRequestsRows(requests) {
+  if (requests.length === 0) {
+    console.log('No requests for this loop.');
+    return;
+  }
+  for (const r of requests) {
+    console.log(`  ${r.id} [${r.status}] ${r.tier ? `T${r.tier}` : '  '} ${formatRequestSummaryDescription(r.description)}`);
+  }
+}
+
 function normalizeSourceRevision(data) {
   const sourceRevision = data && data.source_revision && typeof data.source_revision === 'object'
     ? data.source_revision
@@ -1497,17 +1515,13 @@ async function main() {
           console.error('Usage: mac10 loop-requests <loop_id> [--json]');
           process.exit(1);
         }
-        result = await send(socketPath, 'loop-requests', { loop_id: parseInt(argv[1], 10) });
+        result = normalizeLoopRequestsPayload(
+          await send(socketPath, 'loop-requests', { loop_id: parseInt(argv[1], 10) })
+        );
         if (jsonMode) {
           console.log(JSON.stringify(result, null, 2));
         } else if (result.ok) {
-          if (result.requests.length === 0) {
-            console.log('No requests for this loop.');
-          } else {
-            for (const r of result.requests) {
-              console.log(`  ${r.id} [${r.status}] ${r.tier ? `T${r.tier}` : '  '} ${formatRequestSummaryDescription(r.description)}`);
-            }
-          }
+          printLoopRequestsRows(result.requests);
         } else {
           console.error(result.error);
         }
