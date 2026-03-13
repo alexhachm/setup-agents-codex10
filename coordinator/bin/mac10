@@ -345,6 +345,45 @@ function formatRequestSummaryDescription(description) {
   return sanitizeSingleLineCell(description).slice(0, 60);
 }
 
+function normalizeSourceRevision(data) {
+  const sourceRevision = data && data.source_revision && typeof data.source_revision === 'object'
+    ? data.source_revision
+    : {};
+  const normalizeCommit = (value) => {
+    if (value === undefined || value === null) return null;
+    const trimmed = String(value).trim();
+    return trimmed || null;
+  };
+  const normalizeCount = (value) => {
+    if (value === undefined || value === null || value === '') return null;
+    const parsed = Number.parseInt(String(value), 10);
+    return Number.isInteger(parsed) ? parsed : null;
+  };
+  return {
+    current_branch: normalizeCommit(sourceRevision.current_branch),
+    head_commit: normalizeCommit(sourceRevision.head_commit),
+    origin_main_commit: normalizeCommit(sourceRevision.origin_main_commit),
+    ahead_count: normalizeCount(sourceRevision.ahead_count),
+    behind_count: normalizeCount(sourceRevision.behind_count),
+    dirty_worktree: typeof sourceRevision.dirty_worktree === 'boolean' ? sourceRevision.dirty_worktree : null,
+  };
+}
+
+function summarizeCommit(commit) {
+  if (!commit) return 'unknown';
+  return commit.slice(0, 12);
+}
+
+function hasRevisionDrift(sourceRevision) {
+  if (!sourceRevision) return false;
+  const differsFromOriginMain = Boolean(
+    sourceRevision.head_commit
+    && sourceRevision.origin_main_commit
+    && sourceRevision.head_commit !== sourceRevision.origin_main_commit
+  );
+  return differsFromOriginMain || sourceRevision.dirty_worktree === true;
+}
+
 function isUnsupportedRpcError(message) {
   if (!message) return false;
   return /unknown command|unsupported|not implemented|invalid command/i.test(String(message));
@@ -1466,6 +1505,16 @@ FLAGS:
 function printStatus(data) {
   if (data.project_dir) {
     console.log(`\n=== Project: ${data.project_dir} ===`);
+  }
+  const sourceRevision = normalizeSourceRevision(data);
+  const dirtyLabel = sourceRevision.dirty_worktree === null
+    ? 'unknown'
+    : (sourceRevision.dirty_worktree ? 'dirty' : 'clean');
+  const aheadLabel = sourceRevision.ahead_count === null ? 'unknown' : String(sourceRevision.ahead_count);
+  const behindLabel = sourceRevision.behind_count === null ? 'unknown' : String(sourceRevision.behind_count);
+  console.log(`  Source Revision: branch:${sourceRevision.current_branch || 'unknown'} head:${summarizeCommit(sourceRevision.head_commit)} origin/main:${summarizeCommit(sourceRevision.origin_main_commit)} ahead:${aheadLabel} behind:${behindLabel} worktree:${dirtyLabel}`);
+  if (hasRevisionDrift(sourceRevision)) {
+    console.log('  WARNING: Source revision drift detected (head differs from origin/main or worktree is dirty).');
   }
 
   console.log('\n=== Requests ===');
