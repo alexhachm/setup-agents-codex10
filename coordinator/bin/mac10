@@ -652,10 +652,15 @@ function parseCompleteTaskUsage(rawUsage) {
   }
 
   const aliasNormalized = {};
+  const unknownUsageFields = {};
   for (const [rawField, value] of Object.entries(parsed)) {
     const normalizedEntries = normalizeCompleteTaskUsageEntries(rawField, value);
     for (const normalizedEntry of normalizedEntries) {
       const { canonicalField, value: canonicalValue } = normalizedEntry;
+      if (!Object.prototype.hasOwnProperty.call(COMPLETE_TASK_USAGE_FIELDS, canonicalField)) {
+        unknownUsageFields[canonicalField] = canonicalValue;
+        continue;
+      }
       if (
         Object.prototype.hasOwnProperty.call(aliasNormalized, canonicalField)
         && aliasNormalized[canonicalField] !== canonicalValue
@@ -664,12 +669,6 @@ function parseCompleteTaskUsage(rawUsage) {
       }
       aliasNormalized[canonicalField] = canonicalValue;
     }
-  }
-
-  const unknownFields = Object.keys(aliasNormalized)
-    .filter((field) => !Object.prototype.hasOwnProperty.call(COMPLETE_TASK_USAGE_FIELDS, field));
-  if (unknownFields.length) {
-    throw new Error(`complete-task usage contains unsupported field(s): ${unknownFields.join(', ')}`);
   }
 
   const normalized = {};
@@ -703,7 +702,8 @@ function parseCompleteTaskUsage(rawUsage) {
     normalized[field] = value;
   }
 
-  return normalized;
+  if (!Object.keys(unknownUsageFields).length) return normalized;
+  return { ...normalized, ...unknownUsageFields };
 }
 
 function parseCompleteTaskArgs(optionalArgs, rawWorkerId, projectCwd = process.cwd()) {
