@@ -458,6 +458,8 @@ const COMPLETE_TASK_USAGE_FIELD_TYPES = Object.freeze({
   rejected_prediction_tokens: 'number',
   cached_tokens: 'number',
   cache_creation_tokens: 'number',
+  ephemeral_5m_input_tokens: 'number',
+  ephemeral_1h_input_tokens: 'number',
   total_tokens: 'number',
   cost_usd: 'number',
 });
@@ -497,6 +499,8 @@ const COMPLETE_TASK_USAGE_COLUMN_MAP = Object.freeze({
   rejected_prediction_tokens: 'usage_rejected_prediction_tokens',
   cached_tokens: 'usage_cached_tokens',
   cache_creation_tokens: 'usage_cache_creation_tokens',
+  ephemeral_5m_input_tokens: 'usage_cache_creation_ephemeral_5m_input_tokens',
+  ephemeral_1h_input_tokens: 'usage_cache_creation_ephemeral_1h_input_tokens',
   total_tokens: 'usage_total_tokens',
   cost_usd: 'usage_cost_usd',
 });
@@ -584,23 +588,32 @@ function normalizeCompleteTaskUsageAliasEntries(rawUsage) {
       if (unsupportedNestedFields.length) {
         throw new Error(`Field "usage.cache_creation" contains unsupported keys: ${unsupportedNestedFields.join(', ')}`);
       }
+      const cacheCreationEntries = [];
       let cacheCreationTokens = 0;
-      let hasNestedValue = false;
       for (const nestedField of COMPLETE_TASK_USAGE_CACHE_CREATION_OBJECT_ALIASES) {
         if (!Object.prototype.hasOwnProperty.call(rawValue, nestedField)) continue;
-        hasNestedValue = true;
         const nestedValue = rawValue[nestedField];
         validateCompleteTaskUsageIntegerField(`usage.cache_creation.${nestedField}`, nestedValue);
         cacheCreationTokens += nestedValue;
+        cacheCreationEntries.push({
+          canonicalField: nestedField,
+          canonicalValue: nestedValue,
+        });
       }
-      if (!hasNestedValue) continue;
-      if (
-        Object.prototype.hasOwnProperty.call(aliasNormalized, 'cache_creation_tokens')
-        && aliasNormalized.cache_creation_tokens !== cacheCreationTokens
-      ) {
-        throw new Error('Field "usage" contains conflicting values for key "cache_creation_tokens"');
+      if (!cacheCreationEntries.length) continue;
+      cacheCreationEntries.push({
+        canonicalField: 'cache_creation_tokens',
+        canonicalValue: cacheCreationTokens,
+      });
+      for (const { canonicalField, canonicalValue } of cacheCreationEntries) {
+        if (
+          Object.prototype.hasOwnProperty.call(aliasNormalized, canonicalField)
+          && aliasNormalized[canonicalField] !== canonicalValue
+        ) {
+          throw new Error(`Field "usage" contains conflicting values for key "${canonicalField}"`);
+        }
+        aliasNormalized[canonicalField] = canonicalValue;
       }
-      aliasNormalized.cache_creation_tokens = cacheCreationTokens;
       continue;
     }
 
@@ -698,12 +711,13 @@ function normalizeCompleteTaskUsagePayload(rawUsage) {
   return normalized;
 }
 
-function mapUsagePayloadToTaskFields(usage) {
+function mapUsagePayloadToTaskFields(usage, taskRow = null) {
   const normalizedUsage = normalizeCompleteTaskUsagePayload(usage);
   if (!normalizedUsage || typeof normalizedUsage !== 'object') return {};
   const mapped = {};
   for (const [usageKey, columnName] of Object.entries(COMPLETE_TASK_USAGE_COLUMN_MAP)) {
     if (!Object.prototype.hasOwnProperty.call(normalizedUsage, usageKey)) continue;
+    if (taskRow && !Object.prototype.hasOwnProperty.call(taskRow, columnName)) continue;
     mapped[columnName] = normalizedUsage[usageKey];
   }
   return mapped;
@@ -1847,9 +1861,10 @@ function handleCommand(cmd, conn, handlers) {
           respond(conn, ownership.response);
           break;
         }
+        const task = ownership.task;
         const worker = ownership.worker;
         const usage = normalizeCompleteTaskUsagePayload(args.usage);
-        const usageTaskFields = mapUsagePayloadToTaskFields(usage);
+        const usageTaskFields = mapUsagePayloadToTaskFields(usage, task);
         const completionPrNormalizationCwd = worker && worker.worktree_path
           ? worker.worktree_path
           : (_projectDir || process.cwd());
@@ -2018,9 +2033,9 @@ function handleCommand(cmd, conn, handlers) {
           respond(conn, ownership.response);
           break;
         }
-        const usage = normalizeCompleteTaskUsagePayload(args.usage);
-        const usageTaskFields = mapUsagePayloadToTaskFields(usage);
         const failedTask = ownership.task;
+        const usage = normalizeCompleteTaskUsagePayload(args.usage);
+        const usageTaskFields = mapUsagePayloadToTaskFields(usage, failedTask);
         const routingMeta = failedTask ? {
           subject: failedTask.subject,
           description: failedTask.description,

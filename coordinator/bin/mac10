@@ -25,6 +25,8 @@ const COMPLETE_TASK_USAGE_FIELDS = Object.freeze({
   rejected_prediction_tokens: 'number',
   cached_tokens: 'number',
   cache_creation_tokens: 'number',
+  ephemeral_5m_input_tokens: 'number',
+  ephemeral_1h_input_tokens: 'number',
   total_tokens: 'number',
   cost_usd: 'number',
 });
@@ -80,17 +82,18 @@ function normalizeCompleteTaskUsageEntries(rawField, rawValue) {
     if (unsupportedNestedFields.length) {
       throw new Error(`complete-task usage field "cache_creation" contains unsupported field(s): ${unsupportedNestedFields.join(', ')}`);
     }
+    const cacheCreationEntries = [];
     let cacheCreationTokens = 0;
-    let hasNestedValue = false;
     for (const nestedField of COMPLETE_TASK_USAGE_CACHE_CREATION_OBJECT_ALIASES) {
       if (!Object.prototype.hasOwnProperty.call(rawValue, nestedField)) continue;
-      hasNestedValue = true;
       const nestedValue = rawValue[nestedField];
       validateCompleteTaskUsageIntegerField(`cache_creation.${nestedField}`, nestedValue);
       cacheCreationTokens += nestedValue;
+      cacheCreationEntries.push({ canonicalField: nestedField, value: nestedValue });
     }
-    if (!hasNestedValue) return [];
-    return [{ canonicalField: 'cache_creation_tokens', value: cacheCreationTokens }];
+    if (!cacheCreationEntries.length) return [];
+    cacheCreationEntries.push({ canonicalField: 'cache_creation_tokens', value: cacheCreationTokens });
+    return cacheCreationEntries;
   }
 
   if (Object.prototype.hasOwnProperty.call(COMPLETE_TASK_USAGE_DETAIL_ALIASES, rawField)) {

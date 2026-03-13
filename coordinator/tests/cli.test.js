@@ -936,6 +936,8 @@ describe('CLI Server', () => {
       'usage_rejected_prediction_tokens',
       'usage_cached_tokens',
       'usage_cache_creation_tokens',
+      'usage_cache_creation_ephemeral_5m_input_tokens',
+      'usage_cache_creation_ephemeral_1h_input_tokens',
       'usage_total_tokens',
       'usage_cost_usd',
     ];
@@ -1170,6 +1172,8 @@ describe('CLI Server', () => {
       'usage_rejected_prediction_tokens',
       'usage_cached_tokens',
       'usage_cache_creation_tokens',
+      'usage_cache_creation_ephemeral_5m_input_tokens',
+      'usage_cache_creation_ephemeral_1h_input_tokens',
       'usage_total_tokens',
       'usage_cost_usd',
     ];
@@ -1179,7 +1183,7 @@ describe('CLI Server', () => {
     }
   });
 
-  it('should accept Anthropic cache_creation object aliases and fold them into cache_creation_tokens', async () => {
+  it('should preserve Anthropic cache_creation object TTL fields while folding aggregate cache_creation_tokens', async () => {
     db.registerWorker(1, '/wt-1', 'agent-1');
     db.registerWorker(2, '/wt-2', 'agent-2');
     const reqId = db.createRequest('Anthropic cache_creation object aliases');
@@ -1204,13 +1208,14 @@ describe('CLI Server', () => {
       },
     };
 
-    const completeResult = await sendCommand('complete-task', {
-      worker_id: '1',
-      task_id: String(completeTaskId),
-      result: 'Complete cache object aliases',
-      usage: completeUsage,
-    });
-    assert.strictEqual(completeResult.ok, true);
+    await runMac10Command([
+      'complete-task',
+      '1',
+      String(completeTaskId),
+      'Complete cache object aliases',
+      '--usage',
+      JSON.stringify(completeUsage),
+    ], tmpDir);
 
     await runMac10Command([
       'fail-task',
@@ -1227,6 +1232,37 @@ describe('CLI Server', () => {
     assert.strictEqual(failedTask.status, 'failed');
     assert.strictEqual(completedTask.usage_cache_creation_tokens, 45);
     assert.strictEqual(failedTask.usage_cache_creation_tokens, 9);
+
+    if (Object.prototype.hasOwnProperty.call(completedTask, 'usage_cache_creation_ephemeral_5m_input_tokens')) {
+      assert.strictEqual(completedTask.usage_cache_creation_ephemeral_5m_input_tokens, 12);
+      assert.strictEqual(completedTask.usage_cache_creation_ephemeral_1h_input_tokens, 33);
+      assert.strictEqual(failedTask.usage_cache_creation_ephemeral_5m_input_tokens, 9);
+      assert.strictEqual(failedTask.usage_cache_creation_ephemeral_1h_input_tokens, null);
+    }
+
+    const expectedTaskIds = new Set([completeTaskId, failTaskId].map((taskId) => String(taskId)));
+    const expectedUsageByTaskId = new Map([
+      [String(completeTaskId), {
+        model: 'gpt-5-codex',
+        ephemeral_5m_input_tokens: 12,
+        ephemeral_1h_input_tokens: 33,
+        cache_creation_tokens: 45,
+      }],
+      [String(failTaskId), {
+        model: 'gpt-5-codex',
+        ephemeral_5m_input_tokens: 9,
+        cache_creation_tokens: 9,
+      }],
+    ]);
+
+    const allocatorUsageMessages = db.checkMail('allocator', false)
+      .filter((message) => (message.type === 'task_completed' || message.type === 'task_failed'))
+      .filter((message) => expectedTaskIds.has(String(message.payload.task_id)));
+    assert.strictEqual(allocatorUsageMessages.length, 2);
+    for (const message of allocatorUsageMessages) {
+      const expectedUsage = expectedUsageByTaskId.get(String(message.payload.task_id));
+      assert.deepStrictEqual(message.payload.usage, expectedUsage);
+    }
   });
 
   it('should reject invalid Anthropic cache_creation object alias values for complete-task and fail-task', async () => {
