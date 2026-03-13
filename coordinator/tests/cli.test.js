@@ -1179,6 +1179,135 @@ describe('CLI Server', () => {
     }
   });
 
+  it('should accept Anthropic cache_creation object aliases and fold them into cache_creation_tokens', async () => {
+    db.registerWorker(1, '/wt-1', 'agent-1');
+    db.registerWorker(2, '/wt-2', 'agent-2');
+    const reqId = db.createRequest('Anthropic cache_creation object aliases');
+    const completeTaskId = db.createTask({ request_id: reqId, subject: 'Complete cache object', description: 'Complete-task usage cache object alias payload' });
+    const failTaskId = db.createTask({ request_id: reqId, subject: 'Fail cache object', description: 'Fail-task usage cache object alias payload' });
+    db.updateTask(completeTaskId, { status: 'assigned', assigned_to: 1 });
+    db.updateTask(failTaskId, { status: 'assigned', assigned_to: 2 });
+    db.updateWorker(1, { status: 'assigned', current_task_id: completeTaskId });
+    db.updateWorker(2, { status: 'assigned', current_task_id: failTaskId });
+
+    const completeUsage = {
+      model: 'gpt-5-codex',
+      cache_creation: {
+        ephemeral_5m_input_tokens: 12,
+        ephemeral_1h_input_tokens: 33,
+      },
+    };
+    const failUsage = {
+      model: 'gpt-5-codex',
+      cache_creation: {
+        ephemeral_5m_input_tokens: 9,
+      },
+    };
+
+    const completeResult = await sendCommand('complete-task', {
+      worker_id: '1',
+      task_id: String(completeTaskId),
+      result: 'Complete cache object aliases',
+      usage: completeUsage,
+    });
+    assert.strictEqual(completeResult.ok, true);
+
+    await runMac10Command([
+      'fail-task',
+      '2',
+      String(failTaskId),
+      'Fail cache object aliases',
+      '--usage',
+      JSON.stringify(failUsage),
+    ], tmpDir);
+
+    const completedTask = db.getTask(completeTaskId);
+    const failedTask = db.getTask(failTaskId);
+    assert.strictEqual(completedTask.status, 'completed');
+    assert.strictEqual(failedTask.status, 'failed');
+    assert.strictEqual(completedTask.usage_cache_creation_tokens, 45);
+    assert.strictEqual(failedTask.usage_cache_creation_tokens, 9);
+  });
+
+  it('should reject invalid Anthropic cache_creation object alias values for complete-task and fail-task', async () => {
+    db.registerWorker(1, '/wt-1', 'agent-1');
+    db.registerWorker(2, '/wt-2', 'agent-2');
+    db.registerWorker(3, '/wt-3', 'agent-3');
+    db.registerWorker(4, '/wt-4', 'agent-4');
+    const reqId = db.createRequest('Anthropic cache_creation object validation');
+    const completeNonIntegerTaskId = db.createTask({ request_id: reqId, subject: 'Complete non-integer cache object', description: 'Should reject non-integer cache_creation nested token value' });
+    const failNegativeTaskId = db.createTask({ request_id: reqId, subject: 'Fail negative cache object', description: 'Should reject negative cache_creation nested token value' });
+    const completeUnsupportedNestedTaskId = db.createTask({ request_id: reqId, subject: 'Complete unsupported cache object key', description: 'Should reject unsupported cache_creation nested key' });
+    const failCliNonObjectTaskId = db.createTask({ request_id: reqId, subject: 'Fail non-object cache object alias', description: 'Should reject non-object cache_creation CLI payload' });
+    db.updateTask(completeNonIntegerTaskId, { status: 'assigned', assigned_to: 1 });
+    db.updateTask(failNegativeTaskId, { status: 'assigned', assigned_to: 2 });
+    db.updateTask(completeUnsupportedNestedTaskId, { status: 'assigned', assigned_to: 3 });
+    db.updateTask(failCliNonObjectTaskId, { status: 'assigned', assigned_to: 4 });
+    db.updateWorker(1, { status: 'assigned', current_task_id: completeNonIntegerTaskId });
+    db.updateWorker(2, { status: 'assigned', current_task_id: failNegativeTaskId });
+    db.updateWorker(3, { status: 'assigned', current_task_id: completeUnsupportedNestedTaskId });
+    db.updateWorker(4, { status: 'assigned', current_task_id: failCliNonObjectTaskId });
+
+    const nonIntegerResult = await sendCommand('complete-task', {
+      worker_id: '1',
+      task_id: String(completeNonIntegerTaskId),
+      usage: {
+        cache_creation: {
+          ephemeral_5m_input_tokens: 1.5,
+        },
+      },
+    });
+    assert.ok(nonIntegerResult.error);
+    assert.match(nonIntegerResult.error, /usage\.cache_creation\.ephemeral_5m_input_tokens" must be an integer/);
+    assert.strictEqual(db.getTask(completeNonIntegerTaskId).status, 'assigned');
+
+    const negativeResult = await sendCommand('fail-task', {
+      worker_id: '2',
+      task_id: String(failNegativeTaskId),
+      error: 'Negative cache object alias',
+      usage: {
+        cache_creation: {
+          ephemeral_1h_input_tokens: -2,
+        },
+      },
+    });
+    assert.ok(negativeResult.error);
+    assert.match(negativeResult.error, /usage\.cache_creation\.ephemeral_1h_input_tokens" must be >= 0/);
+    assert.strictEqual(db.getTask(failNegativeTaskId).status, 'assigned');
+
+    const unsupportedNestedResult = await sendCommand('complete-task', {
+      worker_id: '3',
+      task_id: String(completeUnsupportedNestedTaskId),
+      usage: {
+        cache_creation: {
+          ephemeral_5m_input_tokens: 2,
+          bogus_nested: 3,
+        },
+      },
+    });
+    assert.ok(unsupportedNestedResult.error);
+    assert.match(unsupportedNestedResult.error, /usage\.cache_creation" contains unsupported keys: bogus_nested/);
+    assert.strictEqual(db.getTask(completeUnsupportedNestedTaskId).status, 'assigned');
+
+    await assert.rejects(
+      () => runMac10Command([
+        'fail-task',
+        '4',
+        String(failCliNonObjectTaskId),
+        'CLI non-object cache object alias',
+        '--usage',
+        JSON.stringify({
+          cache_creation: 7,
+        }),
+      ], tmpDir),
+      (err) => {
+        assert.match(String(err && err.stderr), /cache_creation" must be an object/);
+        return true;
+      }
+    );
+    assert.strictEqual(db.getTask(failCliNonObjectTaskId).status, 'assigned');
+  });
+
   it('should reject unknown complete-task usage keys even when alias keys are present', async () => {
     db.registerWorker(1, '/wt-1', 'agent-1');
     const reqId = db.createRequest('Usage unknown key rejection');

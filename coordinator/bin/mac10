@@ -34,6 +34,10 @@ const COMPLETE_TASK_USAGE_ALIASES = Object.freeze({
   cache_creation_input_tokens: 'cache_creation_tokens',
   cache_read_input_tokens: 'cached_tokens',
 });
+const COMPLETE_TASK_USAGE_CACHE_CREATION_OBJECT_ALIASES = Object.freeze([
+  'ephemeral_5m_input_tokens',
+  'ephemeral_1h_input_tokens',
+]);
 const COMPLETE_TASK_USAGE_DETAIL_ALIASES = Object.freeze({
   input_tokens_details: Object.freeze([
     { canonicalField: 'cached_tokens', detailField: 'cached_tokens' },
@@ -51,7 +55,44 @@ const COMPLETE_TASK_USAGE_DETAIL_ALIASES = Object.freeze({
   ]),
 });
 
+function validateCompleteTaskUsageIntegerField(field, value) {
+  if (typeof value !== 'number') {
+    throw new Error(`complete-task usage field "${field}" must be number`);
+  }
+  if (!Number.isFinite(value)) {
+    throw new Error(`complete-task usage field "${field}" must be a finite number`);
+  }
+  if (value < 0) {
+    throw new Error(`complete-task usage field "${field}" must be >= 0`);
+  }
+  if (!Number.isInteger(value)) {
+    throw new Error(`complete-task usage field "${field}" must be an integer`);
+  }
+}
+
 function normalizeCompleteTaskUsageEntries(rawField, rawValue) {
+  if (rawField === 'cache_creation') {
+    if (!rawValue || typeof rawValue !== 'object' || Array.isArray(rawValue)) {
+      throw new Error('complete-task usage field "cache_creation" must be an object');
+    }
+    const unsupportedNestedFields = Object.keys(rawValue)
+      .filter((nestedField) => !COMPLETE_TASK_USAGE_CACHE_CREATION_OBJECT_ALIASES.includes(nestedField));
+    if (unsupportedNestedFields.length) {
+      throw new Error(`complete-task usage field "cache_creation" contains unsupported field(s): ${unsupportedNestedFields.join(', ')}`);
+    }
+    let cacheCreationTokens = 0;
+    let hasNestedValue = false;
+    for (const nestedField of COMPLETE_TASK_USAGE_CACHE_CREATION_OBJECT_ALIASES) {
+      if (!Object.prototype.hasOwnProperty.call(rawValue, nestedField)) continue;
+      hasNestedValue = true;
+      const nestedValue = rawValue[nestedField];
+      validateCompleteTaskUsageIntegerField(`cache_creation.${nestedField}`, nestedValue);
+      cacheCreationTokens += nestedValue;
+    }
+    if (!hasNestedValue) return [];
+    return [{ canonicalField: 'cache_creation_tokens', value: cacheCreationTokens }];
+  }
+
   if (Object.prototype.hasOwnProperty.call(COMPLETE_TASK_USAGE_DETAIL_ALIASES, rawField)) {
     const detailAliases = COMPLETE_TASK_USAGE_DETAIL_ALIASES[rawField];
     if (rawValue === null) {
@@ -621,14 +662,16 @@ function parseCompleteTaskUsage(rawUsage) {
       normalized[field] = trimmed;
       continue;
     }
+    if (field !== 'cost_usd') {
+      validateCompleteTaskUsageIntegerField(field, value);
+      normalized[field] = value;
+      continue;
+    }
     if (!Number.isFinite(value)) {
-      throw new Error(`complete-task usage field "${field}" must be a finite number`);
+      throw new Error('complete-task usage field "cost_usd" must be a finite number');
     }
     if (value < 0) {
-      throw new Error(`complete-task usage field "${field}" must be >= 0`);
-    }
-    if (field !== 'cost_usd' && !Number.isInteger(value)) {
-      throw new Error(`complete-task usage field "${field}" must be an integer`);
+      throw new Error('complete-task usage field "cost_usd" must be >= 0');
     }
     normalized[field] = value;
   }
