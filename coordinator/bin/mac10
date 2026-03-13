@@ -287,6 +287,15 @@ function formatMergeAge(createdAt, includeAgo = false) {
   return `${Math.round(ageMs / 60000)}m${suffix}`;
 }
 
+function sanitizeSingleLineCell(value) {
+  if (value === undefined || value === null) return '';
+  return String(value).replace(/[\u0000-\u001f\u007f-\u009f]/g, ' ');
+}
+
+function formatRequestSummaryDescription(description) {
+  return sanitizeSingleLineCell(description).slice(0, 60);
+}
+
 function isUnsupportedRpcError(message) {
   if (!message) return false;
   return /unknown command|unsupported|not implemented|invalid command/i.test(String(message));
@@ -1300,7 +1309,7 @@ async function main() {
             console.log('No requests for this loop.');
           } else {
             for (const r of result.requests) {
-              console.log(`  ${r.id} [${r.status}] ${r.tier ? `T${r.tier}` : '  '} ${r.description.slice(0, 60)}`);
+              console.log(`  ${r.id} [${r.status}] ${r.tier ? `T${r.tier}` : '  '} ${formatRequestSummaryDescription(r.description)}`);
             }
           }
         } else {
@@ -1400,7 +1409,7 @@ function printStatus(data) {
     console.log('  (none)');
   } else {
     for (const r of data.requests) {
-      console.log(`  ${r.id} [${r.status}] ${r.tier ? `T${r.tier}` : '  '} ${r.description.slice(0, 60)}`);
+      console.log(`  ${r.id} [${r.status}] ${r.tier ? `T${r.tier}` : '  '} ${formatRequestSummaryDescription(r.description)}`);
     }
   }
 
