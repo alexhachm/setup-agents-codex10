@@ -46,6 +46,79 @@ function resolveDomainKnowledgePath(domain, knowledgeDir) {
   return filePath;
 }
 
+function parseTaskValidation(validation) {
+  if (!validation) return null;
+
+  let parsed = validation;
+  if (typeof parsed === 'string') {
+    for (let i = 0; i < 3; i += 1) {
+      const trimmed = parsed.trim();
+      if (!trimmed) return null;
+      try {
+        const next = JSON.parse(trimmed);
+        if (next === parsed) break;
+        parsed = next;
+        if (typeof parsed !== 'string') break;
+      } catch {
+        break;
+      }
+    }
+  }
+  return parsed;
+}
+
+function isValidationTierShorthand(value) {
+  if (typeof value !== 'string') return false;
+  return /^tier[23]$/i.test(value.trim());
+}
+
+function collectValidationLines(parsedValidation) {
+  const commandLines = [];
+  const shorthand = new Set();
+
+  function collect(value, label = null) {
+    if (typeof value === 'string') {
+      const trimmed = value.trim();
+      if (!trimmed) return;
+      if (isValidationTierShorthand(trimmed)) {
+        shorthand.add(trimmed.toLowerCase());
+        return;
+      }
+      if (label) {
+        commandLines.push(`- ${label}: \`${trimmed}\``);
+      } else {
+        commandLines.push(`- Command: \`${trimmed}\``);
+      }
+      return;
+    }
+
+    if (Array.isArray(value)) {
+      for (const item of value) collect(item, label);
+      return;
+    }
+
+    if (!value || typeof value !== 'object') return;
+
+    collect(value.build_cmd, 'Build');
+    collect(value.test_cmd, 'Test');
+    collect(value.lint_cmd, 'Lint');
+    collect(value.custom, 'Custom');
+  }
+
+  collect(parsedValidation);
+
+  const lines = [];
+  for (const tier of shorthand) {
+    lines.push(`- Validation tier metadata: \`${tier}\``);
+  }
+  if (shorthand.size > 0) {
+    lines.push('- `tier2`/`tier3` are workflow metadata, not shell commands. Run only explicit task-provided validation commands.');
+  }
+  lines.push(...commandLines);
+
+  return lines;
+}
+
 function buildTaskOverlay(task, worker, projectDir) {
   const lines = [
     '# Current Task',
@@ -77,17 +150,12 @@ function buildTaskOverlay(task, worker, projectDir) {
   }
 
   if (task.validation) {
-    let val;
-    try {
-      val = typeof task.validation === 'string' ? JSON.parse(task.validation) : task.validation;
-    } catch { val = null; }
-    if (val) {
+    const parsedValidation = parseTaskValidation(task.validation);
+    const validationLines = collectValidationLines(parsedValidation);
+    if (validationLines.length > 0) {
       lines.push('## Validation');
       lines.push('');
-      if (val.build_cmd) lines.push(`- Build: \`${val.build_cmd}\``);
-      if (val.test_cmd) lines.push(`- Test: \`${val.test_cmd}\``);
-      if (val.lint_cmd) lines.push(`- Lint: \`${val.lint_cmd}\``);
-      if (val.custom) lines.push(`- Custom: ${val.custom}`);
+      lines.push(...validationLines);
       lines.push('');
     }
   }
@@ -164,7 +232,7 @@ You are a coding worker in the mac10 multi-agent system. You receive tasks from 
 5. **Report completion.** Run \`mac10 complete-task <worker_id> <task_id> [pr_url] [branch] [result] [--usage JSON]\` and include usage telemetry when available.
 6. **On failure.** Run \`mac10 fail-task <worker_id> <task_id> <error_description>\`.
 7. **Stay in your domain.** Only modify files related to your assigned domain.
-8. **Validate before shipping.** Build and test your changes before creating a PR.
+8. **Validate before shipping.** Run only explicit validation commands provided by the task/validator (\`tier2\`/\`tier3\` are metadata, not commands).
 `;
 }
 
