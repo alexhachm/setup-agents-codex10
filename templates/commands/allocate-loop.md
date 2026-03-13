@@ -29,9 +29,9 @@ last_activity = now()      # For adaptive signal timeout
 ## Native Agent Teams
 
 Native teammate delegation is disabled in this Codex workflow. Use the standard codex10 path:
-- Wait for `tasks_available` and `request_ready_to_merge`
+- Wake on allocator mailbox events: `tasks_ready`, `tasks_available`, `task_completed`, `task_failed`, `functional_conflict`, `merge_failed`
 - Assign tasks to workers with `./.claude/scripts/codex10 assign-task`
-- Integrate completed requests with `./.claude/scripts/codex10 integrate`
+- Complete/integrate requests with `./.claude/scripts/codex10 check-completion` + `./.claude/scripts/codex10 integrate`
 
 ## Startup Message
 
@@ -39,12 +39,14 @@ Native teammate delegation is disabled in this Codex workflow. Use the standard 
 ████  I AM MASTER-3 — ALLOCATOR (Fast)  ████
 
 Monitoring via codex10 commands:
-• codex10 ready-tasks   → Tier 3 decomposed tasks ready for assignment
-• codex10 inbox allocator → Fix requests, functional conflicts, task failures
-• codex10 worker-status → Worker heartbeats and availability
-• codex10 check-completion → Task completion for integration
+• codex10 inbox allocator --block --timeout=10000 → Primary wake-up (bounded 10s idle wait)
+• codex10 ready-tasks   → Assignment sweep for `tasks_ready` / `tasks_available`
+• codex10 worker-status → Idle-worker availability + heartbeat state
+• codex10 check-completion → Completion sweep for `task_completed`
+• codex10 inbox allocator → Drain fix/failure mail (`task_failed`, `functional_conflict`, `merge_failed`)
 
 Using mailbox-blocking wake-up via `codex10 inbox allocator --block`.
+Bounded block example: `codex10 inbox allocator --block --timeout=10000`.
 Polling fallback: `codex10 ready-tasks` + `codex10 worker-status` (3s when active, 10s when idle).
 ```
 
@@ -55,14 +57,28 @@ bash .claude/scripts/state-lock.sh .claude/state/codex10.agent-health.json 'jq "
 
 Then begin the loop.
 
+## Allocator Mailbox Contract
+
+Allocator mailbox event types (runtime-produced):
+- `tasks_ready`, `tasks_available`: run assignment sweep (`ready-tasks` + `worker-status` + `assign-task`)
+- `task_completed`: run completion sweep (`check-completion`, then `integrate` when ready and no assignable work remains)
+- `task_failed`, `functional_conflict`, `merge_failed`: create and assign urgent fix/remediation tasks
+
+| Mailbox event | First command | Operational action |
+|---|---|---|
+| `tasks_ready`, `tasks_available` | `./.claude/scripts/codex10 ready-tasks` | Allocate runnable work to idle workers |
+| `task_completed` | `./.claude/scripts/codex10 check-completion <request_id>` | Trigger `integrate` when request is fully complete and assignment gate is clear |
+| `task_failed`, `functional_conflict`, `merge_failed` | `./.claude/scripts/codex10 inbox allocator` | Drain message details, create fix task, assign remediation |
+
 ## The Loop (Explicit Steps)
 
 **Repeat these steps forever:**
 
 ### Step 1: Mailbox-blocking wake-up (adaptive fallback)
 ```bash
-# Primary wake path: block on allocator mailbox (fix/task/merge events)
-./.claude/scripts/codex10 inbox allocator --block || true
+# Primary wake path: block on allocator mailbox with bounded timeout
+# Example timeout keeps fallback sweeps deterministic at <=10s while idle
+./.claude/scripts/codex10 inbox allocator --block --timeout=10000 || true
 ```
 
 If the blocked inbox call returns no actionable work, run polling fallback:
@@ -73,7 +89,8 @@ If the blocked inbox call returns no actionable work, run polling fallback:
 
 Do not wait on `.codex10.task-signal`, `.codex10.fix-signal`, or `.codex10.completion-signal`; these signal files are deprecated and not produced in codex10 runtime.
 
-Use 3s polling fallback cadence if `last_activity` was < 30s ago. Use 10s otherwise.
+Use `--timeout=3000` when `last_activity` was < 30s ago (active cadence). Use `--timeout=10000` otherwise (idle cadence).
+Fallback cadence matches timeout: 3s when active, 10s when idle.
 
 `polling_cycle += 1`
 
@@ -116,6 +133,16 @@ Use the real output to understand current state. **NEVER fabricate status.**
 ```
 
 Process each message by type:
+
+**`tasks_ready` / `tasks_available`** — Runnable work is waiting:
+1. Run `./.claude/scripts/codex10 ready-tasks`
+2. Continue Step 2 allocation flow immediately
+3. `last_activity = now()`
+
+**`task_completed`** — Worker completed a task:
+1. Run `./.claude/scripts/codex10 check-completion <request_id>` using the message payload request
+2. If complete and assignment-first gate is clear, trigger `./.claude/scripts/codex10 integrate <request_id>`
+3. `last_activity = now()`
 
 **`functional_conflict`** — Merge validator detected incompatible changes between tasks:
 1. Create an urgent fix task for the **original worker** (they have the most context):
