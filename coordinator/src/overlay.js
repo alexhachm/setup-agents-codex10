@@ -77,17 +77,48 @@ function buildTaskOverlay(task, worker, projectDir) {
   }
 
   if (task.validation) {
-    let val;
-    try {
-      val = typeof task.validation === 'string' ? JSON.parse(task.validation) : task.validation;
-    } catch { val = null; }
+    let val = task.validation;
+    if (typeof task.validation === 'string') {
+      const trimmed = task.validation.trim();
+      if (!trimmed) {
+        val = null;
+      } else {
+        try {
+          val = JSON.parse(trimmed);
+        } catch {
+          val = trimmed;
+        }
+      }
+    }
     if (val) {
       lines.push('## Validation');
       lines.push('');
-      if (val.build_cmd) lines.push(`- Build: \`${val.build_cmd}\``);
-      if (val.test_cmd) lines.push(`- Test: \`${val.test_cmd}\``);
-      if (val.lint_cmd) lines.push(`- Lint: \`${val.lint_cmd}\``);
-      if (val.custom) lines.push(`- Custom: ${val.custom}`);
+      if (typeof val === 'string') {
+        lines.push(`- Validation: \`${val}\``);
+        if (/^tier[23]$/i.test(val)) {
+          lines.push('- Note: `tier2`/`tier3` are orchestration shorthands, not shell commands.');
+        }
+      } else if (typeof val === 'object') {
+        let rendered = false;
+        if (val.build_cmd) {
+          lines.push(`- Build: \`${val.build_cmd}\``);
+          rendered = true;
+        }
+        if (val.test_cmd) {
+          lines.push(`- Test: \`${val.test_cmd}\``);
+          rendered = true;
+        }
+        if (val.lint_cmd) {
+          lines.push(`- Lint: \`${val.lint_cmd}\``);
+          rendered = true;
+        }
+        if (val.custom) {
+          lines.push(`- Custom: ${val.custom}`);
+          rendered = true;
+        }
+        if (!rendered) lines.push(`- Validation metadata: \`${JSON.stringify(val)}\``);
+      }
+      lines.push('- Note: Run only task-provided validation commands; do not assume `npm run build`.');
       lines.push('');
     }
   }
