@@ -668,6 +668,35 @@ function parseCompleteTaskArgs(optionalArgs, rawWorkerId, projectCwd = process.c
   };
 }
 
+function parseFailTaskArgs(optionalArgs) {
+  const extras = Array.isArray(optionalArgs) ? optionalArgs : [];
+  const positional = [];
+  let usageArg = null;
+
+  for (let i = 0; i < extras.length; i++) {
+    const arg = extras[i];
+    if (arg === '--usage') {
+      if (usageArg !== null) throw new Error('fail-task usage can only be provided once');
+      if (i + 1 >= extras.length) throw new Error('fail-task --usage flag requires a JSON argument');
+      usageArg = extras[i + 1];
+      i += 1;
+      continue;
+    }
+    if (typeof arg === 'string' && arg.startsWith('--usage=')) {
+      if (usageArg !== null) throw new Error('fail-task usage can only be provided once');
+      usageArg = arg.slice('--usage='.length);
+      if (!usageArg.trim()) throw new Error('fail-task --usage flag requires a JSON argument');
+      continue;
+    }
+    positional.push(arg);
+  }
+
+  return {
+    error: positional.join(' ').trim(),
+    usage: parseCompleteTaskUsage(usageArg),
+  };
+}
+
 async function main() {
   const rawArgv = process.argv.slice(2);
   if (rawArgv.length === 0) {
@@ -1003,11 +1032,23 @@ async function main() {
         break;
 
       case 'fail-task':
-        if (argv.length < 4) { console.error('Usage: mac10 fail-task <worker_id> <task_id> <error>'); process.exit(1); }
+        if (argv.length < 3) { console.error('Usage: mac10 fail-task <worker_id> <task_id> [error] [--usage JSON]'); process.exit(1); }
+        const failedWorkerId = parseWorkerId(argv[1]);
+        if (failedWorkerId === null) {
+          console.error('Error: worker_id must be a positive integer');
+          process.exit(1);
+        }
+        const failedTaskId = parseInt(argv[2], 10);
+        if (!Number.isInteger(failedTaskId) || failedTaskId <= 0) {
+          console.error('Error: task_id must be a positive integer');
+          process.exit(1);
+        }
+        const failTaskArgs = parseFailTaskArgs(argv.slice(3));
         result = await send(socketPath, 'fail-task', {
-          worker_id: argv[1],
-          task_id: parseInt(argv[2], 10),
-          error: argv.slice(3).join(' '),
+          worker_id: String(failedWorkerId),
+          task_id: failedTaskId,
+          error: failTaskArgs.error,
+          usage: failTaskArgs.usage,
         });
         if (result.ok) console.log('Task failure recorded.');
         else console.error(result.error);
@@ -1431,7 +1472,7 @@ WORKER:
   heartbeat <worker_id>
   reset-worker <worker_id>       Reset worker to idle state
   complete-task <worker_id> <task_id> [pr_url] [branch] [result] [--usage JSON]
-  fail-task <worker_id> <task_id> <error>
+  fail-task <worker_id> <task_id> [error] [--usage JSON]
   distill <worker_id> <domain> <content>
 
 LOOPS:
