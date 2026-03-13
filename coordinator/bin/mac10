@@ -399,7 +399,17 @@ function normalizeLoopRequestsPayload(payload) {
   if (!payload || typeof payload !== 'object') {
     return { ok: false, error: 'Invalid loop-requests response', requests: [] };
   }
-  const requests = Array.isArray(payload.requests) ? payload.requests : [];
+  if (Array.isArray(payload)) {
+    return { ok: true, requests: payload };
+  }
+  const candidateLists = [
+    payload.requests,
+    payload.data && payload.data.requests,
+    payload.data && payload.data.rows,
+    payload.rows,
+    payload.data,
+  ];
+  const requests = candidateLists.find(Array.isArray) || [];
   return { ...payload, requests };
 }
 
