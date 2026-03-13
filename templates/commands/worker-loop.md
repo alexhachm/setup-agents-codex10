@@ -32,7 +32,7 @@ Read these files to learn from previous work:
 Determine your worker ID from the git branch (`agent-N` → worker N).
 
 ```bash
-WORKER_ID=$(git branch --show-current | sed 's/agent-//')
+WORKER_ID=$(git branch --show-current | sed -E 's/^agent-([0-9]+).*/\1/')
 ```
 
 Fetch your assigned task:
@@ -78,7 +78,7 @@ On conflict: `git rebase --abort && git reset --hard origin/main`
    ```bash
    ./.claude/scripts/codex10 heartbeat $WORKER_ID
    ```
-5. **Self-verify**: run the build/test commands from the task's validation field
+5. **Self-verify**: run only explicit task-provided validation commands. If validation is shorthand (`tier2`/`tier3`), treat it as metadata and do not execute it as a shell command or infer `npm run build`.
 
 ## Step 6: Validate
 
@@ -102,7 +102,7 @@ Run `/commit-push-pr` to create the PR.
 After the PR is created:
 
 ```bash
-./.claude/scripts/codex10 complete-task $WORKER_ID $TASK_ID "$PR_URL" "$BRANCH" "Brief result summary" --usage '{"model":"gpt-5","input_tokens":1200,"output_tokens":350,"cached_input_tokens":90,"total_tokens":1550,"cost_usd":0.42}'
+./.claude/scripts/codex10 complete-task $WORKER_ID $TASK_ID "$PR_URL" "$BRANCH" [result] [--usage JSON]
 ```
 
 Include `--usage` whenever token/cost telemetry is available so routing budget signals stay accurate.

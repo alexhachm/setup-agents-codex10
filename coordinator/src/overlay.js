@@ -46,6 +46,73 @@ function resolveDomainKnowledgePath(domain, knowledgeDir) {
   return filePath;
 }
 
+function isTierValidationShorthand(value) {
+  return typeof value === 'string' && /^tier[0-9]+$/i.test(value.trim());
+}
+
+function pushValidationItem(lines, item) {
+  if (item == null) return false;
+
+  if (typeof item === 'string') {
+    const trimmed = item.trim();
+    if (!trimmed) return false;
+    if (isTierValidationShorthand(trimmed)) {
+      lines.push(`- Validation Metadata: \`${trimmed}\``);
+    } else {
+      lines.push(`- Validation Command: \`${trimmed}\``);
+    }
+    return true;
+  }
+
+  if (Array.isArray(item)) {
+    let added = false;
+    for (const entry of item) {
+      added = pushValidationItem(lines, entry) || added;
+    }
+    return added;
+  }
+
+  if (typeof item === 'object') {
+    let added = false;
+    if (typeof item.build_cmd === 'string' && item.build_cmd.trim()) {
+      lines.push(`- Build: \`${item.build_cmd.trim()}\``);
+      added = true;
+    }
+    if (typeof item.test_cmd === 'string' && item.test_cmd.trim()) {
+      lines.push(`- Test: \`${item.test_cmd.trim()}\``);
+      added = true;
+    }
+    if (typeof item.lint_cmd === 'string' && item.lint_cmd.trim()) {
+      lines.push(`- Lint: \`${item.lint_cmd.trim()}\``);
+      added = true;
+    }
+    if (typeof item.custom === 'string' && item.custom.trim()) {
+      lines.push(`- Custom: ${item.custom.trim()}`);
+      added = true;
+    }
+    if (added) return true;
+    lines.push(`- Validation: \`${JSON.stringify(item)}\``);
+    return true;
+  }
+
+  lines.push(`- Validation: \`${String(item)}\``);
+  return true;
+}
+
+function parseValidationConfig(rawValidation) {
+  if (rawValidation == null) return null;
+  if (typeof rawValidation !== 'string') return rawValidation;
+
+  const trimmed = rawValidation.trim();
+  if (!trimmed) return null;
+
+  try {
+    return JSON.parse(trimmed);
+  } catch {
+    return trimmed;
+  }
+}
+
 function buildTaskOverlay(task, worker, projectDir) {
   const lines = [
     '# Current Task',
@@ -76,18 +143,15 @@ function buildTaskOverlay(task, worker, projectDir) {
     }
   }
 
-  if (task.validation) {
-    let val;
-    try {
-      val = typeof task.validation === 'string' ? JSON.parse(task.validation) : task.validation;
-    } catch { val = null; }
-    if (val) {
+  const parsedValidation = parseValidationConfig(task.validation);
+  if (parsedValidation !== null) {
+    const validationLines = [];
+    const hasValidation = pushValidationItem(validationLines, parsedValidation);
+    if (hasValidation) {
       lines.push('## Validation');
       lines.push('');
-      if (val.build_cmd) lines.push(`- Build: \`${val.build_cmd}\``);
-      if (val.test_cmd) lines.push(`- Test: \`${val.test_cmd}\``);
-      if (val.lint_cmd) lines.push(`- Lint: \`${val.lint_cmd}\``);
-      if (val.custom) lines.push(`- Custom: ${val.custom}`);
+      lines.push(...validationLines);
+      lines.push('- Note: If validation only includes shorthand like `tier2` or `tier3`, treat it as workflow metadata. Run only explicit task-provided commands and never infer `npm run build`.');
       lines.push('');
     }
   }
