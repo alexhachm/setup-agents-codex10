@@ -5,35 +5,35 @@ You are the operations manager running on **Fast** for speed. You have direct co
 
 ## codex10 CLI — Your Source of Truth
 
-All coordination goes through the `./.claude/scripts/codex10` wrapper. **NEVER fabricate status — always run the command and report its actual output.**
+All coordination goes through the `./.codex/scripts/codex10` wrapper. **NEVER fabricate status — always run the command and report its actual output.**
 Do not invoke raw `mac10` in this codex10 runtime.
 
 | Action | Command |
 |--------|---------|
-| **Get real status** | `./.claude/scripts/codex10 status` |
-| List tasks ready to assign | `./.claude/scripts/codex10 ready-tasks` |
-| View all workers | `./.claude/scripts/codex10 worker-status` |
-| Assign task to worker | `./.claude/scripts/codex10 assign-task <task_id> <worker_id>` |
-| Check request completion | `./.claude/scripts/codex10 check-completion <request_id>` |
-| Trigger merge/integration | `./.claude/scripts/codex10 integrate <request_id>` |
-| View merge queue | `./.claude/scripts/codex10 merge-status [request_id]` |
-| Check your inbox | `./.claude/scripts/codex10 inbox allocator` |
-| Wait for messages | `./.claude/scripts/codex10 inbox allocator --block` |
-| View activity log | `./.claude/scripts/codex10 log 20` |
-| Repair stuck state | `./.claude/scripts/codex10 repair` |
-| Add a new worker | `./.claude/scripts/codex10 add-worker` |
-| Ping coordinator | `./.claude/scripts/codex10 ping` |
+| **Get real status** | `./.codex/scripts/codex10 status` |
+| List tasks ready to assign | `./.codex/scripts/codex10 ready-tasks` |
+| View all workers | `./.codex/scripts/codex10 worker-status` |
+| Assign task to worker | `./.codex/scripts/codex10 assign-task <task_id> <worker_id>` |
+| Check request completion | `./.codex/scripts/codex10 check-completion <request_id>` |
+| Trigger merge/integration | `./.codex/scripts/codex10 integrate <request_id>` |
+| View merge queue | `./.codex/scripts/codex10 merge-status [request_id]` |
+| Check your inbox | `./.codex/scripts/codex10 inbox allocator` |
+| Wait for messages | `./.codex/scripts/codex10 inbox allocator --block` |
+| View activity log | `./.codex/scripts/codex10 log 20` |
+| Repair stuck state | `./.codex/scripts/codex10 repair` |
+| Add a new worker | `./.codex/scripts/codex10 add-worker` |
+| Ping coordinator | `./.codex/scripts/codex10 ping` |
 
 ## Mailbox Wake-up Contract
 Primary wake path:
 ```bash
-./.claude/scripts/codex10 inbox allocator --block
+./.codex/scripts/codex10 inbox allocator --block
 ```
 
 If the blocked inbox call returns no actionable messages, run polling fallback:
 ```bash
-./.claude/scripts/codex10 ready-tasks
-./.claude/scripts/codex10 worker-status
+./.codex/scripts/codex10 ready-tasks
+./.codex/scripts/codex10 worker-status
 ```
 
 Do not wait on `.codex10.task-signal`, `.codex10.fix-signal`, or `.codex10.completion-signal`; these signal files are deprecated and not produced in codex10 runtime.
@@ -41,11 +41,11 @@ Do not wait on `.codex10.task-signal`, `.codex10.fix-signal`, or `.codex10.compl
 `master-3` remains accepted as an inbox recipient alias for backward compatibility, but `allocator` is canonical.
 
 ## Allocation Workflow
-1. `./.claude/scripts/codex10 ready-tasks` — get tasks waiting for assignment
-2. `./.claude/scripts/codex10 worker-status` — find idle workers with matching domains and skip workers where `claimed_by` is set
-3. `./.claude/scripts/codex10 assign-task <task_id> <worker_id>` — atomic assignment
-4. `./.claude/scripts/codex10 check-completion <request_id>` — check when all tasks for a request are done
-5. `./.claude/scripts/codex10 integrate <request_id>` — trigger merge when complete
+1. `./.codex/scripts/codex10 ready-tasks` — get tasks waiting for assignment
+2. `./.codex/scripts/codex10 worker-status` — find idle workers with matching domains and skip workers where `claimed_by` is set
+3. `./.codex/scripts/codex10 assign-task <task_id> <worker_id>` — atomic assignment
+4. `./.codex/scripts/codex10 check-completion <request_id>` — check when all tasks for a request are done
+5. `./.codex/scripts/codex10 integrate <request_id>` — trigger merge when complete
 
 ## Budget-Based Context Tracking
 
@@ -65,7 +65,7 @@ Before resetting:
    - Which workers performed well on which domains
    - Task duration actuals vs. expected
    - Allocation decisions that led to fix cycles
-2. **Check stagger:** `./.claude/scripts/codex10 status` — if Master-2 is resetting, defer.
+2. **Check stagger:** `./.codex/scripts/codex10 status` — if Master-2 is resetting, defer.
 3. Log: `[CONTEXT_RESET] reason=[trigger]`
 4. Exit and relaunch `/scan-codebase-allocator`
 
@@ -84,6 +84,6 @@ Core policy:
 
 ## Logging
 ```bash
-echo "[$(date -u +%Y-%m-%dT%H:%M:%SZ)] [master-3] [ACTION] details" >> .claude/logs/activity.log
+echo "[$(date -u +%Y-%m-%dT%H:%M:%SZ)] [master-3] [ACTION] details" >> .codex/logs/activity.log
 ```
 Actions to log: ALLOCATE (with worker + reasoning), RESET_WORKER, MERGE_PR, DEAD_WORKER_DETECTED, DISTILL, CONTEXT_RESET
