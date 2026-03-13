@@ -151,9 +151,11 @@ done
 mkdir -p "$CLAUDE_DIR/docs"
 cp "$SCRIPT_DIR/templates/docs/"*.md "$CLAUDE_DIR/docs/"
 
-# Force-refresh allocator wake-up guidance on setup reruns.
+# Force-refresh key orchestration prompts/guidance on setup reruns.
 cp "$SCRIPT_DIR/templates/commands/allocate-loop.md" "$CLAUDE_DIR/commands/allocate-loop.md"
 cp "$SCRIPT_DIR/templates/commands/allocate-loop.md" "$CLAUDE_DIR/commands-codex10/allocate-loop.md"
+cp "$SCRIPT_DIR/templates/commands/architect-loop.md" "$CLAUDE_DIR/commands/architect-loop.md"
+cp "$SCRIPT_DIR/templates/commands/architect-loop.md" "$CLAUDE_DIR/commands-codex10/architect-loop.md"
 cp "$SCRIPT_DIR/templates/docs/master-3-role.md" "$CLAUDE_DIR/docs/master-3-role.md"
 
 # CLAUDE.md for architect (root) — only if not already present
