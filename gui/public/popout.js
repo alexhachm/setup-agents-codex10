@@ -128,11 +128,12 @@
   function renderTasks(data) {
     var el = document.getElementById('popout-panel');
     var tasks = data.tasks || [];
+    var budgetIndicator = renderBudgetIndicator(data);
     if (tasks.length === 0) {
-      el.innerHTML = '<div style="color:#8b949e;font-size:13px">No tasks</div>';
+      el.innerHTML = budgetIndicator + '<div style="color:#8b949e;font-size:13px">No tasks</div>';
       return;
     }
-    el.innerHTML = tasks.slice(0, 50).map(function(t) {
+    el.innerHTML = budgetIndicator + tasks.slice(0, 50).map(function(t) {
       return '<div class="task-item">' +
         '<span style="color:#58a6ff">#' + t.id + '</span>' +
         '<span class="worker-status badge-' + t.status + '">' + t.status + '</span>' +
@@ -276,6 +277,115 @@
     if (typeof value === 'string') return value.trim();
     if (typeof value === 'number' || typeof value === 'boolean') return String(value);
     return '';
+  }
+
+  function renderBudgetIndicator(state) {
+    var snapshot = getBudgetSnapshot(state);
+    if (!snapshot) return '';
+    var summary = describeBudgetState(snapshot.state);
+    return '' +
+      '<div class="task-budget-indicator">' +
+        '<span class="task-budget-title">Budget</span>' +
+        '<span class="task-chip task-chip-budget"><span class="task-chip-label">source</span>' + escapeHtml(snapshot.source || 'unknown') + '</span>' +
+        '<span class="task-chip task-chip-budget"><span class="task-chip-label">state</span>' + escapeHtml(summary || 'available') + '</span>' +
+      '</div>';
+  }
+
+  function getBudgetSnapshot(state) {
+    var data = state && typeof state === 'object' ? state : {};
+    var parsedState = parseBudgetState(
+      data.routing_budget_state !== undefined ? data.routing_budget_state :
+        (data.budget_state !== undefined ? data.budget_state : data.routingBudgetState)
+    );
+    var wrappedState = unwrapBudgetState(parsedState);
+    var source = pickTelemetryValue(
+      data.routing_budget_source,
+      data.budget_source,
+      data.routingBudgetSource,
+      wrappedState && wrappedState.source
+    );
+    var summaryState = wrappedState ? wrappedState.parsed : parsedState;
+    if (!source && summaryState === null) return null;
+    return { source: source, state: summaryState };
+  }
+
+  function parseBudgetState(value) {
+    if (value === null || value === undefined) return null;
+    if (typeof value === 'string') {
+      var trimmed = value.trim();
+      if (!trimmed) return null;
+      if (trimmed.charAt(0) === '{' || trimmed.charAt(0) === '[') {
+        try {
+          return parseBudgetState(JSON.parse(trimmed));
+        } catch (e) {
+          return trimmed;
+        }
+      }
+      return trimmed;
+    }
+    if (typeof value === 'object') {
+      if (Array.isArray(value)) return value;
+      var wrapped = unwrapBudgetState(value);
+      return wrapped || value;
+    }
+    if (typeof value === 'number' || typeof value === 'boolean') return String(value);
+    return null;
+  }
+
+  function unwrapBudgetState(value) {
+    if (!value || typeof value !== 'object' || Array.isArray(value)) return null;
+    var hasParsed = Object.prototype.hasOwnProperty.call(value, 'parsed');
+    var hasWrapperMeta = (
+      Object.prototype.hasOwnProperty.call(value, 'source') ||
+      Object.prototype.hasOwnProperty.call(value, 'remaining') ||
+      Object.prototype.hasOwnProperty.call(value, 'threshold')
+    );
+    if (!hasParsed || !hasWrapperMeta) return null;
+    var parsed = value.parsed === value ? null : parseBudgetState(value.parsed);
+    var remaining = parseBudgetLimit(value.remaining);
+    var threshold = parseBudgetLimit(value.threshold);
+    var normalizedParsed = parsed;
+    var hasFlagship = normalizedParsed &&
+      typeof normalizedParsed === 'object' &&
+      !Array.isArray(normalizedParsed) &&
+      normalizedParsed.flagship &&
+      typeof normalizedParsed.flagship === 'object';
+    if (!hasFlagship && remaining !== null && threshold !== null) {
+      normalizedParsed = { flagship: { remaining: remaining, threshold: threshold } };
+    }
+    return {
+      source: normalizeTelemetryValue(value.source),
+      parsed: normalizedParsed,
+      remaining: remaining,
+      threshold: threshold,
+    };
+  }
+
+  function parseBudgetLimit(value) {
+    var numeric = Number(value);
+    return Number.isFinite(numeric) ? numeric : null;
+  }
+
+  function describeBudgetState(state) {
+    if (state === null || state === undefined) return '';
+    if (typeof state === 'string') return state;
+    if (typeof state === 'number' || typeof state === 'boolean') return String(state);
+    if (typeof state !== 'object') return '';
+    var wrapped = unwrapBudgetState(state);
+    if (wrapped) {
+      return describeBudgetState(wrapped.parsed);
+    }
+    var flagship = state.flagship && typeof state.flagship === 'object' ? state.flagship : null;
+    if (flagship) {
+      var remaining = Number(flagship.remaining);
+      var threshold = Number(flagship.threshold);
+      if (Number.isFinite(remaining) && Number.isFinite(threshold)) {
+        var status = remaining <= threshold ? 'constrained' : 'healthy';
+        return status + ' (' + remaining + '/' + threshold + ')';
+      }
+    }
+    var keys = Object.keys(state).slice(0, 3);
+    return keys.length > 0 ? 'keys: ' + keys.join(', ') : 'present';
   }
 
   function renderLog(data) {
