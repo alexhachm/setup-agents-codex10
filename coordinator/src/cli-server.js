@@ -64,12 +64,14 @@ function resolveFallbackRoutingClass(task) {
     || description.includes('conflict')
   );
   const hasRefactorSignal = subject.includes('refactor') || description.includes('refactor');
+  const hasDocsSignal = subject.includes('docs') || description.includes('docs');
+  const hasTypoSignal = subject.includes('typo') || description.includes('typo');
   if (tier >= 4) return 'xhigh';
   if (tier >= 3) return 'high';
   if (priority === 'urgent') return 'xhigh';
   if (priority === 'high') return 'high';
   if (hasMergeOrConflictSignal || hasRefactorSignal) return 'mid';
-  if (priority === 'low' && (subject.includes('docs') || description.includes('typo'))) return 'mini';
+  if (priority === 'low' && (hasDocsSignal || hasTypoSignal)) return 'mini';
   return 'spark';
 }
 
