@@ -18,7 +18,7 @@ All communication goes through the `mac10` CLI:
 mac10 my-task <worker_id>                                    # Get assigned task
 mac10 start-task <worker_id> <task_id>                       # Mark task started
 mac10 heartbeat <worker_id>                                  # Send heartbeat (every 30s)
-mac10 complete-task <worker_id> <task_id> <pr> <branch>      # Done
+mac10 complete-task <worker_id> <task_id> [pr] [branch] [result] [--usage JSON]  # Done (include usage telemetry when available)
 mac10 fail-task <worker_id> <task_id> <error>                # Failed
 mac10 distill <worker_id> <domain> <learnings>               # Save knowledge
 ```
