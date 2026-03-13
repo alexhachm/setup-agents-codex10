@@ -8,14 +8,11 @@ const fs = require('fs');
 const { spawn } = require('child_process');
 const db = require('./db');
 const instanceRegistry = require('./instance-registry');
+const { parseBudgetStateConfig } = require('./cli-server');
 
 const REPO_RE = /^(https?:\/\/github\.com\/)?[a-zA-Z0-9._-]+\/[a-zA-Z0-9._-]+(\.git)?$/;
 const SAFE_PATH_RE = /^(?:\/|[A-Za-z]:[\\/])[a-zA-Z0-9._\\/: -]+$/;
 const ROUTING_BUDGET_STATE_KEY = 'routing_budget_state';
-const ROUTING_BUDGET_REMAINING_KEY = 'routing_budget_flagship_remaining';
-const ROUTING_BUDGET_THRESHOLD_KEY = 'routing_budget_flagship_threshold';
-const LEGACY_BUDGET_REMAINING_KEY = 'flagship_budget_remaining';
-const LEGACY_BUDGET_THRESHOLD_KEY = 'flagship_budget_threshold';
 const USAGE_COST_BURN_RATE_DEFAULTS = Object.freeze({
   usd_15m: 0,
   usd_60m: 0,
@@ -136,15 +133,6 @@ function cleanupFailedLaunch(pid, port) {
   try { instanceRegistry.deregister(port); } catch {}
 }
 
-function parseBudgetNumber(value) {
-  if (value === undefined || value === null) return null;
-  if (typeof value === 'number') return Number.isFinite(value) ? value : null;
-  const trimmed = String(value).trim();
-  if (!trimmed) return null;
-  const parsed = Number(trimmed);
-  return Number.isFinite(parsed) ? parsed : null;
-}
-
 function isPlainObject(value) {
   return !!value && typeof value === 'object' && !Array.isArray(value);
 }
@@ -210,43 +198,22 @@ function normalizeBudgetState(value) {
 }
 
 function buildBudgetSnapshotFromConfig() {
-  const parsedState = parseJsonObject(db.getConfig(ROUTING_BUDGET_STATE_KEY));
-  if (parsedState) {
-    const flagship = isPlainObject(parsedState.flagship)
-      ? parsedState.flagship
-      : parsedState;
-    return {
-      state: {
-        source: 'config:routing_budget_state',
-        parsed: parsedState,
-        remaining: parseBudgetNumber(flagship.remaining),
-        threshold: parseBudgetNumber(flagship.threshold),
-      },
-      source: 'config:routing_budget_state',
-    };
-  }
-
-  const routingRemaining = parseBudgetNumber(db.getConfig(ROUTING_BUDGET_REMAINING_KEY));
-  const routingThreshold = parseBudgetNumber(db.getConfig(ROUTING_BUDGET_THRESHOLD_KEY));
-  const remaining = routingRemaining !== null
-    ? routingRemaining
-    : parseBudgetNumber(db.getConfig(LEGACY_BUDGET_REMAINING_KEY));
-  const threshold = routingThreshold !== null
-    ? routingThreshold
-    : parseBudgetNumber(db.getConfig(LEGACY_BUDGET_THRESHOLD_KEY));
-  if (remaining === null && threshold === null) return null;
-
-  const parsed = { flagship: {} };
-  if (remaining !== null) parsed.flagship.remaining = remaining;
-  if (threshold !== null) parsed.flagship.threshold = threshold;
+  const rawState = db.getConfig(ROUTING_BUDGET_STATE_KEY);
+  const parsedConfigState = parseBudgetStateConfig(rawState);
+  const mergedState = parseBudgetStateConfig(rawState, db.getConfig);
+  const parsed = isPlainObject(mergedState.parsed) ? mergedState.parsed : null;
+  if (!parsed) return null;
+  const source = isPlainObject(parsedConfigState.parsed)
+    ? 'config:routing_budget_state'
+    : 'config:budget_thresholds';
   return {
     state: {
-      source: 'config:budget_thresholds',
+      source,
       parsed,
-      remaining,
-      threshold,
+      remaining: mergedState.remaining,
+      threshold: mergedState.threshold,
     },
-    source: 'config:budget_thresholds',
+    source,
   };
 }
 
