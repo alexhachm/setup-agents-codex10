@@ -364,6 +364,50 @@ describe('CLI Server', () => {
     assert.match(result.stdout, /WARNING: Source revision drift detected/);
   });
 
+  it('should default npm_config_if_present on startup when unset', async () => {
+    const previousValue = process.env.npm_config_if_present;
+    try {
+      delete process.env.npm_config_if_present;
+      cliServer.stop();
+      server = cliServer.start(tmpDir, {
+        onTaskCompleted: () => {},
+        onLoopCreated: (loopId, prompt) => {
+          loopCreatedEvents.push({ loopId, prompt });
+        },
+      });
+      await waitForCliServerReady();
+      assert.strictEqual(process.env.npm_config_if_present, 'true');
+    } finally {
+      if (typeof previousValue === 'undefined') {
+        delete process.env.npm_config_if_present;
+      } else {
+        process.env.npm_config_if_present = previousValue;
+      }
+    }
+  });
+
+  it('should preserve explicit npm_config_if_present values on startup', async () => {
+    const previousValue = process.env.npm_config_if_present;
+    try {
+      process.env.npm_config_if_present = 'false';
+      cliServer.stop();
+      server = cliServer.start(tmpDir, {
+        onTaskCompleted: () => {},
+        onLoopCreated: (loopId, prompt) => {
+          loopCreatedEvents.push({ loopId, prompt });
+        },
+      });
+      await waitForCliServerReady();
+      assert.strictEqual(process.env.npm_config_if_present, 'false');
+    } finally {
+      if (typeof previousValue === 'undefined') {
+        delete process.env.npm_config_if_present;
+      } else {
+        process.env.npm_config_if_present = previousValue;
+      }
+    }
+  });
+
   it('should keep status request rows single-line and preserve clean descriptions', async () => {
     const clean = await sendCommand('request', { description: 'Clean status description for readability' });
     assert.strictEqual(clean.ok, true);
