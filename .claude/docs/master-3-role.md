@@ -31,9 +31,8 @@ All coordination goes through the `mac10` CLI (already on your PATH). **NEVER fa
 1. `mac10 ready-tasks` — get tasks waiting for assignment
 2. `mac10 worker-status` — find idle workers with matching domains
 3. `mac10 assign-task <task_id> <worker_id>` — atomic assignment
-4. `bash .claude/scripts/launch-worker.sh <worker_id>` — spawn the worker
-5. `mac10 check-completion <request_id>` — check when all tasks for a request are done
-6. `mac10 integrate <request_id>` — trigger merge when complete
+4. `mac10 check-completion <request_id>` — check when all tasks for a request are done
+5. `mac10 integrate <request_id>` — trigger merge when complete
 
 ## Budget-Based Context Tracking
 

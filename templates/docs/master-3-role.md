@@ -17,8 +17,8 @@ Do not invoke raw `mac10` in this codex10 runtime.
 | Check request completion | `./.codex/scripts/codex10 check-completion <request_id>` |
 | Trigger merge/integration | `./.codex/scripts/codex10 integrate <request_id>` |
 | View merge queue | `./.codex/scripts/codex10 merge-status [request_id]` |
-| Check your inbox | `./.codex/scripts/codex10 inbox master-3` |
-| Wait for messages | `./.codex/scripts/codex10 inbox master-3 --block` |
+| Check your inbox | `./.codex/scripts/codex10 inbox allocator` |
+| Wait for messages | `./.codex/scripts/codex10 inbox allocator --block` |
 | View activity log | `./.codex/scripts/codex10 log 20` |
 | Repair stuck state | `./.codex/scripts/codex10 repair` |
 | Add a new worker | `./.codex/scripts/codex10 add-worker` |
@@ -26,15 +26,14 @@ Do not invoke raw `mac10` in this codex10 runtime.
 
 ## Signal Files
 Watch: `.codex/signals/.codex10.task-signal`, `.codex/signals/.codex10.fix-signal`, `.codex/signals/.codex10.completion-signal`
-After assignment: launch idle workers with `bash .codex/scripts/launch-worker.sh <worker_id>`; signal already-running workers with `touch .codex/signals/.codex10.worker-signal`
+After assignment: do not launch workers manually; `assign-task` handles worker wake/spawn.
 
 ## Allocation Workflow
 1. `./.codex/scripts/codex10 ready-tasks` — get tasks waiting for assignment
 2. `./.codex/scripts/codex10 worker-status` — find idle workers with matching domains and skip workers where `claimed_by` is set
 3. `./.codex/scripts/codex10 assign-task <task_id> <worker_id>` — atomic assignment
-4. `bash .codex/scripts/launch-worker.sh <worker_id>` — spawn the worker
-5. `./.codex/scripts/codex10 check-completion <request_id>` — check when all tasks for a request are done
-6. `./.codex/scripts/codex10 integrate <request_id>` — trigger merge when complete
+4. `./.codex/scripts/codex10 check-completion <request_id>` — check when all tasks for a request are done
+5. `./.codex/scripts/codex10 integrate <request_id>` — trigger merge when complete
 
 ## Budget-Based Context Tracking
 
