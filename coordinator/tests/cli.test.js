@@ -31,20 +31,23 @@ function waitForCliServerReady() {
   });
 }
 
-beforeEach(async () => {
-  tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'mac10-cli-'));
-  fs.mkdirSync(path.join(tmpDir, '.claude', 'state'), { recursive: true });
-  db.init(tmpDir);
-  socketPath = cliServer.getSocketPath(tmpDir);
-  loopCreatedEvents = [];
+function startCliServer() {
   server = cliServer.start(tmpDir, {
     onTaskCompleted: () => {},
     onLoopCreated: (loopId, prompt) => {
       loopCreatedEvents.push({ loopId, prompt });
     },
   });
-  // Wait for server to be listening
-  await waitForCliServerReady();
+  return waitForCliServerReady();
+}
+
+beforeEach(async () => {
+  tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'mac10-cli-'));
+  fs.mkdirSync(path.join(tmpDir, '.claude', 'state'), { recursive: true });
+  db.init(tmpDir);
+  socketPath = cliServer.getSocketPath(tmpDir);
+  loopCreatedEvents = [];
+  await startCliServer();
 });
 
 afterEach(() => {
@@ -276,6 +279,38 @@ describe('CLI Server', () => {
     const result = await sendCommand('ping', {});
     assert.strictEqual(result.ok, true);
     assert.ok(result.ts);
+  });
+
+  it('should default npm_config_if_present to true when unset at startup', async () => {
+    const previousValue = process.env.npm_config_if_present;
+    cliServer.stop();
+    delete process.env.npm_config_if_present;
+    await startCliServer();
+    try {
+      assert.strictEqual(process.env.npm_config_if_present, 'true');
+    } finally {
+      if (previousValue === undefined) {
+        delete process.env.npm_config_if_present;
+      } else {
+        process.env.npm_config_if_present = previousValue;
+      }
+    }
+  });
+
+  it('should preserve explicit npm_config_if_present at startup', async () => {
+    const previousValue = process.env.npm_config_if_present;
+    cliServer.stop();
+    process.env.npm_config_if_present = 'false';
+    await startCliServer();
+    try {
+      assert.strictEqual(process.env.npm_config_if_present, 'false');
+    } finally {
+      if (previousValue === undefined) {
+        delete process.env.npm_config_if_present;
+      } else {
+        process.env.npm_config_if_present = previousValue;
+      }
+    }
   });
 
   it('should create a request', async () => {

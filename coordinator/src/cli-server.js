@@ -1517,6 +1517,9 @@ function createConnectionHandler(handlers) {
 
 function start(projectDir, handlers) {
   _projectDir = projectDir;
+  if (process.env.npm_config_if_present === undefined) {
+    process.env.npm_config_if_present = 'true';
+  }
   const socketPath = getSocketPath(projectDir);
   const connHandler = createConnectionHandler(handlers);
 
