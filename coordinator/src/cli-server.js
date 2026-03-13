@@ -133,13 +133,21 @@ function resolveFallbackRoutingClass(task) {
   const subject = String(task && task.subject || '').toLowerCase();
   const description = String(task && task.description || '').toLowerCase();
   const mergeConflictKeywords = new Set(['merge', 'conflict']);
+  const refactorKeywords = new Set(['refactor']);
+  const typoKeywords = new Set(['typo']);
   const hasMergeOrConflictSignal = (
     hasKeywordToken(subject, mergeConflictKeywords)
     || hasKeywordToken(description, mergeConflictKeywords)
   );
-  const hasRefactorSignal = subject.includes('refactor') || description.includes('refactor');
+  const hasRefactorSignal = (
+    hasKeywordToken(subject, refactorKeywords)
+    || hasKeywordToken(description, refactorKeywords)
+  );
   const hasDocsSignal = subject.includes('docs') || description.includes('docs');
-  const hasTypoSignal = subject.includes('typo') || description.includes('typo');
+  const hasTypoSignal = (
+    hasKeywordToken(subject, typoKeywords)
+    || hasKeywordToken(description, typoKeywords)
+  );
   const hasCodeHeavyMetadataSignal = hasCodeHeavyMetadataSignals(task);
   if (tier >= 4) return 'xhigh';
   if (tier >= 3) return 'high';

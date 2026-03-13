@@ -1761,6 +1761,44 @@ describe('CLI Server', () => {
     assert.strictEqual(submergeDocsAssignment.routing.routing_reason, 'fallback-routing:class-default');
   });
 
+  it('should ignore embedded typo/refactor substrings in fallback routing signals', async () => {
+    db.registerWorker(1, '/wt-1', 'agent-1');
+    db.registerWorker(2, '/wt-2', 'agent-2');
+
+    await setConfigValue('model_spark', 'spark-model');
+    await setConfigValue('reasoning_spark', 'spark-effort');
+    await setConfigValue('routing_budget_state', JSON.stringify({}));
+
+    const typographyTaskId = createReadyTask({
+      subject: 'Typography cleanup pass',
+      description: 'Routine content cleanup',
+      priority: 'low',
+      tier: 1,
+    });
+    const prefactorTaskId = createReadyTask({
+      subject: 'Prefactor helper cleanup',
+      description: 'Routine maintenance task',
+      priority: 'normal',
+      tier: 2,
+    });
+
+    const typographyAssignment = await sendCommand('assign-task', { task_id: typographyTaskId, worker_id: 1 });
+    const prefactorAssignment = await sendCommand('assign-task', { task_id: prefactorTaskId, worker_id: 2 });
+
+    assert.strictEqual(typographyAssignment.ok, true);
+    assert.strictEqual(prefactorAssignment.ok, true);
+    assert.strictEqual(typographyAssignment.routing.class, 'spark');
+    assert.strictEqual(prefactorAssignment.routing.class, 'spark');
+    assert.notStrictEqual(typographyAssignment.routing.class, 'mini');
+    assert.notStrictEqual(prefactorAssignment.routing.class, 'mid');
+    assert.strictEqual(typographyAssignment.routing.model, 'spark-model');
+    assert.strictEqual(prefactorAssignment.routing.model, 'spark-model');
+    assert.strictEqual(typographyAssignment.routing.reasoning_effort, 'spark-effort');
+    assert.strictEqual(prefactorAssignment.routing.reasoning_effort, 'spark-effort');
+    assert.strictEqual(typographyAssignment.routing.routing_reason, 'fallback-routing:class-default');
+    assert.strictEqual(prefactorAssignment.routing.routing_reason, 'fallback-routing:class-default');
+  });
+
   it('should escalate generic tasks when code-heavy metadata is present while preserving docs/typo mini paths', async () => {
     db.registerWorker(1, '/wt-1', 'agent-1');
     db.registerWorker(2, '/wt-2', 'agent-2');
