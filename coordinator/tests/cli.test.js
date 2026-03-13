@@ -1026,6 +1026,34 @@ describe('CLI Server', () => {
     assert.ok(!result.stdout.includes('\n  999 [failed] T9 injected\tcol\rret'));
   });
 
+  it('should reject assign-task for claimed workers without mutating task or claim state', async () => {
+    db.registerWorker(1, '/wt-1', 'agent-1');
+    const taskId = createReadyTask({
+      subject: 'Claim race regression',
+      description: 'Ensure claimed workers cannot be assigned by allocator',
+      tier: 2,
+    });
+
+    const claim = await sendCommand('claim-worker', { worker_id: 1, claimer: 'architect' });
+    assert.strictEqual(claim.ok, true);
+    assert.strictEqual(claim.claimed, true);
+
+    const assignment = await sendCommand('assign-task', { task_id: taskId, worker_id: 1 });
+    assert.strictEqual(assignment.ok, false);
+    assert.strictEqual(assignment.error, 'worker_claimed');
+
+    const worker = db.getWorker(1);
+    assert.ok(worker);
+    assert.strictEqual(worker.status, 'idle');
+    assert.strictEqual(worker.current_task_id, null);
+    assert.strictEqual(worker.claimed_by, 'architect');
+
+    const task = db.getTask(taskId);
+    assert.ok(task);
+    assert.strictEqual(task.status, 'ready');
+    assert.strictEqual(task.assigned_to, null);
+  });
+
   it('should label default fallback assignments as fallback-default in response and logs', async () => {
     db.registerWorker(1, '/wt-1', 'agent-1');
     db.registerWorker(2, '/wt-2', 'agent-2');
