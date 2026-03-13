@@ -7,6 +7,7 @@ const fs = require('fs');
 const os = require('os');
 const net = require('net');
 const http = require('http');
+const { execFile } = require('child_process');
 
 const db = require('../src/db');
 const cliServer = require('../src/cli-server');
@@ -68,6 +69,28 @@ function sendCommand(command, args) {
     });
     conn.on('error', reject);
     conn.setTimeout(5000, () => { conn.end(); reject(new Error('Timeout')); });
+  });
+}
+
+function runMac10Command(args, cwd) {
+  return new Promise((resolve, reject) => {
+    execFile(
+      process.execPath,
+      [path.join(__dirname, '..', 'bin', 'mac10'), ...args],
+      {
+        cwd,
+        encoding: 'utf8',
+      },
+      (error, stdout, stderr) => {
+        if (error) {
+          error.stdout = stdout;
+          error.stderr = stderr;
+          reject(error);
+          return;
+        }
+        resolve({ stdout, stderr });
+      }
+    );
   });
 }
 
@@ -298,6 +321,93 @@ describe('CLI Server', () => {
     const completedWorker = db.getWorker(1);
     assert.strictEqual(completedWorker.status, 'completed_task');
     assert.strictEqual(completedWorker.tasks_completed, 1);
+  });
+
+  it('should persist identical usage values for canonical API payloads and alias-only CLI payloads', async () => {
+    db.registerWorker(1, '/wt-1', 'agent-1');
+    db.registerWorker(2, '/wt-2', 'agent-2');
+    const reqId = db.createRequest('Usage aliases');
+    const canonicalTaskId = db.createTask({ request_id: reqId, subject: 'Canonical', description: 'Canonical usage payload' });
+    const aliasTaskId = db.createTask({ request_id: reqId, subject: 'Alias', description: 'Alias usage payload' });
+    db.updateTask(canonicalTaskId, { status: 'assigned', assigned_to: 1 });
+    db.updateTask(aliasTaskId, { status: 'assigned', assigned_to: 2 });
+    db.updateWorker(1, { status: 'assigned', current_task_id: canonicalTaskId });
+    db.updateWorker(2, { status: 'assigned', current_task_id: aliasTaskId });
+
+    const canonicalUsage = {
+      model: 'gpt-5-codex',
+      input_tokens: 1200,
+      output_tokens: 345,
+      cached_tokens: 67,
+      cache_creation_tokens: 45,
+      total_tokens: 1612,
+      cost_usd: 0.0456,
+    };
+    const aliasUsage = {
+      model: 'gpt-5-codex',
+      input_tokens: 1200,
+      output_tokens: 345,
+      cache_read_input_tokens: 67,
+      cache_creation_input_tokens: 45,
+      total_tokens: 1612,
+      cost_usd: 0.0456,
+    };
+
+    const apiResult = await sendCommand('complete-task', {
+      worker_id: '1',
+      task_id: String(canonicalTaskId),
+      result: 'Canonical completion',
+      usage: canonicalUsage,
+    });
+    assert.strictEqual(apiResult.ok, true);
+
+    await runMac10Command([
+      'complete-task',
+      '2',
+      String(aliasTaskId),
+      'Alias completion',
+      '--usage',
+      JSON.stringify(aliasUsage),
+    ], tmpDir);
+
+    const canonicalTask = db.getTask(canonicalTaskId);
+    const aliasTask = db.getTask(aliasTaskId);
+    assert.strictEqual(canonicalTask.status, 'completed');
+    assert.strictEqual(aliasTask.status, 'completed');
+
+    const comparableUsageFields = [
+      'usage_model',
+      'usage_input_tokens',
+      'usage_output_tokens',
+      'usage_cached_tokens',
+      'usage_cache_creation_tokens',
+      'usage_total_tokens',
+      'usage_cost_usd',
+    ];
+    for (const field of comparableUsageFields) {
+      assert.strictEqual(aliasTask[field], canonicalTask[field], `${field} mismatch`);
+    }
+  });
+
+  it('should reject unknown complete-task usage keys even when alias keys are present', async () => {
+    db.registerWorker(1, '/wt-1', 'agent-1');
+    const reqId = db.createRequest('Usage unknown key rejection');
+    const taskId = db.createTask({ request_id: reqId, subject: 'Unknown key', description: 'Should reject unknown usage key' });
+    db.updateTask(taskId, { status: 'assigned', assigned_to: 1 });
+    db.updateWorker(1, { status: 'assigned', current_task_id: taskId });
+
+    const result = await sendCommand('complete-task', {
+      worker_id: '1',
+      task_id: String(taskId),
+      usage: {
+        cache_creation_input_tokens: 45,
+        cache_read_input_tokens: 67,
+        bogus_field: 1,
+      },
+    });
+    assert.ok(result.error);
+    assert.match(result.error, /unsupported keys: bogus_field/);
+    assert.strictEqual(db.getTask(taskId).status, 'assigned');
   });
 
   it('should reject complete-task when a PR URL is already owned by another request', async () => {

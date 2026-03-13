@@ -355,6 +355,10 @@ const COMPLETE_TASK_USAGE_FIELD_TYPES = Object.freeze({
   total_tokens: 'number',
   cost_usd: 'number',
 });
+const COMPLETE_TASK_USAGE_FIELD_ALIASES = Object.freeze({
+  cache_creation_input_tokens: 'cache_creation_tokens',
+  cache_read_input_tokens: 'cached_tokens',
+});
 
 const COMPLETE_TASK_USAGE_COLUMN_MAP = Object.freeze({
   model: 'usage_model',
@@ -417,7 +421,19 @@ function normalizeCompleteTaskUsagePayload(rawUsage) {
     throw new Error('Field "usage" must be an object');
   }
 
-  const unknownFields = Object.keys(rawUsage)
+  const aliasNormalized = {};
+  for (const [rawField, value] of Object.entries(rawUsage)) {
+    const canonicalField = COMPLETE_TASK_USAGE_FIELD_ALIASES[rawField] || rawField;
+    if (
+      Object.prototype.hasOwnProperty.call(aliasNormalized, canonicalField)
+      && aliasNormalized[canonicalField] !== value
+    ) {
+      throw new Error(`Field "usage" contains conflicting values for key "${canonicalField}"`);
+    }
+    aliasNormalized[canonicalField] = value;
+  }
+
+  const unknownFields = Object.keys(aliasNormalized)
     .filter((field) => !Object.prototype.hasOwnProperty.call(COMPLETE_TASK_USAGE_FIELD_TYPES, field));
   if (unknownFields.length) {
     throw new Error(`Field "usage" contains unsupported keys: ${unknownFields.join(', ')}`);
@@ -425,8 +441,8 @@ function normalizeCompleteTaskUsagePayload(rawUsage) {
 
   const normalized = {};
   for (const [field, expectedType] of Object.entries(COMPLETE_TASK_USAGE_FIELD_TYPES)) {
-    if (!Object.prototype.hasOwnProperty.call(rawUsage, field)) continue;
-    const value = rawUsage[field];
+    if (!Object.prototype.hasOwnProperty.call(aliasNormalized, field)) continue;
+    const value = aliasNormalized[field];
     if (value === null) {
       normalized[field] = null;
       continue;
@@ -457,10 +473,21 @@ function normalizeCompleteTaskUsagePayload(rawUsage) {
 
 function mapUsagePayloadToTaskFields(usage) {
   if (!usage || typeof usage !== 'object') return {};
+  const aliasNormalized = {};
+  for (const [rawField, value] of Object.entries(usage)) {
+    const canonicalField = COMPLETE_TASK_USAGE_FIELD_ALIASES[rawField] || rawField;
+    if (
+      Object.prototype.hasOwnProperty.call(aliasNormalized, canonicalField)
+      && aliasNormalized[canonicalField] !== value
+    ) {
+      throw new Error(`Field "usage" contains conflicting values for key "${canonicalField}"`);
+    }
+    aliasNormalized[canonicalField] = value;
+  }
   const mapped = {};
   for (const [usageKey, columnName] of Object.entries(COMPLETE_TASK_USAGE_COLUMN_MAP)) {
-    if (!Object.prototype.hasOwnProperty.call(usage, usageKey)) continue;
-    mapped[columnName] = usage[usageKey];
+    if (!Object.prototype.hasOwnProperty.call(aliasNormalized, usageKey)) continue;
+    mapped[columnName] = aliasNormalized[usageKey];
   }
   return mapped;
 }
