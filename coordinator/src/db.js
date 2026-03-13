@@ -92,7 +92,8 @@ const VALID_COLUMNS = Object.freeze({
     'request_id', 'subject', 'description', 'domain', 'files', 'priority', 'tier', 'depends_on',
     'assigned_to', 'status', 'pr_url', 'branch', 'validation', 'overlap_with',
     'routing_class', 'routed_model', 'model_source', 'reasoning_effort',
-    'usage_model', 'usage_input_tokens', 'usage_output_tokens', 'usage_reasoning_tokens', 'usage_cached_tokens',
+    'usage_model', 'usage_input_tokens', 'usage_output_tokens', 'usage_reasoning_tokens',
+    'usage_accepted_prediction_tokens', 'usage_rejected_prediction_tokens', 'usage_cached_tokens',
     'usage_cache_creation_tokens', 'usage_total_tokens', 'usage_cost_usd',
     'started_at', 'completed_at', 'result',
   ]),
@@ -165,6 +166,12 @@ function ensureTaskUsageTelemetryColumns(database) {
   }
   if (!taskCols.includes('usage_reasoning_tokens')) {
     database.exec("ALTER TABLE tasks ADD COLUMN usage_reasoning_tokens INTEGER");
+  }
+  if (!taskCols.includes('usage_accepted_prediction_tokens')) {
+    database.exec("ALTER TABLE tasks ADD COLUMN usage_accepted_prediction_tokens INTEGER");
+  }
+  if (!taskCols.includes('usage_rejected_prediction_tokens')) {
+    database.exec("ALTER TABLE tasks ADD COLUMN usage_rejected_prediction_tokens INTEGER");
   }
   if (!taskCols.includes('usage_cached_tokens')) {
     database.exec("ALTER TABLE tasks ADD COLUMN usage_cached_tokens INTEGER");

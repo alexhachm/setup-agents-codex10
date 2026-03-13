@@ -370,6 +370,8 @@ describe('CLI Server', () => {
     assert.strictEqual(completedTask.usage_input_tokens, null);
     assert.strictEqual(completedTask.usage_output_tokens, null);
     assert.strictEqual(completedTask.usage_reasoning_tokens, null);
+    assert.strictEqual(completedTask.usage_accepted_prediction_tokens, null);
+    assert.strictEqual(completedTask.usage_rejected_prediction_tokens, null);
     assert.strictEqual(completedTask.usage_cached_tokens, null);
     assert.strictEqual(completedTask.usage_cache_creation_tokens, null);
     assert.strictEqual(completedTask.usage_total_tokens, null);
@@ -521,6 +523,8 @@ describe('CLI Server', () => {
       input_tokens: 1200,
       output_tokens: 345,
       reasoning_tokens: 89,
+      accepted_prediction_tokens: 21,
+      rejected_prediction_tokens: 34,
       cached_tokens: 67,
       cache_creation_tokens: 45,
       total_tokens: 1612,
@@ -543,6 +547,8 @@ describe('CLI Server', () => {
     assert.strictEqual(completedTask.usage_input_tokens, usage.input_tokens);
     assert.strictEqual(completedTask.usage_output_tokens, usage.output_tokens);
     assert.strictEqual(completedTask.usage_reasoning_tokens, usage.reasoning_tokens);
+    assert.strictEqual(completedTask.usage_accepted_prediction_tokens, usage.accepted_prediction_tokens);
+    assert.strictEqual(completedTask.usage_rejected_prediction_tokens, usage.rejected_prediction_tokens);
     assert.strictEqual(completedTask.usage_cached_tokens, usage.cached_tokens);
     assert.strictEqual(completedTask.usage_cache_creation_tokens, usage.cache_creation_tokens);
     assert.strictEqual(completedTask.usage_total_tokens, usage.total_tokens);
@@ -666,6 +672,8 @@ describe('CLI Server', () => {
       input_tokens: 1200,
       output_tokens: 345,
       reasoning_tokens: 89,
+      accepted_prediction_tokens: 21,
+      rejected_prediction_tokens: 34,
       cached_tokens: 67,
       cache_creation_tokens: 45,
       total_tokens: 1612,
@@ -676,6 +684,8 @@ describe('CLI Server', () => {
       input_tokens: 1200,
       output_tokens: 345,
       reasoning_tokens: 89,
+      accepted_prediction_tokens: 21,
+      rejected_prediction_tokens: 34,
       cache_read_input_tokens: 67,
       cache_creation_input_tokens: 45,
       total_tokens: 1612,
@@ -687,7 +697,11 @@ describe('CLI Server', () => {
       completion_tokens: 345,
       input_tokens_details: { cached_tokens: 67 },
       prompt_tokens_details: { cached_tokens: 67 },
-      completion_tokens_details: { reasoning_tokens: 89 },
+      completion_tokens_details: {
+        reasoning_tokens: 89,
+        accepted_prediction_tokens: 21,
+        rejected_prediction_tokens: 34,
+      },
       output_tokens_details: { reasoning_tokens: 89 },
       cache_creation_tokens: 45,
       total_tokens: 1612,
@@ -731,6 +745,8 @@ describe('CLI Server', () => {
       'usage_input_tokens',
       'usage_output_tokens',
       'usage_reasoning_tokens',
+      'usage_accepted_prediction_tokens',
+      'usage_rejected_prediction_tokens',
       'usage_cached_tokens',
       'usage_cache_creation_tokens',
       'usage_total_tokens',
@@ -753,9 +769,12 @@ describe('CLI Server', () => {
       worker_id: '1',
       task_id: String(taskId),
       usage: {
+        completion_tokens_details: {
+          accepted_prediction_tokens: 11,
+          rejected_prediction_tokens: 5,
+        },
         cache_creation_input_tokens: 45,
         cache_read_input_tokens: 67,
-        output_tokens_details: { reasoning_tokens: 11 },
         bogus_field: 1,
       },
     });
@@ -799,6 +818,18 @@ describe('CLI Server', () => {
     assert.match(serverReasoningResult.error, /conflicting values for key "reasoning_tokens"/);
     assert.strictEqual(db.getTask(serverTaskId).status, 'assigned');
 
+    const serverAcceptedPredictionResult = await sendCommand('complete-task', {
+      worker_id: '1',
+      task_id: String(serverTaskId),
+      usage: {
+        accepted_prediction_tokens: 7,
+        completion_tokens_details: { accepted_prediction_tokens: 8 },
+      },
+    });
+    assert.ok(serverAcceptedPredictionResult.error);
+    assert.match(serverAcceptedPredictionResult.error, /conflicting values for key "accepted_prediction_tokens"/);
+    assert.strictEqual(db.getTask(serverTaskId).status, 'assigned');
+
     await assert.rejects(
       () => runMac10Command([
         'complete-task',
@@ -807,12 +838,12 @@ describe('CLI Server', () => {
         'CLI conflict completion',
         '--usage',
         JSON.stringify({
-          reasoning_tokens: 67,
-          output_tokens_details: { reasoning_tokens: 68 },
+          rejected_prediction_tokens: 12,
+          completion_tokens_details: { rejected_prediction_tokens: 13 },
         }),
       ], tmpDir),
       (err) => {
-        assert.match(String(err && err.stderr), /conflicting values for "reasoning_tokens"/);
+        assert.match(String(err && err.stderr), /conflicting values for "rejected_prediction_tokens"/);
         return true;
       }
     );
