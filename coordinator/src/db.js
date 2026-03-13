@@ -359,10 +359,15 @@ function checkAndPromoteTasks() {
       updateTask(task.id, { status: 'ready' });
       continue;
     }
-    const unfinished = d.prepare(
-      `SELECT COUNT(*) as cnt FROM tasks WHERE id IN (${deps.map(() => '?').join(',')}) AND status != 'completed'`
-    ).get(...deps);
-    if (unfinished.cnt === 0) {
+    const uniqueDeps = [...new Set(deps)];
+    const depStatus = d.prepare(
+      `SELECT
+         COUNT(*) AS total,
+         COALESCE(SUM(CASE WHEN status = 'completed' THEN 1 ELSE 0 END), 0) AS completed
+       FROM tasks
+       WHERE id IN (${uniqueDeps.map(() => '?').join(',')})`
+    ).get(...uniqueDeps);
+    if (depStatus.total === uniqueDeps.length && depStatus.completed === uniqueDeps.length) {
       updateTask(task.id, { status: 'ready' });
     }
   }

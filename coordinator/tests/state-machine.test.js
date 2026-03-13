@@ -115,6 +115,40 @@ describe('Task state machine', () => {
     assert.strictEqual(ready[0].id, urgentId);
     assert.strictEqual(ready[0].priority, 'urgent');
   });
+
+  it('should keep pending tasks blocked when dependency IDs do not exist', () => {
+    const reqId = db.createRequest('Feature');
+    const blockedId = db.createTask({
+      request_id: reqId,
+      subject: 'Blocked',
+      description: 'Wait for missing dependency',
+      depends_on: [999999],
+    });
+
+    db.checkAndPromoteTasks();
+
+    const blockedTask = db.getTask(blockedId);
+    assert.strictEqual(blockedTask.status, 'pending');
+  });
+
+  it('should keep mixed existing and missing dependencies blocked', () => {
+    const reqId = db.createRequest('Feature');
+    const t1 = db.createTask({ request_id: reqId, subject: 'Task 1', description: 'First' });
+    const t2 = db.createTask({
+      request_id: reqId,
+      subject: 'Task 2',
+      description: 'Second',
+      depends_on: [t1, 999999],
+    });
+
+    db.checkAndPromoteTasks();
+    assert.strictEqual(db.getTask(t1).status, 'ready');
+    assert.strictEqual(db.getTask(t2).status, 'pending');
+
+    db.updateTask(t1, { status: 'completed' });
+    db.checkAndPromoteTasks();
+    assert.strictEqual(db.getTask(t2).status, 'pending');
+  });
 });
 
 describe('Worker state machine', () => {
