@@ -77,17 +77,29 @@ function buildTaskOverlay(task, worker, projectDir) {
   }
 
   if (task.validation) {
-    let val;
-    try {
-      val = typeof task.validation === 'string' ? JSON.parse(task.validation) : task.validation;
-    } catch { val = null; }
+    let val = task.validation;
+    if (typeof val === 'string') {
+      try {
+        val = JSON.parse(val);
+      } catch {
+        val = val.trim();
+      }
+    }
     if (val) {
       lines.push('## Validation');
       lines.push('');
-      if (val.build_cmd) lines.push(`- Build: \`${val.build_cmd}\``);
-      if (val.test_cmd) lines.push(`- Test: \`${val.test_cmd}\``);
-      if (val.lint_cmd) lines.push(`- Lint: \`${val.lint_cmd}\``);
-      if (val.custom) lines.push(`- Custom: ${val.custom}`);
+      if (typeof val === 'string') {
+        lines.push(`- Validation: \`${val}\``);
+        if (/^tier[23]$/i.test(val)) {
+          lines.push('- Note: Tier shorthand defines validator flow, not a shell command.');
+        }
+      } else {
+        if (val.build_cmd) lines.push(`- Build: \`${val.build_cmd}\``);
+        if (val.test_cmd) lines.push(`- Test: \`${val.test_cmd}\``);
+        if (val.lint_cmd) lines.push(`- Lint: \`${val.lint_cmd}\``);
+        if (val.custom) lines.push(`- Custom: ${val.custom}`);
+      }
+      lines.push('- Note: Run only task-provided validation commands; do not assume `npm run build` exists.');
       lines.push('');
     }
   }
