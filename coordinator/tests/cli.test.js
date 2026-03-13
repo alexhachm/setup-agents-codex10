@@ -369,6 +369,7 @@ describe('CLI Server', () => {
     assert.strictEqual(completedTask.usage_model, null);
     assert.strictEqual(completedTask.usage_input_tokens, null);
     assert.strictEqual(completedTask.usage_output_tokens, null);
+    assert.strictEqual(completedTask.usage_reasoning_tokens, null);
     assert.strictEqual(completedTask.usage_cached_tokens, null);
     assert.strictEqual(completedTask.usage_cache_creation_tokens, null);
     assert.strictEqual(completedTask.usage_total_tokens, null);
@@ -519,6 +520,7 @@ describe('CLI Server', () => {
       model: '  gpt-5-codex  ',
       input_tokens: 1200,
       output_tokens: 345,
+      reasoning_tokens: 89,
       cached_tokens: 67,
       cache_creation_tokens: 45,
       total_tokens: 1612,
@@ -540,6 +542,7 @@ describe('CLI Server', () => {
     assert.strictEqual(completedTask.usage_model, 'gpt-5-codex');
     assert.strictEqual(completedTask.usage_input_tokens, usage.input_tokens);
     assert.strictEqual(completedTask.usage_output_tokens, usage.output_tokens);
+    assert.strictEqual(completedTask.usage_reasoning_tokens, usage.reasoning_tokens);
     assert.strictEqual(completedTask.usage_cached_tokens, usage.cached_tokens);
     assert.strictEqual(completedTask.usage_cache_creation_tokens, usage.cache_creation_tokens);
     assert.strictEqual(completedTask.usage_total_tokens, usage.total_tokens);
@@ -662,6 +665,7 @@ describe('CLI Server', () => {
       model: 'gpt-5-codex',
       input_tokens: 1200,
       output_tokens: 345,
+      reasoning_tokens: 89,
       cached_tokens: 67,
       cache_creation_tokens: 45,
       total_tokens: 1612,
@@ -671,6 +675,7 @@ describe('CLI Server', () => {
       model: 'gpt-5-codex',
       input_tokens: 1200,
       output_tokens: 345,
+      reasoning_tokens: 89,
       cache_read_input_tokens: 67,
       cache_creation_input_tokens: 45,
       total_tokens: 1612,
@@ -682,6 +687,8 @@ describe('CLI Server', () => {
       completion_tokens: 345,
       input_tokens_details: { cached_tokens: 67 },
       prompt_tokens_details: { cached_tokens: 67 },
+      completion_tokens_details: { reasoning_tokens: 89 },
+      output_tokens_details: { reasoning_tokens: 89 },
       cache_creation_tokens: 45,
       total_tokens: 1612,
       cost_usd: 0.0456,
@@ -723,6 +730,7 @@ describe('CLI Server', () => {
       'usage_model',
       'usage_input_tokens',
       'usage_output_tokens',
+      'usage_reasoning_tokens',
       'usage_cached_tokens',
       'usage_cache_creation_tokens',
       'usage_total_tokens',
@@ -747,6 +755,7 @@ describe('CLI Server', () => {
       usage: {
         cache_creation_input_tokens: 45,
         cache_read_input_tokens: 67,
+        output_tokens_details: { reasoning_tokens: 11 },
         bogus_field: 1,
       },
     });
@@ -778,6 +787,18 @@ describe('CLI Server', () => {
     assert.match(serverResult.error, /conflicting values for key "input_tokens"/);
     assert.strictEqual(db.getTask(serverTaskId).status, 'assigned');
 
+    const serverReasoningResult = await sendCommand('complete-task', {
+      worker_id: '1',
+      task_id: String(serverTaskId),
+      usage: {
+        reasoning_tokens: 77,
+        completion_tokens_details: { reasoning_tokens: 78 },
+      },
+    });
+    assert.ok(serverReasoningResult.error);
+    assert.match(serverReasoningResult.error, /conflicting values for key "reasoning_tokens"/);
+    assert.strictEqual(db.getTask(serverTaskId).status, 'assigned');
+
     await assert.rejects(
       () => runMac10Command([
         'complete-task',
@@ -786,12 +807,12 @@ describe('CLI Server', () => {
         'CLI conflict completion',
         '--usage',
         JSON.stringify({
-          cached_tokens: 67,
-          prompt_tokens_details: { cached_tokens: 68 },
+          reasoning_tokens: 67,
+          output_tokens_details: { reasoning_tokens: 68 },
         }),
       ], tmpDir),
       (err) => {
-        assert.match(String(err && err.stderr), /conflicting values for "cached_tokens"/);
+        assert.match(String(err && err.stderr), /conflicting values for "reasoning_tokens"/);
         return true;
       }
     );
