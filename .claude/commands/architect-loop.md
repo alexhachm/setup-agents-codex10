@@ -186,14 +186,15 @@ Go to Step 6.
 
 3. **Create and assign the task:**
    ```bash
-   task_id="$(
+   create_task_output="$(
      echo '{"request_id":"[id]","subject":"[task title]","description":"DOMAIN: [domain]\nFILES: [files]\nVALIDATION: tier2\nTIER: 2\n\n[detailed requirements]\n\n[success criteria]","domain":"[domain]","tier":2,"priority":"normal","files":["file1.js","file2.js"],"validation":"npm run build"}' \
-       | ./.claude/scripts/codex10 create-task - \
-       | awk '/Task created:/ {print $3}'
+       | ./.claude/scripts/codex10 create-task -
    )"
+   task_id=$(printf '%s\n' "$create_task_output" | awk '/Task created:/ {print $3}')
    [ -n "$task_id" ] || { echo "Failed to capture task_id from create-task output"; exit 1; }
+   printf '%s\n' "$create_task_output"
    ```
-   Then assign with the normalized numeric worker id:
+   Then assign with the captured `task_id` and normalized numeric worker id:
    ```bash
    ./.claude/scripts/codex10 assign-task "$task_id" "$worker_id"
    ```
@@ -223,39 +224,34 @@ Go to Step 6.
    ./.claude/scripts/codex10 ask-clarification <request_id> "[specific question]"
    ./.claude/scripts/codex10 inbox architect --block
    ```
-4. Create each decomposed Tier 3 task via codex10 and capture IDs:
-   ```bash
-   task_id="$(
-     echo '{"request_id":"[id]","subject":"[task title]","description":"REQUEST_ID: [id]\nDOMAIN: [domain]\nFILES: [specific files]\nVALIDATION: tier3\nTIER: 3\n\n[detailed requirements]\n\n[success criteria]","domain":"[domain]","tier":3,"priority":"normal","files":["file1.js","file2.js"],"depends_on":[],"validation":"npm run build"}' \
-       | ./.claude/scripts/codex10 create-task - \
-       | awk '/Task created:/ {print $3}'
-   )"
-   [ -n "$task_id" ] || { echo "Failed to capture Tier 3 task ID"; exit 1; }
-   ```
-   Repeat for each subtask; use `depends_on` for serial dependencies.
-5. Record tier decision in coordinator state:
+4. Record the Tier 3 decision in coordinator state:
    ```bash
    ./.claude/scripts/codex10 triage <request_id> 3 "Decomposed into [N] tasks"
    ```
-6. Signal Master-3:
+5. Create each decomposed Tier 3 task via codex10, capturing output and task IDs as you go:
    ```bash
-   touch .claude/signals/.codex10.task-signal
+   create_task_output="$(
+     echo '{"request_id":"[id]","subject":"[task title]","description":"REQUEST_ID: [id]\nDOMAIN: [domain]\nFILES: [specific files]\nVALIDATION: tier3\nTIER: 3\n\n[detailed requirements]\n\n[success criteria]","domain":"[domain]","tier":3,"priority":"normal","files":["file1.js","file2.js"],"depends_on":[],"validation":"npm run build"}' \
+       | ./.claude/scripts/codex10 create-task -
+   )"
+   task_id=$(printf '%s\n' "$create_task_output" | awk '/Task created:/ {print $3}')
+   [ -n "$task_id" ] || { echo "Failed to capture Tier 3 task ID"; exit 1; }
+   printf '%s\n' "$create_task_output"
    ```
-7. Log:
+   Repeat for each subtask; serialize dependencies by passing prior task IDs in `depends_on` (for example `["$task_id_a"]`).
+6. Validate decomposition overlap via coordinator:
+   ```bash
+   ./.claude/scripts/codex10 check-overlaps <request_id>
+   ```
+   For CRITICAL overlaps, adjust decomposition so conflicting tasks are serialized via `depends_on` before workers execute them.
+7. Do not write `.claude/state/codex10.task-queue.json`, `.claude/state/codex10.handoff.json`, or signal files for decomposition handoff; `create-task` updates coordinator state directly.
+8. Log:
    ```bash
    echo "[$(date -u +%Y-%m-%dT%H:%M:%SZ)] [master-2] [DECOMPOSE_DONE] id=[request_id] tasks=[N] domains=[list]" >> .claude/logs/activity.log
    ```
    `decomposition_count += 1`
    `if decomposition_count is a whole even number (2, 4, 6, ...): curation_due = true`
    `last_activity_epoch = now_epoch()`
-
-8. **Check file overlaps between tasks:**
-   ```bash
-   ./.claude/scripts/codex10 check-overlaps <request_id>
-   ```
-   - **CRITICAL** (3+ shared files): Add `depends_on` edges to serialize the overlapping tasks — they must not run in parallel
-   - **HIGH** (2 shared files): Note in task description ("⚠ OVERLAP: shares [files] with task #N — merger will validate"), let merger validate
-   - **LOW** (1 shared file): Accept as-is, merger handles it
 
 ### Step 4: Curation check
 
