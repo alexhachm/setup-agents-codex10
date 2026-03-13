@@ -1550,6 +1550,73 @@ describe('CLI Server', () => {
     assert.strictEqual(recoveredHighLog.reasoning_effort, 'xhigh-effort');
   });
 
+  it('should classify description-only merge/conflict signals with subject parity', async () => {
+    db.registerWorker(1, '/wt-1', 'agent-1');
+    db.registerWorker(2, '/wt-2', 'agent-2');
+    db.registerWorker(3, '/wt-3', 'agent-3');
+    db.registerWorker(4, '/wt-4', 'agent-4');
+
+    await setConfigValue('model_mid', 'mid-model');
+    await setConfigValue('model_spark', 'spark-model');
+    await setConfigValue('reasoning_mid', 'mid-effort');
+    await setConfigValue('reasoning_spark', 'spark-effort');
+    await setConfigValue('routing_budget_state', JSON.stringify({}));
+
+    const subjectMergeTaskId = createReadyTask({
+      subject: 'Resolve merge queue ownership',
+      description: 'Routine helper cleanup',
+      tier: 2,
+    });
+    const descriptionMergeTaskId = createReadyTask({
+      subject: 'Routine helper cleanup',
+      description: 'Resolve merge queue ownership',
+      tier: 2,
+    });
+
+    const subjectMergeAssignment = await sendCommand('assign-task', { task_id: subjectMergeTaskId, worker_id: 1 });
+    const descriptionMergeAssignment = await sendCommand('assign-task', { task_id: descriptionMergeTaskId, worker_id: 2 });
+    assert.strictEqual(subjectMergeAssignment.ok, true);
+    assert.strictEqual(descriptionMergeAssignment.ok, true);
+    assert.strictEqual(subjectMergeAssignment.routing.class, 'mid');
+    assert.strictEqual(descriptionMergeAssignment.routing.class, 'mid');
+    assert.notStrictEqual(descriptionMergeAssignment.routing.class, 'spark');
+    assert.strictEqual(descriptionMergeAssignment.routing.model, subjectMergeAssignment.routing.model);
+    assert.strictEqual(descriptionMergeAssignment.routing.model_source, subjectMergeAssignment.routing.model_source);
+    assert.strictEqual(descriptionMergeAssignment.routing.reasoning_effort, subjectMergeAssignment.routing.reasoning_effort);
+    assert.strictEqual(descriptionMergeAssignment.routing.routing_reason, subjectMergeAssignment.routing.routing_reason);
+
+    await setConfigValue('routing_budget_state', JSON.stringify({
+      flagship: { remaining: 5, threshold: 10 },
+    }));
+
+    const subjectConflictTaskId = createReadyTask({
+      subject: 'Resolve conflict in coordinator queue',
+      description: 'Routine helper cleanup',
+      tier: 2,
+    });
+    const descriptionConflictTaskId = createReadyTask({
+      subject: 'Routine helper cleanup two',
+      description: 'Resolve conflict in coordinator queue',
+      tier: 2,
+    });
+
+    const subjectConflictAssignment = await sendCommand('assign-task', { task_id: subjectConflictTaskId, worker_id: 3 });
+    const descriptionConflictAssignment = await sendCommand('assign-task', { task_id: descriptionConflictTaskId, worker_id: 4 });
+    assert.strictEqual(subjectConflictAssignment.ok, true);
+    assert.strictEqual(descriptionConflictAssignment.ok, true);
+    assert.strictEqual(subjectConflictAssignment.routing.class, 'mid');
+    assert.strictEqual(descriptionConflictAssignment.routing.class, 'mid');
+    assert.notStrictEqual(descriptionConflictAssignment.routing.class, 'spark');
+    assert.strictEqual(descriptionConflictAssignment.routing.model, subjectConflictAssignment.routing.model);
+    assert.strictEqual(descriptionConflictAssignment.routing.model_source, subjectConflictAssignment.routing.model_source);
+    assert.strictEqual(descriptionConflictAssignment.routing.reasoning_effort, subjectConflictAssignment.routing.reasoning_effort);
+    assert.strictEqual(descriptionConflictAssignment.routing.routing_reason, subjectConflictAssignment.routing.routing_reason);
+    assert.strictEqual(descriptionConflictAssignment.routing.model, 'spark-model');
+    assert.strictEqual(descriptionConflictAssignment.routing.model_source, 'budget-downgrade:model_spark');
+    assert.strictEqual(descriptionConflictAssignment.routing.reasoning_effort, 'spark-effort');
+    assert.strictEqual(descriptionConflictAssignment.routing.routing_reason, 'fallback-budget-downgrade:mid->spark');
+  });
+
   it('should downscale routing from scalar budget keys when routing_budget_state JSON is absent', async () => {
     db.registerWorker(1, '/wt-1', 'agent-1');
     db.registerWorker(2, '/wt-2', 'agent-2');
