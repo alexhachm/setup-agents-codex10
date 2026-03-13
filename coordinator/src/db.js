@@ -9,6 +9,8 @@ let db = null;
 const NAMESPACE = process.env.MAC10_NAMESPACE || 'mac10';
 const SQLITE_TIMESTAMP_RE = /^(\d{4}-\d{2}-\d{2}) (\d{2}:\d{2}:\d{2})(\.\d+)?$/;
 const ISO_TIMESTAMP_WITHOUT_ZONE_RE = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d+)?$/;
+const LOOP_REQUEST_RATE_WINDOW_MS = 60 * 60 * 1000;
+const DEFAULT_LOOP_REQUEST_RETRY_AFTER_SEC = 3600;
 
 function parseCoordinatorTimestamp(value) {
   if (value === null || value === undefined) return null;
@@ -47,6 +49,20 @@ function coordinatorAgeMs(timestamp, nowMs = Date.now()) {
   const parsed = parseCoordinatorTimestamp(timestamp);
   if (!parsed) return null;
   return Math.max(0, nowMs - parsed.getTime());
+}
+
+function parsePositiveInt(value) {
+  if (value === null || value === undefined) return null;
+  const parsed = Number.parseInt(String(value), 10);
+  return Number.isInteger(parsed) && parsed > 0 ? parsed : null;
+}
+
+function computeLoopRequestRetryAfterSec(oldestCreatedAt, nowMs = Date.now()) {
+  const oldestDate = parseCoordinatorTimestamp(oldestCreatedAt);
+  if (!oldestDate) return DEFAULT_LOOP_REQUEST_RETRY_AFTER_SEC;
+  const oldestExpiryMs = oldestDate.getTime() + LOOP_REQUEST_RATE_WINDOW_MS;
+  const remainingMs = oldestExpiryMs - nowMs;
+  return Math.max(1, Math.ceil(remainingMs / 1000));
 }
 
 function buildCompletedTaskCursor(timestampValue, taskId = 0) {
@@ -881,6 +897,33 @@ function createLoopRequest(description, loopId) {
     if (existing) {
       return { id: existing.id, deduplicated: true };
     }
+
+    const loopRequestMaxPerHour = parsePositiveInt(getConfig('loop_request_max_per_hour'));
+    if (loopRequestMaxPerHour !== null) {
+      const recentWindow = d.prepare(`
+        SELECT COUNT(*) AS request_count, MIN(created_at) AS oldest_created_at
+        FROM requests
+        WHERE loop_id = ? AND created_at >= datetime('now', '-1 hour')
+      `).get(loopId);
+      const requestCount = Number.parseInt(String(recentWindow?.request_count ?? 0), 10) || 0;
+      if (requestCount >= loopRequestMaxPerHour) {
+        const retryAfterSec = computeLoopRequestRetryAfterSec(recentWindow?.oldest_created_at ?? null);
+        log('loop', 'loop_request_suppressed', {
+          loop_id: loopId,
+          reason: 'rate_limit',
+          retry_after_sec: retryAfterSec,
+          max_per_hour: loopRequestMaxPerHour,
+        });
+        return {
+          id: null,
+          deduplicated: false,
+          suppressed: true,
+          reason: 'rate_limit',
+          retry_after_sec: retryAfterSec,
+        };
+      }
+    }
+
     const id = 'req-' + crypto.randomBytes(4).toString('hex');
     d.prepare(`
       INSERT INTO requests (id, description, loop_id) VALUES (?, ?, ?)
