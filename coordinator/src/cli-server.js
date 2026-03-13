@@ -2719,6 +2719,10 @@ function handleCommand(cmd, conn, handlers) {
           respond(conn, { ok: false, error: 'Loop not found' });
           break;
         }
+        if (cpLoop.status !== 'active') {
+          respond(conn, { ok: false, error: `Loop is ${cpLoop.status}, not active` });
+          break;
+        }
         db.updateLoop(args.loop_id, {
           last_checkpoint: args.summary,
           iteration_count: cpLoop.iteration_count + 1,
@@ -2736,6 +2740,10 @@ function handleCommand(cmd, conn, handlers) {
         const hbLoop = db.getLoop(args.loop_id);
         if (!hbLoop) {
           respond(conn, { ok: false, error: 'Loop not found' });
+          break;
+        }
+        if (hbLoop.status !== 'active') {
+          respond(conn, { ok: false, error: `Loop is ${hbLoop.status}, not active` });
           break;
         }
         db.updateLoop(args.loop_id, { last_heartbeat: new Date().toISOString() });
