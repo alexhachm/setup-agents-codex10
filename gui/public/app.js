@@ -297,6 +297,7 @@
     if (telemetry.usageInputTokens) chips.push(renderTelemetryChip('in', telemetry.usageInputTokens));
     if (telemetry.usageOutputTokens) chips.push(renderTelemetryChip('out', telemetry.usageOutputTokens));
     if (telemetry.usageCachedTokens) chips.push(renderTelemetryChip('cached', telemetry.usageCachedTokens));
+    if (telemetry.cacheHitRate) chips.push(renderTelemetryChip('cache-hit', telemetry.cacheHitRate));
     if (telemetry.usageCacheCreationTokens) chips.push(renderTelemetryChip('cache-create', telemetry.usageCacheCreationTokens));
     if (telemetry.usageReasoningTokens) chips.push(renderTelemetryChip('reasoning', telemetry.usageReasoningTokens));
     if (telemetry.usageAcceptedPredictionTokens) chips.push(renderTelemetryChip('pred-hit', telemetry.usageAcceptedPredictionTokens));
@@ -314,15 +315,35 @@
   function readTaskTelemetry(task) {
     const routing = task && task.routing && typeof task.routing === 'object' ? task.routing : null;
     const usage = task && task.usage && typeof task.usage === 'object' ? task.usage : null;
+    const usageInputTokensCandidates = [
+      task && task.usage_input_tokens,
+      task && task.usageInputTokens,
+      usage && usage.input_tokens,
+      usage && usage.inputTokens,
+    ];
+    const usageCachedTokensCandidates = [
+      task && task.usage_cached_tokens,
+      task && task.usageCachedTokens,
+      usage && usage.cached_tokens,
+      usage && usage.cachedTokens,
+    ];
+    const usageInputTokens = pickTelemetryValue(...usageInputTokensCandidates);
+    const usageCachedTokens = pickTelemetryValue(...usageCachedTokensCandidates);
+    const usageInputTokensNumber = pickFiniteTelemetryNumber(...usageInputTokensCandidates);
+    const usageCachedTokensNumber = pickFiniteTelemetryNumber(...usageCachedTokensCandidates);
+    const cacheHitRate = usageInputTokensNumber !== null && usageCachedTokensNumber !== null && usageInputTokensNumber > 0
+      ? formatTelemetryPercentage(usageCachedTokensNumber / usageInputTokensNumber)
+      : '';
     return {
       routingClass: pickTelemetryValue(task && task.routing_class, task && task.routingClass, routing && routing.class, routing && routing.routing_class),
       routedModel: pickTelemetryValue(task && task.routed_model, task && task.routedModel, task && task.routing_model, task && task.routingModel, routing && routing.model),
       modelSource: pickTelemetryValue(task && task.model_source, task && task.modelSource, task && task.routing_model_source, task && task.routingModelSource, routing && routing.model_source),
       reasoningEffort: pickTelemetryValue(task && task.reasoning_effort, task && task.reasoningEffort, task && task.routing_reasoning_effort, task && task.routingReasoningEffort, routing && routing.reasoning_effort),
       usageModel: pickTelemetryValue(task && task.usage_model, task && task.usageModel, usage && usage.model),
-      usageInputTokens: pickTelemetryValue(task && task.usage_input_tokens, task && task.usageInputTokens, usage && usage.input_tokens, usage && usage.inputTokens),
+      usageInputTokens,
       usageOutputTokens: pickTelemetryValue(task && task.usage_output_tokens, task && task.usageOutputTokens, usage && usage.output_tokens, usage && usage.outputTokens),
-      usageCachedTokens: pickTelemetryValue(task && task.usage_cached_tokens, task && task.usageCachedTokens, usage && usage.cached_tokens, usage && usage.cachedTokens),
+      usageCachedTokens,
+      cacheHitRate,
       usageCacheCreationTokens: pickTelemetryValue(
         task && task.usage_cache_creation_tokens,
         task && task.usageCacheCreationTokens,
@@ -362,6 +383,28 @@
       if (normalized) return normalized;
     }
     return '';
+  }
+
+  function pickFiniteTelemetryNumber(...values) {
+    for (const candidate of values) {
+      const normalized = normalizeTelemetryNumber(candidate);
+      if (normalized !== null) return normalized;
+    }
+    return null;
+  }
+
+  function normalizeTelemetryNumber(value) {
+    if (typeof value === 'number') return Number.isFinite(value) ? value : null;
+    if (typeof value !== 'string') return null;
+    const trimmed = value.trim();
+    if (!trimmed) return null;
+    const parsed = Number(trimmed);
+    return Number.isFinite(parsed) ? parsed : null;
+  }
+
+  function formatTelemetryPercentage(value) {
+    if (!Number.isFinite(value)) return '';
+    return `${(value * 100).toFixed(1)}%`;
   }
 
   function normalizeTelemetryValue(value) {
