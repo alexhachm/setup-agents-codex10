@@ -110,9 +110,10 @@ echo "[$(date -u +%Y-%m-%dT%H:%M:%SZ)] [master-2] [TIER_CLASSIFY] id=[request_id
 Before acting on inbox order, measure queue pressure:
 
 ```bash
-pending_count=$(./.claude/scripts/codex10 status | sed -n '/=== Requests ===/,/=== Workers ===/p' | grep -c '\[pending\]')
+request_rows=$(./.claude/scripts/codex10 status | sed -n '/=== Requests ===/,/=== Workers ===/p')
+pending_count=$(printf '%s\n' "$request_rows" | awk '$1 ~ /^req-/ && $2 == "[pending]" {count++} END {print count+0}')
 ready_count=$(./.claude/scripts/codex10 ready-tasks | grep -c '^  #')
-oldest_pending_id=$(./.claude/scripts/codex10 status | sed -n '/=== Requests ===/,/=== Workers ===/p' | grep '\[pending\]' | awk '{print $1}' | tail -n 1)
+oldest_pending_id=$(printf '%s\n' "$request_rows" | awk '$1 ~ /^req-/ && $2 == "[pending]" {id=$1} END {print id}')
 ```
 
 If `pending_count > backlog_threshold`:
