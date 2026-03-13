@@ -1724,6 +1724,43 @@ describe('CLI Server', () => {
     assert.strictEqual(subjectTypoAssignment.routing.routing_reason, 'fallback-routing:class-default');
   });
 
+  it('should ignore embedded merge/conflict substrings in low-priority docs/typo subjects', async () => {
+    db.registerWorker(1, '/wt-1', 'agent-1');
+    db.registerWorker(2, '/wt-2', 'agent-2');
+
+    await setConfigValue('model_mini', 'mini-model');
+    await setConfigValue('reasoning_mini', 'mini-effort');
+    await setConfigValue('routing_budget_state', JSON.stringify({}));
+
+    const emergencyTypoTaskId = createReadyTask({
+      subject: 'Emergency typo fix',
+      description: 'Routine cleanup item',
+      priority: 'low',
+      tier: 1,
+    });
+    const submergeDocsTaskId = createReadyTask({
+      subject: 'Submerge docs cleanup',
+      description: 'Routine cleanup item',
+      priority: 'low',
+      tier: 1,
+    });
+
+    const emergencyTypoAssignment = await sendCommand('assign-task', { task_id: emergencyTypoTaskId, worker_id: 1 });
+    const submergeDocsAssignment = await sendCommand('assign-task', { task_id: submergeDocsTaskId, worker_id: 2 });
+    assert.strictEqual(emergencyTypoAssignment.ok, true);
+    assert.strictEqual(submergeDocsAssignment.ok, true);
+    assert.strictEqual(emergencyTypoAssignment.routing.class, 'mini');
+    assert.strictEqual(submergeDocsAssignment.routing.class, 'mini');
+    assert.notStrictEqual(emergencyTypoAssignment.routing.class, 'mid');
+    assert.notStrictEqual(submergeDocsAssignment.routing.class, 'mid');
+    assert.strictEqual(emergencyTypoAssignment.routing.model, 'mini-model');
+    assert.strictEqual(submergeDocsAssignment.routing.model, 'mini-model');
+    assert.strictEqual(emergencyTypoAssignment.routing.reasoning_effort, 'mini-effort');
+    assert.strictEqual(submergeDocsAssignment.routing.reasoning_effort, 'mini-effort');
+    assert.strictEqual(emergencyTypoAssignment.routing.routing_reason, 'fallback-routing:class-default');
+    assert.strictEqual(submergeDocsAssignment.routing.routing_reason, 'fallback-routing:class-default');
+  });
+
   it('should escalate generic tasks when code-heavy metadata is present while preserving docs/typo mini paths', async () => {
     db.registerWorker(1, '/wt-1', 'agent-1');
     db.registerWorker(2, '/wt-2', 'agent-2');
