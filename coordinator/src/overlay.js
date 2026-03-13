@@ -204,6 +204,7 @@ function buildTaskOverlay(task, worker, projectDir) {
   lines.push('- `mac10 heartbeat <worker_id>` — Send heartbeat (every 30s during work)');
   lines.push('- `mac10 complete-task <worker_id> <task_id> [pr_url] [branch] [result] [--usage JSON]` — Report completion (include usage telemetry when available)');
   lines.push('- `mac10 fail-task <worker_id> <task_id> <error>` — Report failure');
+  lines.push('- Validation: run explicit task commands only; treat `validation` shorthand (`tier2`/`tier3`) as metadata and never infer implicit `npm run build`.');
   lines.push('');
 
   return lines.join('\n');
@@ -237,7 +238,7 @@ You are a coding worker in the mac10 multi-agent system. You receive tasks from 
 5. **Report completion.** Run \`mac10 complete-task <worker_id> <task_id> [pr_url] [branch] [result] [--usage JSON]\` and include usage telemetry when available.
 6. **On failure.** Run \`mac10 fail-task <worker_id> <task_id> <error_description>\`.
 7. **Stay in your domain.** Only modify files related to your assigned domain.
-8. **Validate before shipping.** Build and test your changes before creating a PR.
+8. **Validate before shipping.** Run explicit task-provided validation commands only; treat \`validation\` shorthand (\`tier2\`/\`tier3\`) as metadata and never assume implicit \`npm run build\`.
 `;
 }
 

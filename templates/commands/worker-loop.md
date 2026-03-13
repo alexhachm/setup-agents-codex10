@@ -86,9 +86,10 @@ Validation depends on the task tier:
 
 | Tier | Validation |
 |------|-----------|
-| Tier 2 | Spawn `build-validator` subagent only |
-| Tier 3 | Spawn `build-validator` subagent, THEN spawn `verify-app` subagent |
+| Tier 2 | Spawn `build-validator` subagent using explicit task validation commands only (no inferred `npm run build`) |
+| Tier 3 | Spawn `build-validator` subagent with explicit task commands, THEN spawn `verify-app` subagent |
 
+- If `validation` is shorthand metadata (`tier2`/`tier3`) and no explicit command is provided, do not invent `npm run build`; use task-provided commands only.
 - If `build-validator` reports `VALIDATION_FAILED` → fix the issue and re-validate
 - If `verify-app` reports `VERIFICATION_FAILED` → fix the issue and re-validate
 - Only proceed to shipping when all applicable validators pass
