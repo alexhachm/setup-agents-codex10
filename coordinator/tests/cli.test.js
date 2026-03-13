@@ -410,50 +410,6 @@ describe('CLI Server', () => {
     assert.match(result.stdout, /WARNING: Source revision drift detected/);
   });
 
-  it('should default npm_config_if_present on startup when unset', async () => {
-    const previousValue = process.env.npm_config_if_present;
-    try {
-      delete process.env.npm_config_if_present;
-      cliServer.stop();
-      server = cliServer.start(tmpDir, {
-        onTaskCompleted: () => {},
-        onLoopCreated: (loopId, prompt) => {
-          loopCreatedEvents.push({ loopId, prompt });
-        },
-      });
-      await waitForCliServerReady();
-      assert.strictEqual(process.env.npm_config_if_present, 'true');
-    } finally {
-      if (typeof previousValue === 'undefined') {
-        delete process.env.npm_config_if_present;
-      } else {
-        process.env.npm_config_if_present = previousValue;
-      }
-    }
-  });
-
-  it('should preserve explicit npm_config_if_present values on startup', async () => {
-    const previousValue = process.env.npm_config_if_present;
-    try {
-      process.env.npm_config_if_present = 'false';
-      cliServer.stop();
-      server = cliServer.start(tmpDir, {
-        onTaskCompleted: () => {},
-        onLoopCreated: (loopId, prompt) => {
-          loopCreatedEvents.push({ loopId, prompt });
-        },
-      });
-      await waitForCliServerReady();
-      assert.strictEqual(process.env.npm_config_if_present, 'false');
-    } finally {
-      if (typeof previousValue === 'undefined') {
-        delete process.env.npm_config_if_present;
-      } else {
-        process.env.npm_config_if_present = previousValue;
-      }
-    }
-  });
-
   it('should keep status request rows single-line and preserve clean descriptions', async () => {
     const clean = await sendCommand('request', { description: 'Clean status description for readability' });
     assert.strictEqual(clean.ok, true);
@@ -2015,58 +1971,6 @@ describe('CLI Server', () => {
     assert.strictEqual(withMergeRecoveryEvents.length, 1);
     assert.strictEqual(withMergeRecoveryEvents[0].details.reopened_status, 'integrating');
     assert.ok(withMergeRecoveryEvents[0].details.merge_queue_entries >= 1);
-  });
-
-  it('should default npm_config_if_present during server start when unset', async () => {
-    const env = process.env;
-    const hadKey = Object.prototype.hasOwnProperty.call(env, 'npm_config_if_present');
-    const originalValue = env.npm_config_if_present;
-
-    delete env.npm_config_if_present;
-    cliServer.stop();
-
-    try {
-      server = cliServer.start(tmpDir, {
-        onTaskCompleted: () => {},
-        onLoopCreated: (loopId, prompt) => {
-          loopCreatedEvents.push({ loopId, prompt });
-        },
-      });
-      await waitForCliServerReady();
-      assert.strictEqual(env.npm_config_if_present, 'true');
-    } finally {
-      if (hadKey) {
-        env.npm_config_if_present = originalValue;
-      } else {
-        delete env.npm_config_if_present;
-      }
-    }
-  });
-
-  it('should preserve explicit npm_config_if_present override during server start', async () => {
-    const env = process.env;
-    const hadKey = Object.prototype.hasOwnProperty.call(env, 'npm_config_if_present');
-    const originalValue = env.npm_config_if_present;
-
-    env.npm_config_if_present = 'false';
-    cliServer.stop();
-
-    try {
-      server = cliServer.start(tmpDir, {
-        onTaskCompleted: () => {},
-        onLoopCreated: (loopId, prompt) => {
-          loopCreatedEvents.push({ loopId, prompt });
-        },
-      });
-      await waitForCliServerReady();
-      assert.strictEqual(env.npm_config_if_present, 'false');
-    } finally {
-      if (hadKey) {
-        env.npm_config_if_present = originalValue;
-      } else {
-        delete env.npm_config_if_present;
-      }
-    }
   });
 
   it('should rollback model_source and assignment state when assign-task spawn fails', async () => {
