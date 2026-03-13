@@ -220,6 +220,18 @@ function getCoordinatorRemediationRecoveryEvents(requestId, trigger = null) {
 }
 
 describe('CLI Server', () => {
+  it('should set npm if-present compatibility when env is unset', () => {
+    const env = {};
+    cliServer.ensureNpmRunIfPresentEnv(env);
+    assert.strictEqual(env.npm_config_if_present, 'true');
+  });
+
+  it('should preserve explicit npm if-present env values', () => {
+    const env = { npm_config_if_present: 'false' };
+    cliServer.ensureNpmRunIfPresentEnv(env);
+    assert.strictEqual(env.npm_config_if_present, 'false');
+  });
+
   it('should respond to ping', async () => {
     const result = await sendCommand('ping', {});
     assert.strictEqual(result.ok, true);
