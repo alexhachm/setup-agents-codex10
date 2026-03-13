@@ -145,14 +145,18 @@ function parseBudgetNumber(value) {
   return Number.isFinite(parsed) ? parsed : null;
 }
 
+function isPlainObject(value) {
+  return !!value && typeof value === 'object' && !Array.isArray(value);
+}
+
 function parseJsonObject(rawValue) {
   if (rawValue === undefined || rawValue === null) return null;
-  if (typeof rawValue === 'object') return rawValue;
+  if (typeof rawValue === 'object') return isPlainObject(rawValue) ? rawValue : null;
   const trimmed = String(rawValue).trim();
   if (!trimmed) return null;
   try {
     const parsed = JSON.parse(trimmed);
-    return parsed && typeof parsed === 'object' ? parsed : null;
+    return isPlainObject(parsed) ? parsed : null;
   } catch {
     return null;
   }
@@ -202,14 +206,13 @@ function getUsageCostBurnRateSnapshot(requestId = null) {
 }
 
 function normalizeBudgetState(value) {
-  const parsed = parseJsonObject(value);
-  return parsed && typeof parsed === 'object' ? parsed : null;
+  return parseJsonObject(value);
 }
 
 function buildBudgetSnapshotFromConfig() {
   const parsedState = parseJsonObject(db.getConfig(ROUTING_BUDGET_STATE_KEY));
   if (parsedState) {
-    const flagship = parsedState.flagship && typeof parsedState.flagship === 'object'
+    const flagship = isPlainObject(parsedState.flagship)
       ? parsedState.flagship
       : parsedState;
     return {

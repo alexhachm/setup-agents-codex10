@@ -214,7 +214,8 @@ function fallbackModelRouter() {
   return {
     getBudgetState(getConfig) {
       const rawState = parseBudgetStateConfig(typeof getConfig === 'function' ? getConfig(ROUTING_BUDGET_STATE_KEY) : null);
-      if (!rawState.parsed) {
+      const parsedState = isPlainObject(rawState.parsed) ? rawState.parsed : null;
+      if (!parsedState) {
         const scalarState = parseBudgetScalarFallback(getConfig);
         if (!scalarState.parsed) return null;
         return {
@@ -226,7 +227,7 @@ function fallbackModelRouter() {
       }
       return {
         source: fallbackStateSource,
-        parsed: rawState.parsed,
+        parsed: parsedState,
         remaining: rawState.remaining,
         threshold: rawState.threshold,
       };
@@ -235,8 +236,8 @@ function fallbackModelRouter() {
       const getConfig = opts.getConfig;
       const routingClass = resolveFallbackRoutingClass(task);
       const budget = this.getBudgetState(getConfig);
-      const parsedState = budget && budget.parsed && typeof budget.parsed === 'object' ? budget.parsed : null;
-      const flagshipState = parsedState && parsedState.flagship && typeof parsedState.flagship === 'object'
+      const parsedState = budget && isPlainObject(budget.parsed) ? budget.parsed : null;
+      const flagshipState = parsedState && isPlainObject(parsedState.flagship)
         ? parsedState.flagship
         : null;
       const remaining = parseBudgetNumber(flagshipState ? flagshipState.remaining : budget && budget.remaining);
@@ -517,6 +518,10 @@ function parseBudgetNumber(value) {
   return Number.isFinite(parsed) ? parsed : null;
 }
 
+function isPlainObject(value) {
+  return !!value && typeof value === 'object' && !Array.isArray(value);
+}
+
 function parseBudgetStateConfig(raw) {
   if (raw === undefined || raw === null) {
     return { parsed: null, remaining: null, threshold: null };
@@ -527,10 +532,10 @@ function parseBudgetStateConfig(raw) {
   }
   try {
     const parsed = JSON.parse(trimmed);
-    if (!parsed || typeof parsed !== 'object') {
+    if (!isPlainObject(parsed)) {
       return { parsed: null, remaining: null, threshold: null };
     }
-    const flagship = parsed.flagship && typeof parsed.flagship === 'object' ? parsed.flagship : parsed;
+    const flagship = isPlainObject(parsed.flagship) ? parsed.flagship : parsed;
     return {
       parsed,
       remaining: parseBudgetNumber(flagship.remaining),
@@ -543,8 +548,8 @@ function parseBudgetStateConfig(raw) {
 
 function syncBudgetStateFromScalarFallback(raw, getConfig) {
   const current = parseBudgetStateConfig(raw).parsed;
-  const state = current && typeof current === 'object' ? { ...current } : {};
-  const flagship = state.flagship && typeof state.flagship === 'object' ? { ...state.flagship } : {};
+  const state = isPlainObject(current) ? { ...current } : {};
+  const flagship = isPlainObject(state.flagship) ? { ...state.flagship } : {};
   const scalarState = parseBudgetScalarFallback(getConfig);
   if (scalarState.remaining !== null) {
     flagship.remaining = scalarState.remaining;
