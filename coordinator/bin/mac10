@@ -1482,6 +1482,16 @@ async function main() {
         } else console.error(result.error);
         break;
 
+      case 'loop-set-prompt':
+        if (argv.length < 3) { console.error('Usage: mac10 loop-set-prompt <loop_id> <prompt>'); process.exit(1); }
+        result = await send(socketPath, 'loop-set-prompt', {
+          loop_id: parseInt(argv[1], 10),
+          prompt: argv.slice(2).join(' '),
+        });
+        if (result.ok) console.log(`Loop ${result.loop_id} prompt updated.`);
+        else console.error(result.error);
+        break;
+
       case 'loop-request':
         if (argv.length < 3) { console.error('Usage: mac10 loop-request <loop_id> <description>'); process.exit(1); }
         result = await send(socketPath, 'loop-request', {
@@ -1588,6 +1598,7 @@ LOOPS:
   loop-heartbeat <id>            Heartbeat (exits 2 if stopped)
   set-config <key> <value>        Set coordinator config at runtime (no restart needed)
   loop-prompt <id>               Get loop prompt + checkpoint for sentinel
+  loop-set-prompt <id> <prompt>  Update existing loop prompt for active/paused loops
   loop-request <id> <desc>       Submit request from loop (dedup + supersession-aware)
   loop-requests <id> [--json]    List all requests for a loop
 
