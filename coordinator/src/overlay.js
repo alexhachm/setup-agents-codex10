@@ -46,6 +46,110 @@ function resolveDomainKnowledgePath(domain, knowledgeDir) {
   return filePath;
 }
 
+function parseValidationPayload(rawValidation) {
+  if (!rawValidation) return null;
+  if (typeof rawValidation !== 'string') return rawValidation;
+  const trimmed = rawValidation.trim();
+  if (!trimmed) return null;
+  try {
+    return JSON.parse(trimmed);
+  } catch {
+    return trimmed;
+  }
+}
+
+function appendValidationObjectLines(lines, payload) {
+  if (!payload || typeof payload !== 'object' || Array.isArray(payload)) return false;
+  let hasExplicitCommands = false;
+  if (payload.build_cmd) {
+    lines.push(`- Build: \`${payload.build_cmd}\``);
+    hasExplicitCommands = true;
+  }
+  if (payload.test_cmd) {
+    lines.push(`- Test: \`${payload.test_cmd}\``);
+    hasExplicitCommands = true;
+  }
+  if (payload.lint_cmd) {
+    lines.push(`- Lint: \`${payload.lint_cmd}\``);
+    hasExplicitCommands = true;
+  }
+  if (payload.custom) {
+    lines.push(`- Custom: ${payload.custom}`);
+    hasExplicitCommands = true;
+  }
+  if (Array.isArray(payload.commands)) {
+    for (const command of payload.commands) {
+      if (typeof command === 'string' && command.trim()) {
+        lines.push(`- Command: \`${command.trim()}\``);
+        hasExplicitCommands = true;
+      }
+    }
+  }
+  return hasExplicitCommands;
+}
+
+function appendValidationSection(lines, rawValidation) {
+  const payload = parseValidationPayload(rawValidation);
+  if (!payload) return;
+
+  const tierShorthandValues = [];
+  let hasExplicitCommands = false;
+  let hasDisplayedValidation = false;
+
+  const trackTierShorthand = (value) => {
+    if (typeof value !== 'string') return;
+    const trimmed = value.trim();
+    if (/^tier[23]$/i.test(trimmed)) tierShorthandValues.push(trimmed.toLowerCase());
+  };
+
+  const addValidationValue = (value) => {
+    if (typeof value !== 'string') return;
+    const trimmed = value.trim();
+    if (!trimmed) return;
+    lines.push(`- Validation: \`${trimmed}\``);
+    hasDisplayedValidation = true;
+    trackTierShorthand(trimmed);
+  };
+
+  if (typeof payload === 'string') {
+    addValidationValue(payload);
+  } else if (Array.isArray(payload)) {
+    for (const entry of payload) {
+      if (typeof entry === 'string') {
+        addValidationValue(entry);
+        continue;
+      }
+      if (entry && typeof entry === 'object') {
+        const addedObjectCommands = appendValidationObjectLines(lines, entry);
+        hasExplicitCommands = hasExplicitCommands || addedObjectCommands;
+        hasDisplayedValidation = hasDisplayedValidation || addedObjectCommands;
+        trackTierShorthand(entry.tier);
+        trackTierShorthand(entry.validation);
+      }
+    }
+  } else if (typeof payload === 'object') {
+    const addedObjectCommands = appendValidationObjectLines(lines, payload);
+    hasExplicitCommands = hasExplicitCommands || addedObjectCommands;
+    hasDisplayedValidation = hasDisplayedValidation || addedObjectCommands;
+    if (typeof payload.tier === 'string') addValidationValue(payload.tier);
+    if (typeof payload.validation === 'string') addValidationValue(payload.validation);
+  }
+
+  if (!hasDisplayedValidation) {
+    lines.push('- Validation metadata provided (non-command format).');
+  }
+
+  if (tierShorthandValues.length > 0) {
+    const uniqueTierShorthand = [...new Set(tierShorthandValues)];
+    lines.push(`- Note: \`${uniqueTierShorthand.join('`, `')}\` is workflow metadata, not a shell command.`);
+  }
+  lines.push('- Run only explicit task-provided validation commands; do not assume implicit `npm run build`.');
+  if (!hasExplicitCommands) {
+    lines.push('- If no commands are listed here, use the explicit validation commands from the task description.');
+  }
+  lines.push('');
+}
+
 function buildTaskOverlay(task, worker, projectDir) {
   const lines = [
     '# Current Task',
@@ -77,19 +181,9 @@ function buildTaskOverlay(task, worker, projectDir) {
   }
 
   if (task.validation) {
-    let val;
-    try {
-      val = typeof task.validation === 'string' ? JSON.parse(task.validation) : task.validation;
-    } catch { val = null; }
-    if (val) {
-      lines.push('## Validation');
-      lines.push('');
-      if (val.build_cmd) lines.push(`- Build: \`${val.build_cmd}\``);
-      if (val.test_cmd) lines.push(`- Test: \`${val.test_cmd}\``);
-      if (val.lint_cmd) lines.push(`- Lint: \`${val.lint_cmd}\``);
-      if (val.custom) lines.push(`- Custom: ${val.custom}`);
-      lines.push('');
-    }
+    lines.push('## Validation');
+    lines.push('');
+    appendValidationSection(lines, task.validation);
   }
 
   // Add knowledge context if available
