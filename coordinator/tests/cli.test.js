@@ -243,6 +243,39 @@ describe('CLI Server', () => {
     assert.ok(result.ts);
   });
 
+  it('should default npm_config_if_present for build-script compatibility without overriding explicit values', async () => {
+    const originalIfPresent = process.env.npm_config_if_present;
+    try {
+      delete process.env.npm_config_if_present;
+      cliServer.stop();
+      server = cliServer.start(tmpDir, {
+        onTaskCompleted: () => {},
+        onLoopCreated: (loopId, prompt) => {
+          loopCreatedEvents.push({ loopId, prompt });
+        },
+      });
+      await waitForCliServerReady();
+      assert.strictEqual(process.env.npm_config_if_present, 'true');
+
+      process.env.npm_config_if_present = 'false';
+      cliServer.stop();
+      server = cliServer.start(tmpDir, {
+        onTaskCompleted: () => {},
+        onLoopCreated: (loopId, prompt) => {
+          loopCreatedEvents.push({ loopId, prompt });
+        },
+      });
+      await waitForCliServerReady();
+      assert.strictEqual(process.env.npm_config_if_present, 'false');
+    } finally {
+      if (originalIfPresent === undefined) {
+        delete process.env.npm_config_if_present;
+      } else {
+        process.env.npm_config_if_present = originalIfPresent;
+      }
+    }
+  });
+
   it('should create a request', async () => {
     const result = await sendCommand('request', { description: 'Add login page' });
     assert.strictEqual(result.ok, true);

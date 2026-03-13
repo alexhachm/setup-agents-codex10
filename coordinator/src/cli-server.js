@@ -1441,7 +1441,14 @@ function createConnectionHandler(handlers) {
   };
 }
 
+function ensureNpmIfPresentCompatibility() {
+  if (process.env.npm_config_if_present === undefined) {
+    process.env.npm_config_if_present = 'true';
+  }
+}
+
 function start(projectDir, handlers) {
+  ensureNpmIfPresentCompatibility();
   _projectDir = projectDir;
   const socketPath = getSocketPath(projectDir);
   const connHandler = createConnectionHandler(handlers);
