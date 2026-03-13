@@ -1554,7 +1554,7 @@ describe('CLI Server', () => {
     assert.strictEqual(midAssignment.ok, true);
     assert.strictEqual(midAssignment.routing.class, 'mid');
     assert.strictEqual(midAssignment.routing.model, 'spark-model');
-    assert.strictEqual(midAssignment.routing.model_source, 'budget-downgrade:model_spark');
+    assert.strictEqual(midAssignment.routing.model_source, 'budget-downgrade:model_codex_spark');
     assert.strictEqual(midAssignment.routing.reasoning_effort, 'spark-effort');
     assert.strictEqual(midAssignment.routing.routing_reason, 'fallback-budget-downgrade:mid->spark');
     assert.strictEqual(midAssignment.routing.reason, 'fallback-budget-downgrade:mid->spark');
@@ -1571,6 +1571,54 @@ describe('CLI Server', () => {
     assert.strictEqual(highAssignmentLog.model_source, 'budget-downgrade:model_mini');
     assert.strictEqual(highAssignmentLog.routing_reason, 'fallback-budget-downgrade:high->mini');
     assert.strictEqual(highAssignmentLog.reasoning_effort, 'mini-effort');
+  });
+
+  it('should attribute constrained mid-to-spark downgrades to the selected spark alias key', async () => {
+    db.registerWorker(1, '/wt-1', 'agent-1');
+    db.registerWorker(2, '/wt-2', 'agent-2');
+
+    await setConfigValue('reasoning_spark', 'spark-effort');
+    await setConfigValue('routing_budget_state', JSON.stringify({
+      flagship: { remaining: 5, threshold: 10 },
+    }));
+
+    db.setConfig('model_codex_spark', '');
+    db.setConfig('model_spark', 'spark-legacy-model');
+
+    const legacyAliasTaskId = createReadyTask({
+      subject: 'Resolve merge backlog',
+      description: 'Routine helper cleanup',
+      tier: 2,
+    });
+    const legacyAliasAssignment = await sendCommand('assign-task', { task_id: legacyAliasTaskId, worker_id: 1 });
+    assert.strictEqual(legacyAliasAssignment.ok, true);
+    assert.strictEqual(legacyAliasAssignment.routing.class, 'mid');
+    assert.strictEqual(legacyAliasAssignment.routing.model, 'spark-legacy-model');
+    assert.strictEqual(legacyAliasAssignment.routing.model_source, 'budget-downgrade:model_spark');
+    assert.strictEqual(legacyAliasAssignment.routing.reasoning_effort, 'spark-effort');
+    assert.strictEqual(legacyAliasAssignment.routing.routing_reason, 'fallback-budget-downgrade:mid->spark');
+
+    db.setConfig('model_codex_spark', 'spark-codex-model');
+    db.setConfig('model_spark', 'spark-legacy-model-2');
+
+    const codexAliasTaskId = createReadyTask({
+      subject: 'Resolve conflict backlog',
+      description: 'Routine helper cleanup',
+      tier: 2,
+    });
+    const codexAliasAssignment = await sendCommand('assign-task', { task_id: codexAliasTaskId, worker_id: 2 });
+    assert.strictEqual(codexAliasAssignment.ok, true);
+    assert.strictEqual(codexAliasAssignment.routing.class, 'mid');
+    assert.strictEqual(codexAliasAssignment.routing.model, 'spark-codex-model');
+    assert.strictEqual(codexAliasAssignment.routing.model_source, 'budget-downgrade:model_codex_spark');
+    assert.strictEqual(codexAliasAssignment.routing.reasoning_effort, 'spark-effort');
+    assert.strictEqual(codexAliasAssignment.routing.routing_reason, 'fallback-budget-downgrade:mid->spark');
+
+    const codexAliasLog = getAllocatorAssignmentDetails(codexAliasTaskId);
+    assert.ok(codexAliasLog);
+    assert.strictEqual(codexAliasLog.model, 'spark-codex-model');
+    assert.strictEqual(codexAliasLog.model_source, 'budget-downgrade:model_codex_spark');
+    assert.strictEqual(codexAliasLog.routing_reason, 'fallback-budget-downgrade:mid->spark');
   });
 
   it('should restore normal routing after flagship budget recovers above threshold', async () => {
@@ -1714,7 +1762,7 @@ describe('CLI Server', () => {
     assert.strictEqual(descriptionConflictAssignment.routing.reasoning_effort, subjectConflictAssignment.routing.reasoning_effort);
     assert.strictEqual(descriptionConflictAssignment.routing.routing_reason, subjectConflictAssignment.routing.routing_reason);
     assert.strictEqual(descriptionConflictAssignment.routing.model, 'spark-model');
-    assert.strictEqual(descriptionConflictAssignment.routing.model_source, 'budget-downgrade:model_spark');
+    assert.strictEqual(descriptionConflictAssignment.routing.model_source, 'budget-downgrade:model_codex_spark');
     assert.strictEqual(descriptionConflictAssignment.routing.reasoning_effort, 'spark-effort');
     assert.strictEqual(descriptionConflictAssignment.routing.routing_reason, 'fallback-budget-downgrade:mid->spark');
   });
@@ -1895,7 +1943,7 @@ describe('CLI Server', () => {
     assert.strictEqual(midAssignment.ok, true);
     assert.strictEqual(midAssignment.routing.class, 'mid');
     assert.strictEqual(midAssignment.routing.model, 'spark-model');
-    assert.strictEqual(midAssignment.routing.model_source, 'budget-downgrade:model_spark');
+    assert.strictEqual(midAssignment.routing.model_source, 'budget-downgrade:model_codex_spark');
     assert.strictEqual(midAssignment.routing.reasoning_effort, 'spark-effort');
     assert.strictEqual(midAssignment.routing.routing_reason, 'fallback-budget-downgrade:mid->spark');
 
