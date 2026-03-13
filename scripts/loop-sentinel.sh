@@ -65,7 +65,21 @@ while true; do
   fi
 
   # Pre-check: skip Codex spawn if requests are still in-flight
-  ACTIVE_COUNT=$("$MAC10_CMD" loop-requests "$LOOP_ID" 2>/dev/null | grep -c '"status"[[:space:]]*:[[:space:]]*"\(pending\|triaging\|executing_tier1\|decomposed\|in_progress\|integrating\)"' || true)
+  ACTIVE_COUNT=$(
+    "$MAC10_CMD" loop-requests "$LOOP_ID" --json 2>/dev/null | \
+      node -e '
+        const fs = require("fs");
+        const active = new Set(["pending", "triaging", "executing_tier1", "decomposed", "in_progress", "integrating"]);
+        try {
+          const payload = JSON.parse(fs.readFileSync(0, "utf8") || "{}");
+          const requests = Array.isArray(payload.requests) ? payload.requests : [];
+          const count = requests.filter((r) => r && active.has(r.status)).length;
+          process.stdout.write(String(count));
+        } catch (_) {
+          process.stdout.write("0");
+        }
+      ' || true
+  )
   ACTIVE_COUNT="${ACTIVE_COUNT:-0}"
   if [ "$ACTIVE_COUNT" -gt 0 ]; then
     echo "[loop-sentinel-$LOOP_ID] $ACTIVE_COUNT request(s) still active, skipping spawn (backoff=${PRECHECK_BACKOFF}s)"
