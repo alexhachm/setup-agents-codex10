@@ -289,6 +289,10 @@ const ROUTING_BUDGET_REMAINING_KEY = 'routing_budget_flagship_remaining';
 const ROUTING_BUDGET_THRESHOLD_KEY = 'routing_budget_flagship_threshold';
 const LEGACY_BUDGET_REMAINING_KEY = 'flagship_budget_remaining';
 const LEGACY_BUDGET_THRESHOLD_KEY = 'flagship_budget_threshold';
+const ROUTING_BUDGET_SCALAR_LEGACY_KEY_MAP = Object.freeze({
+  [ROUTING_BUDGET_REMAINING_KEY]: LEGACY_BUDGET_REMAINING_KEY,
+  [ROUTING_BUDGET_THRESHOLD_KEY]: LEGACY_BUDGET_THRESHOLD_KEY,
+});
 const PR_RESOLVE_ERROR_RE = /Could not resolve to a PullRequest/i;
 
 function namespacedFile(defaultName, namespacedName) {
@@ -505,15 +509,26 @@ function parseBudgetStateConfig(raw) {
   }
 }
 
-function mergeBudgetState(raw, overrides = {}) {
+function syncBudgetStateFromScalarFallback(raw, getConfig) {
   const current = parseBudgetStateConfig(raw).parsed;
   const state = current && typeof current === 'object' ? { ...current } : {};
   const flagship = state.flagship && typeof state.flagship === 'object' ? { ...state.flagship } : {};
-  for (const [field, incoming] of Object.entries(overrides)) {
-    if (incoming === undefined || incoming === null) continue;
-    flagship[field] = incoming;
+  const scalarState = parseBudgetScalarFallback(getConfig);
+  if (scalarState.remaining !== null) {
+    flagship.remaining = scalarState.remaining;
+  } else {
+    delete flagship.remaining;
   }
-  state.flagship = flagship;
+  if (scalarState.threshold !== null) {
+    flagship.threshold = scalarState.threshold;
+  } else {
+    delete flagship.threshold;
+  }
+  if (Object.keys(flagship).length) {
+    state.flagship = flagship;
+  } else {
+    delete state.flagship;
+  }
   return state;
 }
 
@@ -2690,20 +2705,14 @@ function handleCommand(cmd, conn, handlers) {
             db.setConfig(ROUTING_BUDGET_THRESHOLD_KEY, String(parsedState.threshold));
             db.setConfig(LEGACY_BUDGET_THRESHOLD_KEY, String(parsedState.threshold));
           }
-        } else if (key === ROUTING_BUDGET_REMAINING_KEY) {
-          const parsedValue = parseBudgetNumber(value);
-          if (parsedValue !== null) {
-            const updated = mergeBudgetState(db.getConfig(ROUTING_BUDGET_STATE_KEY), { remaining: parsedValue });
-            db.setConfig(ROUTING_BUDGET_STATE_KEY, JSON.stringify(updated));
-            db.setConfig(LEGACY_BUDGET_REMAINING_KEY, String(parsedValue));
-          }
-        } else if (key === ROUTING_BUDGET_THRESHOLD_KEY) {
-          const parsedValue = parseBudgetNumber(value);
-          if (parsedValue !== null) {
-            const updated = mergeBudgetState(db.getConfig(ROUTING_BUDGET_STATE_KEY), { threshold: parsedValue });
-            db.setConfig(ROUTING_BUDGET_STATE_KEY, JSON.stringify(updated));
-            db.setConfig(LEGACY_BUDGET_THRESHOLD_KEY, String(parsedValue));
-          }
+        } else if (Object.prototype.hasOwnProperty.call(ROUTING_BUDGET_SCALAR_LEGACY_KEY_MAP, key)) {
+          const legacyKey = ROUTING_BUDGET_SCALAR_LEGACY_KEY_MAP[key];
+          db.setConfig(legacyKey, storedValue);
+          const synchronizedState = syncBudgetStateFromScalarFallback(
+            db.getConfig(ROUTING_BUDGET_STATE_KEY),
+            db.getConfig
+          );
+          db.setConfig(ROUTING_BUDGET_STATE_KEY, JSON.stringify(synchronizedState));
         }
 
         db.log('coordinator', 'config_set', { key, value: storedValue });

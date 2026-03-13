@@ -1954,6 +1954,77 @@ describe('CLI Server', () => {
     assert.strictEqual(assignment.routing.routing_reason, 'fallback-budget-upgrade:high->xhigh');
   });
 
+  it('should clear stale constrained routing_budget_state values when scalar budget keys are blanked', async () => {
+    db.registerWorker(1, '/wt-1', 'agent-1');
+
+    await setConfigValue('model_high', 'high-model');
+    await setConfigValue('model_mini', 'mini-model');
+    await setConfigValue('routing_budget_state', JSON.stringify({
+      flagship: { remaining: 5, threshold: 10 },
+    }));
+
+    await setConfigValue('routing_budget_flagship_remaining', '');
+    await setConfigValue('routing_budget_flagship_threshold', '   ');
+
+    assert.strictEqual(db.getConfig('flagship_budget_remaining'), '');
+    assert.strictEqual(db.getConfig('flagship_budget_threshold'), '   ');
+
+    const clearedState = JSON.parse(db.getConfig('routing_budget_state'));
+    const clearedFlagship = clearedState && clearedState.flagship && typeof clearedState.flagship === 'object'
+      ? clearedState.flagship
+      : {};
+    assert.strictEqual(Object.prototype.hasOwnProperty.call(clearedFlagship, 'remaining'), false);
+    assert.strictEqual(Object.prototype.hasOwnProperty.call(clearedFlagship, 'threshold'), false);
+
+    const highTaskId = createReadyTask({
+      subject: 'Post-clear high routing should not stay constrained',
+      description: 'Critical merge remediation',
+      priority: 'high',
+      tier: 3,
+    });
+    const assignment = await sendCommand('assign-task', { task_id: highTaskId, worker_id: 1 });
+    assert.strictEqual(assignment.ok, true);
+    assert.strictEqual(assignment.routing.class, 'high');
+    assert.strictEqual(assignment.routing.model, 'high-model');
+    assert.strictEqual(assignment.routing.model_source, 'config-fallback');
+    assert.strictEqual(assignment.routing.routing_reason, 'fallback-routing:class-default');
+  });
+
+  it('should remove stale scalar remaining from routing_budget_state on non-numeric set-config values', async () => {
+    db.registerWorker(1, '/wt-1', 'agent-1');
+
+    await setConfigValue('model_xhigh', 'xhigh-model');
+    await setConfigValue('model_high', 'high-model');
+    await setConfigValue('routing_budget_state', JSON.stringify({
+      flagship: { remaining: 35, threshold: 10 },
+    }));
+    await setConfigValue('routing_budget_flagship_threshold', '10');
+    await setConfigValue('routing_budget_flagship_remaining', 'not-a-number');
+
+    assert.strictEqual(db.getConfig('flagship_budget_remaining'), 'not-a-number');
+    assert.strictEqual(db.getConfig('flagship_budget_threshold'), '10');
+
+    const syncedState = JSON.parse(db.getConfig('routing_budget_state'));
+    const syncedFlagship = syncedState && syncedState.flagship && typeof syncedState.flagship === 'object'
+      ? syncedState.flagship
+      : {};
+    assert.strictEqual(Object.prototype.hasOwnProperty.call(syncedFlagship, 'remaining'), false);
+    assert.strictEqual(syncedFlagship.threshold, 10);
+
+    const highTaskId = createReadyTask({
+      subject: 'Non numeric scalar budget clear path',
+      description: 'Critical branch maintenance',
+      priority: 'high',
+      tier: 3,
+    });
+    const assignment = await sendCommand('assign-task', { task_id: highTaskId, worker_id: 1 });
+    assert.strictEqual(assignment.ok, true);
+    assert.strictEqual(assignment.routing.class, 'high');
+    assert.strictEqual(assignment.routing.model, 'high-model');
+    assert.strictEqual(assignment.routing.model_source, 'config-fallback');
+    assert.strictEqual(assignment.routing.routing_reason, 'fallback-routing:class-default');
+  });
+
   it('should apply reasoning config per selected effective class', async () => {
     db.registerWorker(1, '/wt-1', 'agent-1');
     db.registerWorker(2, '/wt-2', 'agent-2');
