@@ -413,7 +413,7 @@ const COMMAND_SCHEMAS = {
   'start-task':        { required: ['worker_id', 'task_id'], types: { worker_id: 'string' } },
   'heartbeat':         { required: ['worker_id'], types: { worker_id: 'string' } },
   'complete-task':     { required: ['worker_id', 'task_id'], types: { worker_id: 'string', usage: 'object' } },
-  'fail-task':         { required: ['worker_id', 'task_id', 'error'], types: { worker_id: 'string', error: 'string' } },
+  'fail-task':         { required: ['worker_id', 'task_id', 'error'], types: { worker_id: 'string', error: 'string', usage: 'object' } },
   'distill':           { required: ['worker_id'], types: { worker_id: 'string' } },
   'inbox':             { required: ['recipient'], types: { recipient: 'string' } },
   'inbox-block':       { required: ['recipient'], types: { recipient: 'string', timeout: 'number', peek: 'boolean' } },
@@ -1453,7 +1453,7 @@ function validateCommand(cmd) {
     if (normalizedDomain) a.domain = normalizedDomain;
     else delete a.domain;
   }
-  if (command === 'complete-task' && Object.prototype.hasOwnProperty.call(a, 'usage')) {
+  if ((command === 'complete-task' || command === 'fail-task') && Object.prototype.hasOwnProperty.call(a, 'usage')) {
     a.usage = normalizeCompleteTaskUsagePayload(a.usage);
   }
 }
@@ -1964,6 +1964,8 @@ function handleCommand(cmd, conn, handlers) {
           respond(conn, ownership.response);
           break;
         }
+        const usage = normalizeCompleteTaskUsagePayload(args.usage);
+        const usageTaskFields = mapUsagePayloadToTaskFields(usage);
         const failedTask = ownership.task;
         const routingMeta = failedTask ? {
           subject: failedTask.subject,
@@ -1973,13 +1975,19 @@ function handleCommand(cmd, conn, handlers) {
           tier: failedTask.tier,
           assigned_to: failedTask.assigned_to,
         } : null;
-        db.updateTask(tid, { status: 'failed', result: error, completed_at: new Date().toISOString() });
+        db.updateTask(tid, {
+          status: 'failed',
+          result: error,
+          completed_at: new Date().toISOString(),
+          ...usageTaskFields,
+        });
         db.updateWorker(wid, { status: 'idle', current_task_id: null });
         db.sendMail('allocator', 'task_failed', {
           worker_id: wid,
           task_id: tid,
           request_id: failedTask ? failedTask.request_id : null,
           error,
+          usage,
           subject: routingMeta ? routingMeta.subject : null,
           domain: routingMeta ? routingMeta.domain : null,
           files: routingMeta ? routingMeta.files : null,
@@ -1993,9 +2001,10 @@ function handleCommand(cmd, conn, handlers) {
           task_id: tid,
           request_id: failedTask ? failedTask.request_id : null,
           error,
+          usage,
           original_task: routingMeta,
         });
-        db.log(`worker-${wid}`, 'task_failed', { task_id: tid, error });
+        db.log(`worker-${wid}`, 'task_failed', { task_id: tid, error, usage });
         respond(conn, { ok: true });
         break;
       }

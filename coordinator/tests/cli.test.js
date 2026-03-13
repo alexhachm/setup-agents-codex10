@@ -746,6 +746,243 @@ describe('CLI Server', () => {
     assert.strictEqual(getCoordinatorOwnershipMismatchEvents('fail-task', 1, taskId).length, 1);
   });
 
+  it('should persist and propagate identical usage values for canonical, Anthropic alias, and OpenAI alias fail-task payloads', async () => {
+    db.registerWorker(1, '/wt-1', 'agent-1');
+    db.registerWorker(2, '/wt-2', 'agent-2');
+    db.registerWorker(3, '/wt-3', 'agent-3');
+    const reqId = db.createRequest('Fail usage aliases');
+    const canonicalTaskId = db.createTask({ request_id: reqId, subject: 'Canonical fail', description: 'Canonical fail-task usage payload' });
+    const anthropicAliasTaskId = db.createTask({ request_id: reqId, subject: 'Anthropic alias fail', description: 'Anthropic fail-task usage payload' });
+    const openAiAliasTaskId = db.createTask({ request_id: reqId, subject: 'OpenAI alias fail', description: 'OpenAI fail-task usage payload' });
+    db.updateTask(canonicalTaskId, { status: 'assigned', assigned_to: 1 });
+    db.updateTask(anthropicAliasTaskId, { status: 'assigned', assigned_to: 2 });
+    db.updateTask(openAiAliasTaskId, { status: 'assigned', assigned_to: 3 });
+    db.updateWorker(1, { status: 'assigned', current_task_id: canonicalTaskId });
+    db.updateWorker(2, { status: 'assigned', current_task_id: anthropicAliasTaskId });
+    db.updateWorker(3, { status: 'assigned', current_task_id: openAiAliasTaskId });
+
+    const canonicalUsage = {
+      model: '  gpt-5-codex  ',
+      input_tokens: 1200,
+      output_tokens: 345,
+      reasoning_tokens: 89,
+      accepted_prediction_tokens: 21,
+      rejected_prediction_tokens: 34,
+      cached_tokens: 67,
+      cache_creation_tokens: 45,
+      total_tokens: 1612,
+      cost_usd: 0.0456,
+    };
+    const anthropicAliasUsage = {
+      model: 'gpt-5-codex',
+      input_tokens: 1200,
+      output_tokens: 345,
+      reasoning_tokens: 89,
+      accepted_prediction_tokens: 21,
+      rejected_prediction_tokens: 34,
+      cache_read_input_tokens: 67,
+      cache_creation_input_tokens: 45,
+      total_tokens: 1612,
+      cost_usd: 0.0456,
+    };
+    const openAiAliasUsage = {
+      model: 'gpt-5-codex',
+      prompt_tokens: 1200,
+      completion_tokens: 345,
+      input_tokens_details: { cached_tokens: 67 },
+      prompt_tokens_details: { cached_tokens: 67 },
+      completion_tokens_details: {
+        reasoning_tokens: 89,
+        accepted_prediction_tokens: 21,
+        rejected_prediction_tokens: 34,
+      },
+      output_tokens_details: { reasoning_tokens: 89 },
+      cache_creation_tokens: 45,
+      total_tokens: 1612,
+      cost_usd: 0.0456,
+    };
+
+    const canonicalResult = await sendCommand('fail-task', {
+      worker_id: '1',
+      task_id: String(canonicalTaskId),
+      error: 'Canonical failure',
+      usage: canonicalUsage,
+    });
+    assert.strictEqual(canonicalResult.ok, true);
+
+    const anthropicResult = await sendCommand('fail-task', {
+      worker_id: '2',
+      task_id: String(anthropicAliasTaskId),
+      error: 'Anthropic alias failure',
+      usage: anthropicAliasUsage,
+    });
+    assert.strictEqual(anthropicResult.ok, true);
+
+    await runMac10Command([
+      'fail-task',
+      '3',
+      String(openAiAliasTaskId),
+      'OpenAI alias failure',
+      '--usage',
+      JSON.stringify(openAiAliasUsage),
+    ], tmpDir);
+
+    const canonicalTask = db.getTask(canonicalTaskId);
+    const anthropicAliasTask = db.getTask(anthropicAliasTaskId);
+    const openAiAliasTask = db.getTask(openAiAliasTaskId);
+    assert.strictEqual(canonicalTask.status, 'failed');
+    assert.strictEqual(anthropicAliasTask.status, 'failed');
+    assert.strictEqual(openAiAliasTask.status, 'failed');
+    assert.strictEqual(canonicalTask.result, 'Canonical failure');
+    assert.strictEqual(anthropicAliasTask.result, 'Anthropic alias failure');
+    assert.strictEqual(openAiAliasTask.result, 'OpenAI alias failure');
+
+    const comparableUsageFields = [
+      'usage_model',
+      'usage_input_tokens',
+      'usage_output_tokens',
+      'usage_reasoning_tokens',
+      'usage_accepted_prediction_tokens',
+      'usage_rejected_prediction_tokens',
+      'usage_cached_tokens',
+      'usage_cache_creation_tokens',
+      'usage_total_tokens',
+      'usage_cost_usd',
+    ];
+    for (const field of comparableUsageFields) {
+      assert.strictEqual(anthropicAliasTask[field], canonicalTask[field], `${field} mismatch (anthropic fail-task)`);
+      assert.strictEqual(openAiAliasTask[field], canonicalTask[field], `${field} mismatch (openai fail-task)`);
+    }
+
+    const expectedUsage = {
+      model: 'gpt-5-codex',
+      input_tokens: 1200,
+      output_tokens: 345,
+      reasoning_tokens: 89,
+      accepted_prediction_tokens: 21,
+      rejected_prediction_tokens: 34,
+      cached_tokens: 67,
+      cache_creation_tokens: 45,
+      total_tokens: 1612,
+      cost_usd: 0.0456,
+    };
+
+    const expectedTaskIds = new Set([canonicalTaskId, anthropicAliasTaskId, openAiAliasTaskId].map((taskId) => String(taskId)));
+    const allocatorFailureMessages = db.checkMail('allocator', false)
+      .filter((message) => message.type === 'task_failed')
+      .filter((message) => expectedTaskIds.has(String(message.payload.task_id)));
+    assert.strictEqual(allocatorFailureMessages.length, 3);
+    for (const message of allocatorFailureMessages) {
+      assert.deepStrictEqual(message.payload.usage, expectedUsage);
+    }
+
+    const architectFailureMessages = db.checkMail('architect', false)
+      .filter((message) => message.type === 'task_failed')
+      .filter((message) => expectedTaskIds.has(String(message.payload.task_id)));
+    assert.strictEqual(architectFailureMessages.length, 3);
+    for (const message of architectFailureMessages) {
+      assert.deepStrictEqual(message.payload.usage, expectedUsage);
+    }
+
+    const workerFailureLogs = db.getLog(500)
+      .filter((entry) => entry.action === 'task_failed')
+      .map((entry) => {
+        try {
+          return { actor: entry.actor, details: JSON.parse(entry.details) };
+        } catch {
+          return null;
+        }
+      })
+      .filter((entry) => entry && entry.details && expectedTaskIds.has(String(entry.details.task_id)));
+    assert.strictEqual(workerFailureLogs.length, 3);
+    for (const entry of workerFailureLogs) {
+      assert.deepStrictEqual(entry.details.usage, expectedUsage);
+    }
+  });
+
+  it('should reject unknown fail-task usage keys even when alias keys are present', async () => {
+    db.registerWorker(1, '/wt-1', 'agent-1');
+    const reqId = db.createRequest('Fail-task usage unknown key rejection');
+    const taskId = db.createTask({ request_id: reqId, subject: 'Fail unknown key', description: 'Should reject unknown fail-task usage key' });
+    db.updateTask(taskId, { status: 'assigned', assigned_to: 1 });
+    db.updateWorker(1, { status: 'assigned', current_task_id: taskId });
+
+    const result = await sendCommand('fail-task', {
+      worker_id: '1',
+      task_id: String(taskId),
+      error: 'Fail with invalid usage',
+      usage: {
+        completion_tokens_details: {
+          accepted_prediction_tokens: 11,
+          rejected_prediction_tokens: 5,
+        },
+        cache_creation_input_tokens: 45,
+        cache_read_input_tokens: 67,
+        bogus_field: 1,
+      },
+    });
+    assert.ok(result.error);
+    assert.match(result.error, /unsupported keys: bogus_field/);
+    assert.strictEqual(db.getTask(taskId).status, 'assigned');
+  });
+
+  it('should reject conflicting duplicate aliases deterministically for fail-task usage', async () => {
+    db.registerWorker(1, '/wt-1', 'agent-1');
+    db.registerWorker(2, '/wt-2', 'agent-2');
+    const reqId = db.createRequest('Fail-task usage conflict rejection');
+    const serverTaskId = db.createTask({ request_id: reqId, subject: 'Fail server conflict', description: 'Conflicting fail-task API alias values' });
+    const cliTaskId = db.createTask({ request_id: reqId, subject: 'Fail CLI conflict', description: 'Conflicting fail-task CLI alias values' });
+    db.updateTask(serverTaskId, { status: 'assigned', assigned_to: 1 });
+    db.updateTask(cliTaskId, { status: 'assigned', assigned_to: 2 });
+    db.updateWorker(1, { status: 'assigned', current_task_id: serverTaskId });
+    db.updateWorker(2, { status: 'assigned', current_task_id: cliTaskId });
+
+    const serverResult = await sendCommand('fail-task', {
+      worker_id: '1',
+      task_id: String(serverTaskId),
+      error: 'Server conflict failure',
+      usage: {
+        input_tokens: 1200,
+        prompt_tokens: 1201,
+      },
+    });
+    assert.ok(serverResult.error);
+    assert.match(serverResult.error, /conflicting values for key "input_tokens"/);
+    assert.strictEqual(db.getTask(serverTaskId).status, 'assigned');
+
+    const serverReasoningResult = await sendCommand('fail-task', {
+      worker_id: '1',
+      task_id: String(serverTaskId),
+      error: 'Server reasoning conflict failure',
+      usage: {
+        reasoning_tokens: 77,
+        completion_tokens_details: { reasoning_tokens: 78 },
+      },
+    });
+    assert.ok(serverReasoningResult.error);
+    assert.match(serverReasoningResult.error, /conflicting values for key "reasoning_tokens"/);
+    assert.strictEqual(db.getTask(serverTaskId).status, 'assigned');
+
+    await assert.rejects(
+      () => runMac10Command([
+        'fail-task',
+        '2',
+        String(cliTaskId),
+        'CLI conflict failure',
+        '--usage',
+        JSON.stringify({
+          rejected_prediction_tokens: 12,
+          completion_tokens_details: { rejected_prediction_tokens: 13 },
+        }),
+      ], tmpDir),
+      (err) => {
+        assert.match(String(err && err.stderr), /conflicting values for "rejected_prediction_tokens"/);
+        return true;
+      }
+    );
+    assert.strictEqual(db.getTask(cliTaskId).status, 'assigned');
+  });
+
   it('should persist identical usage values for canonical, Anthropic alias, and OpenAI alias complete-task payloads', async () => {
     db.registerWorker(1, '/wt-1', 'agent-1');
     db.registerWorker(2, '/wt-2', 'agent-2');
