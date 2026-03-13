@@ -502,7 +502,7 @@ function getUsageCostBurnRate(requestId = null) {
       END), 0) AS usd_60m,
       COALESCE(SUM(COALESCE(usage_cost_usd, 0)), 0) AS usd_24h
     FROM tasks
-    WHERE status = 'completed'
+    WHERE status IN ('completed', 'failed')
       AND completed_at IS NOT NULL
       AND completed_at >= datetime('now', '-24 hours')
   `).get() || {};
@@ -517,7 +517,7 @@ function getUsageCostBurnRate(requestId = null) {
         SELECT COALESCE(SUM(COALESCE(usage_cost_usd, 0)), 0) AS total_usd
         FROM tasks
         WHERE request_id = ?
-          AND status = 'completed'
+          AND status IN ('completed', 'failed')
           AND completed_at IS NOT NULL
       `).get(trimmedRequestId) || {};
       requestTotalUsd = normalizeUsdNumber(requestRow.total_usd);

@@ -151,6 +151,59 @@ describe('Task state machine', () => {
   });
 });
 
+describe('Usage cost burn rate', () => {
+  it('should include completed and failed task spend while requiring completed_at', () => {
+    const requestId = db.createRequest('Burn-rate aggregation');
+    const completedTaskId = db.createTask({
+      request_id: requestId,
+      subject: 'Completed task',
+      description: 'Completed in-window usage',
+    });
+    const failedTaskId = db.createTask({
+      request_id: requestId,
+      subject: 'Failed task',
+      description: 'Failed in-window usage',
+    });
+    const failedWithoutCompletedAtTaskId = db.createTask({
+      request_id: requestId,
+      subject: 'Failed missing completion timestamp',
+      description: 'Should be excluded because completed_at is null',
+    });
+
+    const inWindowCompletedAt = new Date(Date.now() - (5 * 60 * 1000)).toISOString().slice(0, 19).replace('T', ' ');
+
+    db.updateTask(completedTaskId, {
+      status: 'completed',
+      usage_cost_usd: 1.25,
+      completed_at: inWindowCompletedAt,
+    });
+    db.updateTask(failedTaskId, {
+      status: 'failed',
+      usage_cost_usd: 2.5,
+      completed_at: inWindowCompletedAt,
+    });
+    db.updateTask(failedWithoutCompletedAtTaskId, {
+      status: 'failed',
+      usage_cost_usd: 99,
+      completed_at: null,
+    });
+
+    const globalBurnRate = db.getUsageCostBurnRate();
+    assert.strictEqual(globalBurnRate.usd_15m, 3.75);
+    assert.strictEqual(globalBurnRate.usd_60m, 3.75);
+    assert.strictEqual(globalBurnRate.usd_24h, 3.75);
+    assert.strictEqual(globalBurnRate.request_id, null);
+    assert.strictEqual(globalBurnRate.request_total_usd, 0);
+
+    const requestBurnRate = db.getUsageCostBurnRate(requestId);
+    assert.strictEqual(requestBurnRate.usd_15m, 3.75);
+    assert.strictEqual(requestBurnRate.usd_60m, 3.75);
+    assert.strictEqual(requestBurnRate.usd_24h, 3.75);
+    assert.strictEqual(requestBurnRate.request_id, requestId);
+    assert.strictEqual(requestBurnRate.request_total_usd, 3.75);
+  });
+});
+
 describe('Loop request state machine', () => {
   it('should prefer exact active deduplication over cooldown suppression', () => {
     db.setConfig('loop_request_quality_gate', 'false');
