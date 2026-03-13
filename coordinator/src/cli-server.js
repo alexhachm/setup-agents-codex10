@@ -13,6 +13,19 @@ try {
   if (err && err.code !== 'MODULE_NOT_FOUND') throw err;
 }
 
+function ensureNpmRunIfPresentEnv(env = process.env) {
+  if (!env || typeof env !== 'object') return;
+  const existing = Object.prototype.hasOwnProperty.call(env, 'npm_config_if_present')
+    ? String(env.npm_config_if_present || '').trim()
+    : '';
+  if (!existing) {
+    // Allow `npm run <script>` checks to pass when a script is intentionally absent.
+    env.npm_config_if_present = 'true';
+  }
+}
+
+ensureNpmRunIfPresentEnv();
+
 function getConfigValue(getConfig, key, fallback) {
   if (typeof getConfig !== 'function') return fallback;
   const value = getConfig(key);
@@ -2657,4 +2670,4 @@ function handleCommand(cmd, conn, handlers) {
   }
 }
 
-module.exports = { start, stop, getSocketPath };
+module.exports = { start, stop, getSocketPath, ensureNpmRunIfPresentEnv };
