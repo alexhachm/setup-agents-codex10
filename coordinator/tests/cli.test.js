@@ -136,9 +136,26 @@ async function setConfigValue(key, value) {
   assert.strictEqual(result.ok, true, `set-config should succeed for ${key}`);
 }
 
-function createReadyTask({ subject, description, priority = 'normal', tier = 2 }) {
+function createReadyTask({
+  subject,
+  description,
+  priority = 'normal',
+  tier = 2,
+  domain = null,
+  files = null,
+  validation = null,
+}) {
   const requestId = db.createRequest(`Req: ${subject}`);
-  const taskId = db.createTask({ request_id: requestId, subject, description, priority, tier });
+  const taskId = db.createTask({
+    request_id: requestId,
+    subject,
+    description,
+    domain,
+    files,
+    priority,
+    tier,
+    validation,
+  });
   db.checkAndPromoteTasks();
   return taskId;
 }
@@ -1674,6 +1691,67 @@ describe('CLI Server', () => {
     assert.strictEqual(subjectTypoAssignment.routing.reasoning_effort, 'mini-effort');
     assert.strictEqual(descriptionDocsAssignment.routing.routing_reason, 'fallback-routing:class-default');
     assert.strictEqual(subjectTypoAssignment.routing.routing_reason, 'fallback-routing:class-default');
+  });
+
+  it('should escalate generic tasks when code-heavy metadata is present while preserving docs/typo mini paths', async () => {
+    db.registerWorker(1, '/wt-1', 'agent-1');
+    db.registerWorker(2, '/wt-2', 'agent-2');
+    db.registerWorker(3, '/wt-3', 'agent-3');
+
+    await setConfigValue('model_mid', 'mid-model');
+    await setConfigValue('model_spark', 'spark-model');
+    await setConfigValue('model_mini', 'mini-model');
+    await setConfigValue('reasoning_mid', 'mid-effort');
+    await setConfigValue('reasoning_spark', 'spark-effort');
+    await setConfigValue('reasoning_mini', 'mini-effort');
+    await setConfigValue('routing_budget_state', JSON.stringify({}));
+
+    const genericWithMetadataTaskId = createReadyTask({
+      subject: 'Routine maintenance',
+      description: 'General follow-up item',
+      priority: 'normal',
+      tier: 2,
+      domain: 'coordinator-routing',
+      files: ['coordinator/src/cli-server.js', 'coordinator/tests/cli.test.js'],
+      validation: ['cd coordinator && npm test -- tests/cli.test.js'],
+    });
+    const genericWithoutMetadataTaskId = createReadyTask({
+      subject: 'Routine maintenance',
+      description: 'General follow-up item',
+      priority: 'normal',
+      tier: 2,
+    });
+    const docsWithCodeMetadataTaskId = createReadyTask({
+      subject: 'Routine maintenance',
+      description: 'Fix typo in docs for worker setup',
+      priority: 'low',
+      tier: 2,
+      domain: 'coordinator-routing',
+      files: ['coordinator/src/cli-server.js', 'coordinator/tests/cli.test.js'],
+      validation: ['tier2'],
+    });
+
+    const metadataAssignment = await sendCommand('assign-task', { task_id: genericWithMetadataTaskId, worker_id: 1 });
+    const baselineAssignment = await sendCommand('assign-task', { task_id: genericWithoutMetadataTaskId, worker_id: 2 });
+    const docsAssignment = await sendCommand('assign-task', { task_id: docsWithCodeMetadataTaskId, worker_id: 3 });
+
+    assert.strictEqual(metadataAssignment.ok, true);
+    assert.strictEqual(metadataAssignment.routing.class, 'mid');
+    assert.strictEqual(metadataAssignment.routing.model, 'mid-model');
+    assert.strictEqual(metadataAssignment.routing.reasoning_effort, 'mid-effort');
+    assert.strictEqual(metadataAssignment.routing.routing_reason, 'fallback-routing:class-default');
+
+    assert.strictEqual(baselineAssignment.ok, true);
+    assert.strictEqual(baselineAssignment.routing.class, 'spark');
+    assert.strictEqual(baselineAssignment.routing.model, 'spark-model');
+    assert.strictEqual(baselineAssignment.routing.reasoning_effort, 'spark-effort');
+    assert.strictEqual(baselineAssignment.routing.routing_reason, 'fallback-routing:class-default');
+
+    assert.strictEqual(docsAssignment.ok, true);
+    assert.strictEqual(docsAssignment.routing.class, 'mini');
+    assert.strictEqual(docsAssignment.routing.model, 'mini-model');
+    assert.strictEqual(docsAssignment.routing.reasoning_effort, 'mini-effort');
+    assert.strictEqual(docsAssignment.routing.routing_reason, 'fallback-routing:class-default');
   });
 
   it('should downscale routing from scalar budget keys when routing_budget_state JSON is absent', async () => {
