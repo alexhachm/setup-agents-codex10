@@ -461,6 +461,8 @@ const COMPLETE_TASK_USAGE_FIELD_TYPES = Object.freeze({
   model: 'string',
   input_tokens: 'number',
   output_tokens: 'number',
+  input_audio_tokens: 'number',
+  output_audio_tokens: 'number',
   reasoning_tokens: 'number',
   accepted_prediction_tokens: 'number',
   rejected_prediction_tokens: 'number',
@@ -484,17 +486,21 @@ const COMPLETE_TASK_USAGE_CACHE_CREATION_OBJECT_ALIASES = Object.freeze([
 const COMPLETE_TASK_USAGE_DETAIL_ALIASES = Object.freeze({
   input_tokens_details: Object.freeze([
     { canonicalField: 'cached_tokens', detailField: 'cached_tokens' },
+    { canonicalField: 'input_audio_tokens', detailField: 'audio_tokens' },
   ]),
   prompt_tokens_details: Object.freeze([
     { canonicalField: 'cached_tokens', detailField: 'cached_tokens' },
+    { canonicalField: 'input_audio_tokens', detailField: 'audio_tokens' },
   ]),
   completion_tokens_details: Object.freeze([
     { canonicalField: 'reasoning_tokens', detailField: 'reasoning_tokens' },
+    { canonicalField: 'output_audio_tokens', detailField: 'audio_tokens' },
     { canonicalField: 'accepted_prediction_tokens', detailField: 'accepted_prediction_tokens' },
     { canonicalField: 'rejected_prediction_tokens', detailField: 'rejected_prediction_tokens' },
   ]),
   output_tokens_details: Object.freeze([
     { canonicalField: 'reasoning_tokens', detailField: 'reasoning_tokens' },
+    { canonicalField: 'output_audio_tokens', detailField: 'audio_tokens' },
   ]),
 });
 
@@ -502,6 +508,8 @@ const COMPLETE_TASK_USAGE_COLUMN_MAP = Object.freeze({
   model: 'usage_model',
   input_tokens: 'usage_input_tokens',
   output_tokens: 'usage_output_tokens',
+  input_audio_tokens: 'usage_input_audio_tokens',
+  output_audio_tokens: 'usage_output_audio_tokens',
   reasoning_tokens: 'usage_reasoning_tokens',
   accepted_prediction_tokens: 'usage_accepted_prediction_tokens',
   rejected_prediction_tokens: 'usage_rejected_prediction_tokens',
