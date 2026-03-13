@@ -115,6 +115,7 @@ function stop() {
 
 function runStartupRecoverySweep() {
   if (!startupRecoverySweepPending) return;
+  recoverFailedRequestsWithActiveRemediation('startup_repair_sweep');
   const repairedRequests = recoverStaleIntegrations(Date.now(), { source: 'startup_repair_sweep' });
   startupRecoverySweepPending = false;
   if (repairedRequests > 0) {
@@ -179,6 +180,9 @@ function tick(projectDir) {
 
   // Orphan task recovery: tasks assigned but worker is idle
   recoverOrphanTasks();
+
+  // Keep failed requests visible to stale-integration recovery when remediation is active.
+  recoverFailedRequestsWithActiveRemediation('watchdog_tick');
 
   // Recover stale integrations
   recoverStaleIntegrations(now);
@@ -343,6 +347,39 @@ function hasActiveRemediationTasks(requestId) {
     t => !['completed', 'failed'].includes(t.status)
   );
   return activeTasks.length > 0;
+}
+
+function getRequestReopenState(requestId) {
+  const row = db.getDb().prepare(
+    'SELECT COUNT(*) as count FROM merge_queue WHERE request_id = ?'
+  ).get(requestId);
+  const mergeQueueEntries = Number(row && row.count) || 0;
+  return {
+    status: mergeQueueEntries > 0 ? 'integrating' : 'in_progress',
+    merge_queue_entries: mergeQueueEntries,
+  };
+}
+
+function recoverFailedRequestsWithActiveRemediation(source = 'watchdog_tick') {
+  const failedRequests = db.getDb().prepare(
+    "SELECT id FROM requests WHERE status = 'failed'"
+  ).all();
+
+  for (const req of failedRequests) {
+    if (!hasActiveRemediationTasks(req.id)) continue;
+    const reopen = getRequestReopenState(req.id);
+    db.updateRequest(req.id, { status: reopen.status });
+    db.log('coordinator', 'request_reopened_for_active_remediation', {
+      request_id: req.id,
+      task_id: null,
+      worker_id: null,
+      trigger: 'watchdog-active-remediation',
+      source,
+      previous_status: 'failed',
+      reopened_status: reopen.status,
+      merge_queue_entries: reopen.merge_queue_entries,
+    });
+  }
 }
 
 function isWithinRemediationGraceWindow(now, requestId, merges, failureStatus, ageScope) {

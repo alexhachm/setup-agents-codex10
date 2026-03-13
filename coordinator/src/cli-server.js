@@ -792,6 +792,39 @@ function parseTaskId(rawTaskId) {
   return parsed;
 }
 
+function getRequestReopenState(requestId) {
+  if (requestId === undefined || requestId === null) {
+    return { status: 'in_progress', merge_queue_entries: 0 };
+  }
+  const row = db.getDb().prepare(
+    'SELECT COUNT(*) as count FROM merge_queue WHERE request_id = ?'
+  ).get(requestId);
+  const mergeQueueEntries = Number(row && row.count) || 0;
+  return {
+    status: mergeQueueEntries > 0 ? 'integrating' : 'in_progress',
+    merge_queue_entries: mergeQueueEntries,
+  };
+}
+
+function reopenFailedRequestForActiveRemediation({ requestId, taskId = null, workerId = null, trigger = 'unknown' }) {
+  if (!requestId) return null;
+  const request = db.getRequest(requestId);
+  if (!request || request.status !== 'failed') return null;
+
+  const reopen = getRequestReopenState(requestId);
+  db.updateRequest(requestId, { status: reopen.status });
+  db.log('coordinator', 'request_reopened_for_active_remediation', {
+    request_id: requestId,
+    task_id: taskId,
+    worker_id: workerId,
+    trigger,
+    previous_status: request.status,
+    reopened_status: reopen.status,
+    merge_queue_entries: reopen.merge_queue_entries,
+  });
+  return reopen;
+}
+
 function validateWorkerTaskOwnership(command, rawWorkerId, rawTaskId) {
   const worker = db.getWorker(rawWorkerId);
   const task = db.getTask(rawTaskId);
@@ -1521,6 +1554,12 @@ function handleCommand(cmd, conn, handlers) {
         const now = new Date().toISOString();
         db.updateTask(task_id, { status: 'in_progress', started_at: now });
         db.updateWorker(worker_id, { status: 'busy', last_heartbeat: now });
+        reopenFailedRequestForActiveRemediation({
+          requestId: task.request_id,
+          taskId: task_id,
+          workerId: parseWorkerId(worker_id),
+          trigger: 'start-task',
+        });
         db.log(`worker-${worker_id}`, 'task_started', { task_id });
         respond(conn, { ok: true });
         break;
@@ -1883,6 +1922,13 @@ function handleCommand(cmd, conn, handlers) {
             break;
           }
         }
+
+        reopenFailedRequestForActiveRemediation({
+          requestId: assignedTask.request_id,
+          taskId: assignTaskId,
+          workerId: assignWorkerId,
+          trigger: 'assign-task',
+        });
 
         db.sendMail(`worker-${assignWorkerId}`, 'task_assigned', {
           task_id: assignTaskId,
