@@ -11,6 +11,9 @@ const SQLITE_TIMESTAMP_RE = /^(\d{4}-\d{2}-\d{2}) (\d{2}:\d{2}:\d{2})(\.\d+)?$/;
 const ISO_TIMESTAMP_WITHOUT_ZONE_RE = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d+)?$/;
 const LOOP_REQUEST_RATE_WINDOW_MS = 60 * 60 * 1000;
 const DEFAULT_LOOP_REQUEST_RETRY_AFTER_SEC = 3600;
+const DEFAULT_LOOP_REQUEST_SIMILARITY_THRESHOLD = 0.82;
+const LOOP_REQUEST_SIMILAR_RECENT_WINDOW_HOURS = 6;
+const LOOP_REQUEST_SIMILAR_CANDIDATE_LIMIT = 50;
 
 function parseCoordinatorTimestamp(value) {
   if (value === null || value === undefined) return null;
@@ -904,6 +907,66 @@ function parseIntConfig(key, fallback, { min = 0, max = Number.MAX_SAFE_INTEGER 
   return parsed;
 }
 
+function parseFloatConfig(key, fallback, { min = 0, max = Number.MAX_SAFE_INTEGER } = {}) {
+  const raw = getConfig(key);
+  if (raw === null || raw === undefined || String(raw).trim() === '') return fallback;
+  const parsed = Number.parseFloat(String(raw).trim());
+  if (!Number.isFinite(parsed)) return fallback;
+  if (parsed < min) return min;
+  if (parsed > max) return max;
+  return parsed;
+}
+
+function buildSimilarityNgrams(value) {
+  const tokens = normalizeLoopRequestText(value)
+    .toLowerCase()
+    .split(/[^a-z0-9]+/)
+    .filter((token) => token.length >= 2);
+  if (tokens.length <= 1) return tokens;
+  const ngrams = [];
+  for (let i = 0; i < tokens.length - 1; i += 1) {
+    ngrams.push(`${tokens[i]} ${tokens[i + 1]}`);
+  }
+  return ngrams;
+}
+
+function buildFrequencyMap(values) {
+  const freq = new Map();
+  for (const value of values) {
+    freq.set(value, (freq.get(value) || 0) + 1);
+  }
+  return freq;
+}
+
+function computeLoopRequestSimilarity(left, right) {
+  const leftNgrams = buildSimilarityNgrams(left);
+  const rightNgrams = buildSimilarityNgrams(right);
+  if (leftNgrams.length === 0 || rightNgrams.length === 0) return 0;
+
+  const leftFreq = buildFrequencyMap(leftNgrams);
+  const rightFreq = buildFrequencyMap(rightNgrams);
+  const leftTotal = leftNgrams.length;
+  const rightTotal = rightNgrams.length;
+  let overlap = 0;
+  for (const [ngram, leftCount] of leftFreq.entries()) {
+    const rightCount = rightFreq.get(ngram) || 0;
+    overlap += Math.min(leftCount, rightCount);
+  }
+  return (2 * overlap) / (leftTotal + rightTotal);
+}
+
+function findMostSimilarLoopRequest(candidates, targetDescription, threshold) {
+  let bestMatch = null;
+  for (const candidate of candidates) {
+    const similarity = computeLoopRequestSimilarity(candidate.description, targetDescription);
+    if (similarity < threshold) continue;
+    if (!bestMatch || similarity > bestMatch.similarity) {
+      bestMatch = { ...candidate, similarity };
+    }
+  }
+  return bestMatch;
+}
+
 function evaluateLoopRequestQuality(description, minDescriptionChars = 180) {
   const text = normalizeLoopRequestText(description);
   const issues = [];
@@ -926,6 +989,13 @@ function createLoopRequest(description, loopId) {
   const normalizedDescription = normalizeLoopRequestText(description);
   const qualityGateEnabled = String(getConfig('loop_request_quality_gate') || 'true').toLowerCase() !== 'false';
   const minDescriptionChars = parseIntConfig('loop_request_min_description_chars', 180, { min: 80, max: 5000 });
+  const loopRequestMinIntervalSec = parseIntConfig('loop_request_min_interval_sec', 0, { min: 0, max: 86400 });
+  const loopRequestMaxPerHour = parsePositiveInt(getConfig('loop_request_max_per_hour'));
+  const loopRequestSimilarityThreshold = parseFloatConfig(
+    'loop_request_similarity_threshold',
+    DEFAULT_LOOP_REQUEST_SIMILARITY_THRESHOLD,
+    { min: 0.5, max: 0.99 }
+  );
 
   if (qualityGateEnabled) {
     const quality = evaluateLoopRequestQuality(normalizedDescription, minDescriptionChars);
@@ -953,10 +1023,61 @@ function createLoopRequest(description, loopId) {
       WHERE loop_id = ? AND description = ? AND status NOT IN ('completed', 'failed')
     `).get(loopId, normalizedDescription);
     if (existing) {
-      return { id: existing.id, deduplicated: true };
+      return {
+        id: existing.id,
+        deduplicated: true,
+        suppressed: false,
+        reason: 'exact_active_duplicate',
+      };
     }
 
-    const loopRequestMaxPerHour = parsePositiveInt(getConfig('loop_request_max_per_hour'));
+    const activeCandidates = d.prepare(`
+      SELECT id, description
+      FROM requests
+      WHERE loop_id = ? AND status NOT IN ('completed', 'failed')
+      ORDER BY datetime(created_at) DESC, id DESC
+      LIMIT ?
+    `).all(loopId, LOOP_REQUEST_SIMILAR_CANDIDATE_LIMIT);
+    const similarActive = findMostSimilarLoopRequest(activeCandidates, normalizedDescription, loopRequestSimilarityThreshold);
+    if (similarActive) {
+      return {
+        id: similarActive.id,
+        deduplicated: true,
+        suppressed: false,
+        reason: 'similar_active_duplicate',
+      };
+    }
+
+    if (loopRequestMinIntervalSec > 0) {
+      const mostRecent = d.prepare(`
+        SELECT id, created_at
+        FROM requests
+        WHERE loop_id = ?
+        ORDER BY datetime(created_at) DESC, id DESC
+        LIMIT 1
+      `).get(loopId);
+      if (mostRecent) {
+        const ageMs = coordinatorAgeMs(mostRecent.created_at);
+        const cooldownMs = loopRequestMinIntervalSec * 1000;
+        if (ageMs !== null && ageMs < cooldownMs) {
+          const retryAfterSec = Math.max(1, Math.ceil((cooldownMs - ageMs) / 1000));
+          log('loop', 'loop_request_suppressed', {
+            loop_id: loopId,
+            reason: 'cooldown',
+            retry_after_sec: retryAfterSec,
+            min_interval_sec: loopRequestMinIntervalSec,
+          });
+          return {
+            id: null,
+            deduplicated: false,
+            suppressed: true,
+            reason: 'cooldown',
+            retry_after_sec: retryAfterSec,
+          };
+        }
+      }
+    }
+
     if (loopRequestMaxPerHour !== null) {
       const recentWindow = d.prepare(`
         SELECT COUNT(*) AS request_count, MIN(created_at) AS oldest_created_at
@@ -982,6 +1103,35 @@ function createLoopRequest(description, loopId) {
       }
     }
 
+    const recentSimilarCandidates = d.prepare(`
+      SELECT id, description, status
+      FROM requests
+      WHERE loop_id = ?
+        AND status IN ('completed', 'failed')
+        AND created_at >= datetime('now', ?)
+      ORDER BY datetime(created_at) DESC, id DESC
+      LIMIT ?
+    `).all(loopId, `-${LOOP_REQUEST_SIMILAR_RECENT_WINDOW_HOURS} hours`, LOOP_REQUEST_SIMILAR_CANDIDATE_LIMIT);
+    const similarRecent = findMostSimilarLoopRequest(
+      recentSimilarCandidates,
+      normalizedDescription,
+      loopRequestSimilarityThreshold
+    );
+    if (similarRecent) {
+      log('loop', 'loop_request_suppressed', {
+        loop_id: loopId,
+        reason: 'similar_recent_duplicate',
+        duplicate_of: similarRecent.id,
+        duplicate_status: similarRecent.status,
+      });
+      return {
+        id: similarRecent.id,
+        deduplicated: true,
+        suppressed: true,
+        reason: 'similar_recent_duplicate',
+      };
+    }
+
     const id = 'req-' + crypto.randomBytes(4).toString('hex');
     d.prepare(`
       INSERT INTO requests (id, description, loop_id) VALUES (?, ?, ?)
@@ -989,7 +1139,7 @@ function createLoopRequest(description, loopId) {
     sendMail('architect', 'new_request', { request_id: id, description: normalizedDescription, loop_id: loopId });
     sendMail('master-1', 'request_acknowledged', { request_id: id, description: normalizedDescription, loop_id: loopId });
     log('loop', 'loop_request_created', { request_id: id, loop_id: loopId, description: normalizedDescription });
-    return { id, deduplicated: false };
+    return { id, deduplicated: false, suppressed: false };
   });
   return txn();
 }

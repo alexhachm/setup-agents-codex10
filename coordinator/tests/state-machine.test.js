@@ -151,6 +151,85 @@ describe('Task state machine', () => {
   });
 });
 
+describe('Loop request state machine', () => {
+  it('should prefer exact active deduplication over cooldown suppression', () => {
+    db.setConfig('loop_request_quality_gate', 'false');
+    db.setConfig('loop_request_min_interval_sec', '300');
+    db.setConfig('loop_request_max_per_hour', '20');
+
+    const loopId = db.createLoop('Exact duplicate ordering');
+    const description = 'Fix duplicate ordering in coordinator/src/db.js because production triage can stall when repeated requests are suppressed by cooldown instead of deduplicated against active work.';
+
+    const first = db.createLoopRequest(description, loopId);
+    assert.strictEqual(first.deduplicated, false);
+    assert.strictEqual(first.suppressed, false);
+    assert.ok(first.id);
+
+    const second = db.createLoopRequest(description, loopId);
+    assert.strictEqual(second.id, first.id);
+    assert.strictEqual(second.deduplicated, true);
+    assert.strictEqual(second.suppressed, false);
+    assert.strictEqual(second.reason, 'exact_active_duplicate');
+
+    const loopRequests = db.listLoopRequests(loopId);
+    assert.strictEqual(loopRequests.length, 1);
+  });
+
+  it('should prefer similar active deduplication over cooldown suppression', () => {
+    db.setConfig('loop_request_quality_gate', 'false');
+    db.setConfig('loop_request_min_interval_sec', '300');
+    db.setConfig('loop_request_max_per_hour', '20');
+    db.setConfig('loop_request_similarity_threshold', '0.6');
+
+    const loopId = db.createLoop('Similar duplicate ordering');
+    const firstDescription = 'Update coordinator/src/db.js duplicate ordering and add state-machine regression coverage because production incident routing can break when active duplicates bypass dedupe.';
+    const secondDescription = 'Update coordinator/src/db.js duplicate ordering and add regression tests because production incident routing can break when active near-duplicate requests bypass dedupe.';
+
+    const first = db.createLoopRequest(firstDescription, loopId);
+    assert.strictEqual(first.deduplicated, false);
+    assert.strictEqual(first.suppressed, false);
+    assert.ok(first.id);
+
+    const second = db.createLoopRequest(secondDescription, loopId);
+    assert.strictEqual(second.id, first.id);
+    assert.strictEqual(second.deduplicated, true);
+    assert.strictEqual(second.suppressed, false);
+    assert.strictEqual(second.reason, 'similar_active_duplicate');
+  });
+
+  it('should still apply cooldown and hourly rate-limit for non-duplicate requests', () => {
+    db.setConfig('loop_request_quality_gate', 'false');
+    db.setConfig('loop_request_similarity_threshold', '0.99');
+    db.setConfig('loop_request_min_interval_sec', '300');
+    db.setConfig('loop_request_max_per_hour', '2');
+
+    const loopId = db.createLoop('Throughput suppression');
+    const first = db.createLoopRequest('Unique request alpha', loopId);
+    assert.strictEqual(first.deduplicated, false);
+    assert.strictEqual(first.suppressed, false);
+
+    const cooldownSuppressed = db.createLoopRequest('Unique request beta', loopId);
+    assert.strictEqual(cooldownSuppressed.id, null);
+    assert.strictEqual(cooldownSuppressed.deduplicated, false);
+    assert.strictEqual(cooldownSuppressed.suppressed, true);
+    assert.strictEqual(cooldownSuppressed.reason, 'cooldown');
+    assert.strictEqual(Number.isInteger(cooldownSuppressed.retry_after_sec), true);
+
+    db.setConfig('loop_request_min_interval_sec', '0');
+
+    const secondAccepted = db.createLoopRequest('Unique request gamma', loopId);
+    assert.strictEqual(secondAccepted.deduplicated, false);
+    assert.strictEqual(secondAccepted.suppressed, false);
+
+    const rateLimited = db.createLoopRequest('Unique request delta', loopId);
+    assert.strictEqual(rateLimited.id, null);
+    assert.strictEqual(rateLimited.deduplicated, false);
+    assert.strictEqual(rateLimited.suppressed, true);
+    assert.strictEqual(rateLimited.reason, 'rate_limit');
+    assert.strictEqual(Number.isInteger(rateLimited.retry_after_sec), true);
+  });
+});
+
 describe('Worker state machine', () => {
   it('should register and track workers', () => {
     db.registerWorker(1, '/path/to/wt-1', 'agent-1');
