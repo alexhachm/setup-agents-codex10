@@ -12,7 +12,7 @@ let tmpDir;
 
 beforeEach(() => {
   tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'mac10-merge-'));
-  fs.mkdirSync(path.join(tmpDir, '.claude', 'state'), { recursive: true });
+  fs.mkdirSync(path.join(tmpDir, '.codex', 'state'), { recursive: true });
   db.init(tmpDir);
 });
 

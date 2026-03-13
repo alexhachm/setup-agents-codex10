@@ -26,6 +26,18 @@ let processing = false;
 let processingStartedAt = 0;
 const PROCESSING_TIMEOUT_MS = 300000; // 5 minutes — reset flag if stuck
 let mergerIntervalId = null;
+let lastAssignmentPriorityDeferralLogMs = 0;
+const ASSIGNMENT_PRIORITY_DEFERRAL_LOG_MS = 15000;
+
+function getBooleanConfig(key, defaultValue = false) {
+  const raw = db.getConfig(key);
+  if (raw === null || raw === undefined) return defaultValue;
+  const normalized = String(raw).trim().toLowerCase();
+  if (!normalized) return defaultValue;
+  if (['1', 'true', 'yes', 'on'].includes(normalized)) return true;
+  if (['0', 'false', 'no', 'off'].includes(normalized)) return false;
+  return defaultValue;
+}
 
 function start(projectDir) {
   // Merger is triggered by task completions, but also runs periodic checks
@@ -107,6 +119,20 @@ function processQueue(projectDir) {
   processingStartedAt = Date.now();
 
   try {
+    const prioritizeAssignment = getBooleanConfig('prioritize_assignment_over_merge', true);
+    if (prioritizeAssignment) {
+      const readyTaskCount = db.getReadyTasks().length;
+      if (readyTaskCount > 0) {
+        const now = Date.now();
+        if (now - lastAssignmentPriorityDeferralLogMs > ASSIGNMENT_PRIORITY_DEFERRAL_LOG_MS) {
+          db.log('coordinator', 'merge_deferred_assignment_priority', { ready_tasks: readyTaskCount });
+          lastAssignmentPriorityDeferralLogMs = now;
+        }
+        processing = false;
+        return;
+      }
+    }
+
     const entry = db.getNextMerge();
     if (!entry) { processing = false; return; }
 
@@ -398,6 +424,7 @@ function checkRequestCompletion(requestId) {
 
 function stop() {
   if (mergerIntervalId) { clearInterval(mergerIntervalId); mergerIntervalId = null; }
+  lastAssignmentPriorityDeferralLogMs = 0;
 }
 
 module.exports = { start, stop, onTaskCompleted, processQueue, attemptMerge };

@@ -15,7 +15,7 @@ const instanceRegistry = require('./instance-registry');
 const projectDir = process.argv[2] || process.cwd();
 const scriptDir = process.env.MAC10_SCRIPT_DIR || path.resolve(__dirname, '..', '..');
 const namespace = process.env.MAC10_NAMESPACE || 'mac10';
-const stateDir = path.join(projectDir, '.claude', 'state');
+const stateDir = path.join(projectDir, '.codex', 'state');
 const pidFile = path.join(stateDir, namespace === 'mac10' ? 'mac10.pid' : `${namespace}.pid`);
 let ownsPidLock = false;
 
@@ -86,26 +86,34 @@ if (tmux.isAvailable()) {
 // Start CLI server (Unix socket for mac10 commands)
 const handlers = {
   onTaskCompleted: (taskId) => merger.onTaskCompleted(taskId),
-  onAssignTask: (task, worker) => {
+  onAssignTask: (task, worker, routingDecision = {}) => {
     const worktreePath = worker.worktree_path || path.join(projectDir, '.worktrees', `wt-${worker.id}`);
 
-    // Sync knowledge files from main project to worktree before spawning
+    // Sync knowledge files from main project to worktree before spawning.
+    // When wt/.codex is a symlink to project/.codex, source and destination
+    // are the same directory and copying would fail.
     try {
-      const srcKnowledge = path.join(projectDir, '.claude', 'knowledge');
-      const dstKnowledge = path.join(worktreePath, '.claude', 'knowledge');
+      const srcKnowledge = path.join(projectDir, '.codex', 'knowledge');
+      const dstKnowledge = path.join(worktreePath, '.codex', 'knowledge');
       const fs = require('fs');
-      fs.mkdirSync(path.join(dstKnowledge, 'domain'), { recursive: true });
-      for (const f of fs.readdirSync(srcKnowledge)) {
-        const srcFile = path.join(srcKnowledge, f);
-        if (fs.statSync(srcFile).isFile()) {
-          fs.copyFileSync(srcFile, path.join(dstKnowledge, f));
+      const srcReal = fs.realpathSync(srcKnowledge);
+      const dstReal = fs.realpathSync(dstKnowledge);
+      if (srcReal === dstReal) {
+        // Shared runtime via symlink; nothing to sync.
+      } else {
+        fs.mkdirSync(path.join(dstKnowledge, 'domain'), { recursive: true });
+        for (const f of fs.readdirSync(srcKnowledge)) {
+          const srcFile = path.join(srcKnowledge, f);
+          if (fs.statSync(srcFile).isFile()) {
+            fs.copyFileSync(srcFile, path.join(dstKnowledge, f));
+          }
         }
-      }
-      // Sync domain subdirectory
-      const domainDir = path.join(srcKnowledge, 'domain');
-      if (fs.existsSync(domainDir)) {
-        for (const f of fs.readdirSync(domainDir)) {
-          fs.copyFileSync(path.join(domainDir, f), path.join(dstKnowledge, 'domain', f));
+        // Sync domain subdirectory
+        const domainDir = path.join(srcKnowledge, 'domain');
+        if (fs.existsSync(domainDir)) {
+          for (const f of fs.readdirSync(domainDir)) {
+            fs.copyFileSync(path.join(domainDir, f), path.join(dstKnowledge, 'domain', f));
+          }
         }
       }
     } catch (e) {
@@ -126,7 +134,7 @@ const handlers = {
       if (tmux.hasWindow(windowName)) {
         tmux.killWindow(windowName);
       }
-      const sentinelPath = path.join(projectDir, '.claude', 'scripts', 'worker-sentinel.sh');
+      const sentinelPath = path.join(projectDir, '.codex', 'scripts', 'worker-sentinel.sh');
       tmux.createWindow(
         windowName,
         `MAC10_NAMESPACE="${namespace}" bash "${sentinelPath}" ${worker.id} "${projectDir}"`,
@@ -138,7 +146,7 @@ const handlers = {
       });
     } else {
       // Native Windows: spawn via launch-worker.sh (opens Windows Terminal tab)
-      const launchScript = path.join(projectDir, '.claude', 'scripts', 'launch-worker.sh');
+      const launchScript = path.join(projectDir, '.codex', 'scripts', 'launch-worker.sh');
       const { execFile } = require('child_process');
       execFile('bash', [launchScript, String(worker.id)], {
         cwd: projectDir,
@@ -147,7 +155,16 @@ const handlers = {
         if (err) db.log('coordinator', 'launch_worker_error', { worker_id: worker.id, error: err.message });
       });
     }
-    db.log('coordinator', 'worker_spawned', { worker_id: worker.id, window: windowName });
+    db.log('coordinator', 'worker_spawned', {
+      worker_id: worker.id,
+      task_id: task.id,
+      assignment_token: worker.launched_at || null,
+      window: windowName,
+      model: routingDecision.model || null,
+      routing_class: routingDecision.routing_class || null,
+      reasoning_effort: routingDecision.reasoning_effort || null,
+      routing_reason: routingDecision.reason || null,
+    });
   },
   onLoopCreated: (loopId, prompt) => {
     const windowName = `loop-${loopId}`;

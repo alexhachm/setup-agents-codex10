@@ -10,8 +10,8 @@ const path = require('path');
  *   2. Task overlay — appended section with task-specific context
  */
 function generateOverlay(task, worker, projectDir) {
-  const workerAgentsMd = path.join(projectDir, '.claude', 'worker-agents.md');
-  const workerClaudeMd = path.join(projectDir, '.claude', 'worker-claude.md');
+  const workerAgentsMd = path.join(projectDir, '.codex', 'worker-agents.md');
+  const workerClaudeMd = path.join(projectDir, '.codex', 'worker-claude.md');
   let base = '';
   try {
     if (fs.existsSync(workerAgentsMd)) {
@@ -93,7 +93,7 @@ function buildTaskOverlay(task, worker, projectDir) {
   }
 
   // Add knowledge context if available
-  const knowledgeDir = path.join(projectDir, '.claude', 'knowledge');
+  const knowledgeDir = path.join(projectDir, '.codex', 'knowledge');
   const domainKnowledgePath = resolveDomainKnowledgePath(task.domain, knowledgeDir);
   if (domainKnowledgePath && fs.existsSync(domainKnowledgePath)) {
     try {

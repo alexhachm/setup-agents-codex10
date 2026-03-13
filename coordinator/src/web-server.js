@@ -5,12 +5,41 @@ const http = require('http');
 const WebSocket = require('ws');
 const path = require('path');
 const fs = require('fs');
-const { spawn } = require('child_process');
+const { spawn, spawnSync } = require('child_process');
 const db = require('./db');
 const instanceRegistry = require('./instance-registry');
 
 const REPO_RE = /^(https?:\/\/github\.com\/)?[a-zA-Z0-9._-]+\/[a-zA-Z0-9._-]+(\.git)?$/;
 const SAFE_PATH_RE = /^(?:\/|[A-Za-z]:[\\/])[a-zA-Z0-9._\\/: -]+$/;
+const NUM_WORKERS_DEFAULT = 4;
+const NUM_WORKERS_MIN = 1;
+const NUM_WORKERS_MAX = 8;
+
+function clampNumWorkers(value) {
+  return Math.min(Math.max(value, NUM_WORKERS_MIN), NUM_WORKERS_MAX);
+}
+
+function validateNumWorkers(rawNumWorkers) {
+  if (rawNumWorkers === undefined) {
+    return { ok: true, value: NUM_WORKERS_DEFAULT };
+  }
+  if (typeof rawNumWorkers === 'number') {
+    if (!Number.isFinite(rawNumWorkers) || !Number.isInteger(rawNumWorkers)) {
+      return {
+        ok: false,
+        error: 'Invalid numWorkers: must be a finite integer or a digit-only string.',
+      };
+    }
+    return { ok: true, value: clampNumWorkers(rawNumWorkers) };
+  }
+  if (typeof rawNumWorkers === 'string' && /^\d+$/.test(rawNumWorkers)) {
+    return { ok: true, value: clampNumWorkers(parseInt(rawNumWorkers, 10)) };
+  }
+  return {
+    ok: false,
+    error: 'Invalid numWorkers: must be a finite integer or a digit-only string.',
+  };
+}
 
 let server = null;
 let wss = null;
@@ -115,6 +144,49 @@ function cleanupFailedLaunch(pid, port) {
     try { process.kill(pid, 'SIGTERM'); } catch {}
   }
   try { instanceRegistry.deregister(port); } catch {}
+}
+
+function commandExists(command) {
+  const probeCmd = process.platform === 'win32' ? 'where.exe' : 'which';
+  try {
+    const probe = spawnSync(probeCmd, [command], { stdio: 'ignore' });
+    return probe.status === 0;
+  } catch {
+    return false;
+  }
+}
+
+function resolveWindowsTerminalCommand() {
+  if (commandExists('wt.exe')) {
+    return 'wt.exe';
+  }
+
+  const candidates = [];
+  const localAppData = process.env.LOCALAPPDATA;
+  const userProfile = process.env.USERPROFILE;
+  if (localAppData) {
+    candidates.push(path.join(localAppData, 'Microsoft', 'WindowsApps', 'wt.exe'));
+  }
+  if (userProfile) {
+    candidates.push(path.join(userProfile, 'AppData', 'Local', 'Microsoft', 'WindowsApps', 'wt.exe'));
+  }
+
+  const unixUsers = [
+    process.env.WIN_USER,
+    process.env.USERNAME,
+    process.env.USER,
+    process.env.LOGNAME,
+  ].filter(Boolean);
+  for (const user of unixUsers) {
+    candidates.push(`/mnt/c/Users/${user}/AppData/Local/Microsoft/WindowsApps/wt.exe`);
+  }
+
+  for (const candidate of candidates) {
+    if (candidate && fs.existsSync(candidate)) {
+      return candidate;
+    }
+  }
+  return null;
 }
 
 function start(projectDir, port = 3100, scriptDir = null, handlers = {}) {
@@ -249,6 +321,10 @@ function start(projectDir, port = 3100, scriptDir = null, handlers = {}) {
   app.post('/api/config', (req, res) => {
     try {
       const { projectDir: newDir, githubRepo, numWorkers } = req.body;
+      const parsedWorkers = validateNumWorkers(numWorkers);
+      if (!parsedWorkers.ok) {
+        return res.status(400).json({ ok: false, error: parsedWorkers.error });
+      }
       if (newDir) {
         if (!SAFE_PATH_RE.test(newDir)) {
           return res.status(400).json({ ok: false, error: 'Invalid project directory path' });
@@ -256,18 +332,20 @@ function start(projectDir, port = 3100, scriptDir = null, handlers = {}) {
         db.setConfig('project_dir', newDir);
       }
       if (githubRepo !== undefined) {
-        if (githubRepo && !REPO_RE.test(githubRepo)) {
-          return res.status(400).json({ ok: false, error: 'Invalid GitHub repo format. Expected owner/repo.' });
-        }
-        db.setConfig('github_repo', githubRepo);
+      if (githubRepo && !REPO_RE.test(githubRepo)) {
+        return res.status(400).json({ ok: false, error: 'Invalid GitHub repo format. Expected owner/repo.' });
+      }
+      db.setConfig('github_repo', githubRepo);
       }
       if (numWorkers !== undefined) {
-        db.setConfig('num_workers', String(Math.min(Math.max(parseInt(numWorkers) || 4, 1), 8)));
+        db.setConfig('num_workers', String(parsedWorkers.value));
       }
       // Auto-save as preset when both project dir and repo are set
       const dir = newDir || db.getConfig('project_dir');
       const repo = githubRepo !== undefined ? githubRepo : db.getConfig('github_repo');
-      const workers = numWorkers !== undefined ? Math.min(Math.max(parseInt(numWorkers) || 4, 1), 8) : parseInt(db.getConfig('num_workers') || '4');
+      const workers = numWorkers !== undefined
+        ? parsedWorkers.value
+        : parseInt(db.getConfig('num_workers') || NUM_WORKERS_DEFAULT);
       if (dir && repo) {
         const presetName = repo || path.basename(dir);
         db.savePreset(presetName, dir, repo, workers);
@@ -301,7 +379,11 @@ function start(projectDir, port = 3100, scriptDir = null, handlers = {}) {
       if (githubRepo && !REPO_RE.test(githubRepo)) {
         return res.status(400).json({ ok: false, error: 'Invalid GitHub repo format' });
       }
-      db.savePreset(name, dir, githubRepo || '', parseInt(numWorkers) || 4);
+      const parsedWorkers = validateNumWorkers(numWorkers);
+      if (!parsedWorkers.ok) {
+        return res.status(400).json({ ok: false, error: parsedWorkers.error });
+      }
+      db.savePreset(name, dir, githubRepo || '', parsedWorkers.value);
       db.log('gui', 'preset_saved', { name, projectDir: dir, githubRepo });
       res.json({ ok: true });
     } catch (e) {
@@ -324,6 +406,10 @@ function start(projectDir, port = 3100, scriptDir = null, handlers = {}) {
 
   app.post('/api/setup', (req, res) => {
     const { projectDir: reqProjectDir, githubRepo, numWorkers } = req.body;
+    const parsedWorkers = validateNumWorkers(numWorkers);
+    if (!parsedWorkers.ok) {
+      return res.status(400).json({ ok: false, error: parsedWorkers.error });
+    }
     if (!reqProjectDir) {
       return res.status(400).json({ ok: false, error: 'projectDir is required' });
     }
@@ -337,7 +423,7 @@ function start(projectDir, port = 3100, scriptDir = null, handlers = {}) {
       return res.status(409).json({ ok: false, error: 'Setup is already running' });
     }
 
-    const workers = Math.min(Math.max(parseInt(numWorkers) || 4, 1), 8);
+    const workers = parsedWorkers.value;
     const setupScript = path.join(resolvedScriptDir, 'setup.sh');
 
     // Save config
@@ -448,8 +534,12 @@ function start(projectDir, port = 3100, scriptDir = null, handlers = {}) {
     }
 
     if (isWSL) {
-      const user = process.env.USER || process.env.LOGNAME || 'owner';
-      const wt = `/mnt/c/Users/${user}/AppData/Local/Microsoft/WindowsApps/wt.exe`;
+      const wt = resolveWindowsTerminalCommand();
+      if (!wt) {
+        const error = 'Windows Terminal (wt.exe) was not found on PATH or known install paths';
+        db.log('gui', `${logTag}_failed`, { projectDir: repoDir, error });
+        return res.status(500).json({ ok: false, error });
+      }
       const distro = process.env.WSL_DISTRO_NAME || 'Ubuntu';
 
       const proc = spawn(wt, [
@@ -460,10 +550,28 @@ function start(projectDir, port = 3100, scriptDir = null, handlers = {}) {
         stdio: 'ignore',
         detached: true,
       });
-      proc.unref();
+      let responded = false;
+      const failLaunch = (error) => {
+        if (responded) return;
+        responded = true;
+        db.log('gui', `${logTag}_failed`, { projectDir: repoDir, error });
+        res.status(500).json({ ok: false, error });
+      };
+      const succeedLaunch = () => {
+        if (responded) return;
+        responded = true;
+        proc.unref();
+        db.log('gui', logTag, { projectDir: repoDir });
+        res.json({ ok: true, message: `${title} terminal opened` });
+      };
 
-      db.log('gui', logTag, { projectDir: repoDir });
-      return res.json({ ok: true, message: `${title} terminal opened` });
+      proc.once('error', (err) => {
+        failLaunch(err.message);
+      });
+      proc.once('spawn', () => {
+        succeedLaunch();
+      });
+      return;
     }
 
     // macOS / Linux: open in tmux
@@ -606,6 +714,10 @@ function start(projectDir, port = 3100, scriptDir = null, handlers = {}) {
 
   app.post('/api/instances/launch', async (req, res) => {
     const { projectDir: reqDir, githubRepo, numWorkers } = req.body;
+    const parsedWorkers = validateNumWorkers(numWorkers);
+    if (!parsedWorkers.ok) {
+      return res.status(400).json({ ok: false, error: parsedWorkers.error });
+    }
     if (!reqDir) {
       return res.status(400).json({ ok: false, error: 'projectDir is required' });
     }
@@ -666,7 +778,7 @@ function start(projectDir, port = 3100, scriptDir = null, handlers = {}) {
       const seedConfig = await seedCoordinatorConfig(newPort, {
         projectDir: reqDir,
         githubRepo: githubRepo || '',
-        numWorkers: parseInt(numWorkers) || 4,
+        numWorkers: parsedWorkers.value,
       });
       if (!seedConfig.ok) {
         cleanupFailedLaunch(childPid, newPort);

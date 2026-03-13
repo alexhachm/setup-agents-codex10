@@ -37,9 +37,10 @@ Use these controls to keep worker throughput high and drain queue age:
 
 1. Measure queue pressure and ready buffer:
    ```bash
-   pending_count=$(mac10 status | sed -n '/=== Requests ===/,/=== Workers ===/p' | grep -c '\[pending\]')
+   request_rows=$(mac10 status | sed -n '/=== Requests ===/,/=== Workers ===/p')
+   pending_count=$(printf '%s\n' "$request_rows" | awk '$1 ~ /^req-/ && $2 == "[pending]" {count++} END {print count+0}')
    ready_count=$(mac10 ready-tasks | grep -c '^  #')
-   oldest_pending_id=$(mac10 status | sed -n '/=== Requests ===/,/=== Workers ===/p' | grep '\[pending\]' | awk '{print $1}' | tail -n 1)
+   oldest_pending_id=$(printf '%s\n' "$request_rows" | awk '$1 ~ /^req-/ && $2 == "[pending]" {id=$1} END {print id}')
    ```
 2. If `pending_count > 50`, enter drain mode:
    - Triage **oldest pending** requests first.
@@ -85,13 +86,22 @@ Only use this protocol for trivial docs-only edits. For code work, use Tier 2 or
 **Tier 1 context budget:** Track how many Tier 1 executions you've done this session. After 4 Tier 1 executions, trigger a reset — implementation details pollute your architect context.
 
 ## Tier 2 Direct Assignment Protocol
-1. Check workers: `mac10 worker-status` to find an idle worker
-2. Claim atomically: `mac10 claim-worker <worker_id>`
-3. Create task: `echo '{"request_id":"...","subject":"...","description":"...","domain":"...","tier":2,"priority":"normal","files":"file1.js,file2.js","validation":"npm run build"}' | mac10 create-task -`
-4. Assign task: `mac10 assign-task <task_id> <worker_id>`
-5. Release claim: `mac10 release-worker <worker_id>`
-6. Do not launch worker terminals manually; `assign-task` wakes/spawns the worker.
-7. Log: `[TIER2_ASSIGN] request=[id] worker=[worker-N] task=[subject]`
+1. Check workers: `mac10 worker-status` to find an idle worker and capture `raw_worker_id` (for example `worker-3`).
+2. Normalize to numeric for claim/assign/release: `worker_id="${raw_worker_id#worker-}"`.
+3. Claim atomically: `mac10 claim-worker "$worker_id"`.
+4. Create task and capture task ID:
+   ```bash
+   task_id="$(
+     echo '{"request_id":"[id]","subject":"[task title]","description":"DOMAIN: [domain]\nFILES: [files]\nVALIDATION: tier2\nTIER: 2\n\n[detailed requirements]\n\n[success criteria]","domain":"[domain]","tier":2,"priority":"normal","files":["file1.js","file2.js"],"validation":"npm run build"}' \
+       | mac10 create-task - \
+       | awk '/Task created:/ {print $3}'
+   )"
+   [ -n "$task_id" ] || { echo "Failed to capture task_id from create-task output"; exit 1; }
+   ```
+5. Assign task with captured numeric ID: `mac10 assign-task "$task_id" "$worker_id"`.
+6. Release claim: `mac10 release-worker "$worker_id"`.
+7. Do not launch worker terminals manually; `assign-task` wakes/spawns the worker.
+8. Log: `[TIER2_ASSIGN] request=[id] worker=[worker-N] task=[subject]`
 
 ## Knowledge Curation (Every 2nd Decomposition)
 

@@ -108,16 +108,38 @@ cd "$SCRIPT_DIR/coordinator"
 npm install --production 2>&1 | tail -1
 echo "  Dependencies installed."
 
-# --- Create .claude directory structure ---
+# --- Create .codex directory structure ---
 
 echo "[3/8] Setting up project directories..."
 
-CLAUDE_DIR="$PROJECT_DIR/.claude"
-mkdir -p "$CLAUDE_DIR/commands"
-mkdir -p "$CLAUDE_DIR/commands-codex10"
-mkdir -p "$CLAUDE_DIR/state"
-mkdir -p "$CLAUDE_DIR/knowledge/domain"
-mkdir -p "$CLAUDE_DIR/scripts"
+LEGACY_DIR="$PROJECT_DIR/.claude"
+CODEX_DIR="$PROJECT_DIR/.codex"
+
+if [ -d "$LEGACY_DIR" ] && [ ! -e "$CODEX_DIR" ]; then
+  mv "$LEGACY_DIR" "$CODEX_DIR"
+  echo "  Migrated existing .claude directory to .codex."
+fi
+
+mkdir -p "$CODEX_DIR/commands"
+mkdir -p "$CODEX_DIR/commands-codex10"
+mkdir -p "$CODEX_DIR/state"
+mkdir -p "$CODEX_DIR/knowledge/domain"
+mkdir -p "$CODEX_DIR/scripts"
+
+# Symlinks are required for shared worker runtime (.worktrees/wt-N/.codex -> .codex).
+# No copy fallback by design: fail early if symlinks are unavailable.
+SYMLINK_PROBE_DIR="$CODEX_DIR/.symlink-probe-dir"
+SYMLINK_PROBE_LINK="$CODEX_DIR/.symlink-probe-link"
+rm -rf "$SYMLINK_PROBE_DIR" "$SYMLINK_PROBE_LINK" 2>/dev/null || true
+mkdir -p "$SYMLINK_PROBE_DIR"
+if ! ln -s "$SYMLINK_PROBE_DIR" "$SYMLINK_PROBE_LINK" 2>/dev/null; then
+  echo "ERROR: This environment cannot create symlinks."
+  echo "  Worker runtimes now require symlinks (no copy fallback)."
+  echo "  On Windows, enable Developer Mode or run with Administrator privileges."
+  rm -rf "$SYMLINK_PROBE_DIR" "$SYMLINK_PROBE_LINK" 2>/dev/null || true
+  exit 1
+fi
+rm -rf "$SYMLINK_PROBE_DIR" "$SYMLINK_PROBE_LINK" 2>/dev/null || true
 
 # --- Copy templates ---
 
@@ -125,31 +147,31 @@ echo "[4/8] Copying templates..."
 
 # Commands (shared) — only copy if not already present
 for f in "$SCRIPT_DIR/templates/commands/"*.md; do
-  dest="$CLAUDE_DIR/commands/$(basename "$f")"
+  dest="$CODEX_DIR/commands/$(basename "$f")"
   [ -f "$dest" ] || cp "$f" "$dest"
 done
 
 # Commands (codex10-isolated) — always refresh to keep codex10 protocol in sync.
 for f in "$SCRIPT_DIR/templates/commands/"*.md; do
-  cp "$f" "$CLAUDE_DIR/commands-codex10/$(basename "$f")"
+  cp "$f" "$CODEX_DIR/commands-codex10/$(basename "$f")"
 done
 
 # Agent templates — only copy if not already present
-mkdir -p "$CLAUDE_DIR/agents"
+mkdir -p "$CODEX_DIR/agents"
 for f in "$SCRIPT_DIR/templates/agents/"*.md; do
-  dest="$CLAUDE_DIR/agents/$(basename "$f")"
+  dest="$CODEX_DIR/agents/$(basename "$f")"
   [ -f "$dest" ] || cp "$f" "$dest"
 done
 
 # Knowledge templates (don't overwrite existing)
 for f in "$SCRIPT_DIR/templates/knowledge/"*.md; do
-  dest="$CLAUDE_DIR/knowledge/$(basename "$f")"
+  dest="$CODEX_DIR/knowledge/$(basename "$f")"
   [ -f "$dest" ] || cp "$f" "$dest"
 done
 
 # Docs
-mkdir -p "$CLAUDE_DIR/docs"
-cp "$SCRIPT_DIR/templates/docs/"*.md "$CLAUDE_DIR/docs/"
+mkdir -p "$CODEX_DIR/docs"
+cp "$SCRIPT_DIR/templates/docs/"*.md "$CODEX_DIR/docs/"
 
 # CLAUDE.md for architect (root) — only if not already present
 if [ ! -f "$PROJECT_DIR/CLAUDE.md" ]; then
@@ -159,27 +181,27 @@ else
 fi
 
 # Worker CLAUDE.md template
-cp "$SCRIPT_DIR/templates/worker-claude.md" "$CLAUDE_DIR/worker-claude.md"
+cp "$SCRIPT_DIR/templates/worker-claude.md" "$CODEX_DIR/worker-claude.md"
 
 # AGENTS.md compatibility for Codex
 if [ ! -f "$PROJECT_DIR/AGENTS.md" ]; then
   cp "$SCRIPT_DIR/templates/root-claude.md" "$PROJECT_DIR/AGENTS.md"
 fi
-cp "$SCRIPT_DIR/templates/worker-claude.md" "$CLAUDE_DIR/worker-agents.md"
+cp "$SCRIPT_DIR/templates/worker-claude.md" "$CODEX_DIR/worker-agents.md"
 
 # Scripts
 for s in worker-sentinel.sh loop-sentinel.sh launch-worker.sh signal-wait.sh state-lock.sh; do
-  cp "$SCRIPT_DIR/scripts/$s" "$CLAUDE_DIR/scripts/"
+  cp "$SCRIPT_DIR/scripts/$s" "$CODEX_DIR/scripts/"
 done
-chmod +x "$CLAUDE_DIR/scripts/"*.sh
+chmod +x "$CODEX_DIR/scripts/"*.sh
 
 # Hooks
-mkdir -p "$CLAUDE_DIR/hooks"
-cp "$SCRIPT_DIR/.claude/hooks/pre-tool-secret-guard.sh" "$CLAUDE_DIR/hooks/" 2>/dev/null || true
-chmod +x "$CLAUDE_DIR/hooks/"*.sh 2>/dev/null || true
+mkdir -p "$CODEX_DIR/hooks"
+cp "$SCRIPT_DIR/.codex/hooks/pre-tool-secret-guard.sh" "$CODEX_DIR/hooks/" 2>/dev/null || true
+chmod +x "$CODEX_DIR/hooks/"*.sh 2>/dev/null || true
 
 # Settings
-SETTINGS_FILE="$CLAUDE_DIR/settings.json"
+SETTINGS_FILE="$CODEX_DIR/settings.json"
 if [ ! -f "$SETTINGS_FILE" ]; then
   cp "$SCRIPT_DIR/templates/settings.json" "$SETTINGS_FILE"
 fi
@@ -192,9 +214,9 @@ echo "[5/8] Setting up codex10 CLI wrapper..."
 
 MAC10_BIN="$SCRIPT_DIR/coordinator/bin/mac10"
 chmod +x "$MAC10_BIN"
-MAC10_CLI="$CLAUDE_DIR/scripts/mac10-codex10"
-CODEX10_CLI="$CLAUDE_DIR/scripts/codex10"
-MAC10_COMPAT="$CLAUDE_DIR/scripts/mac10"
+MAC10_CLI="$CODEX_DIR/scripts/mac10-codex10"
+CODEX10_CLI="$CODEX_DIR/scripts/codex10"
+MAC10_COMPAT="$CODEX_DIR/scripts/mac10"
 
 # Create a namespaced wrapper script in the project
 cat > "$MAC10_CLI" << 'WRAPPER'
@@ -235,7 +257,7 @@ sed -i "s|PLACEHOLDER_MAC10_BIN|$MAC10_BIN|" "$MAC10_COMPAT"
 chmod +x "$MAC10_COMPAT"
 
 # Add to PATH for this project's agents
-export PATH="$SCRIPT_DIR/coordinator/bin:$CLAUDE_DIR/scripts:$PATH"
+export PATH="$SCRIPT_DIR/coordinator/bin:$CODEX_DIR/scripts:$PATH"
 export MAC10_NAMESPACE="$NAMESPACE"
 
 echo "  codex10 wrapper ready: $CODEX10_CLI"
@@ -255,44 +277,46 @@ for i in $(seq 1 "$NUM_WORKERS"); do
   BRANCH="agent-$i"
 
   if [ -d "$WT_PATH" ]; then
-    echo "  Worktree wt-$i already exists, skipping."
-    continue
+    echo "  Worktree wt-$i already exists, refreshing runtime links."
+  else
+    # Create branch if it doesn't exist
+    git branch "$BRANCH" "$MAIN_BRANCH" 2>/dev/null || true
+    git worktree add "$WT_PATH" "$BRANCH" 2>/dev/null || {
+      # Branch might already exist from a previous run
+      git worktree add "$WT_PATH" "$BRANCH" --force 2>/dev/null || true
+    }
   fi
 
-  # Create branch if it doesn't exist
-  git branch "$BRANCH" "$MAIN_BRANCH" 2>/dev/null || true
-  git worktree add "$WT_PATH" "$BRANCH" 2>/dev/null || {
-    # Branch might already exist from a previous run
-    git worktree add "$WT_PATH" "$BRANCH" --force 2>/dev/null || true
-  }
-
   # Copy CLAUDE.md for worker
-  cp "$CLAUDE_DIR/worker-claude.md" "$WT_PATH/CLAUDE.md"
-  cp "$CLAUDE_DIR/worker-agents.md" "$WT_PATH/AGENTS.md"
+  cp "$CODEX_DIR/worker-claude.md" "$WT_PATH/CLAUDE.md"
+  cp "$CODEX_DIR/worker-agents.md" "$WT_PATH/AGENTS.md"
 
-  # Link/copy knowledge, commands, agents, hooks to worktree
-  mkdir -p "$WT_PATH/.claude/commands"
-  mkdir -p "$WT_PATH/.claude/knowledge/domain"
-  mkdir -p "$WT_PATH/.claude/scripts"
-  mkdir -p "$WT_PATH/.claude/agents"
-  mkdir -p "$WT_PATH/.claude/hooks"
-  cp "$CLAUDE_DIR/commands/"*.md "$WT_PATH/.claude/commands/"
-  cp "$MAC10_CLI" "$WT_PATH/.claude/scripts/mac10-codex10"
-  cp "$CODEX10_CLI" "$WT_PATH/.claude/scripts/codex10"
-  cp "$MAC10_COMPAT" "$WT_PATH/.claude/scripts/mac10"
-  cp "$CLAUDE_DIR/scripts/"*.sh "$WT_PATH/.claude/scripts/" 2>/dev/null || true
-  chmod +x "$WT_PATH/.claude/scripts/"*.sh 2>/dev/null || true
-  cp "$CLAUDE_DIR/agents/"*.md "$WT_PATH/.claude/agents/"
-  cp "$CLAUDE_DIR/hooks/"*.sh "$WT_PATH/.claude/hooks/" 2>/dev/null || true
-  chmod +x "$WT_PATH/.claude/hooks/"*.sh 2>/dev/null || true
+  # Shared runtime for workers: each worktree links .codex -> project .codex
+  if [ -L "$WT_PATH/.codex" ]; then
+    CURRENT_TARGET="$(readlink "$WT_PATH/.codex" || true)"
+    if [ "$CURRENT_TARGET" != "$CODEX_DIR" ]; then
+      echo "ERROR: $WT_PATH/.codex points to unexpected target: $CURRENT_TARGET"
+      echo "  Expected: $CODEX_DIR"
+      exit 1
+    fi
+  elif [ -e "$WT_PATH/.codex" ]; then
+    echo "ERROR: $WT_PATH/.codex exists and is not a symlink."
+    echo "  Remove it and rerun setup so workers can share the centralized runtime."
+    exit 1
+  else
+    ln -s "$CODEX_DIR" "$WT_PATH/.codex"
+  fi
 
-  # Copy knowledge files (will be updated via main project junction/copy)
-  cp -r "$CLAUDE_DIR/knowledge/"* "$WT_PATH/.claude/knowledge/" 2>/dev/null || true
+  # Legacy cleanup: old setups copied runtime into .claude per worktree.
+  # Keep only the shared .codex runtime to avoid stale prompts/wrappers.
+  LEGACY_WT_RUNTIME="$WT_PATH/.claude"
+  if [ -L "$LEGACY_WT_RUNTIME" ]; then
+    rm -f "$LEGACY_WT_RUNTIME"
+  elif [ -d "$LEGACY_WT_RUNTIME" ]; then
+    rm -rf "$LEGACY_WT_RUNTIME"
+  fi
 
-  # Copy settings.json to worktree so hooks are active
-  cp "$SETTINGS_FILE" "$WT_PATH/.claude/settings.json" 2>/dev/null || true
-
-  echo "  Created worktree wt-$i (branch: $BRANCH)"
+  echo "  Worktree wt-$i ready (branch: $BRANCH)"
 done
 
 # --- Add trusted directories ---
@@ -345,7 +369,7 @@ echo "[8/8] Starting coordinator..."
 
 # Check if coordinator is already running (e.g. launched by GUI)
 ALREADY_RUNNING=false
-SOCK_PATH_FILE="$CLAUDE_DIR/state/${NAMESPACE}.sock.path"
+SOCK_PATH_FILE="$CODEX_DIR/state/${NAMESPACE}.sock.path"
 if "$CODEX10_CLI" ping &>/dev/null; then
   ALREADY_RUNNING=true
   echo "  Coordinator already running, skipping start."
@@ -357,7 +381,7 @@ fi
 if [ "$ALREADY_RUNNING" = false ]; then
   nohup env MAC10_NAMESPACE="$NAMESPACE" MAC10_SCRIPT_DIR="$SCRIPT_DIR" \
     node "$SCRIPT_DIR/coordinator/src/index.js" "$PROJECT_DIR" \
-    > "$CLAUDE_DIR/state/${NAMESPACE}.coordinator.log" 2>&1 &
+    > "$CODEX_DIR/state/${NAMESPACE}.coordinator.log" 2>&1 &
   COORD_PID=$!
 
   # Wait for socket (on WSL, socket is in /tmp/ — check via mac10.sock.path)
@@ -422,9 +446,9 @@ if [ "$IS_MSYS" = true ]; then
     echo "  Master-3 (Allocator/Fast) terminal opened."
   else
     echo "  Windows Terminal not found — start manually:"
-    echo "    cd $PROJECT_DIR && codex --dangerously-bypass-approvals-and-sandbox -m gpt-5.3-codex -C $PROJECT_DIR -- \"\$(cat .claude/commands-codex10/master-loop.md)\""
-    echo "    cd $PROJECT_DIR && codex exec --dangerously-bypass-approvals-and-sandbox -m gpt-5.3-codex -C $PROJECT_DIR - < .claude/commands-codex10/architect-loop.md"
-    echo "    cd $PROJECT_DIR && codex exec --dangerously-bypass-approvals-and-sandbox -m gpt-5.3-codex -C $PROJECT_DIR - < .claude/commands-codex10/allocate-loop.md"
+    echo "    cd $PROJECT_DIR && codex --dangerously-bypass-approvals-and-sandbox -m gpt-5.3-codex -C $PROJECT_DIR -- \"\$(cat .codex/commands-codex10/master-loop.md)\""
+    echo "    cd $PROJECT_DIR && codex exec --dangerously-bypass-approvals-and-sandbox -m gpt-5.3-codex -C $PROJECT_DIR - < .codex/commands-codex10/architect-loop.md"
+    echo "    cd $PROJECT_DIR && codex exec --dangerously-bypass-approvals-and-sandbox -m gpt-5.3-codex -C $PROJECT_DIR - < .codex/commands-codex10/allocate-loop.md"
   fi
 elif [ "$IS_WSL" = true ]; then
   # WSL — use wt.exe with wsl.exe
@@ -440,16 +464,16 @@ elif [ "$IS_WSL" = true ]; then
     echo "  Master-3 (Allocator/Fast) terminal opened."
   else
     echo "  Windows Terminal not found — start manually:"
-    echo "    cd $PROJECT_DIR && codex --dangerously-bypass-approvals-and-sandbox -m gpt-5.3-codex -C $PROJECT_DIR -- \"\$(cat .claude/commands-codex10/master-loop.md)\""
-    echo "    cd $PROJECT_DIR && codex exec --dangerously-bypass-approvals-and-sandbox -m gpt-5.3-codex -C $PROJECT_DIR - < .claude/commands-codex10/architect-loop.md"
-    echo "    cd $PROJECT_DIR && codex exec --dangerously-bypass-approvals-and-sandbox -m gpt-5.3-codex -C $PROJECT_DIR - < .claude/commands-codex10/allocate-loop.md"
+    echo "    cd $PROJECT_DIR && codex --dangerously-bypass-approvals-and-sandbox -m gpt-5.3-codex -C $PROJECT_DIR -- \"\$(cat .codex/commands-codex10/master-loop.md)\""
+    echo "    cd $PROJECT_DIR && codex exec --dangerously-bypass-approvals-and-sandbox -m gpt-5.3-codex -C $PROJECT_DIR - < .codex/commands-codex10/architect-loop.md"
+    echo "    cd $PROJECT_DIR && codex exec --dangerously-bypass-approvals-and-sandbox -m gpt-5.3-codex -C $PROJECT_DIR - < .codex/commands-codex10/allocate-loop.md"
   fi
 else
   # macOS / Linux — use native terminal
   echo "  Start manually in separate terminals:"
-  echo "    cd $PROJECT_DIR && codex --dangerously-bypass-approvals-and-sandbox -m gpt-5.3-codex -C $PROJECT_DIR -- \"\$(cat .claude/commands-codex10/master-loop.md)\""
-  echo "    cd $PROJECT_DIR && codex exec --dangerously-bypass-approvals-and-sandbox -m gpt-5.3-codex -C $PROJECT_DIR - < .claude/commands-codex10/architect-loop.md"
-  echo "    cd $PROJECT_DIR && codex exec --dangerously-bypass-approvals-and-sandbox -m gpt-5.3-codex -C $PROJECT_DIR - < .claude/commands-codex10/allocate-loop.md"
+  echo "    cd $PROJECT_DIR && codex --dangerously-bypass-approvals-and-sandbox -m gpt-5.3-codex -C $PROJECT_DIR -- \"\$(cat .codex/commands-codex10/master-loop.md)\""
+  echo "    cd $PROJECT_DIR && codex exec --dangerously-bypass-approvals-and-sandbox -m gpt-5.3-codex -C $PROJECT_DIR - < .codex/commands-codex10/architect-loop.md"
+  echo "    cd $PROJECT_DIR && codex exec --dangerously-bypass-approvals-and-sandbox -m gpt-5.3-codex -C $PROJECT_DIR - < .codex/commands-codex10/allocate-loop.md"
 fi
 
 echo ""

@@ -37,6 +37,9 @@ CREATE TABLE IF NOT EXISTS tasks (
   branch TEXT,
   validation TEXT,  -- JSON: what checks to run
   overlap_with TEXT,  -- JSON array of task IDs sharing files
+  routing_class TEXT, -- assigned routing class at dispatch time (xhigh/high/mid/spark/mini)
+  routed_model TEXT,  -- model selected at dispatch time
+  reasoning_effort TEXT, -- reasoning effort selected at dispatch time
   created_at TEXT NOT NULL DEFAULT (datetime('now')),
   updated_at TEXT NOT NULL DEFAULT (datetime('now')),
   started_at TEXT,
@@ -173,6 +176,14 @@ INSERT OR IGNORE INTO config (key, value) VALUES
   ('heartbeat_timeout_s', '60'),
   ('watchdog_interval_ms', '10000'),
   ('allocator_interval_ms', '2000'),
+  ('prioritize_assignment_over_merge', 'true'),
+  ('low_effort_worker_direct_merge', 'true'),
+  ('low_effort_worker_direct_merge_allow_overlap', 'false'),
+  ('loop_request_quality_gate', 'true'),
+  ('loop_request_min_description_chars', '220'),
+  ('loop_request_min_interval_sec', '600'),
+  ('loop_request_max_per_hour', '4'),
+  ('loop_request_similarity_threshold', '0.82'),
   ('merge_validation', 'true'),
   ('project_dir', ''),
   ('coordinator_version', '1.0.0');

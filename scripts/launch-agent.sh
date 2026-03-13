@@ -22,7 +22,7 @@ cd "$DIR"
 # Ensure codex10 CLI is on PATH (project wrapper + coordinator bin)
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 export MAC10_NAMESPACE="${MAC10_NAMESPACE:-codex10}"
-SHIM_DIR="$DIR/.claude/scripts/.codex10-shims"
+SHIM_DIR="$DIR/.codex/scripts/.codex10-shims"
 mkdir -p "$SHIM_DIR"
 cat > "$SHIM_DIR/mac10" << 'SHIM'
 #!/usr/bin/env bash
@@ -38,7 +38,7 @@ echo "ERROR: codex10 wrapper missing in $PROJECT_SCRIPTS" >&2
 exit 1
 SHIM
 chmod +x "$SHIM_DIR/mac10"
-export PATH="$SCRIPT_DIR/../coordinator/bin:$SHIM_DIR:$DIR/.claude/scripts:$PATH"
+export PATH="$SCRIPT_DIR/../coordinator/bin:$SHIM_DIR:$DIR/.codex/scripts:$PATH"
 
 # Source nvm if available (ensures consistent Node.js version)
 [ -s "$HOME/.nvm/nvm.sh" ] && . "$HOME/.nvm/nvm.sh" 2>/dev/null
@@ -63,11 +63,11 @@ resolve_prompt_file() {
   local candidate
 
   # Prefer codex10-local command templates to avoid cross-stack collisions.
-  candidate="$DIR/.claude/commands-codex10/${name}.md"
+  candidate="$DIR/.codex/commands-codex10/${name}.md"
   if [ -f "$candidate" ]; then printf '%s' "$candidate"; return 0; fi
 
   # Project command templates (legacy behavior).
-  candidate="$DIR/.claude/commands/${name}.md"
+  candidate="$DIR/.codex/commands/${name}.md"
   if [ -f "$candidate" ]; then printf '%s' "$candidate"; return 0; fi
 
   # Fallback to codex10 repository templates.
@@ -81,7 +81,7 @@ MODEL_RESOLVED="$(resolve_model "$MODEL")"
 PROMPT_FILE="$(resolve_prompt_file "$CMD" || true)"
 
 if [ -z "${PROMPT_FILE:-}" ]; then
-  echo "ERROR: No command template found for '$CMD' (expected .claude/commands/<name>.md)" >&2
+  echo "ERROR: No command template found for '$CMD' (expected .codex/commands/<name>.md)" >&2
   exit 1
 fi
 

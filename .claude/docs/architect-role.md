@@ -100,5 +100,7 @@ Domain knowledge files can be updated directly (no observation threshold).
 | Tier | Validation Level |
 |------|-----------------|
 | 1 | Inline build check (architect runs build directly) |
-| 2 | build-validator subagent (Economy) |
-| 3 | build-validator (Economy) + verify-app (Fast) |
+| 2 | One worker task with explicit validation command(s) in the task payload (for example `npm run build`) |
+| 3 | Decomposed worker tasks, each with explicit validation command(s); integration validates merged outcome |
+
+Native teammate delegation is disabled in this codex10 runtime. Do not rely on local subagent invocation (`build-validator`, `verify-app`) for Tier 2/3 validation.

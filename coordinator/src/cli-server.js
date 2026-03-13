@@ -107,13 +107,13 @@ function bridgeToHandoff(requestId, description, type = 'bug-fix') {
   if (!_projectDir) return;
   const handoffPath = path.join(
     _projectDir,
-    '.claude',
+    '.codex',
     'state',
     namespacedFile('handoff.json', `${NAMESPACE}.handoff.json`)
   );
   const signalPath = path.join(
     _projectDir,
-    '.claude',
+    '.codex',
     'signals',
     namespacedFile('.handoff-signal', `.${NAMESPACE}.handoff-signal`)
   );
@@ -899,7 +899,7 @@ function validateCommand(cmd) {
 }
 
 function getSocketPath(projectDir) {
-  const dir = path.join(projectDir, '.claude', 'state');
+  const dir = path.join(projectDir, '.codex', 'state');
   fs.mkdirSync(dir, { recursive: true });
   const hashInput = `${NAMESPACE}:${projectDir}`;
   if (process.platform === 'win32') {
@@ -978,7 +978,7 @@ function start(projectDir, handlers) {
   const portHash = crypto.createHash('md5').update(`${NAMESPACE}:${projectDir}`).digest('hex');
   const derivedPort = 31000 + (parseInt(portHash.slice(0, 4), 16) % 1000);
   const tcpPort = parseInt(process.env.MAC10_CLI_PORT) || derivedPort;
-  const stateDir = path.join(projectDir, '.claude', 'state');
+  const stateDir = path.join(projectDir, '.codex', 'state');
   tcpServer = net.createServer(connHandler);
   tcpServer.listen(tcpPort, '127.0.0.1', () => {
     fs.mkdirSync(stateDir, { recursive: true });
@@ -1736,50 +1736,48 @@ function handleCommand(cmd, conn, handlers) {
           }
           execFileSync('git', ['worktree', 'add', wtPath, branchName], { cwd: projDir, encoding: 'utf8' });
 
-          // Copy .claude structure to worktree
-          const srcClaude = path.join(projDir, '.claude');
-          const dstClaude = path.join(wtPath, '.claude');
-          const copyDir = (rel) => {
-            const src = path.join(srcClaude, rel);
-            const dst = path.join(dstClaude, rel);
-            if (!fs.existsSync(src)) return;
-            fs.mkdirSync(dst, { recursive: true });
-            for (const f of fs.readdirSync(src)) {
-              const srcF = path.join(src, f);
-              if (fs.statSync(srcF).isFile()) fs.copyFileSync(srcF, path.join(dst, f));
+          // Share runtime state/prompts via symlink: wt/.codex -> project/.codex
+          const srcCodex = path.join(projDir, '.codex');
+          const dstCodex = path.join(wtPath, '.codex');
+          if (!fs.existsSync(srcCodex)) {
+            throw new Error(`Project runtime directory missing: ${srcCodex}. Re-run setup.sh first.`);
+          }
+          if (fs.existsSync(dstCodex)) {
+            const stat = fs.lstatSync(dstCodex);
+            if (!stat.isSymbolicLink()) {
+              throw new Error(`Expected ${dstCodex} to be a symlink, found regular file/directory.`);
             }
-          };
-          copyDir('commands');
-          copyDir('knowledge');
-          copyDir('knowledge/domain');
-          copyDir('scripts');
-          copyDir('agents');
-          copyDir('hooks');
+            const srcReal = fs.realpathSync(srcCodex);
+            const dstReal = fs.realpathSync(dstCodex);
+            if (srcReal !== dstReal) {
+              throw new Error(`Existing ${dstCodex} symlink does not point to project runtime (${srcCodex}).`);
+            }
+          } else {
+            const linkType = process.platform === 'win32' ? 'junction' : 'dir';
+            try {
+              fs.symlinkSync(srcCodex, dstCodex, linkType);
+            } catch (linkErr) {
+              if (linkErr && (linkErr.code === 'EPERM' || linkErr.code === 'EACCES')) {
+                throw new Error(
+                  `Cannot create required symlink ${dstCodex} -> ${srcCodex}. ` +
+                  'Enable symlink permissions (Windows Developer Mode or Administrator) and retry.'
+                );
+              }
+              throw linkErr;
+            }
+          }
+
           // Copy worker role docs for both legacy and Codex-compatible runtimes.
-          const workerClaude = path.join(srcClaude, 'worker-claude.md');
+          const workerClaude = path.join(srcCodex, 'worker-claude.md');
           if (fs.existsSync(workerClaude)) {
             fs.copyFileSync(workerClaude, path.join(wtPath, 'CLAUDE.md'));
           }
-          const workerAgents = path.join(srcClaude, 'worker-agents.md');
+          const workerAgents = path.join(srcCodex, 'worker-agents.md');
           if (fs.existsSync(workerAgents)) {
             fs.copyFileSync(workerAgents, path.join(wtPath, 'AGENTS.md'));
           } else if (fs.existsSync(workerClaude)) {
             fs.copyFileSync(workerClaude, path.join(wtPath, 'AGENTS.md'));
           }
-          // Copy settings.json
-          const settingsFile = path.join(srcClaude, 'settings.json');
-          if (fs.existsSync(settingsFile)) {
-            fs.copyFileSync(settingsFile, path.join(dstClaude, 'settings.json'));
-          }
-          // Make hook scripts executable
-          try {
-            const hookDir = path.join(dstClaude, 'hooks');
-            if (fs.existsSync(hookDir)) {
-              for (const f of fs.readdirSync(hookDir)) {
-                if (f.endsWith('.sh')) fs.chmodSync(path.join(hookDir, f), 0o755);
-              }
-            }
-          } catch {}
 
           db.registerWorker(nextId, wtPath, branchName);
           db.log('coordinator', 'worker_added', { worker_id: nextId, worktree_path: wtPath, branch: branchName });
@@ -2040,11 +2038,16 @@ function handleCommand(cmd, conn, handlers) {
           break;
         }
         const lrResult = db.createLoopRequest(args.description, args.loop_id);
-        if (!lrResult.deduplicated) bridgeToHandoff(lrResult.id, args.description);
+        if (!lrResult.suppressed && !lrResult.deduplicated) bridgeToHandoff(lrResult.id, args.description);
         respond(conn, {
           ok: true,
-          request_id: lrResult.id,
-          deduplicated: lrResult.deduplicated,
+          request_id: lrResult.id || null,
+          deduplicated: !!lrResult.deduplicated,
+          suppressed: !!lrResult.suppressed,
+          reason: lrResult.reason || null,
+          details: lrResult.details || null,
+          retry_after_sec: lrResult.retry_after_sec || null,
+          similarity: Number.isFinite(lrResult.similarity) ? lrResult.similarity : null,
           superseded_target: lrResult.superseded_target || null,
         });
         break;

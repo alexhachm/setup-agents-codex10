@@ -32,5 +32,5 @@ Run `/master-loop` to begin.
 ## Knowledge Files
 
 Read before starting:
-- `.claude/knowledge/codebase-insights.md` — structure and patterns
-- `.claude/knowledge/user-preferences.md` — user communication preferences
+- `.codex/knowledge/codebase-insights.md` — structure and patterns
+- `.codex/knowledge/user-preferences.md` — user communication preferences

@@ -15,7 +15,7 @@ let tmpDir;
 
 beforeEach(() => {
   tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'mac10-sec-'));
-  fs.mkdirSync(path.join(tmpDir, '.claude', 'state'), { recursive: true });
+  fs.mkdirSync(path.join(tmpDir, '.codex', 'state'), { recursive: true });
   db.init(tmpDir);
 });
 
@@ -158,7 +158,7 @@ describe('SQL column whitelist enforcement', () => {
 
 describe('Overlay domain path safety', () => {
   it('should include domain knowledge for safe domains', () => {
-    const knowledgeDir = path.join(tmpDir, '.claude', 'knowledge');
+    const knowledgeDir = path.join(tmpDir, '.codex', 'knowledge');
     const domainDir = path.join(knowledgeDir, 'domain');
     fs.mkdirSync(domainDir, { recursive: true });
     fs.writeFileSync(path.join(knowledgeDir, 'mistakes.md'), '', 'utf8');
@@ -179,7 +179,7 @@ describe('Overlay domain path safety', () => {
   });
 
   it('should ignore traversal and separator tokens in domain knowledge lookup', () => {
-    const knowledgeDir = path.join(tmpDir, '.claude', 'knowledge');
+    const knowledgeDir = path.join(tmpDir, '.codex', 'knowledge');
     const domainDir = path.join(knowledgeDir, 'domain');
     fs.mkdirSync(domainDir, { recursive: true });
     fs.writeFileSync(path.join(knowledgeDir, 'mistakes.md'), '', 'utf8');

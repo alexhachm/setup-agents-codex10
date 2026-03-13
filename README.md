@@ -27,7 +27,7 @@ mac10 request "Add user authentication"
 
 # Start the architect
 cd /path/to/your-project
-codex exec --dangerously-bypass-approvals-and-sandbox -m gpt-5.3-codex -C "$(pwd)" - < .claude/commands/architect-loop.md
+codex exec --dangerously-bypass-approvals-and-sandbox -m gpt-5.3-codex -C "$(pwd)" - < .codex/commands/architect-loop.md
 
 # Check status
 mac10 status
@@ -51,9 +51,9 @@ For codex10 projects, use the namespaced wrapper:
 
 ```bash
 cd /path/to/your-project
-./.claude/scripts/codex10 loop "Continuously audit UX and implement top-priority fixes until stopped"
-./.claude/scripts/codex10 loop-status
-./.claude/scripts/codex10 stop-loop <loop_id>
+./.codex/scripts/codex10 loop "Continuously audit UX and implement top-priority fixes until stopped"
+./.codex/scripts/codex10 loop-status
+./.codex/scripts/codex10 stop-loop <loop_id>
 ```
 
 Runtime path is:

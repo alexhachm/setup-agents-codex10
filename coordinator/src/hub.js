@@ -14,7 +14,7 @@ const scriptDir = process.env.MAC10_SCRIPT_DIR || path.resolve(__dirname, '..', 
 const namespace = process.env.MAC10_NAMESPACE || 'hub';
 
 // Ensure hub data directory exists
-fs.mkdirSync(path.join(HUB_DIR, '.claude', 'state'), { recursive: true });
+fs.mkdirSync(path.join(HUB_DIR, '.codex', 'state'), { recursive: true });
 
 // Initialize DB (stores presets & config only — requests/workers/tasks stay empty)
 db.init(HUB_DIR);

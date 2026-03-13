@@ -126,7 +126,7 @@ function ensureMergeQueueColumns(database) {
 }
 
 function getDbPath(projectDir) {
-  const stateDir = path.join(projectDir, '.claude', 'state');
+  const stateDir = path.join(projectDir, '.codex', 'state');
   fs.mkdirSync(stateDir, { recursive: true });
   const dbFile = NAMESPACE === 'mac10' ? 'mac10.db' : `${NAMESPACE}.db`;
   return path.join(stateDir, dbFile);
@@ -732,25 +732,209 @@ function stopLoop(id) {
 
 // --- Loop-request helpers ---
 
+const LOOP_REQUEST_STOPWORDS = new Set([
+  'the', 'and', 'for', 'with', 'from', 'that', 'this', 'into', 'over', 'under', 'between',
+  'should', 'would', 'could', 'about', 'while', 'where', 'when', 'what', 'why', 'how',
+  'then', 'than', 'also', 'just', 'need', 'needs', 'using', 'use', 'into', 'onto', 'across',
+  'after', 'before', 'because', 'there', 'their', 'them', 'they', 'your', 'our', 'are',
+  'was', 'were', 'have', 'has', 'had', 'not', 'can', 'will', 'may',
+]);
+
+const LOOP_REQUEST_FILE_SIGNAL_RE = /(?:^|[\s(])(?:[A-Za-z0-9_.-]+\/)+[A-Za-z0-9_.-]+\.(?:cjs|mjs|js|jsx|ts|tsx|json|md|css|scss|sh|sql|py|go|rs|java|kt|rb|php|yml|yaml)(?:[:#]\d+)?(?:[\s),.;]|$)/i;
+const LOOP_REQUEST_WHAT_SIGNAL_RE = /\b(add|remove|update|fix|prevent|refactor|validate|guard|handle|enforce|dedup|retry|throttle|cache|instrument|harden|optimi[sz]e)\b/i;
+const LOOP_REQUEST_WHY_SIGNAL_RE = /\b(bug|failure|regression|incorrect|crash|error|race|corrupt|data loss|security|latency|performance|stability|risk|trust|integrity)\b/i;
+
+function normalizeLoopRequestText(text) {
+  return String(text || '')
+    .replace(/\s+/g, ' ')
+    .trim();
+}
+
+function tokenizeLoopRequestText(text) {
+  const normalized = normalizeLoopRequestText(text)
+    .toLowerCase()
+    .replace(/[^a-z0-9/_.-]+/g, ' ');
+  const tokens = normalized.split(' ').filter((token) => {
+    if (!token) return false;
+    if (token.length < 3) return false;
+    return !LOOP_REQUEST_STOPWORDS.has(token);
+  });
+  return new Set(tokens);
+}
+
+function jaccardSimilarity(leftText, rightText) {
+  const left = tokenizeLoopRequestText(leftText);
+  const right = tokenizeLoopRequestText(rightText);
+  if (left.size === 0 || right.size === 0) return 0;
+
+  let intersection = 0;
+  for (const token of left) {
+    if (right.has(token)) intersection += 1;
+  }
+  const union = left.size + right.size - intersection;
+  if (union <= 0) return 0;
+  return intersection / union;
+}
+
+function parseIntConfig(key, fallback, { min = 0, max = Number.MAX_SAFE_INTEGER } = {}) {
+  const raw = getConfig(key);
+  if (raw === null || raw === undefined || String(raw).trim() === '') return fallback;
+  const parsed = Number.parseInt(String(raw).trim(), 10);
+  if (!Number.isFinite(parsed)) return fallback;
+  if (parsed < min) return min;
+  if (parsed > max) return max;
+  return parsed;
+}
+
+function parseFloatConfig(key, fallback, { min = 0, max = 1 } = {}) {
+  const raw = getConfig(key);
+  if (raw === null || raw === undefined || String(raw).trim() === '') return fallback;
+  const parsed = Number.parseFloat(String(raw).trim());
+  if (!Number.isFinite(parsed)) return fallback;
+  if (parsed < min) return min;
+  if (parsed > max) return max;
+  return parsed;
+}
+
+function evaluateLoopRequestQuality(description, minDescriptionChars) {
+  const issues = [];
+  const text = normalizeLoopRequestText(description);
+  if (text.length < minDescriptionChars) {
+    issues.push(`description too short (${text.length} < ${minDescriptionChars})`);
+  }
+  if (!LOOP_REQUEST_FILE_SIGNAL_RE.test(text)) {
+    issues.push('missing concrete file path signal (WHERE)');
+  }
+  if (!LOOP_REQUEST_WHAT_SIGNAL_RE.test(text)) {
+    issues.push('missing concrete change verb (WHAT)');
+  }
+  if (!LOOP_REQUEST_WHY_SIGNAL_RE.test(text)) {
+    issues.push('missing production impact/risk signal (WHY)');
+  }
+  return { ok: issues.length === 0, issues };
+}
+
 function createLoopRequest(description, loopId) {
+  const normalizedDescription = normalizeLoopRequestText(description);
+  const qualityGateEnabled = String(getConfig('loop_request_quality_gate') || 'true').toLowerCase() !== 'false';
+  const minDescriptionChars = parseIntConfig('loop_request_min_description_chars', 220, { min: 80, max: 5000 });
+  const minIntervalSec = parseIntConfig('loop_request_min_interval_sec', 600, { min: 0, max: 86400 });
+  const maxPerHour = parseIntConfig('loop_request_max_per_hour', 4, { min: 1, max: 1000 });
+  const similarityThreshold = parseFloatConfig('loop_request_similarity_threshold', 0.82, { min: 0.5, max: 0.99 });
+
+  if (qualityGateEnabled) {
+    const quality = evaluateLoopRequestQuality(normalizedDescription, minDescriptionChars);
+    if (!quality.ok) {
+      log('loop', 'loop_request_rejected_quality', {
+        loop_id: loopId,
+        reason: quality.issues.join('; '),
+        description: normalizedDescription.slice(0, 300),
+      });
+      return {
+        id: null,
+        deduplicated: false,
+        suppressed: true,
+        reason: 'quality_gate',
+        details: quality.issues,
+      };
+    }
+  }
+
   const d = getDb();
   const txn = d.transaction(() => {
-    // Check for active (non-completed/failed) request from same loop with same description
+    // Throughput controls: cap request creation rate per loop.
+    const latest = d.prepare(`
+      SELECT id, created_at
+      FROM requests
+      WHERE loop_id = ?
+      ORDER BY created_at DESC, id DESC
+      LIMIT 1
+    `).get(loopId);
+
+    if (latest && minIntervalSec > 0) {
+      const ageMs = coordinatorAgeMs(latest.created_at);
+      if (ageMs !== null && ageMs < minIntervalSec * 1000) {
+        const retryAfter = Math.ceil((minIntervalSec * 1000 - ageMs) / 1000);
+        return {
+          id: latest.id,
+          deduplicated: false,
+          suppressed: true,
+          reason: 'cooldown',
+          retry_after_sec: retryAfter > 0 ? retryAfter : 1,
+        };
+      }
+    }
+
+    const createdPastHour = d.prepare(`
+      SELECT COUNT(*) AS cnt
+      FROM requests
+      WHERE loop_id = ? AND created_at >= datetime('now', '-1 hour')
+    `).get(loopId);
+    if ((createdPastHour && createdPastHour.cnt ? createdPastHour.cnt : 0) >= maxPerHour) {
+      return {
+        id: null,
+        deduplicated: false,
+        suppressed: true,
+        reason: 'rate_limit',
+        retry_after_sec: 3600,
+      };
+    }
+
+    const recent = d.prepare(`
+      SELECT id, description, status, created_at
+      FROM requests
+      WHERE loop_id = ? AND created_at >= datetime('now', '-14 day')
+      ORDER BY created_at DESC, id DESC
+      LIMIT 100
+    `).all(loopId);
+
+    // Check for active exact match first.
     const existing = d.prepare(`
       SELECT id FROM requests
       WHERE loop_id = ? AND description = ? AND status NOT IN ('completed', 'failed')
-    `).get(loopId, description);
+    `).get(loopId, normalizedDescription);
     if (existing) {
-      return { id: existing.id, deduplicated: true };
+      return { id: existing.id, deduplicated: true, suppressed: false, reason: 'exact_active_duplicate' };
     }
+
+    // Fuzzy duplicate suppression catches near-identical churn.
+    for (const candidate of recent) {
+      const similarity = jaccardSimilarity(normalizedDescription, candidate.description || '');
+      if (similarity < similarityThreshold) continue;
+
+      const ageMs = coordinatorAgeMs(candidate.created_at);
+      const isActive = !['completed', 'failed'].includes(candidate.status);
+      if (isActive) {
+        return {
+          id: candidate.id,
+          deduplicated: true,
+          suppressed: false,
+          reason: 'similar_active_duplicate',
+          superseded_target: candidate.id,
+          similarity: Number(similarity.toFixed(3)),
+        };
+      }
+      if (ageMs !== null && ageMs < 24 * 60 * 60 * 1000) {
+        return {
+          id: candidate.id,
+          deduplicated: false,
+          suppressed: true,
+          reason: 'similar_recent_duplicate',
+          superseded_target: candidate.id,
+          similarity: Number(similarity.toFixed(3)),
+          retry_after_sec: Math.ceil((24 * 60 * 60 * 1000 - ageMs) / 1000),
+        };
+      }
+    }
+
     const id = 'req-' + crypto.randomBytes(4).toString('hex');
     d.prepare(`
       INSERT INTO requests (id, description, loop_id) VALUES (?, ?, ?)
-    `).run(id, description, loopId);
-    sendMail('architect', 'new_request', { request_id: id, description, loop_id: loopId });
-    sendMail('master-1', 'request_acknowledged', { request_id: id, description, loop_id: loopId });
-    log('loop', 'loop_request_created', { request_id: id, loop_id: loopId, description });
-    return { id, deduplicated: false };
+    `).run(id, normalizedDescription, loopId);
+    sendMail('architect', 'new_request', { request_id: id, description: normalizedDescription, loop_id: loopId });
+    sendMail('master-1', 'request_acknowledged', { request_id: id, description: normalizedDescription, loop_id: loopId });
+    log('loop', 'loop_request_created', { request_id: id, loop_id: loopId, description: normalizedDescription });
+    return { id, deduplicated: false, suppressed: false };
   });
   return txn();
 }

@@ -6,6 +6,7 @@ const path = require('path');
 const fs = require('fs');
 const os = require('os');
 const net = require('net');
+const { spawn } = require('child_process');
 
 const db = require('../src/db');
 const cliServer = require('../src/cli-server');
@@ -17,7 +18,7 @@ let loopCreatedEvents;
 
 beforeEach(async () => {
   tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'mac10-cli-'));
-  fs.mkdirSync(path.join(tmpDir, '.claude', 'state'), { recursive: true });
+  fs.mkdirSync(path.join(tmpDir, '.codex', 'state'), { recursive: true });
   db.init(tmpDir);
   socketPath = cliServer.getSocketPath(tmpDir);
   loopCreatedEvents = [];
@@ -63,6 +64,32 @@ function sendCommand(command, args) {
     });
     conn.on('error', reject);
     conn.setTimeout(5000, () => { conn.end(); reject(new Error('Timeout')); });
+  });
+}
+
+function runCli(args, options = {}) {
+  return new Promise((resolve, reject) => {
+    const child = spawn(process.execPath, [path.join(__dirname, '..', 'bin', 'mac10'), ...args], {
+      cwd: tmpDir,
+      env: {
+        ...process.env,
+        MAC10_SOCKET: socketPath,
+      },
+      stdio: ['pipe', 'pipe', 'pipe'],
+    });
+    let stdout = '';
+    let stderr = '';
+    child.stdout.on('data', (chunk) => { stdout += chunk.toString(); });
+    child.stderr.on('data', (chunk) => { stderr += chunk.toString(); });
+    child.on('error', reject);
+    child.on('close', (code) => {
+      if (code === 0) {
+        resolve({ stdout, stderr });
+        return;
+      }
+      reject(new Error(`CLI exited ${code}: ${stderr || stdout}`));
+    });
+    child.stdin.end(Object.prototype.hasOwnProperty.call(options, 'input') ? options.input : '');
   });
 }
 
@@ -118,6 +145,22 @@ describe('CLI Server', () => {
     assert.strictEqual(req.status, 'executing_tier1');
   });
 
+  it('should keep tier1-complete argv payload unchanged', async () => {
+    const reqResult = await sendCommand('request', { description: 'Tier1 argv payload' });
+    const payloadParts = ['literal', '`backtick`', '$(dollar-paren)'];
+    await runCli(['tier1-complete', reqResult.request_id, ...payloadParts]);
+    const req = db.getRequest(reqResult.request_id);
+    assert.strictEqual(req.result, payloadParts.join(' '));
+  });
+
+  it('should read tier1-complete payload from stdin when result is dash', async () => {
+    const reqResult = await sendCommand('request', { description: 'Tier1 stdin payload' });
+    const payload = '`backtick` $(dollar-paren)\nline two\nline three';
+    await runCli(['tier1-complete', reqResult.request_id, '-'], { input: payload });
+    const req = db.getRequest(reqResult.request_id);
+    assert.strictEqual(req.result, payload);
+  });
+
   it('should create tasks', async () => {
     const reqResult = await sendCommand('request', { description: 'Feature' });
     const result = await sendCommand('create-task', {
@@ -166,6 +209,72 @@ describe('CLI Server', () => {
     assert.strictEqual(result.ok, true);
     assert.strictEqual(db.getTask(taskId).status, 'completed');
     assert.strictEqual(db.getWorker(1).status, 'completed_task');
+  });
+
+  it('should preserve complete-task payload from argv', async () => {
+    db.registerWorker(1, '/wt-1', 'agent-1');
+    const reqId = db.createRequest('Feature');
+    const taskId = db.createTask({ request_id: reqId, subject: 'Work', description: 'Do it' });
+    db.updateTask(taskId, { status: 'assigned', assigned_to: 1 });
+
+    const payloadParts = ['literal', '`backtick`', '$(dollar-paren)', 'line', 'one'];
+    await runCli([
+      'complete-task',
+      '1',
+      String(taskId),
+      'https://github.com/org/repo/pull/101',
+      'agent-1',
+      ...payloadParts,
+    ]);
+
+    assert.strictEqual(db.getTask(taskId).status, 'completed');
+    assert.strictEqual(db.getTask(taskId).result, payloadParts.join(' '));
+  });
+
+  it('should read complete-task payload from stdin when result is dash', async () => {
+    db.registerWorker(1, '/wt-1', 'agent-1');
+    const reqId = db.createRequest('Feature');
+    const taskId = db.createTask({ request_id: reqId, subject: 'Work', description: 'Do it' });
+    db.updateTask(taskId, { status: 'assigned', assigned_to: 1 });
+
+    const payload = '`backtick` $(dollar-paren)\\nline two\\nline three';
+    await runCli([
+      'complete-task',
+      '1',
+      String(taskId),
+      'https://github.com/org/repo/pull/101',
+      'agent-1',
+      '-',
+    ], { input: payload });
+
+    assert.strictEqual(db.getTask(taskId).status, 'completed');
+    assert.strictEqual(db.getTask(taskId).result, payload);
+  });
+
+  it('should preserve fail-task payload from argv', async () => {
+    db.registerWorker(1, '/wt-1', 'agent-1');
+    const reqId = db.createRequest('Feature');
+    const taskId = db.createTask({ request_id: reqId, subject: 'Work', description: 'Do it' });
+    db.updateTask(taskId, { status: 'assigned', assigned_to: 1 });
+
+    const payloadParts = ['command', '`error`', '$(shell)', 'line', 'two'];
+    await runCli(['fail-task', '1', String(taskId), ...payloadParts]);
+
+    assert.strictEqual(db.getTask(taskId).status, 'failed');
+    assert.strictEqual(db.getTask(taskId).result, payloadParts.join(' '));
+  });
+
+  it('should read fail-task payload from stdin when error is dash', async () => {
+    db.registerWorker(1, '/wt-1', 'agent-1');
+    const reqId = db.createRequest('Feature');
+    const taskId = db.createTask({ request_id: reqId, subject: 'Work', description: 'Do it' });
+    db.updateTask(taskId, { status: 'assigned', assigned_to: 1 });
+
+    const payload = '`error` $(dollar-paren)\\nline two\\nline three';
+    await runCli(['fail-task', '1', String(taskId), '-'], { input: payload });
+
+    assert.strictEqual(db.getTask(taskId).status, 'failed');
+    assert.strictEqual(db.getTask(taskId).result, payload);
   });
 
   it('should handle inbox', async () => {
