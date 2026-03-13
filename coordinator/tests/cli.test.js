@@ -1209,8 +1209,8 @@ describe('CLI Server', () => {
       tier: 3,
     });
     const midTaskId = createReadyTask({
-      subject: 'Resolve merge conflict',
-      description: 'Merge integration branch into main',
+      subject: 'Refactor routing helper',
+      description: 'Routine helper updates',
       tier: 2,
     });
 
@@ -1289,8 +1289,8 @@ describe('CLI Server', () => {
       tier: 3,
     });
     const recoveredMidTaskId = createReadyTask({
-      subject: 'Refactor merge helper',
-      description: 'Refactor merge helper utilities',
+      subject: 'Planner helper maintenance',
+      description: 'Refactor helper utilities',
       tier: 2,
     });
 
