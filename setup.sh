@@ -185,13 +185,36 @@ extract_loop_precheck_signature() {
   ' "$file" 2>/dev/null || true
 }
 
+detect_loop_precheck_mode() {
+  local file="$1"
+  if grep -Eq 'loop-requests[[:space:]]+"\$LOOP_ID"[[:space:]]+--json' "$file" 2>/dev/null && \
+     grep -Eq 'node[[:space:]]+-e' "$file" 2>/dev/null; then
+    echo "json-node"
+    return
+  fi
+
+  if grep -Eq 'loop-requests[[:space:]]+"\$LOOP_ID"' "$file" 2>/dev/null && \
+     grep -Eq 'grep[[:space:]]+-c' "$file" 2>/dev/null; then
+    echo "grep-text"
+    return
+  fi
+
+  echo "unknown"
+}
+
 LOOP_SENTINEL_SOURCE="$SCRIPT_DIR/scripts/loop-sentinel.sh"
 RUNTIME_LOOP_SENTINEL="$SCRIPT_DIR/.codex/scripts/loop-sentinel.sh"
 if [ -f "$RUNTIME_LOOP_SENTINEL" ]; then
+  TRACKED_LOOP_MODE="$(detect_loop_precheck_mode "$LOOP_SENTINEL_SOURCE")"
+  RUNTIME_LOOP_MODE="$(detect_loop_precheck_mode "$RUNTIME_LOOP_SENTINEL")"
   TRACKED_LOOP_SIG="$(extract_loop_precheck_signature "$LOOP_SENTINEL_SOURCE")"
   RUNTIME_LOOP_SIG="$(extract_loop_precheck_signature "$RUNTIME_LOOP_SENTINEL")"
-  if [ -n "$TRACKED_LOOP_SIG" ] && [ -n "$RUNTIME_LOOP_SIG" ] && [ "$TRACKED_LOOP_SIG" != "$RUNTIME_LOOP_SIG" ]; then
-    echo "  WARNING: loop-sentinel parser drift detected; preserving .codex mirror parser during setup copy."
+
+  if [ "$RUNTIME_LOOP_MODE" = "json-node" ] && [ "$TRACKED_LOOP_MODE" != "json-node" ]; then
+    echo "  WARNING: loop-sentinel parser mode drift detected (tracked=$TRACKED_LOOP_MODE runtime=$RUNTIME_LOOP_MODE); preserving .codex mirror parser during setup copy."
+    LOOP_SENTINEL_SOURCE="$RUNTIME_LOOP_SENTINEL"
+  elif [ -n "$TRACKED_LOOP_SIG" ] && [ -n "$RUNTIME_LOOP_SIG" ] && [ "$TRACKED_LOOP_SIG" != "$RUNTIME_LOOP_SIG" ]; then
+    echo "  WARNING: loop-sentinel parser drift detected (tracked=$TRACKED_LOOP_MODE runtime=$RUNTIME_LOOP_MODE); preserving .codex mirror parser during setup copy."
     LOOP_SENTINEL_SOURCE="$RUNTIME_LOOP_SENTINEL"
   fi
 fi

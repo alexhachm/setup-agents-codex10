@@ -76,14 +76,16 @@ while true; do
             ? payload.requests
             : Array.isArray(payload?.data?.requests)
               ? payload.data.requests
-              : Array.isArray(payload?.data)
-                ? payload.data
-                : Array.isArray(payload)
-                  ? payload
-                  : [];
+              : Array.isArray(payload?.data?.rows)
+                ? payload.data.rows
+                : Array.isArray(payload?.data)
+                  ? payload.data
+                  : Array.isArray(payload)
+                    ? payload
+                    : [];
           const count = requests.filter((r) => {
-            if (!r || typeof r.status !== "string") return false;
-            return active.has(r.status.trim().toLowerCase());
+            const status = typeof r?.status === "string" ? r.status : "";
+            return active.has(status.trim().toLowerCase());
           }).length;
           process.stdout.write(String(count));
         } catch (_) {
