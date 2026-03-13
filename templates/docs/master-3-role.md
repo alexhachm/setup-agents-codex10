@@ -36,6 +36,8 @@ If the blocked inbox call returns no actionable messages, run polling fallback:
 ./.claude/scripts/codex10 worker-status
 ```
 
+Do not wait on `.codex10.task-signal`, `.codex10.fix-signal`, or `.codex10.completion-signal`; these signal files are deprecated and not produced in codex10 runtime.
+
 `master-3` remains accepted as an inbox recipient alias for backward compatibility, but `allocator` is canonical.
 
 ## Allocation Workflow
