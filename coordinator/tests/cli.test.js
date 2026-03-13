@@ -579,16 +579,20 @@ describe('CLI Server', () => {
     assert.strictEqual(getCoordinatorOwnershipMismatchEvents('fail-task', 1, taskId).length, 1);
   });
 
-  it('should persist identical usage values for canonical API payloads and alias-only CLI payloads', async () => {
+  it('should persist identical usage values for canonical, Anthropic alias, and OpenAI alias complete-task payloads', async () => {
     db.registerWorker(1, '/wt-1', 'agent-1');
     db.registerWorker(2, '/wt-2', 'agent-2');
+    db.registerWorker(3, '/wt-3', 'agent-3');
     const reqId = db.createRequest('Usage aliases');
     const canonicalTaskId = db.createTask({ request_id: reqId, subject: 'Canonical', description: 'Canonical usage payload' });
-    const aliasTaskId = db.createTask({ request_id: reqId, subject: 'Alias', description: 'Alias usage payload' });
+    const anthropicAliasTaskId = db.createTask({ request_id: reqId, subject: 'Anthropic alias', description: 'Anthropic usage payload' });
+    const openAiAliasTaskId = db.createTask({ request_id: reqId, subject: 'OpenAI alias', description: 'OpenAI usage payload' });
     db.updateTask(canonicalTaskId, { status: 'assigned', assigned_to: 1 });
-    db.updateTask(aliasTaskId, { status: 'assigned', assigned_to: 2 });
+    db.updateTask(anthropicAliasTaskId, { status: 'assigned', assigned_to: 2 });
+    db.updateTask(openAiAliasTaskId, { status: 'assigned', assigned_to: 3 });
     db.updateWorker(1, { status: 'assigned', current_task_id: canonicalTaskId });
-    db.updateWorker(2, { status: 'assigned', current_task_id: aliasTaskId });
+    db.updateWorker(2, { status: 'assigned', current_task_id: anthropicAliasTaskId });
+    db.updateWorker(3, { status: 'assigned', current_task_id: openAiAliasTaskId });
 
     const canonicalUsage = {
       model: 'gpt-5-codex',
@@ -599,12 +603,22 @@ describe('CLI Server', () => {
       total_tokens: 1612,
       cost_usd: 0.0456,
     };
-    const aliasUsage = {
+    const anthropicAliasUsage = {
       model: 'gpt-5-codex',
       input_tokens: 1200,
       output_tokens: 345,
       cache_read_input_tokens: 67,
       cache_creation_input_tokens: 45,
+      total_tokens: 1612,
+      cost_usd: 0.0456,
+    };
+    const openAiAliasUsage = {
+      model: 'gpt-5-codex',
+      prompt_tokens: 1200,
+      completion_tokens: 345,
+      input_tokens_details: { cached_tokens: 67 },
+      prompt_tokens_details: { cached_tokens: 67 },
+      cache_creation_tokens: 45,
       total_tokens: 1612,
       cost_usd: 0.0456,
     };
@@ -617,19 +631,29 @@ describe('CLI Server', () => {
     });
     assert.strictEqual(apiResult.ok, true);
 
+    const anthropicResult = await sendCommand('complete-task', {
+      worker_id: '2',
+      task_id: String(anthropicAliasTaskId),
+      result: 'Anthropic completion',
+      usage: anthropicAliasUsage,
+    });
+    assert.strictEqual(anthropicResult.ok, true);
+
     await runMac10Command([
       'complete-task',
-      '2',
-      String(aliasTaskId),
-      'Alias completion',
+      '3',
+      String(openAiAliasTaskId),
+      'OpenAI completion',
       '--usage',
-      JSON.stringify(aliasUsage),
+      JSON.stringify(openAiAliasUsage),
     ], tmpDir);
 
     const canonicalTask = db.getTask(canonicalTaskId);
-    const aliasTask = db.getTask(aliasTaskId);
+    const anthropicAliasTask = db.getTask(anthropicAliasTaskId);
+    const openAiAliasTask = db.getTask(openAiAliasTaskId);
     assert.strictEqual(canonicalTask.status, 'completed');
-    assert.strictEqual(aliasTask.status, 'completed');
+    assert.strictEqual(anthropicAliasTask.status, 'completed');
+    assert.strictEqual(openAiAliasTask.status, 'completed');
 
     const comparableUsageFields = [
       'usage_model',
@@ -641,7 +665,8 @@ describe('CLI Server', () => {
       'usage_cost_usd',
     ];
     for (const field of comparableUsageFields) {
-      assert.strictEqual(aliasTask[field], canonicalTask[field], `${field} mismatch`);
+      assert.strictEqual(anthropicAliasTask[field], canonicalTask[field], `${field} mismatch (anthropic)`);
+      assert.strictEqual(openAiAliasTask[field], canonicalTask[field], `${field} mismatch (openai)`);
     }
   });
 
@@ -664,6 +689,49 @@ describe('CLI Server', () => {
     assert.ok(result.error);
     assert.match(result.error, /unsupported keys: bogus_field/);
     assert.strictEqual(db.getTask(taskId).status, 'assigned');
+  });
+
+  it('should reject conflicting duplicate aliases deterministically for complete-task usage', async () => {
+    db.registerWorker(1, '/wt-1', 'agent-1');
+    db.registerWorker(2, '/wt-2', 'agent-2');
+    const reqId = db.createRequest('Usage conflict rejection');
+    const serverTaskId = db.createTask({ request_id: reqId, subject: 'Server conflict', description: 'Conflicting API alias values' });
+    const cliTaskId = db.createTask({ request_id: reqId, subject: 'CLI conflict', description: 'Conflicting CLI alias values' });
+    db.updateTask(serverTaskId, { status: 'assigned', assigned_to: 1 });
+    db.updateTask(cliTaskId, { status: 'assigned', assigned_to: 2 });
+    db.updateWorker(1, { status: 'assigned', current_task_id: serverTaskId });
+    db.updateWorker(2, { status: 'assigned', current_task_id: cliTaskId });
+
+    const serverResult = await sendCommand('complete-task', {
+      worker_id: '1',
+      task_id: String(serverTaskId),
+      usage: {
+        input_tokens: 1200,
+        prompt_tokens: 1201,
+      },
+    });
+    assert.ok(serverResult.error);
+    assert.match(serverResult.error, /conflicting values for key "input_tokens"/);
+    assert.strictEqual(db.getTask(serverTaskId).status, 'assigned');
+
+    await assert.rejects(
+      () => runMac10Command([
+        'complete-task',
+        '2',
+        String(cliTaskId),
+        'CLI conflict completion',
+        '--usage',
+        JSON.stringify({
+          cached_tokens: 67,
+          prompt_tokens_details: { cached_tokens: 68 },
+        }),
+      ], tmpDir),
+      (err) => {
+        assert.match(String(err && err.stderr), /conflicting values for "cached_tokens"/);
+        return true;
+      }
+    );
+    assert.strictEqual(db.getTask(cliTaskId).status, 'assigned');
   });
 
   it('should reject complete-task when a PR URL is already owned by another request', async () => {
