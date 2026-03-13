@@ -1617,6 +1617,44 @@ describe('CLI Server', () => {
     assert.strictEqual(descriptionConflictAssignment.routing.routing_reason, 'fallback-budget-downgrade:mid->spark');
   });
 
+  it('should classify low-priority docs/typo signals symmetrically across subject and description', async () => {
+    db.registerWorker(1, '/wt-1', 'agent-1');
+    db.registerWorker(2, '/wt-2', 'agent-2');
+
+    await setConfigValue('model_mini', 'mini-model');
+    await setConfigValue('model_spark', 'spark-model');
+    await setConfigValue('reasoning_mini', 'mini-effort');
+    await setConfigValue('routing_budget_state', JSON.stringify({}));
+
+    const descriptionDocsTaskId = createReadyTask({
+      subject: 'Routine cleanup item',
+      description: 'Update docs for worker setup instructions',
+      priority: 'low',
+      tier: 1,
+    });
+    const subjectTypoTaskId = createReadyTask({
+      subject: 'Fix typo in coordinator worker prompt',
+      description: 'Routine cleanup item',
+      priority: 'low',
+      tier: 1,
+    });
+
+    const descriptionDocsAssignment = await sendCommand('assign-task', { task_id: descriptionDocsTaskId, worker_id: 1 });
+    const subjectTypoAssignment = await sendCommand('assign-task', { task_id: subjectTypoTaskId, worker_id: 2 });
+    assert.strictEqual(descriptionDocsAssignment.ok, true);
+    assert.strictEqual(subjectTypoAssignment.ok, true);
+    assert.strictEqual(descriptionDocsAssignment.routing.class, 'mini');
+    assert.strictEqual(subjectTypoAssignment.routing.class, 'mini');
+    assert.notStrictEqual(descriptionDocsAssignment.routing.class, 'spark');
+    assert.notStrictEqual(subjectTypoAssignment.routing.class, 'spark');
+    assert.strictEqual(descriptionDocsAssignment.routing.model, 'mini-model');
+    assert.strictEqual(subjectTypoAssignment.routing.model, 'mini-model');
+    assert.strictEqual(descriptionDocsAssignment.routing.reasoning_effort, 'mini-effort');
+    assert.strictEqual(subjectTypoAssignment.routing.reasoning_effort, 'mini-effort');
+    assert.strictEqual(descriptionDocsAssignment.routing.routing_reason, 'fallback-routing:class-default');
+    assert.strictEqual(subjectTypoAssignment.routing.routing_reason, 'fallback-routing:class-default');
+  });
+
   it('should downscale routing from scalar budget keys when routing_budget_state JSON is absent', async () => {
     db.registerWorker(1, '/wt-1', 'agent-1');
     db.registerWorker(2, '/wt-2', 'agent-2');
