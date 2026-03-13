@@ -52,6 +52,73 @@ function getFallbackDefaultModel(getConfig, routingClass) {
   return getConfigValue(getConfig, 'model_flagship', 'gpt-5.3-codex');
 }
 
+function parseTaskMetadataValue(value) {
+  if (value === null || value === undefined) return null;
+  if (typeof value !== 'string') return value;
+  const trimmed = value.trim();
+  if (!trimmed) return '';
+  try {
+    return JSON.parse(trimmed);
+  } catch {
+    return value;
+  }
+}
+
+function collectTaskMetadataSignals(value, signals = []) {
+  if (value === null || value === undefined) return signals;
+  if (Array.isArray(value)) {
+    for (const item of value) collectTaskMetadataSignals(item, signals);
+    return signals;
+  }
+  if (typeof value === 'object') {
+    for (const [key, nested] of Object.entries(value)) {
+      if (key) signals.push(String(key));
+      collectTaskMetadataSignals(nested, signals);
+    }
+    return signals;
+  }
+  const normalized = String(value).trim();
+  if (normalized) signals.push(normalized);
+  return signals;
+}
+
+function normalizeTaskFiles(filesValue) {
+  const parsed = parseTaskMetadataValue(filesValue);
+  if (Array.isArray(parsed)) {
+    return parsed
+      .map((file) => String(file).trim())
+      .filter(Boolean)
+      .map((file) => file.replace(/\\/g, '/').toLowerCase());
+  }
+  if (typeof parsed === 'string') {
+    const normalized = parsed.trim();
+    return normalized ? [normalized.replace(/\\/g, '/').toLowerCase()] : [];
+  }
+  return [];
+}
+
+function hasCodeHeavyMetadataSignals(task) {
+  const domain = String(task && task.domain || '').trim().toLowerCase();
+  const files = normalizeTaskFiles(task && task.files);
+  const parsedValidation = parseTaskMetadataValue(task && task.validation);
+  const validationSignals = collectTaskMetadataSignals(parsedValidation).join(' ').toLowerCase();
+  const hasDocsOnlyFiles = files.length > 0 && files.every((file) => /\.(md|mdx|txt|rst|adoc)$/i.test(file));
+  if (hasDocsOnlyFiles) return false;
+
+  const hasCodeFileSignal = files.some((file) => (
+    /\.(c|cc|cpp|cs|go|java|js|jsx|mjs|cjs|ts|tsx|py|rb|php|rs|swift|kt|kts|scala|sh|ps1|sql|yaml|yml|toml|json)$/i.test(file)
+    || /(^|\/)(src|lib|app|server|coordinator|tests?|spec)\//i.test(file)
+  ));
+  const hasCodeDomainSignal = Boolean(domain) && !/(^|[-_])(docs?|documentation|content)([-_]|$)/i.test(domain);
+  const hasNonTrivialValidationSignal = (
+    /(tier[\s_-]*2|tier[\s_-]*3|build-validator|verify-app|npm\s+test|node\s+--test|jest|vitest|mocha|pytest|go\s+test|cargo\s+test|mvn\s+test|gradle\s+test)/i
+  ).test(validationSignals);
+
+  if (hasCodeFileSignal && (hasCodeDomainSignal || hasNonTrivialValidationSignal)) return true;
+  if (!hasCodeFileSignal && hasCodeDomainSignal && hasNonTrivialValidationSignal) return true;
+  return false;
+}
+
 function resolveFallbackRoutingClass(task) {
   const tier = Number(task && task.tier) || 0;
   const priority = String(task && task.priority || '').toLowerCase();
@@ -66,12 +133,14 @@ function resolveFallbackRoutingClass(task) {
   const hasRefactorSignal = subject.includes('refactor') || description.includes('refactor');
   const hasDocsSignal = subject.includes('docs') || description.includes('docs');
   const hasTypoSignal = subject.includes('typo') || description.includes('typo');
+  const hasCodeHeavyMetadataSignal = hasCodeHeavyMetadataSignals(task);
   if (tier >= 4) return 'xhigh';
   if (tier >= 3) return 'high';
   if (priority === 'urgent') return 'xhigh';
   if (priority === 'high') return 'high';
   if (hasMergeOrConflictSignal || hasRefactorSignal) return 'mid';
   if (priority === 'low' && (hasDocsSignal || hasTypoSignal)) return 'mini';
+  if (hasCodeHeavyMetadataSignal) return 'mid';
   return 'spark';
 }
 
