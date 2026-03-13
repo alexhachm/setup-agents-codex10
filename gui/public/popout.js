@@ -197,10 +197,7 @@
     var usageCachedTokens = pickTelemetryValue.apply(null, usageCachedTokensCandidates);
     var usageInputTokensNumber = pickFiniteTelemetryNumber.apply(null, usageInputTokensCandidates);
     var usageCachedTokensNumber = pickFiniteTelemetryNumber.apply(null, usageCachedTokensCandidates);
-    var cacheHitRate = '';
-    if (usageInputTokensNumber !== null && usageCachedTokensNumber !== null && usageInputTokensNumber > 0) {
-      cacheHitRate = formatTelemetryPercentage(usageCachedTokensNumber / usageInputTokensNumber);
-    }
+    var cacheHitRate = computeCacheHitRate(usageInputTokensNumber, usageCachedTokensNumber);
     return {
       routingClass: pickTelemetryValue(task && task.routing_class, task && task.routingClass, routing && routing.class, routing && routing.routing_class),
       routedModel: pickTelemetryValue(task && task.routed_model, task && task.routedModel, task && task.routing_model, task && task.routingModel, routing && routing.model),
@@ -302,6 +299,17 @@
   function formatTelemetryPercentage(value) {
     if (!Number.isFinite(value)) return '';
     return (value * 100).toFixed(1) + '%';
+  }
+
+  function computeCacheHitRate(inputTokens, cachedTokens) {
+    if (inputTokens === null || cachedTokens === null || inputTokens <= 0) return '';
+    var denominator = cachedTokens > inputTokens
+      ? inputTokens + cachedTokens
+      : inputTokens;
+    if (denominator <= 0) return '';
+    var rawRatio = cachedTokens / denominator;
+    var boundedRatio = Math.min(1, Math.max(0, rawRatio));
+    return formatTelemetryPercentage(boundedRatio);
   }
 
   function normalizeTelemetryValue(value) {

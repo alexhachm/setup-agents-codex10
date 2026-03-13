@@ -329,6 +329,49 @@ describe('Dashboard telemetry rendering', () => {
     assert.match(html, /task-chip-label">state<\/span>healthy \(21\/10\)/);
   });
 
+  it('bounds cache-hit percentages for anthropic-style cached token payloads', () => {
+    const { renderTasks, tasksList } = loadDashboardRenderHarness();
+
+    const state = {
+      tasks: [
+        {
+          id: 46,
+          status: 'assigned',
+          subject: 'Anthropic-style dashboard cache task',
+          domain: 'dashboard-ui',
+          tier: 2,
+          assigned_to: 4,
+          usage: {
+            input_tokens: 120,
+            cached_tokens: 180,
+          },
+        },
+        {
+          id: 47,
+          status: 'assigned',
+          subject: 'Normal dashboard cache task',
+          domain: 'dashboard-ui',
+          tier: 2,
+          assigned_to: 4,
+          usage_input_tokens: 200,
+          usage_cached_tokens: 20,
+        },
+      ],
+    };
+
+    renderTasks(state.tasks, state);
+    const html = tasksList.innerHTML;
+
+    const anthropicTask = html.split('<div class="task-item">').find((item) => item.includes('Anthropic-style dashboard cache task'));
+    assert.ok(anthropicTask, 'Expected Anthropic-style dashboard task to render');
+    assert.match(anthropicTask, /task-chip-label">cache-hit<\/span>60\.0%/);
+    assert.doesNotMatch(anthropicTask, /task-chip-label">cache-hit<\/span>150\.0%/);
+
+    const normalTask = html.split('<div class="task-item">').find((item) => item.includes('Normal dashboard cache task'));
+    assert.ok(normalTask, 'Expected normal dashboard cache task to render');
+    assert.match(normalTask, /task-chip-label">cache-hit<\/span>10\.0%/);
+  });
+
   it('omits routing, usage, and budget chips when telemetry fields are absent or null', () => {
     const { renderTasks, tasksList } = loadDashboardRenderHarness();
 
@@ -535,6 +578,47 @@ describe('Popout telemetry rendering', () => {
     html = panel.innerHTML;
     assert.match(html, /task-chip-label">source<\/span>config:routing-budget/);
     assert.match(html, /task-chip-label">state<\/span>healthy \(25\/10\)/);
+  });
+
+  it('bounds cache-hit percentages for anthropic-style cached token payloads', () => {
+    const { renderTasks, panel } = loadPopoutRenderHarness();
+
+    renderTasks({
+      tasks: [
+        {
+          id: 78,
+          status: 'assigned',
+          subject: 'Anthropic-style popout cache task',
+          domain: 'dashboard-ui',
+          tier: 2,
+          assigned_to: 4,
+          usage_input_tokens: 80,
+          usage_cached_tokens: 120,
+        },
+        {
+          id: 79,
+          status: 'assigned',
+          subject: 'Normal popout cache task',
+          domain: 'dashboard-ui',
+          tier: 2,
+          assigned_to: 4,
+          usage: {
+            input_tokens: 150,
+            cached_tokens: 15,
+          },
+        },
+      ],
+    });
+
+    const html = panel.innerHTML;
+    const anthropicTask = html.split('<div class="task-item">').find((item) => item.includes('Anthropic-style popout cache task'));
+    assert.ok(anthropicTask, 'Expected Anthropic-style popout task to render');
+    assert.match(anthropicTask, /task-chip-label">cache-hit<\/span>60\.0%/);
+    assert.doesNotMatch(anthropicTask, /task-chip-label">cache-hit<\/span>150\.0%/);
+
+    const normalTask = html.split('<div class="task-item">').find((item) => item.includes('Normal popout cache task'));
+    assert.ok(normalTask, 'Expected normal popout cache task to render');
+    assert.match(normalTask, /task-chip-label">cache-hit<\/span>10\.0%/);
   });
 
   it('omits usage chips when usage telemetry fields are absent or null', () => {
