@@ -408,6 +408,57 @@ describe('Overlap validation command selection', () => {
     assert.ok(!commands.includes('npm run build'));
   });
 
+  it('should prefer build script for default overlap validation when build and test are both present', () => {
+    const { commandLog } = setupMockMergeCli();
+    fs.writeFileSync(path.join(tmpDir, 'package.json'), JSON.stringify({
+      name: 'overlap-test',
+      scripts: {
+        build: 'echo build',
+        test: 'echo test',
+      },
+    }, null, 2));
+    db.setConfig('merge_validation', 'true');
+
+    const { pendingMergeId } = seedOverlapMergeTask();
+    merger.processQueue(tmpDir);
+
+    const pendingMerge = db.getDb().prepare('SELECT status, error FROM merge_queue WHERE id = ?').get(pendingMergeId);
+    assert.strictEqual(pendingMerge.status, 'merged');
+    assert.strictEqual(pendingMerge.error, null);
+
+    const commands = fs.existsSync(commandLog) ? fs.readFileSync(commandLog, 'utf8') : '';
+    assert.ok(commands.includes('npm run build'));
+    assert.ok(!commands.includes('npm run test'));
+
+    const selectedLogs = readCoordinatorLogEntries('overlap_validation_default_selected');
+    assert.ok(selectedLogs.some((details) => details.source === 'scripts.build'));
+  });
+
+  it('should select test script for default overlap validation when build script is missing', () => {
+    const { commandLog } = setupMockMergeCli();
+    fs.writeFileSync(path.join(tmpDir, 'package.json'), JSON.stringify({
+      name: 'overlap-test',
+      scripts: {
+        test: 'echo test',
+      },
+    }, null, 2));
+    db.setConfig('merge_validation', 'true');
+
+    const { pendingMergeId } = seedOverlapMergeTask();
+    merger.processQueue(tmpDir);
+
+    const pendingMerge = db.getDb().prepare('SELECT status, error FROM merge_queue WHERE id = ?').get(pendingMergeId);
+    assert.strictEqual(pendingMerge.status, 'merged');
+    assert.strictEqual(pendingMerge.error, null);
+
+    const commands = fs.existsSync(commandLog) ? fs.readFileSync(commandLog, 'utf8') : '';
+    assert.ok(!commands.includes('npm run build'));
+    assert.ok(commands.includes('npm run test'));
+
+    const selectedLogs = readCoordinatorLogEntries('overlap_validation_default_selected');
+    assert.ok(selectedLogs.some((details) => details.source === 'scripts.test'));
+  });
+
   it('should execute shell-style task.validation commands with compound operators', () => {
     const { commandLog } = setupMockMergeCli();
     fs.mkdirSync(path.join(tmpDir, 'coordinator'), { recursive: true });
