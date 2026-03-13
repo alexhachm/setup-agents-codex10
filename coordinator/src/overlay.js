@@ -46,6 +46,104 @@ function resolveDomainKnowledgePath(domain, knowledgeDir) {
   return filePath;
 }
 
+function parseValidationPayload(rawValidation) {
+  if (rawValidation == null) return null;
+  if (typeof rawValidation !== 'string') return rawValidation;
+  const trimmed = rawValidation.trim();
+  if (!trimmed) return null;
+  try {
+    return JSON.parse(trimmed);
+  } catch {
+    return trimmed;
+  }
+}
+
+function isTierShorthand(value) {
+  return typeof value === 'string' && /^tier[23]$/i.test(value.trim());
+}
+
+function pushTierMetadataNote(lines) {
+  lines.push('- Note: `tier2`/`tier3` are workflow metadata. Run only explicit task commands; do not assume `npm run build`.');
+}
+
+function pushCommandLine(lines, label, value) {
+  if (typeof value !== 'string') return false;
+  const trimmed = value.trim();
+  if (!trimmed) return false;
+  lines.push(`- ${label}: \`${trimmed}\``);
+  return true;
+}
+
+function appendValidationObject(lines, value, flags) {
+  let emitted = false;
+  emitted = pushCommandLine(lines, 'Build', value.build_cmd) || emitted;
+  emitted = pushCommandLine(lines, 'Test', value.test_cmd) || emitted;
+  emitted = pushCommandLine(lines, 'Lint', value.lint_cmd) || emitted;
+  emitted = pushCommandLine(lines, 'Command', value.command) || emitted;
+  emitted = pushCommandLine(lines, 'Command', value.cmd) || emitted;
+
+  if (Array.isArray(value.commands)) {
+    for (const cmd of value.commands) {
+      if (pushCommandLine(lines, 'Command', cmd)) emitted = true;
+    }
+  }
+
+  if (typeof value.custom === 'string' && value.custom.trim()) {
+    lines.push(`- Custom: ${value.custom.trim()}`);
+    emitted = true;
+  }
+
+  if (typeof value.tier === 'string' && value.tier.trim()) {
+    const tierValue = value.tier.trim();
+    lines.push(`- Tier: \`${tierValue}\``);
+    if (isTierShorthand(tierValue)) flags.needsTierNote = true;
+    emitted = true;
+  }
+
+  if (!emitted) {
+    const compact = JSON.stringify(value);
+    if (compact && compact !== '{}') {
+      lines.push(`- Validation metadata: \`${compact}\``);
+      emitted = true;
+    }
+  }
+
+  return emitted;
+}
+
+function appendValidationLines(lines, validation) {
+  const flags = { needsTierNote: false };
+  let emitted = false;
+
+  if (typeof validation === 'string') {
+    const trimmed = validation.trim();
+    if (trimmed) {
+      lines.push(`- Validation: \`${trimmed}\``);
+      if (isTierShorthand(trimmed)) flags.needsTierNote = true;
+      emitted = true;
+    }
+  } else if (Array.isArray(validation)) {
+    for (const entry of validation) {
+      if (typeof entry === 'string') {
+        const trimmed = entry.trim();
+        if (!trimmed) continue;
+        lines.push(`- Command: \`${trimmed}\``);
+        if (isTierShorthand(trimmed)) flags.needsTierNote = true;
+        emitted = true;
+        continue;
+      }
+      if (entry && typeof entry === 'object') {
+        emitted = appendValidationObject(lines, entry, flags) || emitted;
+      }
+    }
+  } else if (validation && typeof validation === 'object') {
+    emitted = appendValidationObject(lines, validation, flags) || emitted;
+  }
+
+  if (flags.needsTierNote) pushTierMetadataNote(lines);
+  return emitted;
+}
+
 function buildTaskOverlay(task, worker, projectDir) {
   const lines = [
     '# Current Task',
@@ -77,17 +175,11 @@ function buildTaskOverlay(task, worker, projectDir) {
   }
 
   if (task.validation) {
-    let val;
-    try {
-      val = typeof task.validation === 'string' ? JSON.parse(task.validation) : task.validation;
-    } catch { val = null; }
-    if (val) {
+    const val = parseValidationPayload(task.validation);
+    if (val != null) {
       lines.push('## Validation');
       lines.push('');
-      if (val.build_cmd) lines.push(`- Build: \`${val.build_cmd}\``);
-      if (val.test_cmd) lines.push(`- Test: \`${val.test_cmd}\``);
-      if (val.lint_cmd) lines.push(`- Lint: \`${val.lint_cmd}\``);
-      if (val.custom) lines.push(`- Custom: ${val.custom}`);
+      appendValidationLines(lines, val);
       lines.push('');
     }
   }
