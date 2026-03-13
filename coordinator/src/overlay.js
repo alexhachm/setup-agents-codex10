@@ -46,6 +46,92 @@ function resolveDomainKnowledgePath(domain, knowledgeDir) {
   return filePath;
 }
 
+function isTierShorthand(value) {
+  return typeof value === 'string' && /^tier[23]$/i.test(value.trim());
+}
+
+function parseValidationPayload(validation) {
+  if (!validation) return null;
+  if (typeof validation !== 'string') return validation;
+
+  const trimmed = validation.trim();
+  if (!trimmed) return null;
+
+  try {
+    return JSON.parse(trimmed);
+  } catch {
+    return trimmed;
+  }
+}
+
+function appendValidationSection(lines, validation) {
+  const val = parseValidationPayload(validation);
+  if (!val) return;
+
+  lines.push('## Validation');
+  lines.push('');
+
+  if (typeof val === 'string') {
+    if (isTierShorthand(val)) {
+      lines.push(`- Validation metadata: \`${val.trim()}\` (tier shorthand; not an executable shell command).`);
+      lines.push('- Run only explicit validation commands provided in the task details or validator instructions.');
+      lines.push('- Do not infer or run implicit `npm run build`.');
+      lines.push('');
+      return;
+    }
+
+    lines.push(`- Validation directive: \`${val.trim()}\``);
+    lines.push('- Treat this as metadata unless explicit commands are provided in task details.');
+    lines.push('- Do not infer or run implicit `npm run build`.');
+    lines.push('');
+    return;
+  }
+
+  if (Array.isArray(val)) {
+    for (const entry of val) {
+      if (typeof entry === 'string' && entry.trim()) {
+        lines.push(`- Command: \`${entry.trim()}\``);
+      } else if (entry && typeof entry === 'object') {
+        lines.push(`- Validation item: \`${JSON.stringify(entry)}\``);
+      }
+    }
+    lines.push('- Run only explicit commands listed above; do not infer implicit `npm run build`.');
+    lines.push('');
+    return;
+  }
+
+  if (typeof val === 'object') {
+    if (isTierShorthand(val.tier)) {
+      lines.push(`- Validation metadata: \`${String(val.tier).trim()}\` (tier shorthand; not an executable shell command).`);
+    }
+    if (val.build_cmd) lines.push(`- Build: \`${val.build_cmd}\``);
+    if (val.test_cmd) lines.push(`- Test: \`${val.test_cmd}\``);
+    if (val.lint_cmd) lines.push(`- Lint: \`${val.lint_cmd}\``);
+    if (val.custom) lines.push(`- Custom: ${val.custom}`);
+    if (Array.isArray(val.commands)) {
+      for (const cmd of val.commands) {
+        if (typeof cmd === 'string' && cmd.trim()) {
+          lines.push(`- Command: \`${cmd.trim()}\``);
+        }
+      }
+    }
+
+    if (
+      !val.build_cmd &&
+      !val.test_cmd &&
+      !val.lint_cmd &&
+      !val.custom &&
+      !(Array.isArray(val.commands) && val.commands.length > 0) &&
+      !isTierShorthand(val.tier)
+    ) {
+      lines.push(`- Validation config: \`${JSON.stringify(val)}\``);
+    }
+
+    lines.push('- Run only explicit task/validator commands; do not infer implicit `npm run build`.');
+    lines.push('');
+  }
+}
+
 function buildTaskOverlay(task, worker, projectDir) {
   const lines = [
     '# Current Task',
@@ -76,21 +162,7 @@ function buildTaskOverlay(task, worker, projectDir) {
     }
   }
 
-  if (task.validation) {
-    let val;
-    try {
-      val = typeof task.validation === 'string' ? JSON.parse(task.validation) : task.validation;
-    } catch { val = null; }
-    if (val) {
-      lines.push('## Validation');
-      lines.push('');
-      if (val.build_cmd) lines.push(`- Build: \`${val.build_cmd}\``);
-      if (val.test_cmd) lines.push(`- Test: \`${val.test_cmd}\``);
-      if (val.lint_cmd) lines.push(`- Lint: \`${val.lint_cmd}\``);
-      if (val.custom) lines.push(`- Custom: ${val.custom}`);
-      lines.push('');
-    }
-  }
+  appendValidationSection(lines, task.validation);
 
   // Add knowledge context if available
   const knowledgeDir = path.join(projectDir, '.claude', 'knowledge');
@@ -164,7 +236,7 @@ You are a coding worker in the mac10 multi-agent system. You receive tasks from 
 5. **Report completion.** Run \`mac10 complete-task <worker_id> <task_id> [pr_url] [branch] [result] [--usage JSON]\` and include usage telemetry when available.
 6. **On failure.** Run \`mac10 fail-task <worker_id> <task_id> <error_description>\`.
 7. **Stay in your domain.** Only modify files related to your assigned domain.
-8. **Validate before shipping.** Build and test your changes before creating a PR.
+8. **Validate before shipping.** Run explicit task/validator commands only; never assume implicit \`npm run build\`.
 `;
 }
 
