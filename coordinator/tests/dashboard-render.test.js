@@ -169,8 +169,31 @@ describe('Dashboard telemetry rendering', () => {
           usage_input_tokens: 1234,
           usage_output_tokens: 345,
           usage_cached_tokens: 99,
+          usage_cache_creation_tokens: 77,
           usage_total_tokens: 1678,
           usage_cost_usd: 0.0456,
+        },
+        {
+          id: 42,
+          status: 'assigned',
+          subject: 'Telemetry nested cache tokens',
+          domain: 'coordinator-tests',
+          tier: 3,
+          assigned_to: 3,
+          usage: {
+            cache_creation_tokens: 88,
+          },
+        },
+        {
+          id: 43,
+          status: 'assigned',
+          subject: 'Telemetry nested cache input tokens',
+          domain: 'coordinator-tests',
+          tier: 3,
+          assigned_to: 3,
+          usage: {
+            cache_creation_input_tokens: 99,
+          },
         },
       ],
       routing_budget_source: 'activity_log:allocator.task_assigned',
@@ -190,6 +213,9 @@ describe('Dashboard telemetry rendering', () => {
     assert.match(html, /task-chip-label">in<\/span>1234/);
     assert.match(html, /task-chip-label">out<\/span>345/);
     assert.match(html, /task-chip-label">cached<\/span>99/);
+    assert.match(html, /task-chip-label">cache-create<\/span>77/);
+    assert.match(html, /task-chip-label">cache-create<\/span>88/);
+    assert.match(html, /task-chip-label">cache-create<\/span>99/);
     assert.match(html, /task-chip-label">total<\/span>1678/);
     assert.match(html, /task-chip-label">cost<\/span>0\.0456/);
 
@@ -218,8 +244,13 @@ describe('Dashboard telemetry rendering', () => {
           usage_input_tokens: null,
           usage_output_tokens: null,
           usage_cached_tokens: null,
+          usage_cache_creation_tokens: null,
           usage_total_tokens: null,
           usage_cost_usd: null,
+          usage: {
+            cache_creation_tokens: null,
+            cache_creation_input_tokens: null,
+          },
         },
       ],
       routing_budget_source: '',
@@ -231,6 +262,7 @@ describe('Dashboard telemetry rendering', () => {
 
     assert.match(html, /No telemetry task/);
     assert.doesNotMatch(html, /task-chip-row/);
+    assert.doesNotMatch(html, /task-chip-label">cache-create<\/span>/);
     assert.doesNotMatch(html, /task-budget-indicator/);
   });
 });
@@ -253,9 +285,30 @@ describe('Popout telemetry rendering', () => {
             input_tokens: 210,
             output_tokens: 45,
             cached_tokens: 12,
+            cache_creation_input_tokens: 8,
             total_tokens: 267,
             cost_usd: 0.0123,
           },
+        },
+        {
+          id: 73,
+          status: 'completed',
+          subject: 'Popout nested cache tokens task',
+          domain: 'dashboard-ui',
+          tier: 2,
+          assigned_to: 4,
+          usage: {
+            cache_creation_tokens: 9,
+          },
+        },
+        {
+          id: 74,
+          status: 'completed',
+          subject: 'Popout top-level cache tokens task',
+          domain: 'dashboard-ui',
+          tier: 2,
+          assigned_to: 4,
+          usage_cache_creation_tokens: 10,
         },
       ],
     });
@@ -266,6 +319,9 @@ describe('Popout telemetry rendering', () => {
     assert.match(html, /task-chip-label">in<\/span>210/);
     assert.match(html, /task-chip-label">out<\/span>45/);
     assert.match(html, /task-chip-label">cached<\/span>12/);
+    assert.match(html, /task-chip-label">cache-create<\/span>8/);
+    assert.match(html, /task-chip-label">cache-create<\/span>9/);
+    assert.match(html, /task-chip-label">cache-create<\/span>10/);
     assert.match(html, /task-chip-label">total<\/span>267/);
     assert.match(html, /task-chip-label">cost<\/span>0\.0123/);
   });
@@ -286,8 +342,13 @@ describe('Popout telemetry rendering', () => {
           usage_input_tokens: null,
           usage_output_tokens: null,
           usage_cached_tokens: null,
+          usage_cache_creation_tokens: null,
           usage_total_tokens: null,
           usage_cost_usd: null,
+          usage: {
+            cache_creation_tokens: null,
+            cache_creation_input_tokens: null,
+          },
         },
       ],
     });
@@ -295,6 +356,7 @@ describe('Popout telemetry rendering', () => {
     const html = panel.innerHTML;
     assert.match(html, /Popout no telemetry task/);
     assert.doesNotMatch(html, /task-chip-row/);
+    assert.doesNotMatch(html, /task-chip-label">cache-create<\/span>/);
     assert.doesNotMatch(html, /task-chip-label">usage<\/span>/);
   });
 });

@@ -297,6 +297,7 @@
     if (telemetry.usageInputTokens) chips.push(renderTelemetryChip('in', telemetry.usageInputTokens));
     if (telemetry.usageOutputTokens) chips.push(renderTelemetryChip('out', telemetry.usageOutputTokens));
     if (telemetry.usageCachedTokens) chips.push(renderTelemetryChip('cached', telemetry.usageCachedTokens));
+    if (telemetry.usageCacheCreationTokens) chips.push(renderTelemetryChip('cache-create', telemetry.usageCacheCreationTokens));
     if (telemetry.usageTotalTokens) chips.push(renderTelemetryChip('total', telemetry.usageTotalTokens));
     if (telemetry.usageCostUsd) chips.push(renderTelemetryChip('cost', telemetry.usageCostUsd));
     if (chips.length === 0) return '';
@@ -319,6 +320,16 @@
       usageInputTokens: pickTelemetryValue(task && task.usage_input_tokens, task && task.usageInputTokens, usage && usage.input_tokens, usage && usage.inputTokens),
       usageOutputTokens: pickTelemetryValue(task && task.usage_output_tokens, task && task.usageOutputTokens, usage && usage.output_tokens, usage && usage.outputTokens),
       usageCachedTokens: pickTelemetryValue(task && task.usage_cached_tokens, task && task.usageCachedTokens, usage && usage.cached_tokens, usage && usage.cachedTokens),
+      usageCacheCreationTokens: pickTelemetryValue(
+        task && task.usage_cache_creation_tokens,
+        task && task.usageCacheCreationTokens,
+        task && task.usage_cache_creation_input_tokens,
+        task && task.usageCacheCreationInputTokens,
+        usage && usage.cache_creation_tokens,
+        usage && usage.cacheCreationTokens,
+        usage && usage.cache_creation_input_tokens,
+        usage && usage.cacheCreationInputTokens
+      ),
       usageTotalTokens: pickTelemetryValue(task && task.usage_total_tokens, task && task.usageTotalTokens, usage && usage.total_tokens, usage && usage.totalTokens),
       usageCostUsd: pickTelemetryValue(task && task.usage_cost_usd, task && task.usageCostUsd, usage && usage.cost_usd, usage && usage.costUsd),
     };
