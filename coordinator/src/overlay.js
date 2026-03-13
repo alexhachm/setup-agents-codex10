@@ -46,6 +46,103 @@ function resolveDomainKnowledgePath(domain, knowledgeDir) {
   return filePath;
 }
 
+function parseValidationPayload(validation) {
+  if (validation == null) return null;
+  if (typeof validation !== 'string') return validation;
+  const trimmed = validation.trim();
+  if (!trimmed) return null;
+  try {
+    return JSON.parse(trimmed);
+  } catch {
+    return trimmed;
+  }
+}
+
+function isTierValidationToken(value) {
+  if (typeof value !== 'string') return false;
+  return /^tier[0-9]+$/i.test(value.trim());
+}
+
+function appendValidationSection(lines, validation) {
+  const parsed = parseValidationPayload(validation);
+  if (parsed == null) return;
+
+  const commandItems = [];
+  const metadataItems = [];
+  const detailItems = [];
+
+  const addStringItem = (value, defaultLabel) => {
+    if (typeof value !== 'string') return;
+    const trimmed = value.trim();
+    if (!trimmed) return;
+    if (isTierValidationToken(trimmed)) {
+      metadataItems.push(trimmed);
+      return;
+    }
+    commandItems.push({ label: defaultLabel, value: trimmed });
+  };
+
+  const walk = (value, defaultLabel = 'Command') => {
+    if (value == null) return;
+    if (typeof value === 'string') {
+      addStringItem(value, defaultLabel);
+      return;
+    }
+    if (Array.isArray(value)) {
+      for (const item of value) walk(item, 'Command');
+      return;
+    }
+    if (typeof value === 'object') {
+      addStringItem(value.build_cmd, 'Build');
+      addStringItem(value.test_cmd, 'Test');
+      addStringItem(value.lint_cmd, 'Lint');
+      addStringItem(value.command, 'Command');
+
+      if (Array.isArray(value.commands)) {
+        for (const command of value.commands) walk(command, 'Command');
+      }
+
+      if (value.tier != null) {
+        addStringItem(String(value.tier), 'Metadata');
+      }
+
+      if (typeof value.custom === 'string' && value.custom.trim()) {
+        detailItems.push(`Custom: ${value.custom.trim()}`);
+      }
+
+      if (commandItems.length === 0 && metadataItems.length === 0 && detailItems.length === 0) {
+        try {
+          detailItems.push(`Payload: \`${JSON.stringify(value)}\``);
+        } catch {
+          detailItems.push('Payload: [unserializable object]');
+        }
+      }
+      return;
+    }
+
+    detailItems.push(`Payload: ${String(value)}`);
+  };
+
+  walk(parsed);
+  if (commandItems.length === 0 && metadataItems.length === 0 && detailItems.length === 0) return;
+
+  lines.push('## Validation');
+  lines.push('');
+
+  for (const item of commandItems) {
+    lines.push(`- ${item.label}: \`${item.value}\``);
+  }
+  for (const token of metadataItems) {
+    lines.push(`- Metadata: \`${token}\` (workflow shorthand, not a shell command)`);
+  }
+  for (const detail of detailItems) {
+    lines.push(`- ${detail}`);
+  }
+
+  lines.push('- Note: Run only explicit task commands. Never assume an implicit `npm run build`.');
+  lines.push('');
+}
+
 function buildTaskOverlay(task, worker, projectDir) {
   const lines = [
     '# Current Task',
@@ -76,21 +173,7 @@ function buildTaskOverlay(task, worker, projectDir) {
     }
   }
 
-  if (task.validation) {
-    let val;
-    try {
-      val = typeof task.validation === 'string' ? JSON.parse(task.validation) : task.validation;
-    } catch { val = null; }
-    if (val) {
-      lines.push('## Validation');
-      lines.push('');
-      if (val.build_cmd) lines.push(`- Build: \`${val.build_cmd}\``);
-      if (val.test_cmd) lines.push(`- Test: \`${val.test_cmd}\``);
-      if (val.lint_cmd) lines.push(`- Lint: \`${val.lint_cmd}\``);
-      if (val.custom) lines.push(`- Custom: ${val.custom}`);
-      lines.push('');
-    }
-  }
+  appendValidationSection(lines, task.validation);
 
   // Add knowledge context if available
   const knowledgeDir = path.join(projectDir, '.claude', 'knowledge');
@@ -164,7 +247,7 @@ You are a coding worker in the mac10 multi-agent system. You receive tasks from 
 5. **Report completion.** Run \`mac10 complete-task <worker_id> <task_id> [pr_url] [branch] [result] [--usage JSON]\` and include usage telemetry when available.
 6. **On failure.** Run \`mac10 fail-task <worker_id> <task_id> <error_description>\`.
 7. **Stay in your domain.** Only modify files related to your assigned domain.
-8. **Validate before shipping.** Build and test your changes before creating a PR.
+8. **Validate before shipping.** Run explicit task-provided validation commands (tier shorthand is metadata; no implicit \`npm run build\`).
 `;
 }
 
