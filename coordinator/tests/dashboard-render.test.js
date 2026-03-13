@@ -232,6 +232,54 @@ describe('Dashboard telemetry rendering', () => {
     assert.match(html, /task-chip-label">state<\/span>constrained \(4\/10\)/);
   });
 
+  it('renders constrained and healthy budget summaries from wrapped routing_budget_state payloads', () => {
+    const { renderTasks, tasksList } = loadDashboardRenderHarness();
+
+    const constrainedState = {
+      tasks: [
+        {
+          id: 44,
+          status: 'assigned',
+          subject: 'Wrapped constrained budget telemetry',
+          domain: 'dashboard-ui',
+          tier: 2,
+          assigned_to: 4,
+        },
+      ],
+      routing_budget_state: {
+        source: 'activity_log:allocator.task_assigned',
+        parsed: {
+          flagship: { remaining: 3, threshold: 10 },
+        },
+        remaining: 3,
+        threshold: 10,
+      },
+    };
+
+    renderTasks(constrainedState.tasks, constrainedState);
+    let html = tasksList.innerHTML;
+    assert.match(html, /task-budget-indicator/);
+    assert.match(html, /task-chip-label">source<\/span>activity_log:allocator\.task_assigned/);
+    assert.match(html, /task-chip-label">state<\/span>constrained \(3\/10\)/);
+    assert.doesNotMatch(html, /task-chip-label">state<\/span>keys: source, parsed, remaining/);
+
+    const healthyState = {
+      tasks: constrainedState.tasks,
+      routing_budget_state: {
+        source: 'activity_log:allocator.task_assigned',
+        parsed: {
+          flagship: { remaining: 21, threshold: 10 },
+        },
+        remaining: 21,
+        threshold: 10,
+      },
+    };
+
+    renderTasks(healthyState.tasks, healthyState);
+    html = tasksList.innerHTML;
+    assert.match(html, /task-chip-label">state<\/span>healthy \(21\/10\)/);
+  });
+
   it('omits routing, usage, and budget chips when telemetry fields are absent or null', () => {
     const { renderTasks, tasksList } = loadDashboardRenderHarness();
 

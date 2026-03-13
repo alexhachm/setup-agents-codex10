@@ -386,17 +386,20 @@
 
   function getBudgetSnapshot(state) {
     const data = state && typeof state === 'object' ? state : {};
-    const source = pickTelemetryValue(
-      data.routing_budget_source,
-      data.budget_source,
-      data.routingBudgetSource
-    );
     const parsedState = parseBudgetState(
       data.routing_budget_state !== undefined ? data.routing_budget_state :
         (data.budget_state !== undefined ? data.budget_state : data.routingBudgetState)
     );
-    if (!source && parsedState === null) return null;
-    return { source, state: parsedState };
+    const wrappedState = unwrapBudgetState(parsedState);
+    const source = pickTelemetryValue(
+      data.routing_budget_source,
+      data.budget_source,
+      data.routingBudgetSource,
+      wrappedState && wrappedState.source
+    );
+    const summaryState = wrappedState ? wrappedState.parsed : parsedState;
+    if (!source && summaryState === null) return null;
+    return { source, state: summaryState };
   }
 
   function parseBudgetState(value) {
@@ -406,16 +409,51 @@
       if (!trimmed) return null;
       if (trimmed.startsWith('{') || trimmed.startsWith('[')) {
         try {
-          return JSON.parse(trimmed);
+          return parseBudgetState(JSON.parse(trimmed));
         } catch {
           return trimmed;
         }
       }
       return trimmed;
     }
-    if (typeof value === 'object') return value;
+    if (typeof value === 'object') {
+      if (Array.isArray(value)) return value;
+      const wrapped = unwrapBudgetState(value);
+      return wrapped || value;
+    }
     if (typeof value === 'number' || typeof value === 'boolean') return String(value);
     return null;
+  }
+
+  function unwrapBudgetState(value) {
+    if (!value || typeof value !== 'object' || Array.isArray(value)) return null;
+    const hasParsed = Object.prototype.hasOwnProperty.call(value, 'parsed');
+    const hasWrapperMeta = (
+      Object.prototype.hasOwnProperty.call(value, 'source') ||
+      Object.prototype.hasOwnProperty.call(value, 'remaining') ||
+      Object.prototype.hasOwnProperty.call(value, 'threshold')
+    );
+    if (!hasParsed || !hasWrapperMeta) return null;
+    const parsed = value.parsed === value ? null : parseBudgetState(value.parsed);
+    const remaining = parseBudgetLimit(value.remaining);
+    const threshold = parseBudgetLimit(value.threshold);
+    let normalizedParsed = parsed;
+    const hasFlagship = normalizedParsed && typeof normalizedParsed === 'object' && !Array.isArray(normalizedParsed) &&
+      normalizedParsed.flagship && typeof normalizedParsed.flagship === 'object';
+    if (!hasFlagship && remaining !== null && threshold !== null) {
+      normalizedParsed = { flagship: { remaining, threshold } };
+    }
+    return {
+      source: normalizeTelemetryValue(value.source),
+      parsed: normalizedParsed,
+      remaining,
+      threshold,
+    };
+  }
+
+  function parseBudgetLimit(value) {
+    const numeric = Number(value);
+    return Number.isFinite(numeric) ? numeric : null;
   }
 
   function describeBudgetState(state) {
@@ -423,6 +461,10 @@
     if (typeof state === 'string') return state;
     if (typeof state === 'number' || typeof state === 'boolean') return String(state);
     if (typeof state !== 'object') return '';
+    const wrapped = unwrapBudgetState(state);
+    if (wrapped) {
+      return describeBudgetState(wrapped.parsed);
+    }
     const flagship = state.flagship && typeof state.flagship === 'object' ? state.flagship : null;
     if (flagship) {
       const remaining = Number(flagship.remaining);
