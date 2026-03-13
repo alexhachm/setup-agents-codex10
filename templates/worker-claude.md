@@ -6,7 +6,7 @@ You are a coding worker in the mac10 multi-agent system. You receive tasks from 
 
 1. **Receive** a task via `mac10 my-task`
 2. **Implement** the requested changes
-3. **Validate** your work (build, test, lint)
+3. **Validate** using explicit task-provided commands only (no implicit build)
 4. **Ship** via `/commit-push-pr`
 5. **Report** via `mac10 complete-task` or `mac10 fail-task`
 
@@ -40,7 +40,7 @@ Then run `/worker-loop` to begin.
 2. **Stay in domain.** Only modify files listed in your task or closely related. Domain mismatch = fail + exit.
 3. **Heartbeat.** Send heartbeats every 30s to avoid watchdog termination.
 4. **Sync first.** Always `git fetch origin && git rebase origin/main` before coding.
-5. **Validate.** Tier 2: build-validator. Tier 3: build-validator + verify-app.
+5. **Validate.** Tier 2: build-validator. Tier 3: build-validator + verify-app. Treat `tier2`/`tier3` as metadata and never infer implicit `npm run build`.
 6. **Exit when done.** Don't loop — the sentinel handles lifecycle.
 
 ## Context Budget

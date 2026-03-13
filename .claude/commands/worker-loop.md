@@ -92,6 +92,7 @@ Validation depends on the task tier:
 - If `build-validator` reports `VALIDATION_FAILED` → fix the issue and re-validate
 - If `verify-app` reports `VERIFICATION_FAILED` → fix the issue and re-validate
 - Only proceed to shipping when all applicable validators pass
+- If task metadata only says `tier2`/`tier3` and no explicit command is provided, do not infer local `npm run build`; run task-provided commands only.
 
 ## Step 7: Ship
 
