@@ -46,6 +46,92 @@ function resolveDomainKnowledgePath(domain, knowledgeDir) {
   return filePath;
 }
 
+function parseValidationSpec(validation) {
+  if (validation === undefined || validation === null) return null;
+  if (typeof validation === 'string') {
+    const trimmed = validation.trim();
+    if (!trimmed) return null;
+    try {
+      return JSON.parse(trimmed);
+    } catch {
+      return trimmed;
+    }
+  }
+  return validation;
+}
+
+function appendValidationLines(lines, validation) {
+  const parsed = parseValidationSpec(validation);
+  if (!parsed) return;
+
+  lines.push('## Validation');
+  lines.push('');
+
+  if (typeof parsed === 'string') {
+    const value = parsed.trim();
+    if (/^tier[23]$/i.test(value)) {
+      lines.push(`- Validation profile: \`${value}\` (workflow metadata only)`);
+      lines.push('- Run only explicit task-provided validation commands.');
+      lines.push('- Do not infer implicit commands such as `npm run build`.');
+      lines.push('');
+      return;
+    }
+
+    lines.push(`- Command: \`${value}\``);
+    lines.push('- Run only explicit task-provided validation commands.');
+    lines.push('');
+    return;
+  }
+
+  if (Array.isArray(parsed)) {
+    let hasCommand = false;
+    for (const command of parsed) {
+      if (typeof command === 'string' && command.trim()) {
+        lines.push(`- Command: \`${command.trim()}\``);
+        hasCommand = true;
+      }
+    }
+    if (!hasCommand) return;
+    lines.push('- Run only explicit task-provided validation commands.');
+    lines.push('');
+    return;
+  }
+
+  if (typeof parsed === 'object') {
+    let hasCommand = false;
+    if (typeof parsed.build_cmd === 'string' && parsed.build_cmd.trim()) {
+      lines.push(`- Build: \`${parsed.build_cmd.trim()}\``);
+      hasCommand = true;
+    }
+    if (typeof parsed.test_cmd === 'string' && parsed.test_cmd.trim()) {
+      lines.push(`- Test: \`${parsed.test_cmd.trim()}\``);
+      hasCommand = true;
+    }
+    if (typeof parsed.lint_cmd === 'string' && parsed.lint_cmd.trim()) {
+      lines.push(`- Lint: \`${parsed.lint_cmd.trim()}\``);
+      hasCommand = true;
+    }
+    if (typeof parsed.custom === 'string' && parsed.custom.trim()) {
+      lines.push(`- Custom: ${parsed.custom.trim()}`);
+      hasCommand = true;
+    }
+    if (Array.isArray(parsed.custom)) {
+      for (const customCommand of parsed.custom) {
+        if (typeof customCommand === 'string' && customCommand.trim()) {
+          lines.push(`- Custom: \`${customCommand.trim()}\``);
+          hasCommand = true;
+        }
+      }
+    }
+    if (!hasCommand) {
+      lines.push(`- Metadata: \`${JSON.stringify(parsed)}\``);
+    }
+    lines.push('- Run only explicit task-provided validation commands.');
+    lines.push('- Do not infer implicit commands such as `npm run build`.');
+    lines.push('');
+  }
+}
+
 function buildTaskOverlay(task, worker, projectDir) {
   const lines = [
     '# Current Task',
@@ -76,21 +162,7 @@ function buildTaskOverlay(task, worker, projectDir) {
     }
   }
 
-  if (task.validation) {
-    let val;
-    try {
-      val = typeof task.validation === 'string' ? JSON.parse(task.validation) : task.validation;
-    } catch { val = null; }
-    if (val) {
-      lines.push('## Validation');
-      lines.push('');
-      if (val.build_cmd) lines.push(`- Build: \`${val.build_cmd}\``);
-      if (val.test_cmd) lines.push(`- Test: \`${val.test_cmd}\``);
-      if (val.lint_cmd) lines.push(`- Lint: \`${val.lint_cmd}\``);
-      if (val.custom) lines.push(`- Custom: ${val.custom}`);
-      lines.push('');
-    }
-  }
+  appendValidationLines(lines, task.validation);
 
   // Add knowledge context if available
   const knowledgeDir = path.join(projectDir, '.claude', 'knowledge');
