@@ -447,6 +447,55 @@ function checkRequestCompletion(requestId) {
   };
 }
 
+function normalizeUsdNumber(value) {
+  const parsed = Number(value);
+  return Number.isFinite(parsed) ? parsed : 0;
+}
+
+function getUsageCostBurnRate(requestId = null) {
+  const burnWindowRow = getDb().prepare(`
+    SELECT
+      COALESCE(SUM(CASE
+        WHEN completed_at >= datetime('now', '-15 minutes') THEN COALESCE(usage_cost_usd, 0)
+        ELSE 0
+      END), 0) AS usd_15m,
+      COALESCE(SUM(CASE
+        WHEN completed_at >= datetime('now', '-60 minutes') THEN COALESCE(usage_cost_usd, 0)
+        ELSE 0
+      END), 0) AS usd_60m,
+      COALESCE(SUM(COALESCE(usage_cost_usd, 0)), 0) AS usd_24h
+    FROM tasks
+    WHERE status = 'completed'
+      AND completed_at IS NOT NULL
+      AND completed_at >= datetime('now', '-24 hours')
+  `).get() || {};
+
+  let normalizedRequestId = null;
+  let requestTotalUsd = 0;
+  if (requestId !== null && requestId !== undefined) {
+    const trimmedRequestId = String(requestId).trim();
+    if (trimmedRequestId) {
+      normalizedRequestId = trimmedRequestId;
+      const requestRow = getDb().prepare(`
+        SELECT COALESCE(SUM(COALESCE(usage_cost_usd, 0)), 0) AS total_usd
+        FROM tasks
+        WHERE request_id = ?
+          AND status = 'completed'
+          AND completed_at IS NOT NULL
+      `).get(trimmedRequestId) || {};
+      requestTotalUsd = normalizeUsdNumber(requestRow.total_usd);
+    }
+  }
+
+  return {
+    usd_15m: normalizeUsdNumber(burnWindowRow.usd_15m),
+    usd_60m: normalizeUsdNumber(burnWindowRow.usd_60m),
+    usd_24h: normalizeUsdNumber(burnWindowRow.usd_24h),
+    request_id: normalizedRequestId,
+    request_total_usd: requestTotalUsd,
+  };
+}
+
 function getRequestLatestCompletedTaskCursor(requestId) {
   if (requestId === null || requestId === undefined) return null;
   const normalizedRequestId = String(requestId).trim();
@@ -903,7 +952,7 @@ module.exports = {
   createRequest, getRequest, updateRequest, listRequests,
   createTask, getTask, updateTask, listTasks, getReadyTasks, checkAndPromoteTasks,
   registerWorker, getWorker, updateWorker, getIdleWorkers, getAllWorkers, claimWorker, releaseWorker,
-  checkRequestCompletion, getRequestLatestCompletedTaskCursor, hasRequestCompletedTaskProgressSince,
+  checkRequestCompletion, getUsageCostBurnRate, getRequestLatestCompletedTaskCursor, hasRequestCompletedTaskProgressSince,
   sendMail, checkMail, checkMailBlocking, purgeOldMail,
   enqueueMerge, getNextMerge, updateMerge,
   log, getLog,
