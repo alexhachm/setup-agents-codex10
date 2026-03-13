@@ -159,6 +159,9 @@
     if (telemetry.usageOutputTokens) chips.push(renderTelemetryChip('out', telemetry.usageOutputTokens));
     if (telemetry.usageCachedTokens) chips.push(renderTelemetryChip('cached', telemetry.usageCachedTokens));
     if (telemetry.usageCacheCreationTokens) chips.push(renderTelemetryChip('cache-create', telemetry.usageCacheCreationTokens));
+    if (telemetry.usageReasoningTokens) chips.push(renderTelemetryChip('reasoning', telemetry.usageReasoningTokens));
+    if (telemetry.usageAcceptedPredictionTokens) chips.push(renderTelemetryChip('pred-hit', telemetry.usageAcceptedPredictionTokens));
+    if (telemetry.usageRejectedPredictionTokens) chips.push(renderTelemetryChip('pred-miss', telemetry.usageRejectedPredictionTokens));
     if (telemetry.usageTotalTokens) chips.push(renderTelemetryChip('total', telemetry.usageTotalTokens));
     if (telemetry.usageCostUsd) chips.push(renderTelemetryChip('cost', telemetry.usageCostUsd));
     if (chips.length === 0) return '';
@@ -190,6 +193,24 @@
         usage && usage.cacheCreationTokens,
         usage && usage.cache_creation_input_tokens,
         usage && usage.cacheCreationInputTokens
+      ),
+      usageReasoningTokens: pickTelemetryValue(
+        task && task.usage_reasoning_tokens,
+        task && task.usageReasoningTokens,
+        usage && usage.reasoning_tokens,
+        usage && usage.reasoningTokens
+      ),
+      usageAcceptedPredictionTokens: pickTelemetryValue(
+        task && task.usage_accepted_prediction_tokens,
+        task && task.usageAcceptedPredictionTokens,
+        usage && usage.accepted_prediction_tokens,
+        usage && usage.acceptedPredictionTokens
+      ),
+      usageRejectedPredictionTokens: pickTelemetryValue(
+        task && task.usage_rejected_prediction_tokens,
+        task && task.usageRejectedPredictionTokens,
+        usage && usage.rejected_prediction_tokens,
+        usage && usage.rejectedPredictionTokens
       ),
       usageTotalTokens: pickTelemetryValue(task && task.usage_total_tokens, task && task.usageTotalTokens, usage && usage.total_tokens, usage && usage.totalTokens),
       usageCostUsd: pickTelemetryValue(task && task.usage_cost_usd, task && task.usageCostUsd, usage && usage.cost_usd, usage && usage.costUsd),
