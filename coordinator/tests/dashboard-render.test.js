@@ -170,12 +170,16 @@ describe('Dashboard telemetry rendering', () => {
           usage_output_tokens: 345,
           usage_cached_tokens: 99,
           usage_cache_creation_tokens: 77,
+          usage_cache_creation_ephemeral_5m_input_tokens: 55,
           usage_reasoning_tokens: 222,
           usageAcceptedPredictionTokens: 11,
           usage_total_tokens: 1678,
           usage_cost_usd: 0.0456,
           usage: {
             rejected_prediction_tokens: 4,
+            cache_creation: {
+              ephemeral_1h_input_tokens: 66,
+            },
           },
         },
         {
@@ -230,6 +234,8 @@ describe('Dashboard telemetry rendering', () => {
     assert.match(html, /task-chip-label">cached<\/span>99/);
     assert.match(html, /task-chip-label">cache-hit<\/span>8\.0%/);
     assert.match(html, /task-chip-label">cache-create<\/span>77/);
+    assert.match(html, /task-chip-label">cache-create-5m<\/span>55/);
+    assert.match(html, /task-chip-label">cache-create-1h<\/span>66/);
     assert.match(html, /task-chip-label">cache-create<\/span>88/);
     assert.match(html, /task-chip-label">cache-create<\/span>99/);
     assert.match(html, /task-chip-label">reasoning<\/span>222/);
@@ -317,6 +323,8 @@ describe('Dashboard telemetry rendering', () => {
           usage_output_tokens: null,
           usage_cached_tokens: null,
           usage_cache_creation_tokens: null,
+          usage_cache_creation_ephemeral_5m_input_tokens: null,
+          usage_cache_creation_ephemeral_1h_input_tokens: null,
           usage_reasoning_tokens: null,
           usageAcceptedPredictionTokens: null,
           usage_rejected_prediction_tokens: null,
@@ -328,6 +336,10 @@ describe('Dashboard telemetry rendering', () => {
             rejected_prediction_tokens: null,
             cache_creation_tokens: null,
             cache_creation_input_tokens: null,
+            cache_creation: {
+              ephemeral_5m_input_tokens: null,
+              ephemeral_1h_input_tokens: null,
+            },
           },
         },
         {
@@ -352,6 +364,8 @@ describe('Dashboard telemetry rendering', () => {
     assert.doesNotMatch(html, /task-chip-label">cache-hit<\/span>/);
     assert.doesNotMatch(html, /NaN%|Infinity%/);
     assert.doesNotMatch(html, /task-chip-label">cache-create<\/span>/);
+    assert.doesNotMatch(html, /task-chip-label">cache-create-5m<\/span>/);
+    assert.doesNotMatch(html, /task-chip-label">cache-create-1h<\/span>/);
     assert.doesNotMatch(html, /task-chip-label">reasoning<\/span>/);
     assert.doesNotMatch(html, /task-chip-label">pred-hit<\/span>/);
     assert.doesNotMatch(html, /task-chip-label">pred-miss<\/span>/);
@@ -378,11 +392,15 @@ describe('Popout telemetry rendering', () => {
             output_tokens: 45,
             cached_tokens: 12,
             cache_creation_input_tokens: 8,
+            cache_creation: {
+              ephemeral_1h_input_tokens: 21,
+            },
             reasoningTokens: 33,
             accepted_prediction_tokens: 6,
             total_tokens: 267,
             cost_usd: 0.0123,
           },
+          usage_cache_creation_ephemeral_5m_input_tokens: 14,
           usage_rejected_prediction_tokens: 2,
         },
         {
@@ -426,6 +444,8 @@ describe('Popout telemetry rendering', () => {
     assert.match(html, /task-chip-label">cached<\/span>12/);
     assert.match(html, /task-chip-label">cache-hit<\/span>5\.7%/);
     assert.match(html, /task-chip-label">cache-create<\/span>8/);
+    assert.match(html, /task-chip-label">cache-create-5m<\/span>14/);
+    assert.match(html, /task-chip-label">cache-create-1h<\/span>21/);
     assert.match(html, /task-chip-label">cache-create<\/span>9/);
     assert.match(html, /task-chip-label">cache-create<\/span>10/);
     assert.match(html, /task-chip-label">reasoning<\/span>33/);
@@ -507,6 +527,8 @@ describe('Popout telemetry rendering', () => {
           usage_output_tokens: null,
           usage_cached_tokens: null,
           usage_cache_creation_tokens: null,
+          usage_cache_creation_ephemeral_5m_input_tokens: null,
+          usage_cache_creation_ephemeral_1h_input_tokens: null,
           usage_reasoning_tokens: null,
           usageAcceptedPredictionTokens: null,
           usage_rejected_prediction_tokens: null,
@@ -518,6 +540,10 @@ describe('Popout telemetry rendering', () => {
             rejectedPredictionTokens: null,
             cache_creation_tokens: null,
             cache_creation_input_tokens: null,
+            cache_creation: {
+              ephemeral_5m_input_tokens: null,
+              ephemeral_1h_input_tokens: null,
+            },
           },
         },
         {
@@ -538,6 +564,8 @@ describe('Popout telemetry rendering', () => {
     assert.doesNotMatch(html, /task-chip-label">cache-hit<\/span>/);
     assert.doesNotMatch(html, /NaN%|Infinity%/);
     assert.doesNotMatch(html, /task-chip-label">cache-create<\/span>/);
+    assert.doesNotMatch(html, /task-chip-label">cache-create-5m<\/span>/);
+    assert.doesNotMatch(html, /task-chip-label">cache-create-1h<\/span>/);
     assert.doesNotMatch(html, /task-chip-label">reasoning<\/span>/);
     assert.doesNotMatch(html, /task-chip-label">pred-hit<\/span>/);
     assert.doesNotMatch(html, /task-chip-label">pred-miss<\/span>/);
