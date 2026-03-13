@@ -204,6 +204,21 @@ function getCoordinatorOwnershipMismatchEvents(command, workerId, taskId) {
   });
 }
 
+function getCoordinatorRemediationRecoveryEvents(requestId, trigger = null) {
+  const entries = db.getLog(500, 'coordinator');
+  return entries
+    .filter((entry) => entry.action === 'request_reopened_for_active_remediation')
+    .map((entry) => {
+      try {
+        return { entry, details: JSON.parse(entry.details) };
+      } catch {
+        return null;
+      }
+    })
+    .filter((item) => item && item.details && item.details.request_id === requestId)
+    .filter((item) => !trigger || item.details.trigger === trigger);
+}
+
 describe('CLI Server', () => {
   it('should respond to ping', async () => {
     const result = await sendCommand('ping', {});
@@ -442,6 +457,55 @@ describe('CLI Server', () => {
     assert.strictEqual(afterSecond.completed_at, completedAt);
     assert.strictEqual(afterSecond.result, resultText);
     assert.strictEqual(getWorkerTaskStartedEvents(1, taskId).length, 1);
+  });
+
+  it('should reopen failed requests to integrating when start-task begins remediation with merge queue history', async () => {
+    db.registerWorker(1, '/wt-1', 'agent-1');
+    const requestId = db.createRequest('Start-task remediation reopen');
+
+    const originalTaskId = db.createTask({
+      request_id: requestId,
+      subject: 'Original implementation',
+      description: 'Previously failed merge',
+      domain: 'coordinator-routing',
+      files: ['coordinator/src/watchdog.js'],
+      tier: 2,
+    });
+    db.updateTask(originalTaskId, { status: 'completed' });
+
+    const mergeRow = db.enqueueMerge({
+      request_id: requestId,
+      task_id: originalTaskId,
+      pr_url: 'https://example.com/pr/9001',
+      branch: 'agent-1/original',
+      priority: 0,
+    });
+    db.updateMerge(mergeRow.lastInsertRowid, { status: 'failed', error: 'merge failed' });
+
+    const remediationTaskId = db.createTask({
+      request_id: requestId,
+      subject: 'Remediate merge failure',
+      description: 'Fix merge issue',
+      domain: 'coordinator-routing',
+      files: ['coordinator/src/cli-server.js'],
+      tier: 2,
+    });
+    db.updateTask(remediationTaskId, { status: 'assigned', assigned_to: 1 });
+    db.updateWorker(1, { status: 'assigned', current_task_id: remediationTaskId });
+    db.updateRequest(requestId, { status: 'failed', result: 'merge failure' });
+
+    const started = await sendCommand('start-task', { worker_id: '1', task_id: String(remediationTaskId) });
+    assert.strictEqual(started.ok, true);
+    assert.strictEqual(db.getTask(remediationTaskId).status, 'in_progress');
+
+    const request = db.getRequest(requestId);
+    assert.strictEqual(request.status, 'integrating');
+    assert.notStrictEqual(request.status, 'failed');
+
+    const recoveryEvents = getCoordinatorRemediationRecoveryEvents(requestId, 'start-task');
+    assert.strictEqual(recoveryEvents.length, 1);
+    assert.strictEqual(recoveryEvents[0].details.reopened_status, 'integrating');
+    assert.ok(recoveryEvents[0].details.merge_queue_entries >= 1);
   });
 
   it('should persist complete-task usage telemetry fields end-to-end', async () => {
@@ -1111,6 +1175,71 @@ describe('CLI Server', () => {
     assert.strictEqual(task.routed_model, assignment.routing.model);
     assert.strictEqual(task.model_source, assignment.routing.model_source);
     assert.strictEqual(task.reasoning_effort, assignment.routing.reasoning_effort);
+  });
+
+  it('should reopen failed requests during assign-task based on merge queue presence', async () => {
+    db.registerWorker(1, '/wt-1', 'agent-1');
+    db.registerWorker(2, '/wt-2', 'agent-2');
+
+    const requestWithoutMerge = db.createRequest('Assign remediation without merge queue');
+    const noMergeTaskId = db.createTask({
+      request_id: requestWithoutMerge,
+      subject: 'Remediate without merge queue',
+      description: 'Retry work',
+      domain: 'coordinator-routing',
+      files: ['coordinator/src/cli-server.js'],
+      tier: 2,
+    });
+    db.updateTask(noMergeTaskId, { status: 'ready' });
+    db.updateRequest(requestWithoutMerge, { status: 'failed', result: 'previous failure' });
+
+    const noMergeAssign = await sendCommand('assign-task', { task_id: noMergeTaskId, worker_id: 1 });
+    assert.strictEqual(noMergeAssign.ok, true);
+    assert.strictEqual(db.getRequest(requestWithoutMerge).status, 'in_progress');
+
+    const noMergeRecoveryEvents = getCoordinatorRemediationRecoveryEvents(requestWithoutMerge, 'assign-task');
+    assert.strictEqual(noMergeRecoveryEvents.length, 1);
+    assert.strictEqual(noMergeRecoveryEvents[0].details.reopened_status, 'in_progress');
+    assert.strictEqual(noMergeRecoveryEvents[0].details.merge_queue_entries, 0);
+
+    const requestWithMerge = db.createRequest('Assign remediation with merge queue');
+    const originalTaskId = db.createTask({
+      request_id: requestWithMerge,
+      subject: 'Original implementation',
+      description: 'Has merge history',
+      domain: 'coordinator-routing',
+      files: ['coordinator/src/watchdog.js'],
+      tier: 2,
+    });
+    db.updateTask(originalTaskId, { status: 'completed' });
+    const mergeRow = db.enqueueMerge({
+      request_id: requestWithMerge,
+      task_id: originalTaskId,
+      pr_url: 'https://example.com/pr/9002',
+      branch: 'agent-2/original',
+      priority: 0,
+    });
+    db.updateMerge(mergeRow.lastInsertRowid, { status: 'failed', error: 'merge failed' });
+
+    const remediationTaskId = db.createTask({
+      request_id: requestWithMerge,
+      subject: 'Remediation task',
+      description: 'Fix failed merge',
+      domain: 'coordinator-routing',
+      files: ['coordinator/src/cli-server.js'],
+      tier: 2,
+    });
+    db.updateTask(remediationTaskId, { status: 'ready' });
+    db.updateRequest(requestWithMerge, { status: 'failed', result: 'previous merge failure' });
+
+    const withMergeAssign = await sendCommand('assign-task', { task_id: remediationTaskId, worker_id: 2 });
+    assert.strictEqual(withMergeAssign.ok, true);
+    assert.strictEqual(db.getRequest(requestWithMerge).status, 'integrating');
+
+    const withMergeRecoveryEvents = getCoordinatorRemediationRecoveryEvents(requestWithMerge, 'assign-task');
+    assert.strictEqual(withMergeRecoveryEvents.length, 1);
+    assert.strictEqual(withMergeRecoveryEvents[0].details.reopened_status, 'integrating');
+    assert.ok(withMergeRecoveryEvents[0].details.merge_queue_entries >= 1);
   });
 
   it('should rollback model_source and assignment state when assign-task spawn fails', async () => {
