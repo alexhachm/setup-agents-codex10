@@ -149,10 +149,16 @@ describe('SQL column whitelist enforcement', () => {
   it('should accept valid columns in updateTask', () => {
     const reqId = db.createRequest('Test');
     const taskId = db.createTask({ request_id: reqId, subject: 'T', description: 'D' });
-    db.updateTask(taskId, { status: 'ready', domain: 'backend', pr_url: 'https://github.com/o/r/pull/1' });
+    db.updateTask(taskId, {
+      status: 'ready',
+      domain: 'backend',
+      pr_url: 'https://github.com/o/r/pull/1',
+      usage_payload_json: '{"model":"gpt-5-codex","service_tier":"priority"}',
+    });
     const task = db.getTask(taskId);
     assert.strictEqual(task.status, 'ready');
     assert.strictEqual(task.domain, 'backend');
+    assert.strictEqual(task.usage_payload_json, '{"model":"gpt-5-codex","service_tier":"priority"}');
   });
 
   it('should accept routing telemetry columns in updateTask', () => {

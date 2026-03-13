@@ -214,6 +214,24 @@ describe('Dashboard telemetry rendering', () => {
           usage_input_tokens: 0,
           usage_cached_tokens: 10,
         },
+        {
+          id: 45,
+          status: 'assigned',
+          subject: 'Raw usage payload JSON task',
+          domain: 'coordinator-tests',
+          tier: 3,
+          assigned_to: 3,
+          usage_payload_json: JSON.stringify({
+            model: 'gpt-5-codex',
+            input_tokens: 321,
+            output_tokens: 123,
+            cache_creation_tokens: 22,
+            cached_tokens: 11,
+            total_tokens: 444,
+            cost_usd: 0.0444,
+            service_tier: 'priority',
+          }),
+        },
       ],
       routing_budget_source: 'activity_log:allocator.task_assigned',
       routing_budget_state: {
@@ -248,6 +266,15 @@ describe('Dashboard telemetry rendering', () => {
     assert.match(zeroInputTask, /task-chip-label">in<\/span>0/);
     assert.match(zeroInputTask, /task-chip-label">cached<\/span>10/);
     assert.doesNotMatch(zeroInputTask, /task-chip-label">cache-hit<\/span>/);
+    const rawUsagePayloadTask = html.split('<div class="task-item">').find((item) => item.includes('Raw usage payload JSON task'));
+    assert.ok(rawUsagePayloadTask, 'Expected raw usage payload dashboard task to render');
+    assert.match(rawUsagePayloadTask, /task-chip-label">usage<\/span>gpt-5-codex/);
+    assert.match(rawUsagePayloadTask, /task-chip-label">in<\/span>321/);
+    assert.match(rawUsagePayloadTask, /task-chip-label">out<\/span>123/);
+    assert.match(rawUsagePayloadTask, /task-chip-label">cache-create<\/span>22/);
+    assert.match(rawUsagePayloadTask, /task-chip-label">cached<\/span>11/);
+    assert.match(rawUsagePayloadTask, /task-chip-label">total<\/span>444/);
+    assert.match(rawUsagePayloadTask, /task-chip-label">cost<\/span>0\.0444/);
 
     assert.match(html, /task-budget-indicator/);
     assert.match(html, /task-chip-label">source<\/span>activity_log:allocator\.task_assigned/);

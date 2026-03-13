@@ -314,9 +314,32 @@
     return `<span class="task-chip"><span class="task-chip-label">${escapeHtml(label)}</span>${escapeHtml(value)}</span>`;
   }
 
+  function parseUsagePayloadFromTask(task) {
+    if (!task || typeof task !== 'object') return null;
+    const objectCandidates = [task.usage_payload, task.usagePayload];
+    for (const candidate of objectCandidates) {
+      if (candidate && typeof candidate === 'object' && !Array.isArray(candidate)) {
+        return candidate;
+      }
+    }
+    const jsonCandidate = task.usage_payload_json !== undefined
+      ? task.usage_payload_json
+      : task.usagePayloadJson;
+    if (typeof jsonCandidate !== 'string') return null;
+    const trimmed = jsonCandidate.trim();
+    if (!trimmed) return null;
+    try {
+      const parsed = JSON.parse(trimmed);
+      return parsed && typeof parsed === 'object' && !Array.isArray(parsed) ? parsed : null;
+    } catch {
+      return null;
+    }
+  }
+
   function readTaskTelemetry(task) {
     const routing = task && task.routing && typeof task.routing === 'object' ? task.routing : null;
-    const usage = task && task.usage && typeof task.usage === 'object' ? task.usage : null;
+    const usagePayload = parseUsagePayloadFromTask(task);
+    const usage = task && task.usage && typeof task.usage === 'object' ? task.usage : usagePayload;
     const usageCacheCreation = usage && usage.cache_creation && typeof usage.cache_creation === 'object' ? usage.cache_creation : null;
     const usageCacheCreationCamel = usage && usage.cacheCreation && typeof usage.cacheCreation === 'object' ? usage.cacheCreation : null;
     const usageInputTokensCandidates = [

@@ -562,6 +562,7 @@ describe('CLI Server', () => {
     assert.strictEqual(completedTask.usage_cache_creation_tokens, null);
     assert.strictEqual(completedTask.usage_total_tokens, null);
     assert.strictEqual(completedTask.usage_cost_usd, null);
+    assert.strictEqual(completedTask.usage_payload_json, null);
     assert.strictEqual(db.getWorker(1).status, 'completed_task');
   });
 
@@ -743,6 +744,20 @@ describe('CLI Server', () => {
     assert.strictEqual(completedTask.usage_cache_creation_tokens, usage.cache_creation_tokens);
     assert.strictEqual(completedTask.usage_total_tokens, usage.total_tokens);
     assert.strictEqual(completedTask.usage_cost_usd, usage.cost_usd);
+    assert.deepStrictEqual(JSON.parse(completedTask.usage_payload_json), {
+      model: 'gpt-5-codex',
+      input_tokens: usage.input_tokens,
+      output_tokens: usage.output_tokens,
+      input_audio_tokens: usage.input_audio_tokens,
+      output_audio_tokens: usage.output_audio_tokens,
+      reasoning_tokens: usage.reasoning_tokens,
+      accepted_prediction_tokens: usage.accepted_prediction_tokens,
+      rejected_prediction_tokens: usage.rejected_prediction_tokens,
+      cached_tokens: usage.cached_tokens,
+      cache_creation_tokens: usage.cache_creation_tokens,
+      total_tokens: usage.total_tokens,
+      cost_usd: usage.cost_usd,
+    });
 
     const completedWorker = db.getWorker(1);
     assert.strictEqual(completedWorker.status, 'completed_task');
@@ -1046,6 +1061,18 @@ describe('CLI Server', () => {
     assert.strictEqual(failedTask.usage_cached_tokens, usage.cache_read_input_tokens);
     assert.strictEqual(failedTask.usage_total_tokens, usage.total_tokens);
     assert.strictEqual(failedTask.usage_cost_usd, usage.cost_usd);
+    assert.deepStrictEqual(JSON.parse(failedTask.usage_payload_json), {
+      model: usage.model,
+      input_tokens: usage.input_tokens,
+      output_tokens: usage.output_tokens,
+      cache_creation_tokens: usage.cache_creation_input_tokens,
+      cached_tokens: usage.cache_read_input_tokens,
+      total_tokens: usage.total_tokens,
+      cost_usd: usage.cost_usd,
+      service_tier: usage.service_tier,
+      tool_use_prompt_token_count: usage.tool_use_prompt_token_count,
+      thoughts_token_count: usage.thoughts_token_count,
+    });
 
     const allocatorFailureMessage = db.checkMail('allocator', false)
       .find((message) => message.type === 'task_failed' && String(message.payload.task_id) === String(taskId));
@@ -1442,6 +1469,18 @@ describe('CLI Server', () => {
     assert.strictEqual(completedTask.usage_cached_tokens, usage.cache_read_input_tokens);
     assert.strictEqual(completedTask.usage_total_tokens, usage.total_tokens);
     assert.strictEqual(completedTask.usage_cost_usd, usage.cost_usd);
+    assert.deepStrictEqual(JSON.parse(completedTask.usage_payload_json), {
+      model: usage.model,
+      input_tokens: usage.prompt_tokens,
+      output_tokens: usage.completion_tokens,
+      cache_creation_tokens: usage.cache_creation_input_tokens,
+      cached_tokens: usage.cache_read_input_tokens,
+      total_tokens: usage.total_tokens,
+      cost_usd: usage.cost_usd,
+      service_tier: usage.service_tier,
+      tool_use_prompt_token_count: usage.tool_use_prompt_token_count,
+      thoughts_token_count: usage.thoughts_token_count,
+    });
 
     const allocatorCompletionMessage = db.checkMail('allocator', false)
       .find((message) => message.type === 'task_completed' && String(message.payload.task_id) === String(taskId));

@@ -822,6 +822,9 @@ function mapUsagePayloadToTaskFields(usage, taskRow = null) {
     if (taskRow && !Object.prototype.hasOwnProperty.call(taskRow, columnName)) continue;
     mapped[columnName] = normalizedUsage[usageKey];
   }
+  if (!taskRow || Object.prototype.hasOwnProperty.call(taskRow, 'usage_payload_json')) {
+    mapped.usage_payload_json = JSON.stringify(normalizedUsage);
+  }
   return mapped;
 }
 
