@@ -31,18 +31,16 @@ function getExplicitConfigValue(getConfig, key) {
 
 const SPARK_MODEL_KEYS = Object.freeze(['model_codex_spark', 'model_spark']);
 
-function getSparkModelConfigValue(getConfig, fallback) {
-  return getConfigValue(
-    getConfig,
-    SPARK_MODEL_KEYS[0],
-    getConfigValue(getConfig, SPARK_MODEL_KEYS[1], fallback)
-  );
+function getExplicitSparkModelSelection(getConfig) {
+  for (const key of SPARK_MODEL_KEYS) {
+    const value = getExplicitConfigValue(getConfig, key);
+    if (value) return { key, value };
+  }
+  return { key: null, value: null };
 }
 
-function getExplicitSparkModelOverride(getConfig) {
-  const primary = getExplicitConfigValue(getConfig, SPARK_MODEL_KEYS[0]);
-  if (primary) return primary;
-  return getExplicitConfigValue(getConfig, SPARK_MODEL_KEYS[1]);
+function getSparkModelConfigValue(getConfig, fallback) {
+  return getExplicitSparkModelSelection(getConfig).value || fallback;
 }
 
 function getFallbackDefaultModel(getConfig, routingClass) {
@@ -251,8 +249,11 @@ function fallbackModelRouter() {
       const routingShift = getFallbackRoutingShift(routingClass, effectiveClass);
 
       const defaultModel = getFallbackDefaultModel(getConfig, effectiveClass);
+      const explicitSparkModelSelection = effectiveClass === 'spark'
+        ? getExplicitSparkModelSelection(getConfig)
+        : null;
       const explicitModelOverride = effectiveClass === 'spark'
-        ? getExplicitSparkModelOverride(getConfig)
+        ? explicitSparkModelSelection.value
         : getExplicitConfigValue(getConfig, `model_${effectiveClass}`);
       const configuredModel = explicitModelOverride || defaultModel;
       const routingReason = routingShift === 'downscale'
@@ -260,8 +261,13 @@ function fallbackModelRouter() {
         : routingShift === 'upscale'
           ? `fallback-budget-upgrade:${routingClass}->${effectiveClass}`
           : 'fallback-routing:class-default';
+      const downgradeModelSourceKey = effectiveClass === 'spark'
+        ? (explicitSparkModelSelection && explicitSparkModelSelection.key
+          ? explicitSparkModelSelection.key
+          : 'model_spark')
+        : `model_${effectiveClass}`;
       const modelSource = routingShift === 'downscale'
-        ? `budget-downgrade:model_${effectiveClass}`
+        ? `budget-downgrade:${downgradeModelSourceKey}`
         : routingShift === 'upscale'
           ? `budget-upgrade:model_${effectiveClass}`
           : explicitModelOverride
