@@ -7,6 +7,7 @@ const fs = require('fs');
 const os = require('os');
 const net = require('net');
 const http = require('http');
+const { execFile } = require('child_process');
 
 const db = require('../src/db');
 const cliServer = require('../src/cli-server');
@@ -92,6 +93,19 @@ function requestWebJson(port, reqPath) {
     });
     req.on('error', reject);
     req.end();
+  });
+}
+
+function runMac10Cli(args) {
+  const cliPath = path.join(__dirname, '..', 'bin', 'mac10');
+  return new Promise((resolve) => {
+    execFile(process.execPath, [cliPath, '--project', tmpDir, ...args], { encoding: 'utf8' }, (error, stdout, stderr) => {
+      resolve({
+        status: error ? (Number.isInteger(error.code) ? error.code : 1) : 0,
+        stdout,
+        stderr,
+      });
+    });
   });
 }
 
@@ -184,6 +198,40 @@ describe('CLI Server', () => {
     assert.strictEqual(result.ok, true);
     assert.ok(result.requests.length >= 1);
     assert.strictEqual(result.workers.length, 1);
+  });
+
+  it('should keep status request rows single-line and preserve clean descriptions', async () => {
+    const clean = await sendCommand('request', { description: 'Clean status description for readability' });
+    assert.strictEqual(clean.ok, true);
+    const malicious = await sendCommand('request', {
+      description: 'Malicious prefix\n  req-evil [completed] T9 injected\tcolumn\rreturn\u0007bell',
+    });
+    assert.strictEqual(malicious.ok, true);
+
+    const result = await runMac10Cli(['status']);
+    assert.strictEqual(result.status, 0, result.stderr);
+    assert.strictEqual(result.stderr, '');
+
+    const lines = result.stdout.split(/\r?\n/);
+    const requestsStart = lines.indexOf('=== Requests ===');
+    const workersStart = lines.indexOf('=== Workers ===');
+    assert.ok(requestsStart >= 0);
+    assert.ok(workersStart > requestsStart);
+
+    const requestRows = lines
+      .slice(requestsStart + 1, workersStart)
+      .filter((line) => line.startsWith('  req-'));
+    assert.strictEqual(requestRows.length, 2);
+
+    const cleanRow = requestRows.find((line) => line.includes(clean.request_id));
+    const maliciousRow = requestRows.find((line) => line.includes(malicious.request_id));
+    assert.ok(cleanRow);
+    assert.ok(maliciousRow);
+    assert.match(cleanRow, /Clean status description for readability/);
+    assert.ok(!maliciousRow.includes('\t'));
+    assert.ok(!maliciousRow.includes('\r'));
+    assert.match(maliciousRow, /req-evil \[completed\] T9 injected/);
+    assert.ok(!result.stdout.includes('\n  req-evil [completed] T9 injected\tcolumn\rreturn'));
   });
 
   it('should handle triage', async () => {
@@ -554,6 +602,42 @@ describe('CLI Server', () => {
 
     const queuedEvents = getCoordinatorRequestQueuedEvents(loopRequest.request_id);
     assert.strictEqual(queuedEvents.length, 1);
+  });
+
+  it('should keep loop-requests rows single-line with control-char descriptions', async () => {
+    const createdLoop = await sendCommand('loop', { prompt: 'Loop request row sanitization' });
+    assert.strictEqual(createdLoop.ok, true);
+
+    const clean = await sendCommand('loop-request', {
+      loop_id: createdLoop.loop_id,
+      description: 'Clean loop request summary',
+    });
+    assert.strictEqual(clean.ok, true);
+
+    const malicious = await sendCommand('loop-request', {
+      loop_id: createdLoop.loop_id,
+      description: 'Malicious loop row\n  999 [failed] T9 injected\tcol\rret\u0001ctrl',
+    });
+    assert.strictEqual(malicious.ok, true);
+
+    const result = await runMac10Cli(['loop-requests', String(createdLoop.loop_id)]);
+    assert.strictEqual(result.status, 0, result.stderr);
+    assert.strictEqual(result.stderr, '');
+
+    const rows = result.stdout
+      .split(/\r?\n/)
+      .filter((line) => line.startsWith('  '));
+    assert.strictEqual(rows.length, 2);
+
+    const cleanRow = rows.find((line) => line.includes(String(clean.request_id)));
+    const maliciousRow = rows.find((line) => line.includes(String(malicious.request_id)));
+    assert.ok(cleanRow);
+    assert.ok(maliciousRow);
+    assert.match(cleanRow, /Clean loop request summary/);
+    assert.match(maliciousRow, /999 \[failed\] T9 injected/);
+    assert.ok(!maliciousRow.includes('\t'));
+    assert.ok(!maliciousRow.includes('\r'));
+    assert.ok(!result.stdout.includes('\n  999 [failed] T9 injected\tcol\rret'));
   });
 
   it('should label default fallback assignments as fallback-default in response and logs', async () => {
