@@ -77,17 +77,31 @@ function buildTaskOverlay(task, worker, projectDir) {
   }
 
   if (task.validation) {
-    let val;
-    try {
-      val = typeof task.validation === 'string' ? JSON.parse(task.validation) : task.validation;
-    } catch { val = null; }
+    let val = null;
+    if (typeof task.validation === 'string') {
+      const trimmed = task.validation.trim();
+      if (trimmed) {
+        try {
+          val = JSON.parse(trimmed);
+        } catch {
+          val = trimmed;
+        }
+      }
+    } else {
+      val = task.validation;
+    }
     if (val) {
       lines.push('## Validation');
       lines.push('');
-      if (val.build_cmd) lines.push(`- Build: \`${val.build_cmd}\``);
-      if (val.test_cmd) lines.push(`- Test: \`${val.test_cmd}\``);
-      if (val.lint_cmd) lines.push(`- Lint: \`${val.lint_cmd}\``);
-      if (val.custom) lines.push(`- Custom: ${val.custom}`);
+      if (typeof val === 'string') {
+        lines.push(`- Command: \`${val}\``);
+      } else {
+        if (val.build_cmd) lines.push(`- Build: \`${val.build_cmd}\``);
+        if (val.test_cmd) lines.push(`- Test: \`${val.test_cmd}\``);
+        if (val.lint_cmd) lines.push(`- Lint: \`${val.lint_cmd}\``);
+        if (val.custom) lines.push(`- Custom: ${val.custom}`);
+      }
+      lines.push('- Note: Run only explicitly provided validation commands; do not assume `npm run build` exists.');
       lines.push('');
     }
   }
@@ -164,7 +178,7 @@ You are a coding worker in the mac10 multi-agent system. You receive tasks from 
 5. **Report completion.** Run \`mac10 complete-task <worker_id> <task_id> [pr_url] [branch] [result] [--usage JSON]\` and include usage telemetry when available.
 6. **On failure.** Run \`mac10 fail-task <worker_id> <task_id> <error_description>\`.
 7. **Stay in your domain.** Only modify files related to your assigned domain.
-8. **Validate before shipping.** Build and test your changes before creating a PR.
+8. **Validate before shipping.** Run task-specific validation commands (or validator subagents) before creating a PR; do not assume \`npm run build\` exists.
 `;
 }
 
