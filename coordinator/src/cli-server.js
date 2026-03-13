@@ -1516,6 +1516,10 @@ function createConnectionHandler(handlers) {
 }
 
 function start(projectDir, handlers) {
+  if (typeof process.env.npm_config_if_present === 'undefined') {
+    process.env.npm_config_if_present = 'true';
+  }
+
   _projectDir = projectDir;
   if (typeof process.env.npm_config_if_present === 'undefined') {
     process.env.npm_config_if_present = 'true';

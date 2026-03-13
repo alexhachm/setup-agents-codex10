@@ -278,6 +278,52 @@ describe('CLI Server', () => {
     assert.ok(result.ts);
   });
 
+  it('should default npm_config_if_present to true when unset', async () => {
+    const originalIfPresent = process.env.npm_config_if_present;
+    try {
+      cliServer.stop();
+      delete process.env.npm_config_if_present;
+      server = cliServer.start(tmpDir, {
+        onTaskCompleted: () => {},
+        onLoopCreated: (loopId, prompt) => {
+          loopCreatedEvents.push({ loopId, prompt });
+        },
+      });
+      await waitForCliServerReady();
+
+      assert.strictEqual(process.env.npm_config_if_present, 'true');
+    } finally {
+      if (typeof originalIfPresent === 'undefined') {
+        delete process.env.npm_config_if_present;
+      } else {
+        process.env.npm_config_if_present = originalIfPresent;
+      }
+    }
+  });
+
+  it('should preserve explicit npm_config_if_present overrides', async () => {
+    const originalIfPresent = process.env.npm_config_if_present;
+    try {
+      cliServer.stop();
+      process.env.npm_config_if_present = 'false';
+      server = cliServer.start(tmpDir, {
+        onTaskCompleted: () => {},
+        onLoopCreated: (loopId, prompt) => {
+          loopCreatedEvents.push({ loopId, prompt });
+        },
+      });
+      await waitForCliServerReady();
+
+      assert.strictEqual(process.env.npm_config_if_present, 'false');
+    } finally {
+      if (typeof originalIfPresent === 'undefined') {
+        delete process.env.npm_config_if_present;
+      } else {
+        process.env.npm_config_if_present = originalIfPresent;
+      }
+    }
+  });
+
   it('should create a request', async () => {
     const result = await sendCommand('request', { description: 'Add login page' });
     assert.strictEqual(result.ok, true);
