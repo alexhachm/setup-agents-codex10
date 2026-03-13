@@ -26,9 +26,31 @@ const COMPLETE_TASK_USAGE_FIELDS = Object.freeze({
   cost_usd: 'number',
 });
 const COMPLETE_TASK_USAGE_ALIASES = Object.freeze({
+  prompt_tokens: 'input_tokens',
+  completion_tokens: 'output_tokens',
   cache_creation_input_tokens: 'cache_creation_tokens',
   cache_read_input_tokens: 'cached_tokens',
 });
+const COMPLETE_TASK_USAGE_DETAIL_ALIASES = Object.freeze({
+  input_tokens_details: 'cached_tokens',
+  prompt_tokens_details: 'cached_tokens',
+});
+
+function normalizeCompleteTaskUsageEntry(rawField, rawValue) {
+  if (Object.prototype.hasOwnProperty.call(COMPLETE_TASK_USAGE_DETAIL_ALIASES, rawField)) {
+    if (rawValue === null) {
+      return { canonicalField: COMPLETE_TASK_USAGE_DETAIL_ALIASES[rawField], value: null };
+    }
+    if (!rawValue || typeof rawValue !== 'object' || Array.isArray(rawValue)) {
+      throw new Error(`complete-task usage field "${rawField}" must be an object`);
+    }
+    if (!Object.prototype.hasOwnProperty.call(rawValue, 'cached_tokens')) {
+      return null;
+    }
+    return { canonicalField: COMPLETE_TASK_USAGE_DETAIL_ALIASES[rawField], value: rawValue.cached_tokens };
+  }
+  return { canonicalField: COMPLETE_TASK_USAGE_ALIASES[rawField] || rawField, value: rawValue };
+}
 
 function completionStatusLabel(completion) {
   const total = Number(completion && completion.total) || 0;
@@ -501,11 +523,16 @@ function parseCompleteTaskUsage(rawUsage) {
 
   const aliasNormalized = {};
   for (const [rawField, value] of Object.entries(parsed)) {
-    const canonicalField = COMPLETE_TASK_USAGE_ALIASES[rawField] || rawField;
-    if (Object.prototype.hasOwnProperty.call(aliasNormalized, canonicalField) && aliasNormalized[canonicalField] !== value) {
+    const normalizedEntry = normalizeCompleteTaskUsageEntry(rawField, value);
+    if (!normalizedEntry) continue;
+    const { canonicalField, value: canonicalValue } = normalizedEntry;
+    if (
+      Object.prototype.hasOwnProperty.call(aliasNormalized, canonicalField)
+      && aliasNormalized[canonicalField] !== canonicalValue
+    ) {
       throw new Error(`complete-task usage contains conflicting values for "${canonicalField}"`);
     }
-    aliasNormalized[canonicalField] = value;
+    aliasNormalized[canonicalField] = canonicalValue;
   }
 
   const unknownFields = Object.keys(aliasNormalized)
