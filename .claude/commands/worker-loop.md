@@ -32,7 +32,7 @@ Read these files to learn from previous work:
 Determine your worker ID from the git branch (`agent-N` → worker N).
 
 ```bash
-WORKER_ID=$(git branch --show-current | sed 's/agent-//')
+WORKER_ID=$(git branch --show-current | sed -E 's/^agent-([0-9]+).*/\1/')
 ```
 
 Fetch your assigned task:
@@ -78,7 +78,7 @@ On conflict: `git rebase --abort && git reset --hard origin/main`
    ```bash
    mac10 heartbeat $WORKER_ID
    ```
-5. **Self-verify**: run the build/test commands from the task's validation field
+5. **Self-verify**: run only explicit commands listed in the task validation details. If `validation` is shorthand metadata (`tier2`/`tier3`), do not execute it as a command and do not assume `npm run build`.
 
 ## Step 6: Validate
 
@@ -102,6 +102,8 @@ Run `/commit-push-pr` to create the PR.
 After the PR is created:
 
 ```bash
+mac10 complete-task $WORKER_ID $TASK_ID "$PR_URL" "$BRANCH" "Brief result summary"
+# Optional usage telemetry:
 mac10 complete-task $WORKER_ID $TASK_ID "$PR_URL" "$BRANCH" "Brief result summary" --usage '{"model":"gpt-5","input_tokens":1200,"output_tokens":350,"cached_input_tokens":90,"total_tokens":1550,"cost_usd":0.42}'
 ```
 
