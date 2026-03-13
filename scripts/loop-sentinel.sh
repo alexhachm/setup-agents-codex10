@@ -78,7 +78,9 @@ while true; do
               ? payload.data.requests
               : Array.isArray(payload?.data?.rows)
                 ? payload.data.rows
-                : Array.isArray(payload?.data)
+                : Array.isArray(payload?.rows)
+                  ? payload.rows
+                  : Array.isArray(payload?.data)
                   ? payload.data
                   : Array.isArray(payload)
                     ? payload
