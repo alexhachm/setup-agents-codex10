@@ -686,10 +686,11 @@ function normalizeCompleteTaskUsageAliasEntries(rawUsage) {
       if (!rawValue || typeof rawValue !== 'object' || Array.isArray(rawValue)) {
         throw new Error('Field "usage.cache_creation" must be an object');
       }
-      const unsupportedNestedFields = Object.keys(rawValue)
-        .filter((nestedField) => !COMPLETE_TASK_USAGE_CACHE_CREATION_OBJECT_ALIASES.includes(nestedField));
-      if (unsupportedNestedFields.length) {
-        throw new Error(`Field "usage.cache_creation" contains unsupported keys: ${unsupportedNestedFields.join(', ')}`);
+      const passthroughNestedFields = {};
+      for (const [nestedField, nestedValue] of Object.entries(rawValue)) {
+        if (!COMPLETE_TASK_USAGE_CACHE_CREATION_OBJECT_ALIASES.includes(nestedField)) {
+          passthroughNestedFields[nestedField] = nestedValue;
+        }
       }
       const cacheCreationEntries = [];
       let cacheCreationTokens = 0;
@@ -703,19 +704,23 @@ function normalizeCompleteTaskUsageAliasEntries(rawUsage) {
           canonicalValue: nestedValue,
         });
       }
-      if (!cacheCreationEntries.length) continue;
-      cacheCreationEntries.push({
-        canonicalField: 'cache_creation_tokens',
-        canonicalValue: cacheCreationTokens,
-      });
-      for (const { canonicalField, canonicalValue } of cacheCreationEntries) {
-        if (
-          Object.prototype.hasOwnProperty.call(aliasNormalized, canonicalField)
-          && aliasNormalized[canonicalField] !== canonicalValue
-        ) {
-          throw new Error(`Field "usage" contains conflicting values for key "${canonicalField}"`);
+      if (cacheCreationEntries.length) {
+        cacheCreationEntries.push({
+          canonicalField: 'cache_creation_tokens',
+          canonicalValue: cacheCreationTokens,
+        });
+        for (const { canonicalField, canonicalValue } of cacheCreationEntries) {
+          if (
+            Object.prototype.hasOwnProperty.call(aliasNormalized, canonicalField)
+            && aliasNormalized[canonicalField] !== canonicalValue
+          ) {
+            throw new Error(`Field "usage" contains conflicting values for key "${canonicalField}"`);
+          }
+          aliasNormalized[canonicalField] = canonicalValue;
         }
-        aliasNormalized[canonicalField] = canonicalValue;
+      }
+      if (Object.keys(passthroughNestedFields).length) {
+        unknownFields[rawField] = passthroughNestedFields;
       }
       continue;
     }
@@ -723,6 +728,8 @@ function normalizeCompleteTaskUsageAliasEntries(rawUsage) {
     if (Object.prototype.hasOwnProperty.call(COMPLETE_TASK_USAGE_DETAIL_ALIASES, rawField)) {
       const detailAliases = COMPLETE_TASK_USAGE_DETAIL_ALIASES[rawField];
       const detailEntries = [];
+      const detailAliasFields = new Set(detailAliases.map((detailAlias) => detailAlias.detailField));
+      const passthroughNestedFields = {};
       if (rawValue === null) {
         for (const detailAlias of detailAliases) {
           detailEntries.push({ canonicalField: detailAlias.canonicalField, canonicalValue: null });
@@ -730,6 +737,11 @@ function normalizeCompleteTaskUsageAliasEntries(rawUsage) {
       } else {
         if (!rawValue || typeof rawValue !== 'object' || Array.isArray(rawValue)) {
           throw new Error(`Field "usage.${rawField}" must be an object`);
+        }
+        for (const [nestedField, nestedValue] of Object.entries(rawValue)) {
+          if (!detailAliasFields.has(nestedField)) {
+            passthroughNestedFields[nestedField] = nestedValue;
+          }
         }
         for (const detailAlias of detailAliases) {
           if (!Object.prototype.hasOwnProperty.call(rawValue, detailAlias.detailField)) {
@@ -749,6 +761,9 @@ function normalizeCompleteTaskUsageAliasEntries(rawUsage) {
           throw new Error(`Field "usage" contains conflicting values for key "${canonicalField}"`);
         }
         aliasNormalized[canonicalField] = canonicalValue;
+      }
+      if (Object.keys(passthroughNestedFields).length) {
+        unknownFields[rawField] = passthroughNestedFields;
       }
       continue;
     }

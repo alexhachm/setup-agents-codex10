@@ -83,10 +83,11 @@ function normalizeCompleteTaskUsageEntries(rawField, rawValue) {
     if (!rawValue || typeof rawValue !== 'object' || Array.isArray(rawValue)) {
       throw new Error('complete-task usage field "cache_creation" must be an object');
     }
-    const unsupportedNestedFields = Object.keys(rawValue)
-      .filter((nestedField) => !COMPLETE_TASK_USAGE_CACHE_CREATION_OBJECT_ALIASES.includes(nestedField));
-    if (unsupportedNestedFields.length) {
-      throw new Error(`complete-task usage field "cache_creation" contains unsupported field(s): ${unsupportedNestedFields.join(', ')}`);
+    const passthroughNestedFields = {};
+    for (const [nestedField, nestedValue] of Object.entries(rawValue)) {
+      if (!COMPLETE_TASK_USAGE_CACHE_CREATION_OBJECT_ALIASES.includes(nestedField)) {
+        passthroughNestedFields[nestedField] = nestedValue;
+      }
     }
     const cacheCreationEntries = [];
     let cacheCreationTokens = 0;
@@ -97,20 +98,34 @@ function normalizeCompleteTaskUsageEntries(rawField, rawValue) {
       cacheCreationTokens += nestedValue;
       cacheCreationEntries.push({ canonicalField: nestedField, value: nestedValue });
     }
-    if (!cacheCreationEntries.length) return [];
-    cacheCreationEntries.push({ canonicalField: 'cache_creation_tokens', value: cacheCreationTokens });
-    return cacheCreationEntries;
+    if (cacheCreationEntries.length) {
+      cacheCreationEntries.push({ canonicalField: 'cache_creation_tokens', value: cacheCreationTokens });
+    }
+    return {
+      normalizedEntries: cacheCreationEntries,
+      passthroughUnknown: Object.keys(passthroughNestedFields).length ? passthroughNestedFields : null,
+    };
   }
 
   if (Object.prototype.hasOwnProperty.call(COMPLETE_TASK_USAGE_DETAIL_ALIASES, rawField)) {
     const detailAliases = COMPLETE_TASK_USAGE_DETAIL_ALIASES[rawField];
     if (rawValue === null) {
-      return detailAliases.map((detailAlias) => ({ canonicalField: detailAlias.canonicalField, value: null }));
+      return {
+        normalizedEntries: detailAliases.map((detailAlias) => ({ canonicalField: detailAlias.canonicalField, value: null })),
+        passthroughUnknown: null,
+      };
     }
     if (!rawValue || typeof rawValue !== 'object' || Array.isArray(rawValue)) {
       throw new Error(`complete-task usage field "${rawField}" must be an object`);
     }
     const normalizedEntries = [];
+    const detailAliasFields = new Set(detailAliases.map((detailAlias) => detailAlias.detailField));
+    const passthroughNestedFields = {};
+    for (const [detailField, detailValue] of Object.entries(rawValue)) {
+      if (!detailAliasFields.has(detailField)) {
+        passthroughNestedFields[detailField] = detailValue;
+      }
+    }
     for (const detailAlias of detailAliases) {
       if (!Object.prototype.hasOwnProperty.call(rawValue, detailAlias.detailField)) {
         continue;
@@ -120,9 +135,15 @@ function normalizeCompleteTaskUsageEntries(rawField, rawValue) {
         value: rawValue[detailAlias.detailField],
       });
     }
-    return normalizedEntries;
+    return {
+      normalizedEntries,
+      passthroughUnknown: Object.keys(passthroughNestedFields).length ? passthroughNestedFields : null,
+    };
   }
-  return [{ canonicalField: COMPLETE_TASK_USAGE_ALIASES[rawField] || rawField, value: rawValue }];
+  return {
+    normalizedEntries: [{ canonicalField: COMPLETE_TASK_USAGE_ALIASES[rawField] || rawField, value: rawValue }],
+    passthroughUnknown: null,
+  };
 }
 
 function completionStatusLabel(completion) {
@@ -659,7 +680,10 @@ function parseCompleteTaskUsage(rawUsage) {
   const aliasNormalized = {};
   const unknownUsageFields = {};
   for (const [rawField, value] of Object.entries(parsed)) {
-    const normalizedEntries = normalizeCompleteTaskUsageEntries(rawField, value);
+    const { normalizedEntries, passthroughUnknown } = normalizeCompleteTaskUsageEntries(rawField, value);
+    if (passthroughUnknown && Object.keys(passthroughUnknown).length) {
+      unknownUsageFields[rawField] = passthroughUnknown;
+    }
     for (const normalizedEntry of normalizedEntries) {
       const { canonicalField, value: canonicalValue } = normalizedEntry;
       if (!Object.prototype.hasOwnProperty.call(COMPLETE_TASK_USAGE_FIELDS, canonicalField)) {
