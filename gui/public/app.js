@@ -299,6 +299,8 @@
     if (telemetry.usageCachedTokens) chips.push(renderTelemetryChip('cached', telemetry.usageCachedTokens));
     if (telemetry.cacheHitRate) chips.push(renderTelemetryChip('cache-hit', telemetry.cacheHitRate));
     if (telemetry.usageCacheCreationTokens) chips.push(renderTelemetryChip('cache-create', telemetry.usageCacheCreationTokens));
+    if (telemetry.usageCacheCreationEphemeral5mInputTokens) chips.push(renderTelemetryChip('cache-create-5m', telemetry.usageCacheCreationEphemeral5mInputTokens));
+    if (telemetry.usageCacheCreationEphemeral1hInputTokens) chips.push(renderTelemetryChip('cache-create-1h', telemetry.usageCacheCreationEphemeral1hInputTokens));
     if (telemetry.usageReasoningTokens) chips.push(renderTelemetryChip('reasoning', telemetry.usageReasoningTokens));
     if (telemetry.usageAcceptedPredictionTokens) chips.push(renderTelemetryChip('pred-hit', telemetry.usageAcceptedPredictionTokens));
     if (telemetry.usageRejectedPredictionTokens) chips.push(renderTelemetryChip('pred-miss', telemetry.usageRejectedPredictionTokens));
@@ -315,6 +317,8 @@
   function readTaskTelemetry(task) {
     const routing = task && task.routing && typeof task.routing === 'object' ? task.routing : null;
     const usage = task && task.usage && typeof task.usage === 'object' ? task.usage : null;
+    const usageCacheCreation = usage && usage.cache_creation && typeof usage.cache_creation === 'object' ? usage.cache_creation : null;
+    const usageCacheCreationCamel = usage && usage.cacheCreation && typeof usage.cacheCreation === 'object' ? usage.cacheCreation : null;
     const usageInputTokensCandidates = [
       task && task.usage_input_tokens,
       task && task.usageInputTokens,
@@ -352,7 +356,35 @@
         usage && usage.cache_creation_tokens,
         usage && usage.cacheCreationTokens,
         usage && usage.cache_creation_input_tokens,
-        usage && usage.cacheCreationInputTokens
+        usage && usage.cacheCreationInputTokens,
+        usageCacheCreation && usageCacheCreation.cache_creation_tokens,
+        usageCacheCreation && usageCacheCreation.cacheCreationTokens,
+        usageCacheCreation && usageCacheCreation.cache_creation_input_tokens,
+        usageCacheCreation && usageCacheCreation.cacheCreationInputTokens,
+        usageCacheCreationCamel && usageCacheCreationCamel.cache_creation_tokens,
+        usageCacheCreationCamel && usageCacheCreationCamel.cacheCreationTokens,
+        usageCacheCreationCamel && usageCacheCreationCamel.cache_creation_input_tokens,
+        usageCacheCreationCamel && usageCacheCreationCamel.cacheCreationInputTokens
+      ),
+      usageCacheCreationEphemeral5mInputTokens: pickTelemetryValue(
+        task && task.usage_cache_creation_ephemeral_5m_input_tokens,
+        task && task.usageCacheCreationEphemeral5mInputTokens,
+        usage && usage.ephemeral_5m_input_tokens,
+        usage && usage.ephemeral5mInputTokens,
+        usageCacheCreation && usageCacheCreation.ephemeral_5m_input_tokens,
+        usageCacheCreation && usageCacheCreation.ephemeral5mInputTokens,
+        usageCacheCreationCamel && usageCacheCreationCamel.ephemeral_5m_input_tokens,
+        usageCacheCreationCamel && usageCacheCreationCamel.ephemeral5mInputTokens
+      ),
+      usageCacheCreationEphemeral1hInputTokens: pickTelemetryValue(
+        task && task.usage_cache_creation_ephemeral_1h_input_tokens,
+        task && task.usageCacheCreationEphemeral1hInputTokens,
+        usage && usage.ephemeral_1h_input_tokens,
+        usage && usage.ephemeral1hInputTokens,
+        usageCacheCreation && usageCacheCreation.ephemeral_1h_input_tokens,
+        usageCacheCreation && usageCacheCreation.ephemeral1hInputTokens,
+        usageCacheCreationCamel && usageCacheCreationCamel.ephemeral_1h_input_tokens,
+        usageCacheCreationCamel && usageCacheCreationCamel.ephemeral1hInputTokens
       ),
       usageReasoningTokens: pickTelemetryValue(
         task && task.usage_reasoning_tokens,
