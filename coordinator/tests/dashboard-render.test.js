@@ -440,6 +440,56 @@ describe('Popout telemetry rendering', () => {
     assert.doesNotMatch(zeroInputTask, /task-chip-label">cache-hit<\/span>/);
   });
 
+  it('renders constrained and healthy budget summaries from wrapped routing_budget_state payloads', () => {
+    const { renderTasks, panel } = loadPopoutRenderHarness();
+
+    const tasks = [
+      {
+        id: 77,
+        status: 'assigned',
+        subject: 'Popout wrapped budget telemetry',
+        domain: 'dashboard-ui',
+        tier: 2,
+        assigned_to: 4,
+      },
+    ];
+
+    renderTasks({
+      tasks,
+      routing_budget_state: {
+        source: 'activity_log:allocator.task_assigned',
+        parsed: {
+          flagship: { remaining: 2, threshold: 10 },
+        },
+        remaining: 2,
+        threshold: 10,
+      },
+    });
+
+    let html = panel.innerHTML;
+    assert.match(html, /task-budget-indicator/);
+    assert.match(html, /task-chip-label">source<\/span>activity_log:allocator\.task_assigned/);
+    assert.match(html, /task-chip-label">state<\/span>constrained \(2\/10\)/);
+    assert.doesNotMatch(html, /task-chip-label">state<\/span>keys: source, parsed, remaining/);
+
+    renderTasks({
+      tasks,
+      routing_budget_source: 'config:routing-budget',
+      routing_budget_state: {
+        source: 'activity_log:allocator.task_assigned',
+        parsed: {
+          flagship: { remaining: 25, threshold: 10 },
+        },
+        remaining: 25,
+        threshold: 10,
+      },
+    });
+
+    html = panel.innerHTML;
+    assert.match(html, /task-chip-label">source<\/span>config:routing-budget/);
+    assert.match(html, /task-chip-label">state<\/span>healthy \(25\/10\)/);
+  });
+
   it('omits usage chips when usage telemetry fields are absent or null', () => {
     const { renderTasks, panel } = loadPopoutRenderHarness();
 
