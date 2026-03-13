@@ -313,6 +313,7 @@ If `total_domains > 0` and `changed_domains * 2 >= total_domains`: full reset (S
 If `commits_since >= 5` and none of the full-reset conditions above fired, run this incremental rescan:
 1. Review changed files in a bounded pass:
    ```bash
+   mkdir -p .claude/state/reports
    printf '%s\n' "$changed_files" | sed '/^$/d' > .claude/state/reports/master2-incremental-scan-files.txt
    ```
    Use this list as the review queue and inspect each file before continuing.

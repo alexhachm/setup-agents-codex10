@@ -116,6 +116,7 @@ CLAUDE_DIR="$PROJECT_DIR/.claude"
 mkdir -p "$CLAUDE_DIR/commands"
 mkdir -p "$CLAUDE_DIR/commands-codex10"
 mkdir -p "$CLAUDE_DIR/state"
+mkdir -p "$PROJECT_DIR/.codex/state/reports"
 mkdir -p "$CLAUDE_DIR/knowledge/domain"
 mkdir -p "$CLAUDE_DIR/scripts"
 
