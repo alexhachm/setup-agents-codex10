@@ -32,7 +32,7 @@ Read these files to learn from previous work:
 Determine your worker ID from the git branch (`agent-N` → worker N).
 
 ```bash
-WORKER_ID=$(git branch --show-current | sed 's/agent-//')
+WORKER_ID=$(git branch --show-current | sed -E 's/^agent-([0-9]+).*/\1/')
 ```
 
 Fetch your assigned task:
@@ -78,7 +78,7 @@ On conflict: `git rebase --abort && git reset --hard origin/main`
    ```bash
    mac10 heartbeat $WORKER_ID
    ```
-5. **Self-verify**: run the build/test commands from the task's validation field
+5. **Self-verify**: run only validation commands explicitly provided by the task's `validation` field. If it only contains tier shorthand (`tier2`/`tier3`), do not run implicit `npm run build`; follow Step 6 validator flow instead.
 
 ## Step 6: Validate
 
