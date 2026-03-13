@@ -171,4 +171,42 @@ describe('Request completion tracking', () => {
     assert.strictEqual(result.all_completed, false);
     assert.strictEqual(result.all_done, false);
   });
+
+  it('should keep zero-task non-terminal requests as not done', () => {
+    const reqId = db.createRequest('Zero task pending request');
+
+    const result = db.checkRequestCompletion(reqId);
+    assert.strictEqual(result.request_status, 'pending');
+    assert.strictEqual(result.total, 0);
+    assert.strictEqual(result.completed, 0);
+    assert.strictEqual(result.failed, 0);
+    assert.strictEqual(result.all_completed, false);
+    assert.strictEqual(result.all_done, false);
+  });
+
+  it('should treat zero-task completed requests as completed', () => {
+    const reqId = db.createRequest('Zero task completed request');
+    db.updateRequest(reqId, { status: 'completed' });
+
+    const result = db.checkRequestCompletion(reqId);
+    assert.strictEqual(result.request_status, 'completed');
+    assert.strictEqual(result.total, 0);
+    assert.strictEqual(result.completed, 0);
+    assert.strictEqual(result.failed, 0);
+    assert.strictEqual(result.all_completed, true);
+    assert.strictEqual(result.all_done, true);
+  });
+
+  it('should treat zero-task failed requests as done but not completed', () => {
+    const reqId = db.createRequest('Zero task failed request');
+    db.updateRequest(reqId, { status: 'failed' });
+
+    const result = db.checkRequestCompletion(reqId);
+    assert.strictEqual(result.request_status, 'failed');
+    assert.strictEqual(result.total, 0);
+    assert.strictEqual(result.completed, 0);
+    assert.strictEqual(result.failed, 0);
+    assert.strictEqual(result.all_completed, false);
+    assert.strictEqual(result.all_done, true);
+  });
 });

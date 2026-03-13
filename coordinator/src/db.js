@@ -462,6 +462,12 @@ function releaseWorker(workerId) {
 }
 
 function checkRequestCompletion(requestId) {
+  const request = getDb().prepare(`
+    SELECT status
+    FROM requests
+    WHERE id = ?
+  `).get(requestId);
+  const requestStatus = request && request.status ? String(request.status) : null;
   const row = getDb().prepare(`
     SELECT
       COUNT(*) as total,
@@ -472,10 +478,13 @@ function checkRequestCompletion(requestId) {
   const total = Number(row.total) || 0;
   const completed = Number(row.completed) || 0;
   const failed = Number(row.failed) || 0;
-  const allCompleted = total > 0 && completed === total;
-  const allFailed = total > 0 && failed === total;
+  const zeroTaskCompleted = total === 0 && requestStatus === 'completed';
+  const zeroTaskFailed = total === 0 && requestStatus === 'failed';
+  const allCompleted = (total > 0 && completed === total) || zeroTaskCompleted;
+  const allFailed = (total > 0 && failed === total) || zeroTaskFailed;
   return {
     request_id: requestId,
+    request_status: requestStatus,
     total,
     completed,
     failed,

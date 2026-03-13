@@ -129,6 +129,11 @@ function completionStatusLabel(completion) {
   const total = Number(completion && completion.total) || 0;
   const completed = Number(completion && completion.completed) || 0;
   const failed = Number(completion && completion.failed) || 0;
+  const requestStatus = completion && typeof completion.request_status === 'string'
+    ? completion.request_status
+    : '';
+  if (total === 0 && requestStatus === 'completed') return 'COMPLETED (NO TASKS)';
+  if (total === 0 && requestStatus === 'failed') return 'ALL FAILED (NO TASKS)';
   if (total > 0 && completed === total && failed === 0) return 'ALL DONE';
   if (total > 0 && failed === total && completed === 0) return 'ALL FAILED';
   if (completed > 0 && failed > 0) return 'MIXED (HAS FAILURES)';
