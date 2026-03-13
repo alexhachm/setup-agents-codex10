@@ -55,19 +55,19 @@ Then begin the loop.
 
 **Repeat these steps forever:**
 
-### Step 1: Wait for signal and check inbox
-Use adaptive timeout before each inbox check:
+### Step 1: Wait mode and check inbox
+Use adaptive blocking inbox wait before each inbox check:
 ```bash
 now_epoch=$(date +%s)
 last_activity_epoch=${last_activity_epoch:-0}
 if [ $((now_epoch - last_activity_epoch)) -lt 30 ]; then
-  timeout=5
+  timeout_ms=5000
 else
-  timeout=15
+  timeout_ms=15000
 fi
-bash .claude/scripts/signal-wait.sh .claude/signals/.codex10.handoff-signal "$timeout"
+./.claude/scripts/codex10 inbox architect --block --timeout="$timeout_ms" || true
 ```
-Use 5s timeout if activity was < 30s ago. Use 15s otherwise.
+Use 5s block timeout if activity was < 30s ago. Use 15s otherwise.
 Then check for new requests via codex10 CLI (source of truth — never read JSON files directly):
 ```bash
 ./.claude/scripts/codex10 inbox architect
@@ -184,21 +184,11 @@ Go to Step 6.
    ```
    If claim fails, pick another idle worker and retry.
 
-3. **Create and assign the task** (script-aware validation):
-   - If `package.json` defines `build`, use `npm run build`.
-   - Otherwise, if it defines `test`, use `npm test`.
-   - If neither script exists, omit `validation` so coordinator fallback applies.
+3. **Create and assign the task:**
    ```bash
-   validation_field=""
-   if [ -f package.json ] && grep -Eq '"build"[[:space:]]*:' package.json; then
-     validation_field=',"validation":"npm run build"'
-   elif [ -f package.json ] && grep -Eq '"test"[[:space:]]*:' package.json; then
-     validation_field=',"validation":"npm test"'
-   fi
-
-   task_payload='{"request_id":"[id]","subject":"[task title]","description":"DOMAIN: [domain]\nFILES: [files]\nVALIDATION: tier2\nTIER: 2\n\n[detailed requirements]\n\n[success criteria]","domain":"[domain]","tier":2,"priority":"normal","files":["file1.js","file2.js"]'"$validation_field"'}'
    create_task_output="$(
-     printf '%s\n' "$task_payload" | ./.claude/scripts/codex10 create-task -
+     echo '{"request_id":"[id]","subject":"[task title]","description":"DOMAIN: [domain]\nFILES: [files]\nVALIDATION: tier2\nTIER: 2\n\n[detailed requirements]\n\n[success criteria]","domain":"[domain]","tier":2,"priority":"normal","files":["file1.js","file2.js"],"validation":"npm run build"}' \
+       | ./.claude/scripts/codex10 create-task -
    )"
    task_id=$(printf '%s\n' "$create_task_output" | awk '/Task created:/ {print $3}')
    [ -n "$task_id" ] || { echo "Failed to capture task_id from create-task output"; exit 1; }
@@ -238,22 +228,11 @@ Go to Step 6.
    ```bash
    ./.claude/scripts/codex10 triage <request_id> 3 "Decomposed into [N] tasks"
    ```
-5. Create each decomposed Tier 3 task via codex10, capturing output and task IDs as you go.
-   Use script-aware validation selection per target package:
-   - Prefer `npm run build` when `build` exists.
-   - Else use `npm test` when `test` exists.
-   - Else omit `validation` and let coordinator fallback select the command.
+5. Create each decomposed Tier 3 task via codex10, capturing output and task IDs as you go:
    ```bash
-   validation_field=""
-   if [ -f package.json ] && grep -Eq '"build"[[:space:]]*:' package.json; then
-     validation_field=',"validation":"npm run build"'
-   elif [ -f package.json ] && grep -Eq '"test"[[:space:]]*:' package.json; then
-     validation_field=',"validation":"npm test"'
-   fi
-
-   task_payload='{"request_id":"[id]","subject":"[task title]","description":"REQUEST_ID: [id]\nDOMAIN: [domain]\nFILES: [specific files]\nVALIDATION: tier3\nTIER: 3\n\n[detailed requirements]\n\n[success criteria]","domain":"[domain]","tier":3,"priority":"normal","files":["file1.js","file2.js"],"depends_on":[]'"$validation_field"'}'
    create_task_output="$(
-     printf '%s\n' "$task_payload" | ./.claude/scripts/codex10 create-task -
+     echo '{"request_id":"[id]","subject":"[task title]","description":"REQUEST_ID: [id]\nDOMAIN: [domain]\nFILES: [specific files]\nVALIDATION: tier3\nTIER: 3\n\n[detailed requirements]\n\n[success criteria]","domain":"[domain]","tier":3,"priority":"normal","files":["file1.js","file2.js"],"depends_on":[],"validation":"npm run build"}' \
+       | ./.claude/scripts/codex10 create-task -
    )"
    task_id=$(printf '%s\n' "$create_task_output" | awk '/Task created:/ {print $3}')
    [ -n "$task_id" ] || { echo "Failed to capture Tier 3 task ID"; exit 1; }
@@ -265,7 +244,7 @@ Go to Step 6.
    ./.claude/scripts/codex10 check-overlaps <request_id>
    ```
    For CRITICAL overlaps, adjust decomposition so conflicting tasks are serialized via `depends_on` before workers execute them.
-7. Do not write `.claude/state/codex10.task-queue.json`, `.claude/state/codex10.handoff.json`, or signal files for decomposition handoff; `create-task` updates coordinator state directly.
+7. Keep decomposition coordinator-native: use codex10 triage/create-task/check-overlaps only; do not use manual queue or signal handoffs.
 8. Log:
    ```bash
    echo "[$(date -u +%Y-%m-%dT%H:%M:%SZ)] [master-2] [DECOMPOSE_DONE] id=[request_id] tasks=[N] domains=[list]" >> .claude/logs/activity.log
