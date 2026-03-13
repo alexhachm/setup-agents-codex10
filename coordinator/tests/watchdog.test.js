@@ -7,7 +7,7 @@ const fs = require('fs');
 const os = require('os');
 
 const db = require('../src/db');
-const { THRESHOLDS, tick } = require('../src/watchdog');
+const { THRESHOLDS, tick, start, stop } = require('../src/watchdog');
 
 let tmpDir;
 
@@ -18,6 +18,7 @@ beforeEach(() => {
 });
 
 afterEach(() => {
+  stop();
   db.close();
   fs.rmSync(tmpDir, { recursive: true, force: true });
 });
@@ -289,5 +290,90 @@ describe('Stale integration recovery', () => {
       tier: 3,
       assigned_to: 1,
     });
+  });
+});
+
+describe('Stale decomposition recovery', () => {
+  it('recovers stale decomposed requests with zero tasks during startup and periodic watchdog passes', () => {
+    const startupRequestId = db.createRequest('Startup stale decomposition');
+    db.getDb().prepare(
+      "UPDATE requests SET status = 'decomposed', updated_at = datetime('now', '-16 minutes') WHERE id = ?"
+    ).run(startupRequestId);
+
+    start(tmpDir);
+    stop();
+
+    let request = db.getRequest(startupRequestId);
+    assert.strictEqual(request.status, 'failed');
+    assert.match(request.result, /Stale decomposition recovered/i);
+
+    const startupFailureMail = db.checkMail('master-1', false).find(
+      (mail) => mail.type === 'request_failed' && mail.payload.request_id === startupRequestId
+    );
+    assert.ok(startupFailureMail);
+    assert.strictEqual(startupFailureMail.payload.reason, 'stale_decomposition_zero_tasks');
+
+    const tickRequestId = db.createRequest('Tick stale decomposition');
+    db.getDb().prepare(
+      "UPDATE requests SET status = 'decomposed', updated_at = datetime('now', '-16 minutes') WHERE id = ?"
+    ).run(tickRequestId);
+
+    tick(tmpDir);
+
+    request = db.getRequest(tickRequestId);
+    assert.strictEqual(request.status, 'failed');
+    assert.match(request.result, /Stale decomposition recovered/i);
+
+    const staleDecompositionLogs = db.getLog(20, 'coordinator')
+      .filter((entry) => entry.action === 'stale_decomposition_recovered')
+      .map((entry) => JSON.parse(entry.details));
+    const tickLog = staleDecompositionLogs.find((entry) => entry.request_id === tickRequestId);
+    assert.ok(tickLog);
+    assert.strictEqual(tickLog.source, 'watchdog_tick');
+    assert.strictEqual(tickLog.reason, 'stale_decomposition_zero_tasks');
+    assert.strictEqual(tickLog.recovered_status, 'failed');
+  });
+
+  it('does not recover recent decomposed requests with zero tasks', () => {
+    const requestId = db.createRequest('Recent decomposition');
+    db.getDb().prepare(
+      "UPDATE requests SET status = 'decomposed', updated_at = datetime('now', '-5 minutes') WHERE id = ?"
+    ).run(requestId);
+
+    tick(tmpDir);
+
+    const request = db.getRequest(requestId);
+    assert.strictEqual(request.status, 'decomposed');
+
+    const failureMail = db.checkMail('master-1', false).find(
+      (mail) => mail.type === 'request_failed' && mail.payload.request_id === requestId
+    );
+    assert.strictEqual(failureMail, undefined);
+  });
+
+  it('does not recover stale decomposed requests that already have tasks', () => {
+    const requestId = db.createRequest('Stale decomposition with tasks');
+    db.getDb().prepare(
+      "UPDATE requests SET status = 'decomposed', updated_at = datetime('now', '-20 minutes') WHERE id = ?"
+    ).run(requestId);
+    db.createTask({
+      request_id: requestId,
+      subject: 'Existing decomposed task',
+      description: 'Task exists so watchdog should not fail request',
+      domain: 'coordinator-routing',
+      files: ['coordinator/src/watchdog.js'],
+      tier: 2,
+    });
+
+    tick(tmpDir);
+
+    const request = db.getRequest(requestId);
+    assert.strictEqual(request.status, 'decomposed');
+
+    const staleDecompositionLog = db.getLog(20, 'coordinator')
+      .filter((entry) => entry.action === 'stale_decomposition_recovered')
+      .map((entry) => JSON.parse(entry.details))
+      .find((entry) => entry.request_id === requestId);
+    assert.strictEqual(staleDecompositionLog, undefined);
   });
 });

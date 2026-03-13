@@ -19,6 +19,7 @@ const THRESHOLDS = Object.freeze({
 });
 const MERGE_TIMEOUT_SEC = 300;
 const MERGE_CONFLICT_GRACE_SEC = 600;
+const STALE_DECOMPOSITION_SEC = 900;
 const MERGE_TIMEOUT_ERROR = `Merge timed out after ${MERGE_TIMEOUT_SEC / 60} minutes`;
 const SQLITE_DATETIME_PATTERN = /^(\d{4})-(\d{2})-(\d{2}) (\d{2}):(\d{2}):(\d{2})(?:\.(\d{1,3}))?$/;
 
@@ -116,6 +117,7 @@ function stop() {
 function runStartupRecoverySweep() {
   if (!startupRecoverySweepPending) return;
   recoverFailedRequestsWithActiveRemediation('startup_repair_sweep');
+  recoverStaleDecomposedZeroTaskRequests(Date.now(), { source: 'startup_repair_sweep' });
   const repairedRequests = recoverStaleIntegrations(Date.now(), { source: 'startup_repair_sweep' });
   startupRecoverySweepPending = false;
   if (repairedRequests > 0) {
@@ -183,6 +185,9 @@ function tick(projectDir) {
 
   // Keep failed requests visible to stale-integration recovery when remediation is active.
   recoverFailedRequestsWithActiveRemediation('watchdog_tick');
+
+  // Recover stale decomposition deadlocks (decomposed with zero tasks).
+  recoverStaleDecomposedZeroTaskRequests(now);
 
   // Recover stale integrations
   recoverStaleIntegrations(now);
@@ -378,6 +383,48 @@ function recoverFailedRequestsWithActiveRemediation(source = 'watchdog_tick') {
       previous_status: 'failed',
       reopened_status: reopen.status,
       merge_queue_entries: reopen.merge_queue_entries,
+    });
+  }
+}
+
+function recoverStaleDecomposedZeroTaskRequests(now, options = {}) {
+  const source = options.source || 'watchdog_tick';
+  const requests = db.getDb().prepare(`
+    SELECT r.id, r.updated_at, COUNT(t.id) as task_count
+    FROM requests r
+    LEFT JOIN tasks t ON t.request_id = r.id
+    WHERE r.status = 'decomposed'
+    GROUP BY r.id
+  `).all();
+
+  for (const req of requests) {
+    const taskCount = Number(req.task_count) || 0;
+    if (taskCount > 0) continue;
+
+    const ageSec = getAgeSeconds(now, req.updated_at, {
+      request_id: req.id,
+      scope: 'decomposition_age',
+    });
+    if (ageSec === null || ageSec < STALE_DECOMPOSITION_SEC) continue;
+
+    const error = `Stale decomposition recovered: request remained decomposed with zero tasks for ${Math.round(ageSec)}s`;
+    db.updateRequest(req.id, {
+      status: 'failed',
+      result: error,
+    });
+    db.sendMail('master-1', 'request_failed', {
+      request_id: req.id,
+      error,
+      reason: 'stale_decomposition_zero_tasks',
+    });
+    db.log('coordinator', 'stale_decomposition_recovered', {
+      request_id: req.id,
+      source,
+      age_sec: Math.round(ageSec),
+      task_count: taskCount,
+      previous_status: 'decomposed',
+      recovered_status: 'failed',
+      reason: 'stale_decomposition_zero_tasks',
     });
   }
 }
