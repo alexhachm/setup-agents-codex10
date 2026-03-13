@@ -10,6 +10,7 @@ const db = require('../src/db');
 const merger = require('../src/merger');
 
 let tmpDir;
+const originalPath = process.env.PATH;
 
 function getRequestCompletionMailCount(requestId) {
   return db.checkMail('master-1', false)
@@ -29,6 +30,54 @@ function getRequestCompletionLogCount(requestId) {
   }).length;
 }
 
+function setupMockMergeCli({ failBuild = false } = {}) {
+  const binDir = path.join(tmpDir, 'mock-bin');
+  const commandLog = path.join(tmpDir, 'mock-cli.log');
+  fs.mkdirSync(binDir, { recursive: true });
+
+  const writeMock = (name, script) => {
+    const filePath = path.join(binDir, name);
+    fs.writeFileSync(filePath, script, { mode: 0o755 });
+  };
+
+  writeMock('git', `#!/usr/bin/env bash
+set -eu
+echo "git $*" >> "${commandLog}"
+exit 0
+`);
+
+  writeMock('gh', `#!/usr/bin/env bash
+set -eu
+echo "gh $*" >> "${commandLog}"
+exit 0
+`);
+
+  writeMock('npm', `#!/usr/bin/env bash
+set -eu
+echo "npm $*" >> "${commandLog}"
+if [ "${failBuild ? '1' : '0'}" = "1" ] && [ "$1" = "run" ] && [ "\${2:-}" = "build" ]; then
+  echo "missing script: build" >&2
+  exit 1
+fi
+exit 0
+`);
+
+  process.env.PATH = `${binDir}${path.delimiter}${originalPath}`;
+  return { commandLog };
+}
+
+function readCoordinatorLogEntries(action) {
+  return db.getLog(200, 'coordinator')
+    .filter((entry) => entry.action === action)
+    .map((entry) => {
+      try {
+        return JSON.parse(entry.details || '{}');
+      } catch {
+        return {};
+      }
+    });
+}
+
 beforeEach(() => {
   tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'mac10-merge-'));
   fs.mkdirSync(path.join(tmpDir, '.claude', 'state'), { recursive: true });
@@ -36,6 +85,7 @@ beforeEach(() => {
 });
 
 afterEach(() => {
+  process.env.PATH = originalPath;
   db.close();
   fs.rmSync(tmpDir, { recursive: true, force: true });
 });
@@ -224,5 +274,81 @@ describe('Request completion tracking', () => {
     assert.strictEqual(requestAfterTasksDone.status, 'completed');
     assert.strictEqual(getRequestCompletionMailCount(reqId), 1);
     assert.strictEqual(getRequestCompletionLogCount(reqId), 1);
+  });
+});
+
+describe('Overlap validation command selection', () => {
+  function seedOverlapMergeTask(validation) {
+    const reqId = db.createRequest('Feature');
+    const mergedTaskId = db.createTask({
+      request_id: reqId,
+      subject: 'Merged overlap task',
+      description: 'Already merged',
+      files: ['src/shared.js'],
+    });
+    const pendingTaskPayload = {
+      request_id: reqId,
+      subject: 'Pending overlap task',
+      description: 'Needs merge validation',
+      files: ['src/shared.js'],
+    };
+    if (validation !== undefined) {
+      pendingTaskPayload.validation = validation;
+    }
+    const pendingTaskId = db.createTask(pendingTaskPayload);
+    db.updateTask(pendingTaskId, { overlap_with: JSON.stringify([mergedTaskId]) });
+
+    const mergedQueue = db.enqueueMerge({
+      request_id: reqId,
+      task_id: mergedTaskId,
+      pr_url: 'https://github.com/acme/repo/pull/1',
+      branch: 'agent-1',
+    });
+    db.updateMerge(mergedQueue.lastInsertRowid, { status: 'merged', merged_at: new Date().toISOString() });
+
+    const pendingQueue = db.enqueueMerge({
+      request_id: reqId,
+      task_id: pendingTaskId,
+      pr_url: 'https://github.com/acme/repo/pull/2',
+      branch: 'agent-2',
+    });
+
+    return { pendingMergeId: pendingQueue.lastInsertRowid };
+  }
+
+  it('should skip default overlap validation when build and test scripts are missing', () => {
+    const { commandLog } = setupMockMergeCli({ failBuild: true });
+    fs.writeFileSync(path.join(tmpDir, 'package.json'), JSON.stringify({ name: 'overlap-test' }, null, 2));
+    db.setConfig('merge_validation', 'true');
+
+    const { pendingMergeId } = seedOverlapMergeTask();
+    merger.processQueue(tmpDir);
+
+    const pendingMerge = db.getDb().prepare('SELECT status, error FROM merge_queue WHERE id = ?').get(pendingMergeId);
+    assert.strictEqual(pendingMerge.status, 'merged');
+    assert.strictEqual(pendingMerge.error, null);
+
+    const commands = fs.existsSync(commandLog) ? fs.readFileSync(commandLog, 'utf8') : '';
+    assert.ok(!commands.includes('npm run build'));
+
+    const skipLogs = readCoordinatorLogEntries('overlap_validation_default_skipped');
+    assert.ok(skipLogs.some((details) => details.reason === 'no_build_or_test_script'));
+  });
+
+  it('should run task.validation during overlap checks even when no default script is available', () => {
+    const { commandLog } = setupMockMergeCli({ failBuild: true });
+    fs.writeFileSync(path.join(tmpDir, 'package.json'), JSON.stringify({ name: 'overlap-test' }, null, 2));
+    db.setConfig('merge_validation', 'true');
+
+    const { pendingMergeId } = seedOverlapMergeTask('npm run validate:task');
+    merger.processQueue(tmpDir);
+
+    const pendingMerge = db.getDb().prepare('SELECT status, error FROM merge_queue WHERE id = ?').get(pendingMergeId);
+    assert.strictEqual(pendingMerge.status, 'merged');
+    assert.strictEqual(pendingMerge.error, null);
+
+    const commands = fs.existsSync(commandLog) ? fs.readFileSync(commandLog, 'utf8') : '';
+    assert.ok(commands.includes('npm run validate:task'));
+    assert.ok(!commands.includes('npm run build'));
   });
 });
