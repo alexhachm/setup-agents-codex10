@@ -72,8 +72,19 @@ while true; do
         const active = new Set(["pending", "triaging", "executing_tier1", "decomposed", "in_progress", "integrating"]);
         try {
           const payload = JSON.parse(fs.readFileSync(0, "utf8") || "{}");
-          const requests = Array.isArray(payload.requests) ? payload.requests : [];
-          const count = requests.filter((r) => r && active.has(r.status)).length;
+          const requests = Array.isArray(payload?.requests)
+            ? payload.requests
+            : Array.isArray(payload?.data?.requests)
+              ? payload.data.requests
+              : Array.isArray(payload?.data)
+                ? payload.data
+                : Array.isArray(payload)
+                  ? payload
+                  : [];
+          const count = requests.filter((r) => {
+            if (!r || typeof r.status !== "string") return false;
+            return active.has(r.status.trim().toLowerCase());
+          }).length;
           process.stdout.write(String(count));
         } catch (_) {
           process.stdout.write("0");
