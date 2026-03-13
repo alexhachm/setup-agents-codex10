@@ -1781,6 +1781,70 @@ describe('CLI Server', () => {
     assert.notStrictEqual(afterHeartbeat.last_heartbeat, checkpointHeartbeat);
   });
 
+  it('should update loop prompts for active/paused loops and preserve loop state', async () => {
+    const created = await sendCommand('loop', { prompt: 'Initial loop prompt' });
+    assert.strictEqual(created.ok, true);
+
+    db.updateLoop(created.loop_id, {
+      status: 'active',
+      iteration_count: 4,
+      last_checkpoint: 'checkpoint-before-update',
+    });
+
+    const activeUpdate = await sendCommand('loop-set-prompt', {
+      loop_id: created.loop_id,
+      prompt: 'Refreshed prompt while active',
+    });
+    assert.strictEqual(activeUpdate.ok, true);
+    assert.strictEqual(activeUpdate.prompt, 'Refreshed prompt while active');
+    assert.strictEqual(activeUpdate.status, 'active');
+    assert.strictEqual(activeUpdate.iteration_count, 4);
+    assert.strictEqual(activeUpdate.last_checkpoint, 'checkpoint-before-update');
+
+    db.updateLoop(created.loop_id, { status: 'paused' });
+    const cliUpdate = await runMac10Cli(['loop-set-prompt', String(created.loop_id), 'Refreshed prompt while paused']);
+    assert.strictEqual(cliUpdate.status, 0, cliUpdate.stderr);
+    assert.strictEqual(cliUpdate.stderr, '');
+    assert.match(cliUpdate.stdout, new RegExp(`Loop ${created.loop_id} prompt updated\\.`));
+
+    const promptResult = await sendCommand('loop-prompt', { loop_id: created.loop_id });
+    assert.strictEqual(promptResult.ok, true);
+    assert.strictEqual(promptResult.prompt, 'Refreshed prompt while paused');
+    assert.strictEqual(promptResult.status, 'paused');
+    assert.strictEqual(promptResult.iteration_count, 4);
+    assert.strictEqual(promptResult.last_checkpoint, 'checkpoint-before-update');
+  });
+
+  it('should reject loop-set-prompt for non-active loops without mutating prompt/checkpoint state', async () => {
+    for (const status of ['stopped', 'failed']) {
+      const created = await sendCommand('loop', { prompt: `Prompt update guard ${status}` });
+      assert.strictEqual(created.ok, true);
+
+      const baselinePrompt = `baseline-prompt-${status}`;
+      const baselineCheckpoint = `baseline-checkpoint-${status}`;
+      db.updateLoop(created.loop_id, {
+        status,
+        prompt: baselinePrompt,
+        iteration_count: 7,
+        last_checkpoint: baselineCheckpoint,
+      });
+
+      const rejected = await sendCommand('loop-set-prompt', {
+        loop_id: created.loop_id,
+        prompt: 'should-not-apply',
+      });
+      assert.strictEqual(rejected.ok, false);
+      assert.strictEqual(rejected.error, `Loop is ${status}, prompt can only be updated for active or paused loops`);
+
+      const promptResult = await sendCommand('loop-prompt', { loop_id: created.loop_id });
+      assert.strictEqual(promptResult.ok, true);
+      assert.strictEqual(promptResult.prompt, baselinePrompt);
+      assert.strictEqual(promptResult.status, status);
+      assert.strictEqual(promptResult.iteration_count, 7);
+      assert.strictEqual(promptResult.last_checkpoint, baselineCheckpoint);
+    }
+  });
+
   it('should emit a single architect new_request mail and one request_queued event for loop-request creation', async () => {
     const createdLoop = await sendCommand('loop', { prompt: 'Create loop request once' });
     assert.strictEqual(createdLoop.ok, true);

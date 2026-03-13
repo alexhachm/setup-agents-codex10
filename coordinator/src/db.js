@@ -878,6 +878,27 @@ function updateLoop(id, fields) {
   getDb().prepare(`UPDATE loops SET ${sets.join(', ')} WHERE id = ?`).run(...vals);
 }
 
+function setLoopPrompt(id, prompt, allowedStatuses = ['active', 'paused']) {
+  const normalizedPrompt = String(prompt || '');
+  if (!normalizedPrompt.trim()) {
+    return { ok: false, error: 'prompt must be a non-empty string' };
+  }
+  const allowed = Array.isArray(allowedStatuses)
+    ? allowedStatuses.map((status) => String(status))
+    : ['active', 'paused'];
+  const txn = getDb().transaction(() => {
+    const loop = getLoop(id);
+    if (!loop) return { ok: false, error: 'Loop not found' };
+    if (!allowed.includes(loop.status)) {
+      return { ok: false, error: `Loop is ${loop.status}, prompt can only be updated for active or paused loops` };
+    }
+    updateLoop(id, { prompt: normalizedPrompt });
+    const updated = getLoop(id);
+    return { ok: true, loop: updated };
+  });
+  return txn();
+}
+
 function listLoops(status) {
   if (status) return getDb().prepare('SELECT * FROM loops WHERE status = ? ORDER BY id DESC').all(status);
   return getDb().prepare('SELECT * FROM loops ORDER BY id DESC').all();
@@ -1168,7 +1189,7 @@ module.exports = {
   savePreset, listPresets, getPreset, deletePreset,
   findOverlappingTasks, getOverlapsForRequest, hasOverlappingMergedTasks,
   createChange, getChange, listChanges, updateChange,
-  createLoop, getLoop, updateLoop, listLoops, stopLoop,
+  createLoop, getLoop, updateLoop, setLoopPrompt, listLoops, stopLoop,
   evaluateLoopRequestQuality,
   createLoopRequest, listLoopRequests,
 };
