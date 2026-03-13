@@ -149,6 +149,21 @@ function getCoordinatorRequestQueuedEvents(requestId) {
   });
 }
 
+function getWorkerTaskStartedEvents(workerId, taskId) {
+  const entries = db.getLog(200, `worker-${workerId}`);
+  const normalizedTaskId = taskId === undefined || taskId === null ? null : String(taskId);
+  return entries.filter((entry) => {
+    if (entry.action !== 'task_started') return false;
+    try {
+      const details = JSON.parse(entry.details);
+      if (!normalizedTaskId) return true;
+      return details && String(details.task_id) === normalizedTaskId;
+    } catch {
+      return false;
+    }
+  });
+}
+
 describe('CLI Server', () => {
   it('should respond to ping', async () => {
     const result = await sendCommand('ping', {});
@@ -304,6 +319,85 @@ describe('CLI Server', () => {
     assert.strictEqual(completedTask.usage_total_tokens, null);
     assert.strictEqual(completedTask.usage_cost_usd, null);
     assert.strictEqual(db.getWorker(1).status, 'completed_task');
+  });
+
+  it('should reject start-task for completed tasks', async () => {
+    db.registerWorker(1, '/wt-1', 'agent-1');
+    const reqId = db.createRequest('Completed task replay');
+    const taskId = db.createTask({ request_id: reqId, subject: 'Already done', description: 'Do not reopen' });
+    const completedAt = '2026-01-01T00:00:00.000Z';
+    db.updateTask(taskId, {
+      status: 'completed',
+      assigned_to: 1,
+      completed_at: completedAt,
+      result: 'already done',
+    });
+    db.updateWorker(1, { status: 'completed_task', current_task_id: taskId });
+
+    const result = await sendCommand('start-task', { worker_id: '1', task_id: String(taskId) });
+    assert.strictEqual(result.ok, false);
+    assert.strictEqual(result.error, 'task_not_startable');
+
+    const task = db.getTask(taskId);
+    assert.strictEqual(task.status, 'completed');
+    assert.strictEqual(task.completed_at, completedAt);
+    assert.strictEqual(task.result, 'already done');
+    assert.strictEqual(getWorkerTaskStartedEvents(1, taskId).length, 0);
+  });
+
+  it('should reject start-task when task is assigned to another worker', async () => {
+    db.registerWorker(1, '/wt-1', 'agent-1');
+    db.registerWorker(2, '/wt-2', 'agent-2');
+    const reqId = db.createRequest('Ownership guard');
+    const taskId = db.createTask({ request_id: reqId, subject: 'Owned by worker 2', description: 'Do not steal' });
+    db.updateTask(taskId, { status: 'assigned', assigned_to: 2 });
+    db.updateWorker(1, { status: 'assigned', current_task_id: taskId });
+    db.updateWorker(2, { status: 'assigned', current_task_id: taskId });
+
+    const result = await sendCommand('start-task', { worker_id: '1', task_id: String(taskId) });
+    assert.strictEqual(result.ok, false);
+    assert.strictEqual(result.error, 'task_not_assigned');
+
+    const task = db.getTask(taskId);
+    assert.strictEqual(task.status, 'assigned');
+    assert.strictEqual(task.started_at, null);
+    assert.strictEqual(getWorkerTaskStartedEvents(1, taskId).length, 0);
+  });
+
+  it('should treat duplicate start-task calls on owned in-progress task as idempotent', async () => {
+    db.registerWorker(1, '/wt-1', 'agent-1');
+    const reqId = db.createRequest('Duplicate starts');
+    const taskId = db.createTask({ request_id: reqId, subject: 'Repeat start', description: 'Idempotent expected' });
+    const completedAt = '2026-01-01T00:00:00.000Z';
+    const resultText = 'keep existing completion fields';
+    db.updateTask(taskId, {
+      status: 'assigned',
+      assigned_to: 1,
+      completed_at: completedAt,
+      result: resultText,
+    });
+    db.updateWorker(1, { status: 'assigned', current_task_id: taskId });
+
+    const first = await sendCommand('start-task', { worker_id: '1', task_id: String(taskId) });
+    assert.strictEqual(first.ok, true);
+    const afterFirst = db.getTask(taskId);
+    assert.strictEqual(afterFirst.status, 'in_progress');
+    assert.ok(afterFirst.started_at);
+    assert.strictEqual(afterFirst.completed_at, completedAt);
+    assert.strictEqual(afterFirst.result, resultText);
+
+    await new Promise((resolve) => setTimeout(resolve, 20));
+
+    const second = await sendCommand('start-task', { worker_id: '1', task_id: String(taskId) });
+    assert.strictEqual(second.ok, true);
+    assert.strictEqual(second.idempotent, true);
+
+    const afterSecond = db.getTask(taskId);
+    assert.strictEqual(afterSecond.status, 'in_progress');
+    assert.strictEqual(afterSecond.started_at, afterFirst.started_at);
+    assert.strictEqual(afterSecond.completed_at, completedAt);
+    assert.strictEqual(afterSecond.result, resultText);
+    assert.strictEqual(getWorkerTaskStartedEvents(1, taskId).length, 1);
   });
 
   it('should persist complete-task usage telemetry fields end-to-end', async () => {
