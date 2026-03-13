@@ -259,6 +259,66 @@ function tryRebase(entry, projectDir) {
   }
 }
 
+function parseValidationCommand(command) {
+  if (typeof command !== 'string' || !command.trim()) return null;
+  const parts = command.trim().split(/\s+/);
+  if (parts.length === 0) return null;
+  return { file: parts[0], args: parts.slice(1) };
+}
+
+function getTaskValidationCommands(taskValidation) {
+  if (!taskValidation) return [];
+
+  let parsedValidation = taskValidation;
+  if (typeof taskValidation === 'string') {
+    try {
+      parsedValidation = JSON.parse(taskValidation);
+    } catch {
+      parsedValidation = taskValidation;
+    }
+  }
+
+  const commands = [];
+  if (typeof parsedValidation === 'string') {
+    const cmd = parseValidationCommand(parsedValidation);
+    if (cmd) commands.push(cmd);
+    return commands;
+  }
+
+  if (!parsedValidation || typeof parsedValidation !== 'object') {
+    return commands;
+  }
+
+  for (const key of ['build_cmd', 'test_cmd', 'lint_cmd']) {
+    const cmd = parseValidationCommand(parsedValidation[key]);
+    if (cmd) commands.push(cmd);
+  }
+  return commands;
+}
+
+function getDefaultValidationCommand(validationDir) {
+  const packageJsonPath = path.join(validationDir, 'package.json');
+  if (!fs.existsSync(packageJsonPath)) {
+    return { command: null, reason: 'package_json_missing' };
+  }
+
+  let packageJson;
+  try {
+    packageJson = JSON.parse(fs.readFileSync(packageJsonPath, 'utf8'));
+  } catch {
+    return { command: null, reason: 'package_json_parse_error' };
+  }
+
+  const scripts = packageJson && typeof packageJson.scripts === 'object' ? packageJson.scripts : {};
+  if (typeof scripts.build === 'string' && scripts.build.trim()) {
+    return { command: { file: 'npm', args: ['run', 'build'] }, reason: null, source: 'scripts.build' };
+  }
+  if (typeof scripts.test === 'string' && scripts.test.trim()) {
+    return { command: { file: 'npm', args: ['run', 'test'] }, reason: null, source: 'scripts.test' };
+  }
+  return { command: null, reason: 'no_build_or_test_script' };
+}
+
 function runOverlapValidation(entry, projectDir) {
   // Only validate when merge_validation config is enabled
   const mergeValidation = db.getConfig('merge_validation');
@@ -276,36 +336,42 @@ function runOverlapValidation(entry, projectDir) {
 
   const wtPath = findWorktreePath(entry, projectDir);
   const validationDir = wtPath || projectDir;
+  const task = db.getTask(entry.task_id);
+  const taskValidationCommands = getTaskValidationCommands(task && task.validation);
+  const defaultValidation = getDefaultValidationCommand(validationDir);
 
   try {
     safeExec('git', ['fetch', 'origin'], validationDir);
 
     if (wtPath) {
       // Validate directly in worktree (branch already checked out)
-      safeExec('npm', ['run', 'build'], wtPath);
+      if (defaultValidation.command) {
+        safeExec(defaultValidation.command.file, defaultValidation.command.args, wtPath);
+      }
     } else {
       // Fallback: old behavior
       safeExec('git', ['checkout', entry.branch], projectDir);
-      safeExec('npm', ['run', 'build'], projectDir);
+      if (defaultValidation.command) {
+        safeExec(defaultValidation.command.file, defaultValidation.command.args, projectDir);
+      }
     }
 
-    // Run task-specific validation if set
-    const task = db.getTask(entry.task_id);
-    if (task && task.validation) {
-      let validation;
-      try { validation = JSON.parse(task.validation); } catch { validation = task.validation; }
-      if (typeof validation === 'string' && validation.trim()) {
-        const parts = validation.trim().split(/\s+/);
-        safeExec(parts[0], parts.slice(1), validationDir);
-      } else if (typeof validation === 'object' && validation !== null) {
-        // Handle structured validation: { test_cmd, build_cmd, lint_cmd }
-        for (const key of ['build_cmd', 'test_cmd', 'lint_cmd']) {
-          if (validation[key] && typeof validation[key] === 'string') {
-            const parts = validation[key].trim().split(/\s+/);
-            safeExec(parts[0], parts.slice(1), validationDir);
-          }
-        }
-      }
+    if (!defaultValidation.command) {
+      db.log('coordinator', 'overlap_validation_default_skipped', {
+        merge_id: entry.id,
+        task_id: entry.task_id,
+        reason: defaultValidation.reason,
+      });
+    } else {
+      db.log('coordinator', 'overlap_validation_default_selected', {
+        merge_id: entry.id,
+        task_id: entry.task_id,
+        source: defaultValidation.source,
+      });
+    }
+
+    for (const command of taskValidationCommands) {
+      safeExec(command.file, command.args, validationDir);
     }
 
     if (!wtPath) {
