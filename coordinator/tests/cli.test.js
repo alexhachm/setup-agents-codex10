@@ -2806,6 +2806,104 @@ describe('CLI Server', () => {
     }
   });
 
+  it('should expose non-zero usage burn-rate telemetry in /api/status via db helper', async () => {
+    const requestOne = db.createRequest('Usage burn-rate request one');
+    const requestTwo = db.createRequest('Usage burn-rate request two');
+    const requestTotals = {
+      [requestOne]: 3.5,
+      [requestTwo]: 1.25,
+    };
+    const burnSnapshot = {
+      usd_15m: 1.5,
+      usd_60m: 2.75,
+      usd_24h: 4.75,
+      request_id: null,
+      request_total_usd: 0,
+    };
+
+    const hadBurnRateHelper = Object.prototype.hasOwnProperty.call(db, 'getUsageCostBurnRate');
+    const originalBurnRateHelper = db.getUsageCostBurnRate;
+    db.getUsageCostBurnRate = (requestId = null) => {
+      if (requestId === null || requestId === undefined) return { ...burnSnapshot };
+      const normalizedRequestId = String(requestId).trim();
+      return {
+        ...burnSnapshot,
+        request_id: normalizedRequestId || null,
+        request_total_usd: requestTotals[normalizedRequestId] || 0,
+      };
+    };
+
+    const web = webServer.start(tmpDir, 0);
+    await new Promise((resolve, reject) => {
+      web.once('listening', resolve);
+      web.once('error', reject);
+    });
+    const webPort = web.address().port;
+
+    try {
+      const statusResult = await requestWebJson(webPort, '/api/status');
+      assert.strictEqual(statusResult.status, 200);
+      assert.deepStrictEqual(statusResult.body.usage_cost_burn_rate, burnSnapshot);
+      assert.strictEqual(statusResult.body.usage_cost_usd_15m, burnSnapshot.usd_15m);
+      assert.strictEqual(statusResult.body.usage_cost_usd_60m, burnSnapshot.usd_60m);
+      assert.strictEqual(statusResult.body.usage_cost_usd_24h, burnSnapshot.usd_24h);
+      assert.strictEqual(statusResult.body.usage_cost_request_id, null);
+      assert.strictEqual(statusResult.body.usage_cost_request_total_usd, 0);
+      assert.deepStrictEqual(statusResult.body.usage_cost_request_totals_usd, {
+        [requestOne]: 3.5,
+        [requestTwo]: 1.25,
+      });
+    } finally {
+      webServer.stop();
+      if (hadBurnRateHelper) {
+        db.getUsageCostBurnRate = originalBurnRateHelper;
+      } else {
+        delete db.getUsageCostBurnRate;
+      }
+    }
+  });
+
+  it('should expose safe-zero usage burn-rate telemetry defaults in /api/status', async () => {
+    const requestId = db.createRequest('Zero usage burn-rate request');
+    const hadBurnRateHelper = Object.prototype.hasOwnProperty.call(db, 'getUsageCostBurnRate');
+    const originalBurnRateHelper = db.getUsageCostBurnRate;
+    delete db.getUsageCostBurnRate;
+
+    const web = webServer.start(tmpDir, 0);
+    await new Promise((resolve, reject) => {
+      web.once('listening', resolve);
+      web.once('error', reject);
+    });
+    const webPort = web.address().port;
+
+    try {
+      const statusResult = await requestWebJson(webPort, '/api/status');
+      assert.strictEqual(statusResult.status, 200);
+      assert.deepStrictEqual(statusResult.body.usage_cost_burn_rate, {
+        usd_15m: 0,
+        usd_60m: 0,
+        usd_24h: 0,
+        request_id: null,
+        request_total_usd: 0,
+      });
+      assert.strictEqual(statusResult.body.usage_cost_usd_15m, 0);
+      assert.strictEqual(statusResult.body.usage_cost_usd_60m, 0);
+      assert.strictEqual(statusResult.body.usage_cost_usd_24h, 0);
+      assert.strictEqual(statusResult.body.usage_cost_request_id, null);
+      assert.strictEqual(statusResult.body.usage_cost_request_total_usd, 0);
+      assert.deepStrictEqual(statusResult.body.usage_cost_request_totals_usd, {
+        [requestId]: 0,
+      });
+    } finally {
+      webServer.stop();
+      if (hadBurnRateHelper) {
+        db.getUsageCostBurnRate = originalBurnRateHelper;
+      } else {
+        delete db.getUsageCostBurnRate;
+      }
+    }
+  });
+
   it('should keep routing_budget_state JSON precedence over scalar fallback keys', async () => {
     db.registerWorker(1, '/wt-1', 'agent-1');
 
