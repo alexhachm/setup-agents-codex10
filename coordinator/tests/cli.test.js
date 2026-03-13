@@ -1437,6 +1437,37 @@ describe('CLI Server', () => {
     assert.strictEqual(queuedEvents.length, 1);
   });
 
+  it('should compute loop-request rate-limit retry_after_sec from oldest in-window request age', async () => {
+    const createdLoop = await sendCommand('loop', { prompt: 'Loop request rate limit timing' });
+    assert.strictEqual(createdLoop.ok, true);
+
+    db.setConfig('loop_request_max_per_hour', 2);
+
+    const oldestInWindow = db.createLoopRequest('Old in-window request', createdLoop.loop_id);
+    assert.strictEqual(oldestInWindow.deduplicated, false);
+    const recentInWindow = db.createLoopRequest('Recent in-window request', createdLoop.loop_id);
+    assert.strictEqual(recentInWindow.deduplicated, false);
+
+    const setRequestAge = db.getDb().prepare(`
+      UPDATE requests
+      SET created_at = datetime('now', ?), updated_at = datetime('now', ?)
+      WHERE id = ?
+    `);
+    setRequestAge.run('-59 minutes', '-59 minutes', oldestInWindow.id);
+    setRequestAge.run('-10 minutes', '-10 minutes', recentInWindow.id);
+
+    const rateLimited = db.createLoopRequest('Rate-limited candidate', createdLoop.loop_id);
+    assert.strictEqual(rateLimited.suppressed, true);
+    assert.strictEqual(rateLimited.reason, 'rate_limit');
+    assert.strictEqual(Number.isInteger(rateLimited.retry_after_sec), true);
+    assert.ok(rateLimited.retry_after_sec >= 1);
+    assert.ok(rateLimited.retry_after_sec <= 120, `expected retry_after_sec near oldest expiry, got ${rateLimited.retry_after_sec}`);
+    assert.notStrictEqual(rateLimited.retry_after_sec, 3600);
+
+    const loopRequests = db.listLoopRequests(createdLoop.loop_id);
+    assert.strictEqual(loopRequests.length, 2);
+  });
+
   it('should keep loop-requests rows single-line with control-char descriptions', async () => {
     const createdLoop = await sendCommand('loop', { prompt: 'Loop request row sanitization' });
     assert.strictEqual(createdLoop.ok, true);
