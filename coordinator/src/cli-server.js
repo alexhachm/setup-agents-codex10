@@ -679,6 +679,7 @@ function normalizeLoopRequestSetConfigValue(key, rawValue) {
 
 function normalizeCompleteTaskUsageAliasEntries(rawUsage) {
   const aliasNormalized = {};
+  const unknownFields = {};
   for (const [rawField, rawValue] of Object.entries(rawUsage)) {
     if (rawField === 'cache_creation') {
       if (!rawValue || typeof rawValue !== 'object' || Array.isArray(rawValue)) {
@@ -753,6 +754,10 @@ function normalizeCompleteTaskUsageAliasEntries(rawUsage) {
 
     const canonicalField = COMPLETE_TASK_USAGE_FIELD_ALIASES[rawField] || rawField;
     const canonicalValue = rawValue;
+    if (!Object.prototype.hasOwnProperty.call(COMPLETE_TASK_USAGE_FIELD_TYPES, canonicalField)) {
+      unknownFields[canonicalField] = canonicalValue;
+      continue;
+    }
     if (
       Object.prototype.hasOwnProperty.call(aliasNormalized, canonicalField)
       && aliasNormalized[canonicalField] !== canonicalValue
@@ -761,7 +766,7 @@ function normalizeCompleteTaskUsageAliasEntries(rawUsage) {
     }
     aliasNormalized[canonicalField] = canonicalValue;
   }
-  return aliasNormalized;
+  return { aliasNormalized, unknownFields };
 }
 
 function normalizeCompleteTaskUsagePayload(rawUsage) {
@@ -770,13 +775,7 @@ function normalizeCompleteTaskUsagePayload(rawUsage) {
     throw new Error('Field "usage" must be an object');
   }
 
-  const aliasNormalized = normalizeCompleteTaskUsageAliasEntries(rawUsage);
-
-  const unknownFields = Object.keys(aliasNormalized)
-    .filter((field) => !Object.prototype.hasOwnProperty.call(COMPLETE_TASK_USAGE_FIELD_TYPES, field));
-  if (unknownFields.length) {
-    throw new Error(`Field "usage" contains unsupported keys: ${unknownFields.join(', ')}`);
-  }
+  const { aliasNormalized, unknownFields } = normalizeCompleteTaskUsageAliasEntries(rawUsage);
 
   const normalized = {};
   for (const [field, expectedType] of Object.entries(COMPLETE_TASK_USAGE_FIELD_TYPES)) {
@@ -809,7 +808,8 @@ function normalizeCompleteTaskUsagePayload(rawUsage) {
     normalized[field] = value;
   }
 
-  return normalized;
+  if (!Object.keys(unknownFields).length) return normalized;
+  return { ...normalized, ...unknownFields };
 }
 
 function mapUsagePayloadToTaskFields(usage, taskRow = null) {

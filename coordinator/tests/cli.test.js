@@ -1007,30 +1007,67 @@ describe('CLI Server', () => {
     }
   });
 
-  it('should reject unknown fail-task usage keys even when alias keys are present', async () => {
+  it('should accept fail-task usage payloads with extra provider keys while persisting known metrics', async () => {
     db.registerWorker(1, '/wt-1', 'agent-1');
-    const reqId = db.createRequest('Fail-task usage unknown key rejection');
-    const taskId = db.createTask({ request_id: reqId, subject: 'Fail unknown key', description: 'Should reject unknown fail-task usage key' });
+    const reqId = db.createRequest('Fail-task usage forward compatibility');
+    const taskId = db.createTask({ request_id: reqId, subject: 'Fail unknown key', description: 'Should accept unknown fail-task usage keys' });
     db.updateTask(taskId, { status: 'assigned', assigned_to: 1 });
     db.updateWorker(1, { status: 'assigned', current_task_id: taskId });
 
-    const result = await sendCommand('fail-task', {
-      worker_id: '1',
-      task_id: String(taskId),
-      error: 'Fail with invalid usage',
-      usage: {
-        completion_tokens_details: {
-          accepted_prediction_tokens: 11,
-          rejected_prediction_tokens: 5,
-        },
-        cache_creation_input_tokens: 45,
-        cache_read_input_tokens: 67,
-        bogus_field: 1,
-      },
-    });
-    assert.ok(result.error);
-    assert.match(result.error, /unsupported keys: bogus_field/);
-    assert.strictEqual(db.getTask(taskId).status, 'assigned');
+    const usage = {
+      model: 'gpt-5-codex',
+      input_tokens: 123,
+      output_tokens: 45,
+      cache_creation_input_tokens: 11,
+      cache_read_input_tokens: 22,
+      total_tokens: 190,
+      cost_usd: 0.019,
+      service_tier: 'priority',
+      tool_use_prompt_token_count: 7,
+      thoughts_token_count: 3,
+    };
+
+    await runMac10Command([
+      'fail-task',
+      '1',
+      String(taskId),
+      'Fail with provider extras',
+      '--usage',
+      JSON.stringify(usage),
+    ], tmpDir);
+
+    const failedTask = db.getTask(taskId);
+    assert.strictEqual(failedTask.status, 'failed');
+    assert.strictEqual(failedTask.result, 'Fail with provider extras');
+    assert.strictEqual(failedTask.usage_model, usage.model);
+    assert.strictEqual(failedTask.usage_input_tokens, usage.input_tokens);
+    assert.strictEqual(failedTask.usage_output_tokens, usage.output_tokens);
+    assert.strictEqual(failedTask.usage_cache_creation_tokens, usage.cache_creation_input_tokens);
+    assert.strictEqual(failedTask.usage_cached_tokens, usage.cache_read_input_tokens);
+    assert.strictEqual(failedTask.usage_total_tokens, usage.total_tokens);
+    assert.strictEqual(failedTask.usage_cost_usd, usage.cost_usd);
+
+    const allocatorFailureMessage = db.checkMail('allocator', false)
+      .find((message) => message.type === 'task_failed' && String(message.payload.task_id) === String(taskId));
+    assert.ok(allocatorFailureMessage);
+    assert.strictEqual(allocatorFailureMessage.payload.usage.service_tier, usage.service_tier);
+    assert.strictEqual(allocatorFailureMessage.payload.usage.tool_use_prompt_token_count, usage.tool_use_prompt_token_count);
+    assert.strictEqual(allocatorFailureMessage.payload.usage.thoughts_token_count, usage.thoughts_token_count);
+
+    const workerFailureLog = db.getLog(500)
+      .filter((entry) => entry.action === 'task_failed' && entry.actor === 'worker-1')
+      .map((entry) => {
+        try {
+          return JSON.parse(entry.details);
+        } catch {
+          return null;
+        }
+      })
+      .find((details) => details && String(details.task_id) === String(taskId));
+    assert.ok(workerFailureLog);
+    assert.strictEqual(workerFailureLog.usage.service_tier, usage.service_tier);
+    assert.strictEqual(workerFailureLog.usage.tool_use_prompt_token_count, usage.tool_use_prompt_token_count);
+    assert.strictEqual(workerFailureLog.usage.thoughts_token_count, usage.thoughts_token_count);
   });
 
   it('should reject conflicting duplicate aliases deterministically for fail-task usage', async () => {
@@ -1366,29 +1403,67 @@ describe('CLI Server', () => {
     assert.strictEqual(db.getTask(failCliNonObjectTaskId).status, 'assigned');
   });
 
-  it('should reject unknown complete-task usage keys even when alias keys are present', async () => {
+  it('should accept complete-task usage payloads with extra provider keys while persisting known metrics', async () => {
     db.registerWorker(1, '/wt-1', 'agent-1');
-    const reqId = db.createRequest('Usage unknown key rejection');
-    const taskId = db.createTask({ request_id: reqId, subject: 'Unknown key', description: 'Should reject unknown usage key' });
+    const reqId = db.createRequest('Usage forward compatibility');
+    const taskId = db.createTask({ request_id: reqId, subject: 'Unknown key', description: 'Should accept unknown usage key' });
     db.updateTask(taskId, { status: 'assigned', assigned_to: 1 });
     db.updateWorker(1, { status: 'assigned', current_task_id: taskId });
 
-    const result = await sendCommand('complete-task', {
-      worker_id: '1',
-      task_id: String(taskId),
-      usage: {
-        completion_tokens_details: {
-          accepted_prediction_tokens: 11,
-          rejected_prediction_tokens: 5,
-        },
-        cache_creation_input_tokens: 45,
-        cache_read_input_tokens: 67,
-        bogus_field: 1,
-      },
-    });
-    assert.ok(result.error);
-    assert.match(result.error, /unsupported keys: bogus_field/);
-    assert.strictEqual(db.getTask(taskId).status, 'assigned');
+    const usage = {
+      model: 'gpt-5-codex',
+      prompt_tokens: 144,
+      completion_tokens: 55,
+      cache_creation_input_tokens: 13,
+      cache_read_input_tokens: 34,
+      total_tokens: 246,
+      cost_usd: 0.0246,
+      service_tier: 'priority',
+      tool_use_prompt_token_count: 8,
+      thoughts_token_count: 5,
+    };
+
+    await runMac10Command([
+      'complete-task',
+      '1',
+      String(taskId),
+      'Complete with provider extras',
+      '--usage',
+      JSON.stringify(usage),
+    ], tmpDir);
+
+    const completedTask = db.getTask(taskId);
+    assert.strictEqual(completedTask.status, 'completed');
+    assert.strictEqual(completedTask.result, 'Complete with provider extras');
+    assert.strictEqual(completedTask.usage_model, usage.model);
+    assert.strictEqual(completedTask.usage_input_tokens, usage.prompt_tokens);
+    assert.strictEqual(completedTask.usage_output_tokens, usage.completion_tokens);
+    assert.strictEqual(completedTask.usage_cache_creation_tokens, usage.cache_creation_input_tokens);
+    assert.strictEqual(completedTask.usage_cached_tokens, usage.cache_read_input_tokens);
+    assert.strictEqual(completedTask.usage_total_tokens, usage.total_tokens);
+    assert.strictEqual(completedTask.usage_cost_usd, usage.cost_usd);
+
+    const allocatorCompletionMessage = db.checkMail('allocator', false)
+      .find((message) => message.type === 'task_completed' && String(message.payload.task_id) === String(taskId));
+    assert.ok(allocatorCompletionMessage);
+    assert.strictEqual(allocatorCompletionMessage.payload.usage.service_tier, usage.service_tier);
+    assert.strictEqual(allocatorCompletionMessage.payload.usage.tool_use_prompt_token_count, usage.tool_use_prompt_token_count);
+    assert.strictEqual(allocatorCompletionMessage.payload.usage.thoughts_token_count, usage.thoughts_token_count);
+
+    const workerCompletionLog = db.getLog(500)
+      .filter((entry) => entry.action === 'task_completed' && entry.actor === 'worker-1')
+      .map((entry) => {
+        try {
+          return JSON.parse(entry.details);
+        } catch {
+          return null;
+        }
+      })
+      .find((details) => details && String(details.task_id) === String(taskId));
+    assert.ok(workerCompletionLog);
+    assert.strictEqual(workerCompletionLog.usage.service_tier, usage.service_tier);
+    assert.strictEqual(workerCompletionLog.usage.tool_use_prompt_token_count, usage.tool_use_prompt_token_count);
+    assert.strictEqual(workerCompletionLog.usage.thoughts_token_count, usage.thoughts_token_count);
   });
 
   it('should reject conflicting duplicate aliases deterministically for complete-task usage', async () => {
