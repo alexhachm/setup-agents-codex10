@@ -184,11 +184,21 @@ Go to Step 6.
    ```
    If claim fails, pick another idle worker and retry.
 
-3. **Create and assign the task:**
+3. **Create and assign the task** (script-aware validation):
+   - If `package.json` defines `build`, use `npm run build`.
+   - Otherwise, if it defines `test`, use `npm test`.
+   - If neither script exists, omit `validation` so coordinator fallback applies.
    ```bash
+   validation_field=""
+   if [ -f package.json ] && grep -Eq '"build"[[:space:]]*:' package.json; then
+     validation_field=',"validation":"npm run build"'
+   elif [ -f package.json ] && grep -Eq '"test"[[:space:]]*:' package.json; then
+     validation_field=',"validation":"npm test"'
+   fi
+
+   task_payload='{"request_id":"[id]","subject":"[task title]","description":"DOMAIN: [domain]\nFILES: [files]\nVALIDATION: tier2\nTIER: 2\n\n[detailed requirements]\n\n[success criteria]","domain":"[domain]","tier":2,"priority":"normal","files":["file1.js","file2.js"]'"$validation_field"'}'
    create_task_output="$(
-     echo '{"request_id":"[id]","subject":"[task title]","description":"DOMAIN: [domain]\nFILES: [files]\nVALIDATION: tier2\nTIER: 2\n\n[detailed requirements]\n\n[success criteria]","domain":"[domain]","tier":2,"priority":"normal","files":["file1.js","file2.js"],"validation":"npm run build"}' \
-       | ./.claude/scripts/codex10 create-task -
+     printf '%s\n' "$task_payload" | ./.claude/scripts/codex10 create-task -
    )"
    task_id=$(printf '%s\n' "$create_task_output" | awk '/Task created:/ {print $3}')
    [ -n "$task_id" ] || { echo "Failed to capture task_id from create-task output"; exit 1; }
@@ -228,11 +238,22 @@ Go to Step 6.
    ```bash
    ./.claude/scripts/codex10 triage <request_id> 3 "Decomposed into [N] tasks"
    ```
-5. Create each decomposed Tier 3 task via codex10, capturing output and task IDs as you go:
+5. Create each decomposed Tier 3 task via codex10, capturing output and task IDs as you go.
+   Use script-aware validation selection per target package:
+   - Prefer `npm run build` when `build` exists.
+   - Else use `npm test` when `test` exists.
+   - Else omit `validation` and let coordinator fallback select the command.
    ```bash
+   validation_field=""
+   if [ -f package.json ] && grep -Eq '"build"[[:space:]]*:' package.json; then
+     validation_field=',"validation":"npm run build"'
+   elif [ -f package.json ] && grep -Eq '"test"[[:space:]]*:' package.json; then
+     validation_field=',"validation":"npm test"'
+   fi
+
+   task_payload='{"request_id":"[id]","subject":"[task title]","description":"REQUEST_ID: [id]\nDOMAIN: [domain]\nFILES: [specific files]\nVALIDATION: tier3\nTIER: 3\n\n[detailed requirements]\n\n[success criteria]","domain":"[domain]","tier":3,"priority":"normal","files":["file1.js","file2.js"],"depends_on":[]'"$validation_field"'}'
    create_task_output="$(
-     echo '{"request_id":"[id]","subject":"[task title]","description":"REQUEST_ID: [id]\nDOMAIN: [domain]\nFILES: [specific files]\nVALIDATION: tier3\nTIER: 3\n\n[detailed requirements]\n\n[success criteria]","domain":"[domain]","tier":3,"priority":"normal","files":["file1.js","file2.js"],"depends_on":[],"validation":"npm run build"}' \
-       | ./.claude/scripts/codex10 create-task -
+     printf '%s\n' "$task_payload" | ./.claude/scripts/codex10 create-task -
    )"
    task_id=$(printf '%s\n' "$create_task_output" | awk '/Task created:/ {print $3}')
    [ -n "$task_id" ] || { echo "Failed to capture Tier 3 task ID"; exit 1; }
