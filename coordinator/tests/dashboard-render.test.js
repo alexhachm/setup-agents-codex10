@@ -169,6 +169,7 @@ describe('Dashboard telemetry rendering', () => {
           usage_input_tokens: 1234,
           usage_output_tokens: 345,
           usage_cached_tokens: 99,
+          usage_cache_creation_tokens: 77,
           usage_total_tokens: 1678,
           usage_cost_usd: 0.0456,
         },
@@ -190,6 +191,7 @@ describe('Dashboard telemetry rendering', () => {
     assert.match(html, /task-chip-label">in<\/span>1234/);
     assert.match(html, /task-chip-label">out<\/span>345/);
     assert.match(html, /task-chip-label">cached<\/span>99/);
+    assert.match(html, /task-chip-label">cache-create<\/span>77/);
     assert.match(html, /task-chip-label">total<\/span>1678/);
     assert.match(html, /task-chip-label">cost<\/span>0\.0456/);
 
@@ -218,6 +220,7 @@ describe('Dashboard telemetry rendering', () => {
           usage_input_tokens: null,
           usage_output_tokens: null,
           usage_cached_tokens: null,
+          usage_cache_creation_tokens: null,
           usage_total_tokens: null,
           usage_cost_usd: null,
         },
@@ -231,6 +234,7 @@ describe('Dashboard telemetry rendering', () => {
 
     assert.match(html, /No telemetry task/);
     assert.doesNotMatch(html, /task-chip-row/);
+    assert.doesNotMatch(html, /task-chip-label">cache-create<\/span>/);
     assert.doesNotMatch(html, /task-budget-indicator/);
   });
 });
@@ -253,6 +257,7 @@ describe('Popout telemetry rendering', () => {
             input_tokens: 210,
             output_tokens: 45,
             cached_tokens: 12,
+            cache_creation_input_tokens: 8,
             total_tokens: 267,
             cost_usd: 0.0123,
           },
@@ -266,6 +271,7 @@ describe('Popout telemetry rendering', () => {
     assert.match(html, /task-chip-label">in<\/span>210/);
     assert.match(html, /task-chip-label">out<\/span>45/);
     assert.match(html, /task-chip-label">cached<\/span>12/);
+    assert.match(html, /task-chip-label">cache-create<\/span>8/);
     assert.match(html, /task-chip-label">total<\/span>267/);
     assert.match(html, /task-chip-label">cost<\/span>0\.0123/);
   });
@@ -286,6 +292,7 @@ describe('Popout telemetry rendering', () => {
           usage_input_tokens: null,
           usage_output_tokens: null,
           usage_cached_tokens: null,
+          usage_cache_creation_tokens: null,
           usage_total_tokens: null,
           usage_cost_usd: null,
         },
@@ -295,6 +302,7 @@ describe('Popout telemetry rendering', () => {
     const html = panel.innerHTML;
     assert.match(html, /Popout no telemetry task/);
     assert.doesNotMatch(html, /task-chip-row/);
+    assert.doesNotMatch(html, /task-chip-label">cache-create<\/span>/);
     assert.doesNotMatch(html, /task-chip-label">usage<\/span>/);
   });
 });
