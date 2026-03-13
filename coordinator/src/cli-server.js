@@ -119,16 +119,23 @@ function hasCodeHeavyMetadataSignals(task) {
   return false;
 }
 
+function hasKeywordToken(value, keywords) {
+  const tokens = String(value || '')
+    .toLowerCase()
+    .split(/[^a-z0-9]+/)
+    .filter(Boolean);
+  return tokens.some((token) => keywords.has(token));
+}
+
 function resolveFallbackRoutingClass(task) {
   const tier = Number(task && task.tier) || 0;
   const priority = String(task && task.priority || '').toLowerCase();
   const subject = String(task && task.subject || '').toLowerCase();
   const description = String(task && task.description || '').toLowerCase();
+  const mergeConflictKeywords = new Set(['merge', 'conflict']);
   const hasMergeOrConflictSignal = (
-    subject.includes('merge')
-    || subject.includes('conflict')
-    || description.includes('merge')
-    || description.includes('conflict')
+    hasKeywordToken(subject, mergeConflictKeywords)
+    || hasKeywordToken(description, mergeConflictKeywords)
   );
   const hasRefactorSignal = subject.includes('refactor') || description.includes('refactor');
   const hasDocsSignal = subject.includes('docs') || description.includes('docs');
