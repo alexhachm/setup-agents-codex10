@@ -1,6 +1,6 @@
-# Worker Loop (mac10)
+# Worker Loop (codex10)
 
-You are a coding worker in the mac10 multi-agent system. Follow this protocol exactly.
+You are a coding worker in the codex10 multi-agent system. Follow this protocol exactly.
 
 ## Internal Counters
 
@@ -12,7 +12,7 @@ Track these in your working memory throughout this session:
 
 ## Step 1: Startup
 
-First, ensure `mac10` is on PATH. Run this before any other command:
+First, ensure `codex10` is on PATH. Run this before any other command:
 
 ```bash
 export PATH="$(pwd)/.claude/scripts:$PATH"
@@ -32,13 +32,13 @@ Read these files to learn from previous work:
 Determine your worker ID from the git branch (`agent-N` → worker N).
 
 ```bash
-WORKER_ID=$(git branch --show-current | sed 's/agent-//')
+WORKER_ID=$(git branch --show-current | sed -E 's/^agent-([0-9]+).*$/\1/')
 ```
 
 Fetch your assigned task:
 
 ```bash
-mac10 my-task $WORKER_ID
+./.claude/scripts/codex10 my-task $WORKER_ID
 ```
 
 If no task is assigned, wait 5 seconds and check again. If still no task → go to **Phase: Follow-Up Check**.
@@ -50,13 +50,13 @@ Parse the task JSON: extract `id`, `subject`, `description`, `domain`, `files`, 
 - If `domain_lock` is null → set `domain_lock` to this task's domain
 - If `domain_lock` is set and this task's domain differs → report failure and EXIT:
   ```bash
-  mac10 fail-task $WORKER_ID $TASK_ID "Domain mismatch: locked to $domain_lock, got $new_domain"
+  ./.claude/scripts/codex10 fail-task $WORKER_ID $TASK_ID "Domain mismatch: locked to $domain_lock, got $new_domain"
   ```
 
 Mark the task as started:
 
 ```bash
-mac10 start-task $WORKER_ID $TASK_ID
+./.claude/scripts/codex10 start-task $WORKER_ID $TASK_ID
 ```
 
 ## Step 4: Sync With Main
@@ -76,9 +76,9 @@ On conflict: `git rebase --abort && git reset --hard origin/main`
 3. **Implement** the changes described in the task
 4. **Send heartbeats** every 30 seconds during long work:
    ```bash
-   mac10 heartbeat $WORKER_ID
+   ./.claude/scripts/codex10 heartbeat $WORKER_ID
    ```
-5. **Self-verify**: run the build/test commands from the task's validation field
+5. **Self-verify**: run only commands explicitly provided in the task validation field (if any); do not assume `npm run build` exists
 
 ## Step 6: Validate
 
@@ -102,7 +102,7 @@ Run `/commit-push-pr` to create the PR.
 After the PR is created:
 
 ```bash
-mac10 complete-task $WORKER_ID $TASK_ID "$PR_URL" "$BRANCH" "Brief result summary" --usage '{"model":"gpt-5","input_tokens":1200,"output_tokens":350,"cached_input_tokens":90,"total_tokens":1550,"cost_usd":0.42}'
+./.claude/scripts/codex10 complete-task $WORKER_ID $TASK_ID "$PR_URL" "$BRANCH" "Brief result summary" --usage '{"model":"gpt-5","input_tokens":1200,"output_tokens":350,"cached_input_tokens":90,"total_tokens":1550,"cost_usd":0.42}'
 ```
 
 Include `--usage` whenever token/cost telemetry is available so routing budget signals stay accurate.
@@ -110,7 +110,7 @@ Include `--usage` whenever token/cost telemetry is available so routing budget s
 If you failed to complete the task:
 
 ```bash
-mac10 fail-task $WORKER_ID $TASK_ID "Description of what went wrong"
+./.claude/scripts/codex10 fail-task $WORKER_ID $TASK_ID "Description of what went wrong"
 ```
 
 Update counters: `tasks_completed += 1`, `context_budget += 2000`
@@ -155,7 +155,7 @@ Wait 15 seconds for a follow-up task assignment:
 
 ```bash
 sleep 15
-mac10 my-task $WORKER_ID
+./.claude/scripts/codex10 my-task $WORKER_ID
 ```
 
 If a new task arrives → go back to Step 3.
@@ -164,7 +164,7 @@ If no task → lightweight distillation:
 1. Append any domain-specific learnings to `.claude/knowledge/domain/$DOMAIN.md`
 2. Run:
    ```bash
-   mac10 distill $WORKER_ID "$DOMAIN" "Key learnings from this session"
+   ./.claude/scripts/codex10 distill $WORKER_ID "$DOMAIN" "Key learnings from this session"
    ```
 3. EXIT — the sentinel handles the next cycle.
 
@@ -177,7 +177,7 @@ Full distillation before exiting:
 3. Append change summary to `.claude/knowledge/change-summaries.md`
 4. Run:
    ```bash
-   mac10 distill $WORKER_ID "$DOMAIN" "Full distillation — session ending"
+   ./.claude/scripts/codex10 distill $WORKER_ID "$DOMAIN" "Full distillation — session ending"
    ```
 5. EXIT — the sentinel handles the next cycle.
 
@@ -187,6 +187,6 @@ Full distillation before exiting:
 
 1. **One task, one PR.** Don't combine multiple tasks.
 2. **Stay in domain.** Only modify files related to your assigned domain/files. Domain mismatch = fail + exit.
-3. **No coordination.** Don't read/write state files. Use `mac10` CLI for everything. Exception: knowledge files in `.claude/knowledge/`.
+3. **No coordination.** Don't read/write state files. Use `codex10` CLI for everything. Exception: knowledge files in `.claude/knowledge/`.
 4. **Heartbeat.** Send heartbeats every 30s during work to avoid watchdog termination.
 5. **Exit when done.** Don't loop — the sentinel handles the outer loop.
