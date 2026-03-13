@@ -2855,6 +2855,34 @@ describe('CLI Server', () => {
     assert.strictEqual(assignment.routing.routing_reason, 'fallback-budget-downgrade:high->mini');
   });
 
+  it('should merge scalar fallback into partial routing_budget_state for routing decisions', async () => {
+    db.registerWorker(1, '/wt-1', 'agent-1');
+
+    await setConfigValue('model_mid', 'mid-model');
+    await setConfigValue('model_codex_spark', 'spark-model');
+    await setConfigValue('reasoning_spark', 'spark-effort');
+
+    db.setConfig('routing_budget_state', JSON.stringify({
+      flagship: { remaining: 7 },
+    }));
+    db.setConfig('routing_budget_flagship_remaining', '50');
+    db.setConfig('routing_budget_flagship_threshold', '10');
+
+    const midTaskId = createReadyTask({
+      subject: 'Partial budget object should merge missing threshold',
+      description: 'Resolve merge conflict in fallback router',
+      tier: 2,
+    });
+
+    const assignment = await sendCommand('assign-task', { task_id: midTaskId, worker_id: 1 });
+    assert.strictEqual(assignment.ok, true);
+    assert.strictEqual(assignment.routing.class, 'mid');
+    assert.strictEqual(assignment.routing.model, 'spark-model');
+    assert.strictEqual(assignment.routing.model_source, 'budget-downgrade:model_codex_spark');
+    assert.strictEqual(assignment.routing.reasoning_effort, 'spark-effort');
+    assert.strictEqual(assignment.routing.routing_reason, 'fallback-budget-downgrade:mid->spark');
+  });
+
   it('should upgrade routing from legacy scalar budget keys when routing_budget_state JSON is absent', async () => {
     db.registerWorker(1, '/wt-1', 'agent-1');
 
@@ -2964,6 +2992,35 @@ describe('CLI Server', () => {
         source: 'config:budget_thresholds',
         parsed: { flagship: { remaining: 8, threshold: 10 } },
         remaining: 8,
+        threshold: 10,
+      });
+    } finally {
+      webServer.stop();
+    }
+  });
+
+  it('should merge scalar fallback into partial routing_budget_state snapshot in /api/status', async () => {
+    db.setConfig('routing_budget_state', JSON.stringify({
+      flagship: { remaining: 7 },
+    }));
+    db.setConfig('routing_budget_flagship_remaining', '50');
+    db.setConfig('routing_budget_flagship_threshold', '10');
+
+    const web = webServer.start(tmpDir, 0);
+    await new Promise((resolve, reject) => {
+      web.once('listening', resolve);
+      web.once('error', reject);
+    });
+    const webPort = web.address().port;
+
+    try {
+      const statusResult = await requestWebJson(webPort, '/api/status');
+      assert.strictEqual(statusResult.status, 200);
+      assert.strictEqual(statusResult.body.routing_budget_source, 'config:routing_budget_state');
+      assert.deepStrictEqual(statusResult.body.routing_budget_state, {
+        source: 'config:routing_budget_state',
+        parsed: { flagship: { remaining: 7, threshold: 10 } },
+        remaining: 7,
         threshold: 10,
       });
     } finally {
@@ -3200,6 +3257,8 @@ describe('CLI Server', () => {
     assert.strictEqual(constrainedHighAssignment.routing.reasoning_effort, 'effort-mini');
 
     await setConfigValue('routing_budget_state', JSON.stringify({}));
+    await setConfigValue('routing_budget_flagship_remaining', '');
+    await setConfigValue('routing_budget_flagship_threshold', '   ');
     const highTaskId = createReadyTask({
       subject: 'High complexity no budget signal',
       description: 'Critical migration path',

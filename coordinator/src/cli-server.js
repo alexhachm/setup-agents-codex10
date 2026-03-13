@@ -213,18 +213,12 @@ function fallbackModelRouter() {
   const fallbackStateSource = 'coordinator-fallback-model-router';
   return {
     getBudgetState(getConfig) {
-      const rawState = parseBudgetStateConfig(typeof getConfig === 'function' ? getConfig(ROUTING_BUDGET_STATE_KEY) : null);
+      const rawState = parseBudgetStateConfig(
+        typeof getConfig === 'function' ? getConfig(ROUTING_BUDGET_STATE_KEY) : null,
+        getConfig
+      );
       const parsedState = isPlainObject(rawState.parsed) ? rawState.parsed : null;
-      if (!parsedState) {
-        const scalarState = parseBudgetScalarFallback(getConfig);
-        if (!scalarState.parsed) return null;
-        return {
-          source: fallbackStateSource,
-          parsed: scalarState.parsed,
-          remaining: scalarState.remaining,
-          threshold: scalarState.threshold,
-        };
-      }
+      if (!parsedState) return null;
       return {
         source: fallbackStateSource,
         parsed: parsedState,
@@ -534,28 +528,61 @@ function isPlainObject(value) {
   return !!value && typeof value === 'object' && !Array.isArray(value);
 }
 
-function parseBudgetStateConfig(raw) {
-  if (raw === undefined || raw === null) {
-    return { parsed: null, remaining: null, threshold: null };
+function mergeBudgetStateWithScalarFallback(parsedState, scalarState) {
+  if (!isPlainObject(parsedState)) return parsedState;
+  if (!scalarState || (scalarState.remaining === null && scalarState.threshold === null)) {
+    return parsedState;
   }
-  const trimmed = String(raw).trim();
-  if (!trimmed) {
-    return { parsed: null, remaining: null, threshold: null };
+  const mergedState = { ...parsedState };
+  if (isPlainObject(parsedState.flagship)) {
+    mergedState.flagship = { ...parsedState.flagship };
   }
-  try {
-    const parsed = JSON.parse(trimmed);
-    if (!isPlainObject(parsed)) {
-      return { parsed: null, remaining: null, threshold: null };
+  const flagship = isPlainObject(mergedState.flagship) ? mergedState.flagship : mergedState;
+  if (parseBudgetNumber(flagship.remaining) === null && scalarState.remaining !== null) {
+    flagship.remaining = scalarState.remaining;
+  }
+  if (parseBudgetNumber(flagship.threshold) === null && scalarState.threshold !== null) {
+    flagship.threshold = scalarState.threshold;
+  }
+  return mergedState;
+}
+
+function parseBudgetStateConfig(raw, getConfig = null) {
+  let parsed = null;
+  if (raw !== undefined && raw !== null) {
+    if (typeof raw === 'object') {
+      parsed = isPlainObject(raw) ? raw : null;
+    } else {
+      const trimmed = String(raw).trim();
+      if (trimmed) {
+        try {
+          const jsonParsed = JSON.parse(trimmed);
+          parsed = isPlainObject(jsonParsed) ? jsonParsed : null;
+        } catch {
+          parsed = null;
+        }
+      }
     }
-    const flagship = isPlainObject(parsed.flagship) ? parsed.flagship : parsed;
+  }
+
+  const scalarState = typeof getConfig === 'function' ? parseBudgetScalarFallback(getConfig) : null;
+  if (isPlainObject(parsed)) {
+    const mergedParsed = mergeBudgetStateWithScalarFallback(parsed, scalarState);
+    const flagship = isPlainObject(mergedParsed.flagship) ? mergedParsed.flagship : mergedParsed;
     return {
-      parsed,
+      parsed: mergedParsed,
       remaining: parseBudgetNumber(flagship.remaining),
       threshold: parseBudgetNumber(flagship.threshold),
     };
-  } catch {
-    return { parsed: null, remaining: null, threshold: null };
   }
+  if (scalarState && isPlainObject(scalarState.parsed)) {
+    return {
+      parsed: scalarState.parsed,
+      remaining: scalarState.remaining,
+      threshold: scalarState.threshold,
+    };
+  }
+  return { parsed: null, remaining: null, threshold: null };
 }
 
 function syncBudgetStateFromScalarFallback(raw, getConfig) {
@@ -3021,4 +3048,4 @@ function handleCommand(cmd, conn, handlers) {
   }
 }
 
-module.exports = { start, stop, getSocketPath };
+module.exports = { start, stop, getSocketPath, parseBudgetStateConfig };
