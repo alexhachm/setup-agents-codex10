@@ -338,6 +338,28 @@ function recoverOrphanTasks() {
   }
 }
 
+function hasActiveRemediationTasks(requestId) {
+  const activeTasks = db.listTasks({ request_id: requestId }).filter(
+    t => !['completed', 'failed'].includes(t.status)
+  );
+  return activeTasks.length > 0;
+}
+
+function isWithinRemediationGraceWindow(now, requestId, merges, failureStatus, ageScope) {
+  const oldestFailureAgeSec = merges
+    .filter(m => m.status === failureStatus)
+    .reduce((oldest, m) => {
+      const ageSec = getAgeSeconds(now, m.updated_at || m.created_at, {
+        request_id: requestId,
+        merge_id: m.id,
+        scope: ageScope,
+      });
+      if (ageSec === null) return oldest;
+      return ageSec > oldest ? ageSec : oldest;
+    }, 0);
+  return oldestFailureAgeSec < MERGE_CONFLICT_GRACE_SEC;
+}
+
 function recoverStaleIntegrations(now, options = {}) {
   const source = options.source || 'watchdog_tick';
   const integratingRequests = db.getDb().prepare(
@@ -461,30 +483,13 @@ function recoverStaleIntegrations(now, options = {}) {
     } else if (hasConflicts) {
       // Case 3: Merge conflicts — wait for allocator to create fix tasks
       // Check if there are active tasks that could be fix tasks from the allocator
-      const activeTasks = db.listTasks({ request_id: req.id }).filter(
-        t => !['completed', 'failed'].includes(t.status)
-      );
-      if (activeTasks.length > 0) {
+      if (hasActiveRemediationTasks(req.id)) {
         // Fix tasks in progress — don't mark request as failed yet
         continue;
       }
 
       // No active tasks — give allocator a grace period to create fix tasks
-      // Check age of the oldest conflict entry
-      const oldestConflict = freshMerges
-        .filter(m => m.status === 'conflict')
-        .reduce((oldest, m) => {
-          const ageSec = getAgeSeconds(now, m.updated_at || m.created_at, {
-            request_id: req.id,
-            merge_id: m.id,
-            scope: 'conflict_age',
-          });
-          if (ageSec === null) return oldest;
-          return ageSec > oldest ? ageSec : oldest;
-        }, 0);
-      const conflictAgeSec = oldestConflict;
-
-      if (conflictAgeSec < MERGE_CONFLICT_GRACE_SEC) { // 10-minute grace period for allocator
+      if (isWithinRemediationGraceWindow(now, req.id, freshMerges, 'conflict', 'conflict_age')) {
         continue;
       }
 
@@ -506,6 +511,12 @@ function recoverStaleIntegrations(now, options = {}) {
       });
     } else {
       // Case 4: All resolved but some failed (no conflicts) → mark request failed
+      if (hasActiveRemediationTasks(req.id)) {
+        continue;
+      }
+      if (isWithinRemediationGraceWindow(now, req.id, freshMerges, 'failed', 'merge_failure_age')) {
+        continue;
+      }
       const failedMerges = freshMerges.filter(m => m.status !== 'merged');
       const details = failedMerges.map(m => `${m.branch}: ${m.status}${m.error ? ' - ' + m.error.slice(0, 100) : ''}`).join('; ');
       db.updateRequest(req.id, {
