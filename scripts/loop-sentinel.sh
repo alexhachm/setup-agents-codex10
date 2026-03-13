@@ -72,19 +72,15 @@ while true; do
         const active = new Set(["pending", "triaging", "executing_tier1", "decomposed", "in_progress", "integrating"]);
         try {
           const payload = JSON.parse(fs.readFileSync(0, "utf8") || "{}");
-          const requests = Array.isArray(payload?.requests)
-            ? payload.requests
-            : Array.isArray(payload?.data?.requests)
-              ? payload.data.requests
-              : Array.isArray(payload?.data?.rows)
-                ? payload.data.rows
-                : Array.isArray(payload?.rows)
-                  ? payload.rows
-                  : Array.isArray(payload?.data)
-                  ? payload.data
-                  : Array.isArray(payload)
-                    ? payload
-                    : [];
+          const requestLists = [
+            payload?.requests,
+            payload?.data?.requests,
+            payload?.data?.rows,
+            payload?.rows,
+            payload?.data,
+            payload,
+          ].filter(Array.isArray);
+          const requests = requestLists.find((list) => list.length > 0) || requestLists[0] || [];
           const count = requests.filter((r) => {
             const status = typeof r?.status === "string" ? r.status : "";
             return active.has(status.trim().toLowerCase());
