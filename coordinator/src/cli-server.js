@@ -1819,7 +1819,11 @@ function handleCommand(cmd, conn, handlers) {
           const freshTask = db.getTask(assignTaskId);
           const freshWorker = db.getWorker(assignWorkerId);
           if (!freshTask || freshTask.status !== 'ready' || freshTask.assigned_to) return { ok: false, reason: 'task_not_ready' };
-          if (!freshWorker || freshWorker.status !== 'idle') return { ok: false, reason: 'worker_not_idle' };
+          if (!freshWorker) return { ok: false, reason: 'worker_not_idle' };
+          if (freshWorker.claimed_by !== null && freshWorker.claimed_by !== undefined) {
+            return { ok: false, reason: 'worker_claimed' };
+          }
+          if (freshWorker.status !== 'idle') return { ok: false, reason: 'worker_not_idle' };
 
           db.updateTask(assignTaskId, { status: 'assigned', assigned_to: assignWorkerId });
           db.updateWorker(assignWorkerId, {
