@@ -16,6 +16,13 @@ const ROUTING_BUDGET_REMAINING_KEY = 'routing_budget_flagship_remaining';
 const ROUTING_BUDGET_THRESHOLD_KEY = 'routing_budget_flagship_threshold';
 const LEGACY_BUDGET_REMAINING_KEY = 'flagship_budget_remaining';
 const LEGACY_BUDGET_THRESHOLD_KEY = 'flagship_budget_threshold';
+const USAGE_COST_BURN_RATE_DEFAULTS = Object.freeze({
+  usd_15m: 0,
+  usd_60m: 0,
+  usd_24h: 0,
+  request_id: null,
+  request_total_usd: 0,
+});
 
 let server = null;
 let wss = null;
@@ -157,6 +164,43 @@ function normalizeRoutingField(value) {
   return trimmed ? trimmed : null;
 }
 
+function normalizeUsdNumber(value) {
+  const parsed = Number(value);
+  return Number.isFinite(parsed) ? parsed : 0;
+}
+
+function normalizeRequestId(value) {
+  if (value === undefined || value === null) return null;
+  const trimmed = String(value).trim();
+  return trimmed ? trimmed : null;
+}
+
+function normalizeUsageCostBurnRate(rawSnapshot, requestedRequestId = null) {
+  const normalizedRequestId = normalizeRequestId(
+    rawSnapshot && Object.prototype.hasOwnProperty.call(rawSnapshot, 'request_id')
+      ? rawSnapshot.request_id
+      : requestedRequestId
+  );
+  return {
+    usd_15m: normalizeUsdNumber(rawSnapshot && rawSnapshot.usd_15m),
+    usd_60m: normalizeUsdNumber(rawSnapshot && rawSnapshot.usd_60m),
+    usd_24h: normalizeUsdNumber(rawSnapshot && rawSnapshot.usd_24h),
+    request_id: normalizedRequestId,
+    request_total_usd: normalizeUsdNumber(rawSnapshot && rawSnapshot.request_total_usd),
+  };
+}
+
+function getUsageCostBurnRateSnapshot(requestId = null) {
+  if (typeof db.getUsageCostBurnRate !== 'function') {
+    return normalizeUsageCostBurnRate(USAGE_COST_BURN_RATE_DEFAULTS, requestId);
+  }
+  try {
+    return normalizeUsageCostBurnRate(db.getUsageCostBurnRate(requestId), requestId);
+  } catch {
+    return normalizeUsageCostBurnRate(USAGE_COST_BURN_RATE_DEFAULTS, requestId);
+  }
+}
+
 function normalizeBudgetState(value) {
   const parsed = parseJsonObject(value);
   return parsed && typeof parsed === 'object' ? parsed : null;
@@ -286,6 +330,14 @@ function buildStatePayload({ includeLogs = false, includeLoops = false } = {}) {
   const requests = db.listRequests();
   const workers = db.getAllWorkers();
   const { tasks: hydratedTasks, telemetry } = listHydratedTasks();
+  const usageCostBurnRate = getUsageCostBurnRateSnapshot();
+  const usageCostRequestTotalsUsd = {};
+  for (const request of requests) {
+    const requestId = normalizeRequestId(request && request.id);
+    if (!requestId) continue;
+    const requestSnapshot = getUsageCostBurnRateSnapshot(requestId);
+    usageCostRequestTotalsUsd[requestId] = requestSnapshot.request_total_usd;
+  }
 
   const configBudget = buildBudgetSnapshotFromConfig();
   const routingBudgetState = configBudget
@@ -301,6 +353,13 @@ function buildStatePayload({ includeLogs = false, includeLoops = false } = {}) {
     tasks: hydratedTasks,
     routing_budget_state: routingBudgetState,
     routing_budget_source: routingBudgetSource,
+    usage_cost_burn_rate: usageCostBurnRate,
+    usage_cost_request_totals_usd: usageCostRequestTotalsUsd,
+    usage_cost_usd_15m: usageCostBurnRate.usd_15m,
+    usage_cost_usd_60m: usageCostBurnRate.usd_60m,
+    usage_cost_usd_24h: usageCostBurnRate.usd_24h,
+    usage_cost_request_id: usageCostBurnRate.request_id,
+    usage_cost_request_total_usd: usageCostBurnRate.request_total_usd,
   };
   if (includeLogs) payload.logs = db.getLog(20);
   if (includeLoops) payload.loops = db.listLoops();
