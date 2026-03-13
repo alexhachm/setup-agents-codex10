@@ -358,9 +358,7 @@
     const usageCachedTokens = pickTelemetryValue(...usageCachedTokensCandidates);
     const usageInputTokensNumber = pickFiniteTelemetryNumber(...usageInputTokensCandidates);
     const usageCachedTokensNumber = pickFiniteTelemetryNumber(...usageCachedTokensCandidates);
-    const cacheHitRate = usageInputTokensNumber !== null && usageCachedTokensNumber !== null && usageInputTokensNumber > 0
-      ? formatTelemetryPercentage(usageCachedTokensNumber / usageInputTokensNumber)
-      : '';
+    const cacheHitRate = computeCacheHitRate(usageInputTokensNumber, usageCachedTokensNumber);
     return {
       routingClass: pickTelemetryValue(task && task.routing_class, task && task.routingClass, routing && routing.class, routing && routing.routing_class),
       routedModel: pickTelemetryValue(task && task.routed_model, task && task.routedModel, task && task.routing_model, task && task.routingModel, routing && routing.model),
@@ -460,6 +458,17 @@
   function formatTelemetryPercentage(value) {
     if (!Number.isFinite(value)) return '';
     return `${(value * 100).toFixed(1)}%`;
+  }
+
+  function computeCacheHitRate(inputTokens, cachedTokens) {
+    if (inputTokens === null || cachedTokens === null || inputTokens <= 0) return '';
+    const denominator = cachedTokens > inputTokens
+      ? inputTokens + cachedTokens
+      : inputTokens;
+    if (denominator <= 0) return '';
+    const rawRatio = cachedTokens / denominator;
+    const boundedRatio = Math.min(1, Math.max(0, rawRatio));
+    return formatTelemetryPercentage(boundedRatio);
   }
 
   function normalizeTelemetryValue(value) {
