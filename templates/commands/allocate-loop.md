@@ -71,6 +71,8 @@ If the blocked inbox call returns no actionable work, run polling fallback:
 ./.claude/scripts/codex10 worker-status
 ```
 
+Do not wait on `.codex10.task-signal`, `.codex10.fix-signal`, or `.codex10.completion-signal`; these signal files are deprecated and not produced in codex10 runtime.
+
 Use 3s polling fallback cadence if `last_activity` was < 30s ago. Use 10s otherwise.
 
 `polling_cycle += 1`
