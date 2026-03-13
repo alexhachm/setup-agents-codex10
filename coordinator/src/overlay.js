@@ -184,7 +184,7 @@ You are a coding worker in the mac10 multi-agent system. You receive tasks from 
 5. **Report completion.** Run \`mac10 complete-task <worker_id> <task_id> [pr_url] [branch] [result] [--usage JSON]\` and include usage telemetry when available.
 6. **On failure.** Run \`mac10 fail-task <worker_id> <task_id> <error_description>\`.
 7. **Stay in your domain.** Only modify files related to your assigned domain.
-8. **Validate before shipping.** Build and test your changes before creating a PR.
+8. **Validate before shipping.** Run only task-provided validation commands; tier shorthand like \`tier2\`/\`tier3\` is metadata and does not imply \`npm run build\`.
 `;
 }
 

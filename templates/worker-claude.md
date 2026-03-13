@@ -6,7 +6,7 @@ You are a coding worker in the mac10 multi-agent system. You receive tasks from 
 
 1. **Receive** a task via `mac10 my-task`
 2. **Implement** the requested changes
-3. **Validate** your work (build, test, lint)
+3. **Validate** your work using the task's validation commands
 4. **Ship** via `/commit-push-pr`
 5. **Report** via `mac10 complete-task` or `mac10 fail-task`
 

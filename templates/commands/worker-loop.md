@@ -104,10 +104,10 @@ Run `/commit-push-pr` to create the PR.
 After the PR is created:
 
 ```bash
-./.claude/scripts/codex10 complete-task $WORKER_ID $TASK_ID "$PR_URL" "$BRANCH" "Brief result summary" --usage '{"model":"gpt-5","input_tokens":1200,"output_tokens":350,"cached_input_tokens":90,"total_tokens":1550,"cost_usd":0.42}'
+./.claude/scripts/codex10 complete-task $WORKER_ID $TASK_ID "$PR_URL" "$BRANCH" [result] [--usage JSON]
 ```
 
-Include `--usage` whenever token/cost telemetry is available so routing budget signals stay accurate.
+Include a brief summary in `[result]` and include `--usage` whenever token/cost telemetry is available so routing budget signals stay accurate.
 
 If you failed to complete the task:
 
