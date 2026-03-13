@@ -77,17 +77,37 @@ function buildTaskOverlay(task, worker, projectDir) {
   }
 
   if (task.validation) {
-    let val;
-    try {
-      val = typeof task.validation === 'string' ? JSON.parse(task.validation) : task.validation;
-    } catch { val = null; }
+    let val = null;
+    if (typeof task.validation === 'string') {
+      const trimmed = task.validation.trim();
+      if (trimmed) {
+        try {
+          val = JSON.parse(trimmed);
+        } catch {
+          val = trimmed;
+        }
+      }
+    } else {
+      val = task.validation;
+    }
     if (val) {
       lines.push('## Validation');
       lines.push('');
-      if (val.build_cmd) lines.push(`- Build: \`${val.build_cmd}\``);
-      if (val.test_cmd) lines.push(`- Test: \`${val.test_cmd}\``);
-      if (val.lint_cmd) lines.push(`- Lint: \`${val.lint_cmd}\``);
-      if (val.custom) lines.push(`- Custom: ${val.custom}`);
+      if (typeof val === 'string') {
+        lines.push(`- Validation: \`${val}\``);
+      } else if (Array.isArray(val)) {
+        for (const command of val) {
+          if (typeof command === 'string' && command.trim()) {
+            lines.push(`- Command: \`${command}\``);
+          }
+        }
+      } else if (typeof val === 'object') {
+        if (val.build_cmd) lines.push(`- Build: \`${val.build_cmd}\``);
+        if (val.test_cmd) lines.push(`- Test: \`${val.test_cmd}\``);
+        if (val.lint_cmd) lines.push(`- Lint: \`${val.lint_cmd}\``);
+        if (val.custom) lines.push(`- Custom: ${val.custom}`);
+      }
+      lines.push('- Note: Run only task-provided validation commands; tier shorthand like `tier2`/`tier3` is metadata, not a shell command, and does not imply `npm run build`.');
       lines.push('');
     }
   }
