@@ -314,6 +314,13 @@ const ROUTING_BUDGET_SCALAR_LEGACY_KEY_MAP = Object.freeze({
   [ROUTING_BUDGET_REMAINING_KEY]: LEGACY_BUDGET_REMAINING_KEY,
   [ROUTING_BUDGET_THRESHOLD_KEY]: LEGACY_BUDGET_THRESHOLD_KEY,
 });
+const LOOP_REQUEST_SET_CONFIG_SPECS = Object.freeze({
+  loop_request_quality_gate: Object.freeze({ type: 'boolean' }),
+  loop_request_min_description_chars: Object.freeze({ type: 'int', min: 80, max: 5000 }),
+  loop_request_min_interval_sec: Object.freeze({ type: 'int', min: 0, max: 86400 }),
+  loop_request_max_per_hour: Object.freeze({ type: 'int', min: 1, max: 1000 }),
+  loop_request_similarity_threshold: Object.freeze({ type: 'float', min: 0.5, max: 0.99 }),
+});
 const PR_RESOLVE_ERROR_RE = /Could not resolve to a PullRequest/i;
 
 function namespacedFile(defaultName, namespacedName) {
@@ -551,6 +558,60 @@ function syncBudgetStateFromScalarFallback(raw, getConfig) {
     delete state.flagship;
   }
   return state;
+}
+
+function normalizeLoopRequestSetConfigValue(key, rawValue) {
+  const spec = LOOP_REQUEST_SET_CONFIG_SPECS[key];
+  if (!spec) return { ok: true, value: String(rawValue) };
+
+  const trimmed = String(rawValue).trim();
+  if (!trimmed) {
+    return { ok: false, error: `Invalid value for '${key}': value cannot be blank` };
+  }
+
+  if (spec.type === 'boolean') {
+    const lowered = trimmed.toLowerCase();
+    if (lowered !== 'true' && lowered !== 'false') {
+      return { ok: false, error: `Invalid value for '${key}': expected true or false` };
+    }
+    return { ok: true, value: lowered };
+  }
+
+  if (spec.type === 'int') {
+    const parsed = Number.parseInt(trimmed, 10);
+    if (!Number.isFinite(parsed)) {
+      return {
+        ok: false,
+        error: `Invalid value for '${key}': expected integer between ${spec.min} and ${spec.max}`,
+      };
+    }
+    if (parsed < spec.min || parsed > spec.max) {
+      return {
+        ok: false,
+        error: `Invalid value for '${key}': expected integer between ${spec.min} and ${spec.max}, received ${parsed}`,
+      };
+    }
+    return { ok: true, value: String(parsed) };
+  }
+
+  if (spec.type === 'float') {
+    const parsed = Number.parseFloat(trimmed);
+    if (!Number.isFinite(parsed)) {
+      return {
+        ok: false,
+        error: `Invalid value for '${key}': expected number between ${spec.min} and ${spec.max}`,
+      };
+    }
+    if (parsed < spec.min || parsed > spec.max) {
+      return {
+        ok: false,
+        error: `Invalid value for '${key}': expected number between ${spec.min} and ${spec.max}, received ${parsed}`,
+      };
+    }
+    return { ok: true, value: String(parsed) };
+  }
+
+  return { ok: true, value: String(rawValue) };
 }
 
 function normalizeCompleteTaskUsageAliasEntries(rawUsage) {
@@ -2749,6 +2810,11 @@ function handleCommand(cmd, conn, handlers) {
           'watchdog_warn_sec', 'watchdog_nudge_sec', 'watchdog_triage_sec', 'watchdog_terminate_sec',
           'watchdog_interval_ms', 'allocator_interval_ms', 'max_workers',
           'primary_branch',
+          'loop_request_quality_gate',
+          'loop_request_min_description_chars',
+          'loop_request_min_interval_sec',
+          'loop_request_max_per_hour',
+          'loop_request_similarity_threshold',
           'model_flagship', 'model_codex_spark', 'model_spark', 'model_mini',
           'model_xhigh', 'model_high', 'model_mid',
           'reasoning_xhigh', 'reasoning_high', 'reasoning_mid', 'reasoning_spark', 'reasoning_mini',
@@ -2762,7 +2828,13 @@ function handleCommand(cmd, conn, handlers) {
         }
         const dbConn = db.getDb();
         const upsertConfig = dbConn.prepare('INSERT INTO config(key, value) VALUES(?,?) ON CONFLICT(key) DO UPDATE SET value=excluded.value');
-        let storedValue = String(value);
+        const normalizedLoopConfigValue = normalizeLoopRequestSetConfigValue(key, value);
+        if (!normalizedLoopConfigValue.ok) {
+          respond(conn, { error: normalizedLoopConfigValue.error });
+          break;
+        }
+
+        let storedValue = normalizedLoopConfigValue.value;
         const isSparkModelKey = SPARK_MODEL_KEYS.includes(key);
         if (key === 'max_workers') {
           storedValue = String(clampWorkerLimit(value));

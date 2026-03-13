@@ -1617,6 +1617,59 @@ describe('CLI Server', () => {
     assert.match(qualityRejections[0].reason, /missing concrete file path signal \(WHERE\)/);
   });
 
+  it('should allow loop request quality and rate config keys via set-config', async () => {
+    const updates = [
+      ['loop_request_quality_gate', 'FALSE', 'false'],
+      ['loop_request_min_description_chars', ' 220 ', '220'],
+      ['loop_request_min_interval_sec', '900', '900'],
+      ['loop_request_max_per_hour', '12', '12'],
+      ['loop_request_similarity_threshold', '0.88', '0.88'],
+    ];
+
+    for (const [key, value, expectedStored] of updates) {
+      const result = await sendCommand('set-config', { key, value });
+      assert.strictEqual(result.ok, true, `set-config should succeed for ${key}`);
+      assert.strictEqual(result.key, key);
+      assert.strictEqual(result.value, expectedStored);
+      assert.strictEqual(db.getConfig(key), expectedStored);
+    }
+  });
+
+  it('should reject out-of-range loop request config values in set-config', async () => {
+    const baseline = [
+      ['loop_request_quality_gate', 'true'],
+      ['loop_request_min_description_chars', '220'],
+      ['loop_request_min_interval_sec', '600'],
+      ['loop_request_max_per_hour', '4'],
+      ['loop_request_similarity_threshold', '0.82'],
+    ];
+
+    for (const [key, value] of baseline) {
+      const seeded = await sendCommand('set-config', { key, value });
+      assert.strictEqual(seeded.ok, true, `seed set-config should succeed for ${key}`);
+    }
+
+    const invalidUpdates = [
+      ['loop_request_quality_gate', 'sometimes', /expected true or false/],
+      ['loop_request_min_description_chars', '79', /between 80 and 5000/],
+      ['loop_request_min_interval_sec', '86401', /between 0 and 86400/],
+      ['loop_request_max_per_hour', '0', /between 1 and 1000/],
+      ['loop_request_similarity_threshold', '1.2', /between 0.5 and 0.99/],
+    ];
+
+    for (const [key, value, expectedError] of invalidUpdates) {
+      const result = await sendCommand('set-config', { key, value });
+      assert.notStrictEqual(result.ok, true, `set-config should fail for ${key}=${value}`);
+      assert.match(result.error, expectedError);
+    }
+
+    assert.strictEqual(db.getConfig('loop_request_quality_gate'), 'true');
+    assert.strictEqual(db.getConfig('loop_request_min_description_chars'), '220');
+    assert.strictEqual(db.getConfig('loop_request_min_interval_sec'), '600');
+    assert.strictEqual(db.getConfig('loop_request_max_per_hour'), '4');
+    assert.strictEqual(db.getConfig('loop_request_similarity_threshold'), '0.82');
+  });
+
   it('should reject assign-task for claimed workers without mutating task or claim state', async () => {
     db.registerWorker(1, '/wt-1', 'agent-1');
     const taskId = createReadyTask({
