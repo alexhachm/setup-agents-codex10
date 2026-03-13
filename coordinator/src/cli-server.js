@@ -1395,8 +1395,43 @@ function handleCommand(cmd, conn, handlers) {
       }
       case 'start-task': {
         const { worker_id, task_id } = args;
-        db.updateTask(task_id, { status: 'in_progress', started_at: new Date().toISOString() });
-        db.updateWorker(worker_id, { status: 'busy', last_heartbeat: new Date().toISOString() });
+        const worker = db.getWorker(worker_id);
+        if (!worker) {
+          respond(conn, { ok: false, error: 'Worker not found' });
+          break;
+        }
+
+        const task = db.getTask(task_id);
+        if (!task) {
+          respond(conn, { ok: false, error: 'Task not found' });
+          break;
+        }
+
+        const parsedWorkerId = parseWorkerId(worker_id);
+        const parsedAssignedWorkerId = parseWorkerId(task.assigned_to);
+        if (parsedWorkerId === null || parsedAssignedWorkerId === null || parsedAssignedWorkerId !== parsedWorkerId) {
+          respond(conn, { ok: false, error: 'task_not_assigned' });
+          break;
+        }
+
+        if (task.status === 'completed' || task.status === 'failed') {
+          respond(conn, { ok: false, error: 'task_not_startable' });
+          break;
+        }
+
+        if (task.status === 'in_progress') {
+          respond(conn, { ok: true, idempotent: true });
+          break;
+        }
+
+        if (task.status !== 'assigned') {
+          respond(conn, { ok: false, error: 'task_not_startable' });
+          break;
+        }
+
+        const now = new Date().toISOString();
+        db.updateTask(task_id, { status: 'in_progress', started_at: now });
+        db.updateWorker(worker_id, { status: 'busy', last_heartbeat: now });
         db.log(`worker-${worker_id}`, 'task_started', { task_id });
         respond(conn, { ok: true });
         break;
