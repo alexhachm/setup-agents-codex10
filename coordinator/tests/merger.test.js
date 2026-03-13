@@ -277,6 +277,62 @@ describe('Request completion tracking', () => {
   });
 });
 
+describe('Assignment-priority merge deferral', () => {
+  it('should defer merges first, then process one merge after bounded deferrals', () => {
+    const reqId = db.createRequest('Feature');
+    const mergedTaskId = db.createTask({ request_id: reqId, subject: 'Task ready to merge', description: 'Done' });
+    const readyTaskId = db.createTask({ request_id: reqId, subject: 'Task still ready', description: 'Still assignable' });
+
+    db.updateTask(mergedTaskId, { status: 'completed' });
+    db.updateTask(readyTaskId, { status: 'ready', assigned_to: null });
+    db.updateRequest(reqId, { status: 'integrating' });
+
+    db.setConfig('prioritize_assignment_over_merge', 'true');
+    db.setConfig('assignment_priority_merge_max_deferrals', '2');
+    db.setConfig('assignment_priority_merge_max_age_ms', '86400000');
+
+    const enqueueResult = db.enqueueMerge({
+      request_id: reqId,
+      task_id: mergedTaskId,
+      pr_url: 'https://github.com/acme/repo/pull/3',
+      branch: 'agent-1',
+    });
+    const mergeId = enqueueResult.lastInsertRowid;
+
+    let mergeAttempts = 0;
+    const mergeExecutor = () => {
+      mergeAttempts += 1;
+      return { success: true };
+    };
+
+    merger.processQueue(tmpDir, mergeExecutor);
+
+    const mergeAfterFirstPass = db.getDb().prepare('SELECT status FROM merge_queue WHERE id = ?').get(mergeId);
+    assert.strictEqual(mergeAttempts, 0);
+    assert.strictEqual(mergeAfterFirstPass.status, 'pending');
+
+    const deferredLogs = readCoordinatorLogEntries('merge_deferred_assignment_priority');
+    assert.strictEqual(deferredLogs.length, 1);
+    assert.strictEqual(deferredLogs[0].merge_id, mergeId);
+    assert.strictEqual(deferredLogs[0].consecutive_deferrals, 1);
+    assert.strictEqual(deferredLogs[0].ready_task_count, 1);
+
+    merger.processQueue(tmpDir, mergeExecutor);
+
+    const mergeAfterSecondPass = db.getDb().prepare('SELECT status FROM merge_queue WHERE id = ?').get(mergeId);
+    assert.strictEqual(mergeAttempts, 1);
+    assert.strictEqual(mergeAfterSecondPass.status, 'merged');
+
+    const starvationEscapeLogs = readCoordinatorLogEntries('merge_assignment_priority_starvation_escape');
+    assert.strictEqual(starvationEscapeLogs.length, 1);
+    assert.strictEqual(starvationEscapeLogs[0].merge_id, mergeId);
+    assert.strictEqual(starvationEscapeLogs[0].breached_by_count, true);
+
+    const readyTaskAfterMerge = db.getTask(readyTaskId);
+    assert.strictEqual(readyTaskAfterMerge.status, 'ready');
+  });
+});
+
 describe('Overlap validation command selection', () => {
   function seedOverlapMergeTask(validation) {
     const reqId = db.createRequest('Feature');

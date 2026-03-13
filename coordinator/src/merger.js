@@ -37,6 +37,90 @@ let processing = false;
 let processingStartedAt = 0;
 const PROCESSING_TIMEOUT_MS = 300000; // 5 minutes — reset flag if stuck
 let mergerIntervalId = null;
+const assignmentPriorityDeferralsByMergeId = new Map();
+const ASSIGNMENT_PRIORITY_DEFAULT_MAX_CONSECUTIVE_DEFERRALS = 3;
+const ASSIGNMENT_PRIORITY_DEFAULT_MAX_DEFER_AGE_MS = 120000;
+const ASSIGNMENT_PRIORITY_ENABLED_CONFIG_KEY = 'prioritize_assignment_over_merge';
+const ASSIGNMENT_PRIORITY_MAX_CONSECUTIVE_DEFERRALS_CONFIG_KEY = 'assignment_priority_merge_max_deferrals';
+const ASSIGNMENT_PRIORITY_MAX_DEFER_AGE_MS_CONFIG_KEY = 'assignment_priority_merge_max_age_ms';
+
+function parseBooleanConfig(value) {
+  if (typeof value === 'boolean') return value;
+  if (typeof value !== 'string') return false;
+  const normalized = value.trim().toLowerCase();
+  return normalized === '1' || normalized === 'true' || normalized === 'yes' || normalized === 'on';
+}
+
+function parsePositiveIntegerConfig(value, fallback) {
+  const parsed = Number.parseInt(value, 10);
+  if (!Number.isFinite(parsed) || parsed <= 0) return fallback;
+  return parsed;
+}
+
+function getMergeQueueAgeMs(entry) {
+  const createdAtMs = Date.parse(entry && entry.created_at ? entry.created_at : '');
+  if (!Number.isFinite(createdAtMs)) return 0;
+  const ageMs = Date.now() - createdAtMs;
+  return ageMs > 0 ? ageMs : 0;
+}
+
+function shouldDeferMergeForAssignmentPriority(entry) {
+  const prioritizeAssignments = parseBooleanConfig(db.getConfig(ASSIGNMENT_PRIORITY_ENABLED_CONFIG_KEY));
+  if (!prioritizeAssignments) {
+    assignmentPriorityDeferralsByMergeId.delete(entry.id);
+    return false;
+  }
+
+  const readyTasks = db.getReadyTasks();
+  const readyTaskCount = Array.isArray(readyTasks) ? readyTasks.length : 0;
+  if (readyTaskCount === 0) {
+    assignmentPriorityDeferralsByMergeId.delete(entry.id);
+    return false;
+  }
+
+  const maxConsecutiveDeferrals = parsePositiveIntegerConfig(
+    db.getConfig(ASSIGNMENT_PRIORITY_MAX_CONSECUTIVE_DEFERRALS_CONFIG_KEY),
+    ASSIGNMENT_PRIORITY_DEFAULT_MAX_CONSECUTIVE_DEFERRALS
+  );
+  const maxDeferralAgeMs = parsePositiveIntegerConfig(
+    db.getConfig(ASSIGNMENT_PRIORITY_MAX_DEFER_AGE_MS_CONFIG_KEY),
+    ASSIGNMENT_PRIORITY_DEFAULT_MAX_DEFER_AGE_MS
+  );
+  const deferredCount = (assignmentPriorityDeferralsByMergeId.get(entry.id) || 0) + 1;
+  const pendingAgeMs = getMergeQueueAgeMs(entry);
+  const thresholdBreachedByCount = deferredCount >= maxConsecutiveDeferrals;
+  const thresholdBreachedByAge = pendingAgeMs >= maxDeferralAgeMs;
+
+  if (!thresholdBreachedByCount && !thresholdBreachedByAge) {
+    assignmentPriorityDeferralsByMergeId.set(entry.id, deferredCount);
+    db.log('coordinator', 'merge_deferred_assignment_priority', {
+      merge_id: entry.id,
+      request_id: entry.request_id,
+      task_id: entry.task_id,
+      ready_task_count: readyTaskCount,
+      consecutive_deferrals: deferredCount,
+      max_consecutive_deferrals: maxConsecutiveDeferrals,
+      pending_age_ms: pendingAgeMs,
+      max_pending_age_ms: maxDeferralAgeMs,
+    });
+    return true;
+  }
+
+  assignmentPriorityDeferralsByMergeId.delete(entry.id);
+  db.log('coordinator', 'merge_assignment_priority_starvation_escape', {
+    merge_id: entry.id,
+    request_id: entry.request_id,
+    task_id: entry.task_id,
+    ready_task_count: readyTaskCount,
+    consecutive_deferrals: deferredCount,
+    max_consecutive_deferrals: maxConsecutiveDeferrals,
+    pending_age_ms: pendingAgeMs,
+    max_pending_age_ms: maxDeferralAgeMs,
+    breached_by_count: thresholdBreachedByCount,
+    breached_by_age: thresholdBreachedByAge,
+  });
+  return false;
+}
 
 function completeRequestIfTransition(requestId, result) {
   const completionTimestamp = new Date().toISOString();
@@ -139,6 +223,9 @@ function processQueue(projectDir, mergeExecutor = attemptMerge) {
   try {
     const entry = db.getNextMerge();
     if (!entry) { processing = false; return; }
+    if (shouldDeferMergeForAssignmentPriority(entry)) { processing = false; return; }
+
+    assignmentPriorityDeferralsByMergeId.delete(entry.id);
 
     db.updateMerge(entry.id, { status: 'merging' });
     db.log('coordinator', 'merge_start', { merge_id: entry.id, branch: entry.branch, pr: entry.pr_url });
