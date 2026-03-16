@@ -18,6 +18,48 @@ const namespace = process.env.MAC10_NAMESPACE || 'mac10';
 const stateDir = path.join(projectDir, '.claude', 'state');
 const pidFile = path.join(stateDir, namespace === 'mac10' ? 'mac10.pid' : `${namespace}.pid`);
 let ownsPidLock = false;
+let researchPlannerTimer = null;
+
+function resolveResearchPlannerIntervalMs() {
+  const raw = db.getConfig('research_planner_interval_ms');
+  const parsed = Number.parseInt(String(raw ?? '').trim(), 10);
+  if (!Number.isFinite(parsed) || parsed <= 0) return 5000;
+  return parsed;
+}
+
+function runResearchPlannerTick() {
+  try {
+    const plan = db.materializeResearchBatchPlan({});
+    if (plan.batch_count > 0) {
+      db.log('coordinator', 'research_batch_planner_tick', {
+        planner_key: plan.planner_key,
+        batch_count: plan.batch_count,
+        candidate_count: plan.candidate_count,
+        batch_ids: plan.batches.map((batch) => batch.batch_id),
+      });
+    }
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error);
+    db.log('coordinator', 'research_batch_planner_error', { error: message });
+  }
+}
+
+function startResearchPlanner() {
+  if (researchPlannerTimer) return;
+  const intervalMs = resolveResearchPlannerIntervalMs();
+  researchPlannerTimer = setInterval(runResearchPlannerTick, intervalMs);
+  if (typeof researchPlannerTimer.unref === 'function') {
+    researchPlannerTimer.unref();
+  }
+  runResearchPlannerTick();
+  console.log(`Research planner running (${intervalMs}ms).`);
+}
+
+function stopResearchPlanner() {
+  if (!researchPlannerTimer) return;
+  clearInterval(researchPlannerTimer);
+  researchPlannerTimer = null;
+}
 
 function isPidAlive(pid) {
   if (!Number.isInteger(pid) || pid <= 0) return false;
@@ -197,6 +239,9 @@ console.log('Watchdog running.');
 merger.start(projectDir);
 console.log('Merger running.');
 
+// Start browser research planner loop (quota-aware batching)
+startResearchPlanner();
+
 // Start web dashboard — single dashboard at port 3100 (or next free port)
 // All project coordinators register in the shared instance registry so the
 // dashboard at /api/instances can manage them all from one place.
@@ -220,6 +265,7 @@ console.log('Merger running.');
   function shutdown() {
     console.log('Shutting down...');
     instanceRegistry.deregister(port);
+    stopResearchPlanner();
     allocator.stop();
     watchdog.stop();
     merger.stop();
@@ -260,6 +306,7 @@ console.log('Merger running.');
 process.on('uncaughtException', (err) => {
   console.error('Uncaught exception:', err);
   try { db.log('coordinator', 'uncaught_exception', { error: err.message, stack: err.stack }); } catch {}
+  try { stopResearchPlanner(); } catch {}
   process.exit(1);
 });
 process.on('unhandledRejection', (reason) => {

@@ -82,6 +82,80 @@ CREATE TABLE IF NOT EXISTS tasks (
   result TEXT  -- outcome summary
 );
 
+-- Browser research batching: intents, staged plans, and per-intent fan-out
+CREATE TABLE IF NOT EXISTS research_intents (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  request_id TEXT REFERENCES requests(id),
+  task_id INTEGER REFERENCES tasks(id),
+  intent_type TEXT NOT NULL DEFAULT 'browser_research',
+  intent_payload TEXT NOT NULL,
+  dedupe_fingerprint TEXT NOT NULL,
+  priority_score REAL NOT NULL DEFAULT 500,
+  batch_size_cap INTEGER NOT NULL DEFAULT 5 CHECK (batch_size_cap > 0),
+  timeout_window_ms INTEGER NOT NULL DEFAULT 120000 CHECK (timeout_window_ms > 0),
+  status TEXT NOT NULL DEFAULT 'queued'
+    CHECK (status IN ('queued','planned','running','completed','partial_failed','failed','cancelled')),
+  latest_batch_id INTEGER REFERENCES research_batches(id),
+  failure_count INTEGER NOT NULL DEFAULT 0,
+  last_error TEXT,
+  created_at TEXT NOT NULL DEFAULT (datetime('now')),
+  updated_at TEXT NOT NULL DEFAULT (datetime('now')),
+  resolved_at TEXT
+);
+
+CREATE TABLE IF NOT EXISTS research_batches (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  planner_key TEXT NOT NULL DEFAULT 'default',
+  status TEXT NOT NULL DEFAULT 'planned'
+    CHECK (status IN ('planned','running','completed','partial_failed','failed','timed_out','cancelled')),
+  max_batch_size INTEGER NOT NULL CHECK (max_batch_size > 0),
+  timeout_window_ms INTEGER NOT NULL CHECK (timeout_window_ms > 0),
+  planned_intent_count INTEGER NOT NULL DEFAULT 0,
+  sequence_cursor TEXT NOT NULL,
+  last_error TEXT,
+  created_at TEXT NOT NULL DEFAULT (datetime('now')),
+  updated_at TEXT NOT NULL DEFAULT (datetime('now')),
+  started_at TEXT,
+  completed_at TEXT
+);
+
+CREATE TABLE IF NOT EXISTS research_batch_stages (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  batch_id INTEGER NOT NULL REFERENCES research_batches(id) ON DELETE CASCADE,
+  intent_id INTEGER NOT NULL REFERENCES research_intents(id) ON DELETE CASCADE,
+  stage_name TEXT NOT NULL DEFAULT 'intent_execution',
+  stage_order INTEGER NOT NULL DEFAULT 1,
+  execution_order INTEGER NOT NULL,
+  dedupe_fingerprint TEXT NOT NULL,
+  priority_score REAL NOT NULL DEFAULT 0,
+  timeout_window_ms INTEGER NOT NULL CHECK (timeout_window_ms > 0),
+  status TEXT NOT NULL DEFAULT 'planned'
+    CHECK (status IN ('planned','running','completed','partial_failed','failed','cancelled')),
+  failure_count INTEGER NOT NULL DEFAULT 0,
+  last_error TEXT,
+  created_at TEXT NOT NULL DEFAULT (datetime('now')),
+  updated_at TEXT NOT NULL DEFAULT (datetime('now')),
+  completed_at TEXT,
+  UNIQUE(batch_id, intent_id, stage_order)
+);
+
+CREATE TABLE IF NOT EXISTS research_intent_fanout (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  intent_id INTEGER NOT NULL REFERENCES research_intents(id) ON DELETE CASCADE,
+  fanout_key TEXT NOT NULL,
+  fanout_payload TEXT,
+  planned_batch_id INTEGER REFERENCES research_batches(id) ON DELETE SET NULL,
+  planned_stage_id INTEGER REFERENCES research_batch_stages(id) ON DELETE SET NULL,
+  status TEXT NOT NULL DEFAULT 'pending'
+    CHECK (status IN ('pending','planned','running','completed','partial_failed','failed','cancelled')),
+  attempt_count INTEGER NOT NULL DEFAULT 0,
+  last_error TEXT,
+  created_at TEXT NOT NULL DEFAULT (datetime('now')),
+  updated_at TEXT NOT NULL DEFAULT (datetime('now')),
+  completed_at TEXT,
+  UNIQUE(intent_id, fanout_key)
+);
+
 -- Workers (replaces worker-status.json)
 CREATE TABLE IF NOT EXISTS workers (
   id INTEGER PRIMARY KEY,  -- worker number (1-8)
@@ -190,6 +264,22 @@ CREATE INDEX IF NOT EXISTS idx_tasks_status ON tasks(status);
 CREATE INDEX IF NOT EXISTS idx_tasks_request ON tasks(request_id);
 CREATE INDEX IF NOT EXISTS idx_tasks_assigned ON tasks(assigned_to);
 CREATE INDEX IF NOT EXISTS idx_tasks_request_status ON tasks(request_id, status);
+CREATE INDEX IF NOT EXISTS idx_research_intents_status_score
+  ON research_intents(status, priority_score DESC, created_at ASC, id ASC);
+CREATE INDEX IF NOT EXISTS idx_research_intents_active_dedupe
+  ON research_intents(dedupe_fingerprint, intent_type)
+  WHERE status IN ('queued','planned','running','partial_failed');
+CREATE INDEX IF NOT EXISTS idx_research_batches_status
+  ON research_batches(status, created_at ASC, id ASC);
+CREATE INDEX IF NOT EXISTS idx_research_batch_stages_batch_status
+  ON research_batch_stages(batch_id, status, execution_order ASC, id ASC);
+CREATE INDEX IF NOT EXISTS idx_research_batch_stages_execution
+  ON research_batch_stages(status, execution_order ASC, id ASC);
+CREATE INDEX IF NOT EXISTS idx_research_intent_fanout_intent_status
+  ON research_intent_fanout(intent_id, status, fanout_key);
+CREATE INDEX IF NOT EXISTS idx_research_intent_fanout_retry
+  ON research_intent_fanout(status, updated_at ASC, id ASC)
+  WHERE status IN ('partial_failed','failed');
 CREATE INDEX IF NOT EXISTS idx_mail_recipient ON mail(recipient, consumed);
 CREATE INDEX IF NOT EXISTS idx_mail_type ON mail(type);
 CREATE INDEX IF NOT EXISTS idx_mail_created ON mail(created_at);
@@ -211,6 +301,10 @@ INSERT OR IGNORE INTO config (key, value) VALUES
   ('heartbeat_timeout_s', '60'),
   ('watchdog_interval_ms', '10000'),
   ('allocator_interval_ms', '2000'),
+  ('research_planner_interval_ms', '5000'),
+  ('research_batch_max_size', '5'),
+  ('research_batch_timeout_ms', '120000'),
+  ('research_batch_candidate_limit', '200'),
   ('merge_validation', 'true'),
   ('project_dir', ''),
   ('coordinator_version', '1.0.0');
