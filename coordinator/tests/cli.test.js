@@ -649,6 +649,8 @@ describe('CLI Server', () => {
       status: 'busy',
       current_task_id: taskId,
       launched_at: assignmentToken,
+      claimed_by: 'architect',
+      claimed_at: assignmentToken,
     });
 
     const myTask = await sendCommand('my-task', { worker_id: '1' });
@@ -673,6 +675,8 @@ describe('CLI Server', () => {
     const worker = db.getWorker(1);
     assert.strictEqual(worker.status, 'idle');
     assert.strictEqual(worker.current_task_id, null);
+    assert.strictEqual(worker.claimed_by, null);
+    assert.strictEqual(worker.claimed_at, null);
 
     const resetEvents = getWorkerResetEvents(1, 'sentinel_reset');
     assert.ok(resetEvents.length >= 1);
@@ -1877,6 +1881,8 @@ describe('CLI Server', () => {
     // Simulate stuck worker (stale heartbeat)
     db.updateWorker(1, {
       status: 'busy',
+      claimed_by: 'architect',
+      claimed_at: new Date(Date.now() - 60 * 1000).toISOString(),
       last_heartbeat: new Date(Date.now() - 300000).toISOString(), // 5 min ago
     });
 
@@ -1884,6 +1890,8 @@ describe('CLI Server', () => {
     assert.strictEqual(result.ok, true);
     assert.strictEqual(result.reset_workers, 1);
     assert.strictEqual(db.getWorker(1).status, 'idle');
+    assert.strictEqual(db.getWorker(1).claimed_by, null);
+    assert.strictEqual(db.getWorker(1).claimed_at, null);
   });
 
   it('should return error for unknown commands', async () => {
@@ -2358,6 +2366,7 @@ describe('CLI Server', () => {
     assert.strictEqual(worker.status, 'idle');
     assert.strictEqual(worker.current_task_id, null);
     assert.strictEqual(worker.claimed_by, 'architect');
+    assert.ok(worker.claimed_at);
 
     const task = db.getTask(taskId);
     assert.ok(task);

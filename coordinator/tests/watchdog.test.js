@@ -122,6 +122,52 @@ describe('Heartbeat staleness', () => {
   });
 });
 
+describe('Stale claim cleanup', () => {
+  it('should not release a fresh claim on a worker with an old heartbeat', () => {
+    db.registerWorker(1, '/wt-1', 'agent-1');
+    db.updateWorker(1, {
+      last_heartbeat: new Date(Date.now() - 3600 * 1000).toISOString(),
+    });
+    assert.strictEqual(db.claimWorker(1, 'architect'), true);
+
+    tick(tmpDir);
+
+    const worker = db.getWorker(1);
+    assert.strictEqual(worker.claimed_by, 'architect');
+    assert.ok(worker.claimed_at);
+  });
+
+  it('should release a claim only when claim age exceeds timeout', () => {
+    db.registerWorker(1, '/wt-1', 'agent-1');
+    assert.strictEqual(db.claimWorker(1, 'architect'), true);
+    db.updateWorker(1, {
+      claimed_at: new Date(Date.now() - 121 * 1000).toISOString(),
+      last_heartbeat: new Date().toISOString(),
+    });
+
+    tick(tmpDir);
+
+    const worker = db.getWorker(1);
+    assert.strictEqual(worker.claimed_by, null);
+    assert.strictEqual(worker.claimed_at, null);
+  });
+
+  it('should safely skip legacy claimed rows without claimed_at', () => {
+    db.registerWorker(1, '/wt-1', 'agent-1');
+    db.updateWorker(1, {
+      claimed_by: 'architect',
+      claimed_at: null,
+      last_heartbeat: new Date(Date.now() - 3600 * 1000).toISOString(),
+    });
+
+    tick(tmpDir);
+
+    const worker = db.getWorker(1);
+    assert.strictEqual(worker.claimed_by, 'architect');
+    assert.strictEqual(worker.claimed_at, null);
+  });
+});
+
 describe('Stale integration recovery', () => {
   it('keeps failed merge requests recoverable while remediation is active or just queued', () => {
     const requestId = db.createRequest('Failed merge remediation');

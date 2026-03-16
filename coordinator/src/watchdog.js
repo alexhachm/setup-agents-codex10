@@ -20,6 +20,7 @@ const THRESHOLDS = Object.freeze({
 const MERGE_TIMEOUT_SEC = 300;
 const MERGE_CONFLICT_GRACE_SEC = 600;
 const MERGE_TIMEOUT_ERROR = `Merge timed out after ${MERGE_TIMEOUT_SEC / 60} minutes`;
+const STALE_CLAIM_TIMEOUT_SEC = 120;
 const SQLITE_DATETIME_PATTERN = /^(\d{4})-(\d{2})-(\d{2}) (\d{2}):(\d{2}):(\d{2})(?:\.(\d{1,3}))?$/;
 
 // Escalation thresholds (seconds since last heartbeat)
@@ -166,7 +167,12 @@ function tick(projectDir) {
         : getThresholds().terminate;
       if (completedAgo > 30) {
         // Reset to idle so allocator can reuse
-        db.updateWorker(worker.id, { status: 'idle', current_task_id: null });
+        db.updateWorker(worker.id, {
+          status: 'idle',
+          current_task_id: null,
+          claimed_by: null,
+          claimed_at: null,
+        });
         db.log('coordinator', 'worker_auto_reset', { worker_id: worker.id });
       }
     }
@@ -281,6 +287,8 @@ function handleDeath(worker, reason) {
   db.updateWorker(worker.id, {
     status: 'idle',
     current_task_id: null,
+    claimed_by: null,
+    claimed_at: null,
     pid: null,
   });
 }
@@ -307,11 +315,13 @@ function releaseStaleClaimsCheck(now) {
   ).all();
 
   for (const worker of claimedWorkers) {
-    // Use last_heartbeat or created_at as claim timestamp proxy
-    const claimTime = worker.last_heartbeat || worker.created_at;
+    // Stale claim age must be computed from the claim timestamp only.
+    const claimTime = worker.claimed_at;
     if (!claimTime) {
-      db.releaseWorker(worker.id);
-      db.log('coordinator', 'stale_claim_released', { worker_id: worker.id, reason: 'no_timestamp' });
+      db.log('coordinator', 'stale_claim_check_skipped', {
+        worker_id: worker.id,
+        reason: 'missing_claimed_at',
+      });
       continue;
     }
     const staleSec = getAgeSeconds(now, claimTime, {
@@ -319,7 +329,7 @@ function releaseStaleClaimsCheck(now) {
       scope: 'release_stale_claim',
     });
     if (staleSec === null) continue;
-    if (staleSec > 120) {
+    if (staleSec > STALE_CLAIM_TIMEOUT_SEC) {
       db.releaseWorker(worker.id);
       db.log('coordinator', 'stale_claim_released', { worker_id: worker.id, stale_sec: staleSec });
     }

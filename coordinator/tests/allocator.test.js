@@ -104,6 +104,7 @@ describe('Worker claim/release', () => {
 
     const worker = db.getWorker(1);
     assert.strictEqual(worker.claimed_by, 'architect');
+    assert.ok(worker.claimed_at);
 
     // Cannot claim again
     const claimed2 = db.claimWorker(1, 'allocator');
@@ -113,10 +114,12 @@ describe('Worker claim/release', () => {
     db.releaseWorker(1);
     const workerAfter = db.getWorker(1);
     assert.strictEqual(workerAfter.claimed_by, null);
+    assert.strictEqual(workerAfter.claimed_at, null);
 
     // Can claim again after release
     const claimed3 = db.claimWorker(1, 'allocator');
     assert.strictEqual(claimed3, true);
+    assert.ok(db.getWorker(1).claimed_at);
   });
 
   it('should not claim busy workers', () => {
