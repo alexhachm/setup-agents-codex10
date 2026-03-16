@@ -307,14 +307,17 @@ function releaseStaleClaimsCheck(now) {
   ).all();
 
   for (const worker of claimedWorkers) {
-    // Use last_heartbeat or created_at as claim timestamp proxy
-    const claimTime = worker.last_heartbeat || worker.created_at;
-    if (!claimTime) {
+    // Claims expire by claimed_at age only. Missing claimed_at is treated as stale
+    // so malformed/legacy rows cannot wedge allocator ownership forever.
+    if (!worker.claimed_at) {
       db.releaseWorker(worker.id);
-      db.log('coordinator', 'stale_claim_released', { worker_id: worker.id, reason: 'no_timestamp' });
+      db.log('coordinator', 'stale_claim_released', {
+        worker_id: worker.id,
+        reason: 'missing_claimed_at',
+      });
       continue;
     }
-    const staleSec = getAgeSeconds(now, claimTime, {
+    const staleSec = getAgeSeconds(now, worker.claimed_at, {
       worker_id: worker.id,
       scope: 'release_stale_claim',
     });
