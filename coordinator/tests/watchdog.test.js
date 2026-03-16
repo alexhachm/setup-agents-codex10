@@ -7,6 +7,7 @@ const fs = require('fs');
 const os = require('os');
 
 const db = require('../src/db');
+const tmux = require('../src/tmux');
 const { THRESHOLDS, tick } = require('../src/watchdog');
 
 let tmpDir;
@@ -119,6 +120,80 @@ describe('Heartbeat staleness', () => {
     const worker = db.getWorker(1);
     const launchedAgo = (Date.now() - new Date(worker.launched_at).getTime()) / 1000;
     assert.ok(launchedAgo < THRESHOLDS.warn); // Should be skipped by watchdog
+  });
+});
+
+describe('Loop stale-heartbeat recovery', () => {
+  let originalIsPaneAlive;
+  let originalKillWindow;
+  let originalCreateWindow;
+  let isPaneAliveCalls;
+  let killWindowCalls;
+  let createWindowCalls;
+
+  beforeEach(() => {
+    originalIsPaneAlive = tmux.isPaneAlive;
+    originalKillWindow = tmux.killWindow;
+    originalCreateWindow = tmux.createWindow;
+    isPaneAliveCalls = 0;
+    killWindowCalls = 0;
+    createWindowCalls = 0;
+
+    tmux.isPaneAlive = () => {
+      isPaneAliveCalls += 1;
+      return true;
+    };
+    tmux.killWindow = () => {
+      killWindowCalls += 1;
+    };
+    tmux.createWindow = () => {
+      createWindowCalls += 1;
+    };
+  });
+
+  afterEach(() => {
+    tmux.isPaneAlive = originalIsPaneAlive;
+    tmux.killWindow = originalKillWindow;
+    tmux.createWindow = originalCreateWindow;
+  });
+
+  it('restarts stale loop sentinel when pane stays alive', () => {
+    const loopId = db.createLoop('Keep allocator throughput healthy');
+    const staleHeartbeat = new Date(Date.now() - 301 * 1000).toISOString();
+    db.updateLoop(loopId, {
+      tmux_window: 'loop-1',
+      tmux_session: 'mac10-test',
+      last_heartbeat: staleHeartbeat,
+    });
+
+    tick(tmpDir);
+
+    assert.strictEqual(isPaneAliveCalls, 1);
+    assert.strictEqual(killWindowCalls, 1);
+    assert.strictEqual(createWindowCalls, 1);
+
+    const loop = db.getLoop(loopId);
+    assert.ok(loop.last_heartbeat);
+    assert.ok(new Date(loop.last_heartbeat).getTime() > new Date(staleHeartbeat).getTime());
+
+    const coordinatorLogs = db.getLog(100, 'coordinator').map((entry) => ({
+      action: entry.action,
+      details: JSON.parse(entry.details),
+    }));
+    const staleLog = coordinatorLogs.find(
+      (entry) => entry.action === 'loop_heartbeat_stale' && entry.details.loop_id === loopId
+    );
+    assert.ok(staleLog);
+
+    const respawnLog = coordinatorLogs.find(
+      (entry) =>
+        entry.action === 'loop_sentinel_respawned' &&
+        entry.details.loop_id === loopId &&
+        entry.details.reason === 'heartbeat_stale'
+    );
+    assert.ok(respawnLog);
+    assert.strictEqual(respawnLog.details.force_restart, true);
+    assert.ok(respawnLog.details.stale_sec >= 301);
   });
 });
 
