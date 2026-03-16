@@ -3013,6 +3013,10 @@ function handleCommand(cmd, conn, handlers) {
           respond(conn, { ok: false, error: 'Loop not found' });
           break;
         }
+        if (hbLoop.status === 'stopped' || hbLoop.status === 'paused') {
+          respond(conn, { ok: true, status: hbLoop.status });
+          break;
+        }
         if (hbLoop.status !== 'active') {
           respond(conn, { ok: false, error: `Loop is ${hbLoop.status}, not active` });
           break;
