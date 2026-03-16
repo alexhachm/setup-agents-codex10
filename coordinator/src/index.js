@@ -61,6 +61,20 @@ function stopResearchPlanner() {
   researchPlannerTimer = null;
 }
 
+function rebuildProjectMemorySnapshotIndexOnStartup() {
+  try {
+    const result = db.rebuildProjectMemorySnapshotIndex();
+    if (result.indexed_count > 0) {
+      console.log(
+        `Project-memory snapshot index rebuilt for ${result.project_context_count} context(s).`
+      );
+    }
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error);
+    db.log('coordinator', 'project_memory_snapshot_index_rebuild_error', { error: message });
+  }
+}
+
 function isPidAlive(pid) {
   if (!Number.isInteger(pid) || pid <= 0) return false;
   try {
@@ -114,6 +128,7 @@ console.log(`mac10 coordinator starting for: ${projectDir}`);
 
 // Initialize database
 db.init(projectDir);
+rebuildProjectMemorySnapshotIndexOnStartup();
 console.log('Database initialized.');
 
 // Namespace tmux session per project (optional — not available on native Windows)
