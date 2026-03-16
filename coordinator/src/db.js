@@ -15,6 +15,10 @@ const DEFAULT_LOOP_REQUEST_SIMILARITY_THRESHOLD = 0.82;
 const LOOP_REQUEST_SIMILAR_RECENT_WINDOW_HOURS = 6;
 const LOOP_REQUEST_SIMILAR_CANDIDATE_LIMIT = 50;
 const DEFAULT_STALE_DECOMPOSED_RECOVERY_SEC = 120;
+const REQUEST_TERMINAL_STATUSES = new Set(['completed', 'failed']);
+const TASK_PRIORITY_RANK = Object.freeze({ urgent: 0, high: 1, normal: 2, low: 3 });
+const PRIORITY_OVERRIDE_MARKER_RE = /\bpriority\s+override\b/i;
+const REQUEST_ID_TOKEN_RE = /\breq-[a-f0-9]{8}\b/gi;
 const AUTONOMOUS_REQUEST_SIGNATURES = Object.freeze([
   Object.freeze({ id: 'master2_header', pattern: /You are \*\*Master-2: Architect\*\*/i }),
   Object.freeze({ id: 'worker_header', pattern: /You are a coding worker in the (?:mac10|codex10) multi-agent system/i }),
@@ -2330,13 +2334,77 @@ function listTasks(filters = {}) {
   return getDb().prepare(sql).all(...vals);
 }
 
+function getTaskPriorityRank(priority) {
+  return Object.prototype.hasOwnProperty.call(TASK_PRIORITY_RANK, priority)
+    ? TASK_PRIORITY_RANK[priority]
+    : Number.MAX_SAFE_INTEGER;
+}
+
+function extractPriorityOverrideTargetRequestId(description, sourceRequestId = null) {
+  const text = String(description || '');
+  if (!PRIORITY_OVERRIDE_MARKER_RE.test(text)) return null;
+
+  const sourceId = typeof sourceRequestId === 'string' ? sourceRequestId.toLowerCase() : null;
+  const requestIds = text.match(REQUEST_ID_TOKEN_RE) || [];
+  for (const requestId of requestIds) {
+    const normalizedId = requestId.toLowerCase();
+    if (!sourceId || normalizedId !== sourceId) return normalizedId;
+  }
+  return null;
+}
+
+function getActivePriorityOverrideTargetRequestIds() {
+  const requests = getDb().prepare(`
+    SELECT id, description, status, created_at
+    FROM requests
+    ORDER BY datetime(created_at) DESC, id DESC
+  `).all();
+  if (!requests.length) return [];
+
+  const requestStatusById = new Map();
+  for (const request of requests) {
+    requestStatusById.set(request.id, String(request.status || '').toLowerCase());
+  }
+
+  const orderedTargets = [];
+  const seenTargets = new Set();
+  for (const request of requests) {
+    const targetRequestId = extractPriorityOverrideTargetRequestId(request.description, request.id);
+    if (!targetRequestId || seenTargets.has(targetRequestId)) continue;
+    const targetStatus = requestStatusById.get(targetRequestId);
+    if (!targetStatus || REQUEST_TERMINAL_STATUSES.has(targetStatus)) continue;
+    seenTargets.add(targetRequestId);
+    orderedTargets.push(targetRequestId);
+  }
+  return orderedTargets;
+}
+
 function getReadyTasks() {
   // Tasks that are ready and have no unfinished dependencies
-  return getDb().prepare(`
+  const readyTasks = getDb().prepare(`
     SELECT * FROM tasks
     WHERE status = 'ready' AND assigned_to IS NULL
     ORDER BY CASE priority WHEN 'urgent' THEN 0 WHEN 'high' THEN 1 WHEN 'normal' THEN 2 WHEN 'low' THEN 3 END, id
   `).all();
+
+  const priorityOverrideTargetIds = getActivePriorityOverrideTargetRequestIds();
+  if (!priorityOverrideTargetIds.length || readyTasks.length <= 1) return readyTasks;
+
+  const overrideRankByRequestId = new Map(priorityOverrideTargetIds.map((requestId, index) => [requestId, index]));
+  return readyTasks.slice().sort((leftTask, rightTask) => {
+    const leftOverrideRank = overrideRankByRequestId.has(leftTask.request_id)
+      ? overrideRankByRequestId.get(leftTask.request_id)
+      : Number.MAX_SAFE_INTEGER;
+    const rightOverrideRank = overrideRankByRequestId.has(rightTask.request_id)
+      ? overrideRankByRequestId.get(rightTask.request_id)
+      : Number.MAX_SAFE_INTEGER;
+    if (leftOverrideRank !== rightOverrideRank) return leftOverrideRank - rightOverrideRank;
+
+    const leftPriorityRank = getTaskPriorityRank(leftTask.priority);
+    const rightPriorityRank = getTaskPriorityRank(rightTask.priority);
+    if (leftPriorityRank !== rightPriorityRank) return leftPriorityRank - rightPriorityRank;
+    return leftTask.id - rightTask.id;
+  });
 }
 
 function checkAndPromoteTasks() {
