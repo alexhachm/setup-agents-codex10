@@ -1852,7 +1852,11 @@ function handleCommand(cmd, conn, handlers) {
       // === ARCHITECT commands ===
       case 'triage': {
         const { request_id, tier, reasoning } = args;
-        db.updateRequest(request_id, { tier, status: tier === 1 ? 'executing_tier1' : 'decomposed' });
+        const updateResult = db.updateRequest(request_id, { tier, status: tier === 1 ? 'executing_tier1' : 'decomposed' });
+        if (!updateResult || updateResult.changes < 1) {
+          respond(conn, { ok: false, error: 'Request not found', message: 'Request not found' });
+          break;
+        }
         db.log('architect', 'triage', { request_id, tier, reasoning });
         respond(conn, { ok: true });
         break;
