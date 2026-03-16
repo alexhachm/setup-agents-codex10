@@ -152,6 +152,7 @@ mkdir -p "$CLAUDE_DIR/docs"
 cp "$SCRIPT_DIR/templates/docs/"*.md "$CLAUDE_DIR/docs/"
 
 # Force-refresh key orchestration prompts/guidance on setup reruns.
+# This keeps allocator/architect mirrors aligned with current mailbox contracts.
 cp "$SCRIPT_DIR/templates/commands/allocate-loop.md" "$CLAUDE_DIR/commands/allocate-loop.md"
 cp "$SCRIPT_DIR/templates/commands/allocate-loop.md" "$CLAUDE_DIR/commands-codex10/allocate-loop.md"
 cp "$SCRIPT_DIR/templates/commands/architect-loop.md" "$CLAUDE_DIR/commands/architect-loop.md"
@@ -317,11 +318,13 @@ for i in $(seq 1 "$NUM_WORKERS"); do
 
   # Link/copy knowledge, commands, agents, hooks to worktree
   mkdir -p "$WT_PATH/.claude/commands"
+  mkdir -p "$WT_PATH/.claude/commands-codex10"
   mkdir -p "$WT_PATH/.claude/knowledge/domain"
   mkdir -p "$WT_PATH/.claude/scripts"
   mkdir -p "$WT_PATH/.claude/agents"
   mkdir -p "$WT_PATH/.claude/hooks"
   cp "$CLAUDE_DIR/commands/"*.md "$WT_PATH/.claude/commands/"
+  cp "$CLAUDE_DIR/commands-codex10/"*.md "$WT_PATH/.claude/commands-codex10/"
   cp "$MAC10_CLI" "$WT_PATH/.claude/scripts/mac10-codex10"
   cp "$CODEX10_CLI" "$WT_PATH/.claude/scripts/codex10"
   cp "$MAC10_COMPAT" "$WT_PATH/.claude/scripts/mac10"

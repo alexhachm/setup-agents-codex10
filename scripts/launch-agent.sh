@@ -66,12 +66,12 @@ resolve_prompt_file() {
   candidate="$DIR/.claude/commands-codex10/${name}.md"
   if [ -f "$candidate" ]; then printf '%s' "$candidate"; return 0; fi
 
-  # Project command templates (legacy behavior).
-  candidate="$DIR/.claude/commands/${name}.md"
-  if [ -f "$candidate" ]; then printf '%s' "$candidate"; return 0; fi
-
   # Fallback to codex10 repository templates.
   candidate="$SCRIPT_DIR/../templates/commands/${name}.md"
+  if [ -f "$candidate" ]; then printf '%s' "$candidate"; return 0; fi
+
+  # Project command templates (legacy behavior, last resort).
+  candidate="$DIR/.claude/commands/${name}.md"
   if [ -f "$candidate" ]; then printf '%s' "$candidate"; return 0; fi
 
   return 1
@@ -81,7 +81,7 @@ MODEL_RESOLVED="$(resolve_model "$MODEL")"
 PROMPT_FILE="$(resolve_prompt_file "$CMD" || true)"
 
 if [ -z "${PROMPT_FILE:-}" ]; then
-  echo "ERROR: No command template found for '$CMD' (expected .claude/commands/<name>.md)" >&2
+  echo "ERROR: No command template found for '$CMD' (checked .claude/commands-codex10, templates/commands, .claude/commands)" >&2
   exit 1
 fi
 
