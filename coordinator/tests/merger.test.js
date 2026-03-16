@@ -30,7 +30,12 @@ function getRequestCompletionLogCount(requestId) {
   }).length;
 }
 
-function setupMockMergeCli({ failBuild = false } = {}) {
+function setupMockMergeCli({
+  failBuild = false,
+  failAuth = false,
+  failNetwork = false,
+  failMergeButReportMerged = false,
+} = {}) {
   const binDir = path.join(tmpDir, 'mock-bin');
   const commandLog = path.join(tmpDir, 'mock-cli.log');
   fs.mkdirSync(binDir, { recursive: true });
@@ -49,6 +54,36 @@ exit 0
   writeMock('gh', `#!/usr/bin/env bash
 set -eu
 echo "gh $*" >> "${commandLog}"
+if [ "$1" = "auth" ] && [ "\${2:-}" = "status" ]; then
+  if [ "${failAuth ? '1' : '0'}" = "1" ]; then
+    echo "not logged in" >&2
+    exit 1
+  fi
+  exit 0
+fi
+if [ "$1" = "api" ] && [ "\${2:-}" = "rate_limit" ]; then
+  if [ "${failNetwork ? '1' : '0'}" = "1" ]; then
+    echo "network unreachable" >&2
+    exit 1
+  fi
+  echo "4999"
+  exit 0
+fi
+if [ "$1" = "pr" ] && [ "\${2:-}" = "merge" ]; then
+  if [ "${failMergeButReportMerged ? '1' : '0'}" = "1" ]; then
+    echo "failed to delete local branch" >&2
+    exit 1
+  fi
+  exit 0
+fi
+if [ "$1" = "pr" ] && [ "\${2:-}" = "view" ]; then
+  if [ "${failMergeButReportMerged ? '1' : '0'}" = "1" ]; then
+    echo "MERGED"
+    exit 0
+  fi
+  echo "OPEN"
+  exit 0
+fi
 exit 0
 `);
 
@@ -143,6 +178,107 @@ describe('Merge queue', () => {
     // Conflict entries are not retried automatically
     const next = db.getNextMerge();
     assert.strictEqual(next, undefined);
+  });
+});
+
+describe('Merge hardening', () => {
+  it('should not mark merge as failed when post-merge cleanup fails', () => {
+    setupMockMergeCli({ failMergeButReportMerged: true });
+    const reqId = db.createRequest('Feature');
+    const taskId = db.createTask({ request_id: reqId, subject: 'Merge task', description: 'D1' });
+    const enqueueResult = db.enqueueMerge({
+      request_id: reqId,
+      task_id: taskId,
+      pr_url: 'https://github.com/acme/repo/pull/11',
+      branch: 'agent-1',
+    });
+    const mergeId = enqueueResult.lastInsertRowid;
+
+    merger.processQueue(tmpDir);
+
+    const mergeRow = db.getDb().prepare('SELECT status, error FROM merge_queue WHERE id = ?').get(mergeId);
+    assert.strictEqual(mergeRow.status, 'merged');
+    assert.strictEqual(mergeRow.error, null);
+
+    const warnings = readCoordinatorLogEntries('merge_post_cleanup_warning');
+    assert.ok(warnings.some((details) => details.merge_id === mergeId));
+
+    const failures = readCoordinatorLogEntries('merge_failed');
+    assert.ok(!failures.some((details) => details.merge_id === mergeId));
+  });
+
+  it('should classify preflight auth failures as deterministic infra failures', () => {
+    setupMockMergeCli({ failAuth: true });
+    const reqId = db.createRequest('Feature');
+    const taskId = db.createTask({ request_id: reqId, subject: 'Merge task', description: 'D1' });
+    const enqueueResult = db.enqueueMerge({
+      request_id: reqId,
+      task_id: taskId,
+      pr_url: 'https://github.com/acme/repo/pull/12',
+      branch: 'agent-1',
+    });
+    const mergeId = enqueueResult.lastInsertRowid;
+
+    merger.processQueue(tmpDir);
+
+    const mergeRow = db.getDb().prepare('SELECT status, error FROM merge_queue WHERE id = ?').get(mergeId);
+    assert.strictEqual(mergeRow.status, 'failed');
+    assert.match(mergeRow.error, /^\[preflight_auth\] infra\.preflight\.auth:/);
+
+    const classified = readCoordinatorLogEntries('merge_failure_classified').find((details) => details.merge_id === mergeId);
+    assert.ok(classified);
+    assert.strictEqual(classified.failure_category, 'preflight_auth');
+    assert.strictEqual(classified.root_cause, 'infra.preflight.auth');
+
+    const mergeStarts = readCoordinatorLogEntries('merge_start');
+    assert.ok(!mergeStarts.some((details) => details.merge_id === mergeId));
+  });
+
+  it('should retry transient failures and open circuit breaker for repeated identical failures', () => {
+    const reqId = db.createRequest('Feature');
+    const taskId = db.createTask({ request_id: reqId, subject: 'Merge task', description: 'D1' });
+    const enqueueResult = db.enqueueMerge({
+      request_id: reqId,
+      task_id: taskId,
+      pr_url: 'https://github.com/acme/repo/pull/13',
+      branch: 'agent-1',
+    });
+    const mergeId = enqueueResult.lastInsertRowid;
+
+    const transientFailure = () => ({
+      success: false,
+      category: 'infra_network',
+      error: 'network timeout during merge',
+      stage: 'merge',
+      tier: 1,
+    });
+
+    merger.processQueue(tmpDir, transientFailure);
+    const firstAttempt = db.getDb().prepare('SELECT status FROM merge_queue WHERE id = ?').get(mergeId);
+    assert.strictEqual(firstAttempt.status, 'pending');
+
+    merger.processQueue(tmpDir, transientFailure);
+    const secondAttempt = db.getDb().prepare('SELECT status FROM merge_queue WHERE id = ?').get(mergeId);
+    assert.strictEqual(secondAttempt.status, 'pending');
+
+    merger.processQueue(tmpDir, transientFailure);
+    const thirdAttempt = db.getDb().prepare('SELECT status, error FROM merge_queue WHERE id = ?').get(mergeId);
+    assert.strictEqual(thirdAttempt.status, 'failed');
+    assert.match(thirdAttempt.error, /^\[infra_network\] infra\.network_failure:/);
+
+    const retryLogs = readCoordinatorLogEntries('merge_retry_scheduled')
+      .filter((details) => details.merge_id === mergeId);
+    assert.strictEqual(retryLogs.length, 2);
+
+    const breakerLogs = readCoordinatorLogEntries('merge_circuit_breaker_opened')
+      .filter((details) => details.merge_id === mergeId);
+    assert.strictEqual(breakerLogs.length, 1);
+    assert.strictEqual(breakerLogs[0].identical_failure_streak, 3);
+
+    const failureLogs = readCoordinatorLogEntries('merge_failed').filter((details) => details.merge_id === mergeId);
+    assert.strictEqual(failureLogs.length, 1);
+    assert.strictEqual(failureLogs[0].circuit_breaker_open, true);
+    assert.strictEqual(failureLogs[0].retry_count, 2);
   });
 });
 
