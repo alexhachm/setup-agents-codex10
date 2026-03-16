@@ -39,6 +39,23 @@ describe('Request state machine', () => {
     assert.strictEqual(db.getRequest(id).status, 'completed');
   });
 
+  it('should clear stale completion metadata when moving from completed to integrating', () => {
+    const id = db.createRequest('Retry integration');
+    const completedAt = new Date().toISOString();
+
+    db.updateRequest(id, { status: 'completed', completed_at: completedAt, result: 'Done before retry' });
+    const completed = db.getRequest(id);
+    assert.strictEqual(completed.status, 'completed');
+    assert.strictEqual(completed.completed_at, completedAt);
+    assert.strictEqual(completed.result, 'Done before retry');
+
+    db.updateRequest(id, { status: 'integrating' });
+    const reopened = db.getRequest(id);
+    assert.strictEqual(reopened.status, 'integrating');
+    assert.strictEqual(reopened.completed_at, null);
+    assert.strictEqual(reopened.result, null);
+  });
+
   it('should list requests by status', () => {
     db.createRequest('Req 1');
     const id2 = db.createRequest('Req 2');
