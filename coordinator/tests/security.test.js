@@ -339,6 +339,111 @@ describe('CLI server security', () => {
     }
   });
 
+  it('should reject browser session creation for non-chatgpt workflow domains', async () => {
+    const reqId = db.createRequest('Browser workflow allow-list');
+    const taskId = db.createTask({
+      request_id: reqId,
+      subject: 'Browser domain check',
+      description: 'Only chatgpt.com should be accepted',
+    });
+
+    const result = await sendCommand('browser-create-session', {
+      task_id: taskId,
+      workflow_url: 'https://example.com/research',
+      idempotency_key: 'browser-domain-0001',
+    });
+    assert.ok(result.error);
+    assert.match(result.error, /workflow_domain_not_allowed/);
+  });
+
+  it('should reject malformed and mismatched browser session identifiers', async () => {
+    const reqId = db.createRequest('Browser session validation');
+    const taskId = db.createTask({
+      request_id: reqId,
+      subject: 'Session validation',
+      description: 'Ensure malformed session inputs are rejected',
+    });
+
+    const created = await sendCommand('browser-create-session', {
+      task_id: taskId,
+      workflow_url: 'https://chatgpt.com/g/security-check',
+      idempotency_key: 'browser-session-create-0001',
+    });
+    assert.strictEqual(created.ok, true);
+
+    const malformed = await sendCommand('browser-attach-session', {
+      task_id: taskId,
+      session_id: '../bad-session',
+      idempotency_key: 'browser-session-attach-0001',
+    });
+    assert.ok(malformed.error);
+    assert.match(malformed.error, /Invalid session_id/);
+
+    const mismatched = await sendCommand('browser-attach-session', {
+      task_id: taskId,
+      session_id: 'session-ffffffffffffffff',
+      idempotency_key: 'browser-session-attach-0002',
+    });
+    assert.ok(mismatched.error);
+    assert.match(mismatched.error, /browser_session_mismatch/);
+  });
+
+  it('should reject callback token failures and oversized callback chunks', async () => {
+    const reqId = db.createRequest('Browser callback validation');
+    const taskId = db.createTask({
+      request_id: reqId,
+      subject: 'Callback token validation',
+      description: 'Reject bad callback auth token and oversized payloads',
+    });
+
+    const created = await sendCommand('browser-create-session', {
+      task_id: taskId,
+      workflow_url: 'https://chatgpt.com/g/security-check',
+      idempotency_key: 'browser-callback-create-0001',
+    });
+    assert.strictEqual(created.ok, true);
+
+    const attached = await sendCommand('browser-attach-session', {
+      task_id: taskId,
+      session_id: created.session_id,
+      idempotency_key: 'browser-callback-attach-0001',
+    });
+    assert.strictEqual(attached.ok, true);
+
+    const started = await sendCommand('browser-start-job', {
+      task_id: taskId,
+      session_id: created.session_id,
+      workflow_url: 'https://chatgpt.com/g/security-check',
+      guidance: 'Collect only security notes.',
+      idempotency_key: 'browser-callback-start-0001',
+    });
+    assert.strictEqual(started.ok, true);
+
+    const badToken = await sendCommand('browser-callback-chunk', {
+      task_id: taskId,
+      session_id: created.session_id,
+      job_id: started.job_id,
+      callback_token: 'A'.repeat(24),
+      idempotency_key: 'browser-callback-chunk-0001',
+      chunk_index: 0,
+      chunk: 'unauthorized',
+    });
+    assert.ok(badToken.error);
+    assert.match(badToken.error, /callback_auth_failed/);
+
+    const oversized = await sendCommand('browser-callback-chunk', {
+      task_id: taskId,
+      session_id: created.session_id,
+      job_id: started.job_id,
+      callback_token: started.callback_token,
+      idempotency_key: 'browser-callback-chunk-0002',
+      chunk_index: 1,
+      chunk: 'x'.repeat(33 * 1024),
+    });
+    assert.ok(oversized.error);
+    assert.match(oversized.error, /Chunk exceeds size limit/);
+  });
+
   it('should reject missing command field', async () => {
     const result = await sendRaw(JSON.stringify({ args: {} }));
     assert.ok(result.error);
