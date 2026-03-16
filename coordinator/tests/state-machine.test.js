@@ -165,6 +165,59 @@ describe('Task state machine', () => {
     assert.strictEqual(ready[0].priority, 'urgent');
   });
 
+  it('should prioritize active priority-override target requests over backlog task priority', () => {
+    const targetRequestId = db.createRequest('Target request');
+    const backlogRequestId = db.createRequest('Backlog request');
+    db.createRequest(`PRIORITY OVERRIDE: Execute request ${targetRequestId} immediately as top priority.`);
+
+    const backlogUrgentTaskId = db.createTask({
+      request_id: backlogRequestId,
+      subject: 'Backlog urgent',
+      description: 'Urgent but lower than active override target',
+      priority: 'urgent',
+    });
+    const targetNormalTaskId = db.createTask({
+      request_id: targetRequestId,
+      subject: 'Target normal',
+      description: 'Should be selected first while override is active',
+      priority: 'normal',
+    });
+
+    db.updateTask(backlogUrgentTaskId, { status: 'ready' });
+    db.updateTask(targetNormalTaskId, { status: 'ready' });
+
+    const ready = db.getReadyTasks();
+    assert.strictEqual(ready[0].id, targetNormalTaskId);
+    assert.strictEqual(ready[0].request_id, targetRequestId);
+  });
+
+  it('should stop priority-override targeting when the target request reaches terminal state', () => {
+    const targetRequestId = db.createRequest('Target request');
+    const backlogRequestId = db.createRequest('Backlog request');
+    db.createRequest(`PRIORITY OVERRIDE: Execute request ${targetRequestId} immediately as top priority.`);
+
+    const backlogUrgentTaskId = db.createTask({
+      request_id: backlogRequestId,
+      subject: 'Backlog urgent',
+      description: 'Should retake precedence when target request is completed',
+      priority: 'urgent',
+    });
+    const targetNormalTaskId = db.createTask({
+      request_id: targetRequestId,
+      subject: 'Target normal',
+      description: 'No longer prioritized after target completion',
+      priority: 'normal',
+    });
+
+    db.updateTask(backlogUrgentTaskId, { status: 'ready' });
+    db.updateTask(targetNormalTaskId, { status: 'ready' });
+    db.updateRequest(targetRequestId, { status: 'completed' });
+
+    const ready = db.getReadyTasks();
+    assert.strictEqual(ready[0].id, backlogUrgentTaskId);
+    assert.strictEqual(ready[0].request_id, backlogRequestId);
+  });
+
   it('should keep pending tasks blocked when dependency IDs do not exist', () => {
     const reqId = db.createRequest('Feature');
     const blockedId = db.createTask({
