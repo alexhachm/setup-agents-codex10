@@ -149,6 +149,75 @@ describe('Task state machine', () => {
     db.checkAndPromoteTasks();
     assert.strictEqual(db.getTask(t2).status, 'pending');
   });
+
+  it('should persist browser-offload task fields and lifecycle transitions', () => {
+    const reqId = db.createRequest('Browser research offload');
+    const taskId = db.createTask({
+      request_id: reqId,
+      subject: 'Offload deep research',
+      description: 'Run browser-backed deep research and callback results',
+    });
+
+    const created = db.getTask(taskId);
+    assert.strictEqual(created.browser_offload_status, 'not_requested');
+    assert.strictEqual(created.browser_session_id, null);
+    assert.strictEqual(created.browser_channel, null);
+
+    const requested = db.transitionTaskBrowserOffload(taskId, 'requested', {
+      browser_offload_payload: JSON.stringify({ query: 'weekly market summary' }),
+    });
+    assert.strictEqual(requested.browser_offload_status, 'requested');
+    assert.strictEqual(requested.browser_offload_payload, '{"query":"weekly market summary"}');
+    assert.ok(requested.browser_offload_updated_at);
+
+    const queued = db.transitionTaskBrowserOffload(taskId, 'queued', {
+      browser_channel: 'research:task-1',
+    });
+    assert.strictEqual(queued.browser_offload_status, 'queued');
+    assert.strictEqual(queued.browser_channel, 'research:task-1');
+
+    const running = db.transitionTaskBrowserOffload(taskId, 'launching');
+    assert.strictEqual(running.browser_offload_status, 'launching');
+
+    const attached = db.transitionTaskBrowserOffload(taskId, 'attached', {
+      browser_session_id: 'session-abc',
+    });
+    assert.strictEqual(attached.browser_offload_status, 'attached');
+    assert.strictEqual(attached.browser_session_id, 'session-abc');
+
+    db.transitionTaskBrowserOffload(taskId, 'running');
+    db.transitionTaskBrowserOffload(taskId, 'awaiting_callback');
+    const completed = db.transitionTaskBrowserOffload(taskId, 'completed', {
+      browser_offload_result: JSON.stringify({ sources: 12 }),
+      browser_offload_error: null,
+    });
+
+    assert.strictEqual(completed.browser_offload_status, 'completed');
+    assert.strictEqual(completed.browser_offload_result, '{"sources":12}');
+    assert.strictEqual(completed.browser_offload_error, null);
+  });
+
+  it('should reject invalid browser-offload lifecycle transitions', () => {
+    const reqId = db.createRequest('Browser research offload');
+    const taskId = db.createTask({
+      request_id: reqId,
+      subject: 'Offload deep research',
+      description: 'Run browser-backed deep research and callback results',
+    });
+
+    assert.throws(() => {
+      db.transitionTaskBrowserOffload(taskId, 'running');
+    }, /Invalid browser offload transition/);
+
+    db.transitionTaskBrowserOffload(taskId, 'requested');
+    db.transitionTaskBrowserOffload(taskId, 'failed', {
+      browser_offload_error: 'session launch failed',
+    });
+
+    assert.throws(() => {
+      db.transitionTaskBrowserOffload(taskId, 'completed');
+    }, /Invalid browser offload transition/);
+  });
 });
 
 describe('Usage cost burn rate', () => {
