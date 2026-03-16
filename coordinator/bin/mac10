@@ -1304,6 +1304,44 @@ async function main() {
         } else console.error(result.error);
         break;
 
+      case 'replan-dependency': {
+        if (argv.length < 3) {
+          console.error('Usage: mac10 replan-dependency <from_task_id> <to_task_id> [request_id]');
+          process.exit(1);
+        }
+        const fromTaskId = parseInt(argv[1], 10);
+        const toTaskId = parseInt(argv[2], 10);
+        if (!Number.isInteger(fromTaskId) || fromTaskId <= 0) {
+          console.error('Error: from_task_id must be a positive integer');
+          process.exit(1);
+        }
+        if (!Number.isInteger(toTaskId) || toTaskId <= 0) {
+          console.error('Error: to_task_id must be a positive integer');
+          process.exit(1);
+        }
+        result = await send(socketPath, 'replan-dependency', {
+          from_task_id: fromTaskId,
+          to_task_id: toTaskId,
+          request_id: argv[3] || undefined,
+        });
+        if (result.ok) {
+          const scopeSuffix = result.request_id ? ` (request ${result.request_id})` : '';
+          console.log(
+            `Replanned dependency #${fromTaskId} -> #${toTaskId}${scopeSuffix}: ` +
+            `${result.updated_count} task(s) updated, ${result.promoted_count} promoted.`
+          );
+          if (Array.isArray(result.updated_task_ids) && result.updated_task_ids.length > 0) {
+            console.log(`Updated: ${result.updated_task_ids.join(', ')}`);
+          }
+          if (Array.isArray(result.promoted_task_ids) && result.promoted_task_ids.length > 0) {
+            console.log(`Promoted: ${result.promoted_task_ids.join(', ')}`);
+          }
+        } else {
+          console.error(result.error);
+        }
+        break;
+      }
+
       case 'integrate': {
         if (!argv[1]) { console.error('Usage: mac10 integrate <request_id> [--retry-terminal]'); process.exit(1); }
         const options = argv.slice(2);
@@ -1583,6 +1621,8 @@ ALLOCATOR:
   worker-status                  Show all workers
   check-completion <request_id>  Check if all tasks for request are done
   check-overlaps <request_id>   Show file overlaps between tasks
+  replan-dependency <from_task_id> <to_task_id> [request_id]
+                                Replace a blocked dependency across pending tasks and promote unblocked work
   integrate <request_id> [--retry-terminal]
                                  Trigger worktree merge/integration (optionally retry terminal merge rows)
 

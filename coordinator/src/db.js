@@ -550,6 +550,104 @@ function checkAndPromoteTasks() {
   }
 }
 
+function replanTaskDependency({ fromTaskId, toTaskId, requestId = null } = {}) {
+  const fromId = Number(fromTaskId);
+  const toId = Number(toTaskId);
+  if (!Number.isInteger(fromId) || fromId <= 0) {
+    throw new Error('fromTaskId must be a positive integer');
+  }
+  if (!Number.isInteger(toId) || toId <= 0) {
+    throw new Error('toTaskId must be a positive integer');
+  }
+  if (fromId === toId) {
+    throw new Error('fromTaskId and toTaskId must be different');
+  }
+
+  const fromTask = getTask(fromId);
+  if (!fromTask) {
+    throw new Error(`Task ${fromId} not found`);
+  }
+  const replacementTask = getTask(toId);
+  if (!replacementTask) {
+    throw new Error(`Task ${toId} not found`);
+  }
+  if (replacementTask.status === 'failed') {
+    throw new Error(`Task ${toId} is failed and cannot be used as a replacement dependency`);
+  }
+
+  const normalizedRequestId = requestId === null || requestId === undefined
+    ? null
+    : String(requestId).trim() || null;
+  const d = getDb();
+  const replanned = d.transaction(() => {
+    const queryBase = `
+      SELECT id, depends_on
+      FROM tasks
+      WHERE status = 'pending'
+        AND depends_on IS NOT NULL
+        AND depends_on != '[]'
+    `;
+    const scopedSql = normalizedRequestId
+      ? `${queryBase} AND request_id = ? ORDER BY id`
+      : `${queryBase} ORDER BY id`;
+    const rows = normalizedRequestId
+      ? d.prepare(scopedSql).all(normalizedRequestId)
+      : d.prepare(scopedSql).all();
+
+    const updatedTaskIds = [];
+    const promotedTaskIds = [];
+    for (const row of rows) {
+      let deps;
+      try {
+        deps = JSON.parse(row.depends_on);
+      } catch {
+        continue;
+      }
+      if (!Array.isArray(deps) || deps.length === 0) continue;
+      const touchesSource = deps.some((dep) => Number(dep) === fromId);
+      if (!touchesSource) continue;
+
+      const seen = new Set();
+      const rewritten = [];
+      for (const dep of deps) {
+        const candidate = Number(dep) === fromId ? toId : dep;
+        const dedupeKey = String(candidate);
+        if (seen.has(dedupeKey)) continue;
+        seen.add(dedupeKey);
+        rewritten.push(candidate);
+      }
+      updateTask(row.id, { depends_on: rewritten.length ? JSON.stringify(rewritten) : null });
+      updatedTaskIds.push(row.id);
+    }
+
+    checkAndPromoteTasks();
+    for (const taskId of updatedTaskIds) {
+      const task = getTask(taskId);
+      if (task && task.status === 'ready') {
+        promotedTaskIds.push(taskId);
+      }
+    }
+    return { updatedTaskIds, promotedTaskIds };
+  })();
+
+  log('coordinator', 'dependency_replanned', {
+    request_id: normalizedRequestId,
+    from_task_id: fromId,
+    to_task_id: toId,
+    updated_task_ids: replanned.updatedTaskIds,
+    promoted_task_ids: replanned.promotedTaskIds,
+  });
+  return {
+    request_id: normalizedRequestId,
+    from_task_id: fromId,
+    to_task_id: toId,
+    updated_task_ids: replanned.updatedTaskIds,
+    promoted_task_ids: replanned.promotedTaskIds,
+    updated_count: replanned.updatedTaskIds.length,
+    promoted_count: replanned.promotedTaskIds.length,
+  };
+}
+
 // --- Worker helpers ---
 
 function registerWorker(id, worktreePath, branch) {
@@ -1324,7 +1422,7 @@ module.exports = {
   init, close, getDb,
   coordinatorAgeMs,
   createRequest, getRequest, updateRequest, listRequests,
-  createTask, getTask, updateTask, transitionTaskBrowserOffload, listTasks, getReadyTasks, checkAndPromoteTasks,
+  createTask, getTask, updateTask, transitionTaskBrowserOffload, listTasks, getReadyTasks, checkAndPromoteTasks, replanTaskDependency,
   registerWorker, getWorker, updateWorker, getIdleWorkers, getAllWorkers, claimWorker, releaseWorker,
   checkRequestCompletion, getUsageCostBurnRate, getRequestLatestCompletedTaskCursor, hasRequestCompletedTaskProgressSince,
   sendMail, checkMail, checkMailBlocking, purgeOldMail,
