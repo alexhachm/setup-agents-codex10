@@ -826,6 +826,8 @@ describe('CLI Server', () => {
     const request = db.getRequest(requestId);
     assert.strictEqual(request.status, 'integrating');
     assert.notStrictEqual(request.status, 'failed');
+    assert.strictEqual(request.completed_at, null);
+    assert.strictEqual(request.result, null);
 
     const recoveryEvents = getCoordinatorRemediationRecoveryEvents(requestId, 'start-task');
     assert.strictEqual(recoveryEvents.length, 1);
@@ -1885,6 +1887,35 @@ describe('CLI Server', () => {
     assert.deepStrictEqual(queuedRows.map((row) => row.task_id), [taskA, taskB].sort((a, b) => a - b));
   });
 
+  it('should clear stale completion metadata when integrate transitions completed requests to integrating', async () => {
+    const requestId = db.createRequest('Retry integration from terminal state');
+    const taskId = db.createTask({ request_id: requestId, subject: 'Task A', description: 'Done A' });
+    const taskCompletedAt = new Date().toISOString();
+    const requestCompletedAt = new Date(Date.now() - 1000).toISOString();
+
+    db.updateTask(taskId, {
+      status: 'completed',
+      pr_url: 'https://github.com/org/repo/pull/333',
+      branch: 'agent-3',
+      completed_at: taskCompletedAt,
+    });
+    db.updateRequest(requestId, {
+      status: 'completed',
+      completed_at: requestCompletedAt,
+      result: 'previous completion',
+    });
+
+    const integrate = await sendCommand('integrate', { request_id: requestId });
+    assert.strictEqual(integrate.ok, true);
+    assert.strictEqual(integrate.request_id, requestId);
+    assert.strictEqual(integrate.merges_queued, 1);
+
+    const request = db.getRequest(requestId);
+    assert.strictEqual(request.status, 'integrating');
+    assert.strictEqual(request.completed_at, null);
+    assert.strictEqual(request.result, null);
+  });
+
   it('should handle inbox', async () => {
     db.sendMail('architect', 'test_msg', { data: 'hello' });
 
@@ -2575,7 +2606,10 @@ describe('CLI Server', () => {
 
     const noMergeAssign = await sendCommand('assign-task', { task_id: noMergeTaskId, worker_id: 1 });
     assert.strictEqual(noMergeAssign.ok, true);
-    assert.strictEqual(db.getRequest(requestWithoutMerge).status, 'in_progress');
+    const requestWithoutMergeAfter = db.getRequest(requestWithoutMerge);
+    assert.strictEqual(requestWithoutMergeAfter.status, 'in_progress');
+    assert.strictEqual(requestWithoutMergeAfter.completed_at, null);
+    assert.strictEqual(requestWithoutMergeAfter.result, null);
 
     const noMergeRecoveryEvents = getCoordinatorRemediationRecoveryEvents(requestWithoutMerge, 'assign-task');
     assert.strictEqual(noMergeRecoveryEvents.length, 1);
@@ -2614,7 +2648,10 @@ describe('CLI Server', () => {
 
     const withMergeAssign = await sendCommand('assign-task', { task_id: remediationTaskId, worker_id: 2 });
     assert.strictEqual(withMergeAssign.ok, true);
-    assert.strictEqual(db.getRequest(requestWithMerge).status, 'integrating');
+    const requestWithMergeAfter = db.getRequest(requestWithMerge);
+    assert.strictEqual(requestWithMergeAfter.status, 'integrating');
+    assert.strictEqual(requestWithMergeAfter.completed_at, null);
+    assert.strictEqual(requestWithMergeAfter.result, null);
 
     const withMergeRecoveryEvents = getCoordinatorRemediationRecoveryEvents(requestWithMerge, 'assign-task');
     assert.strictEqual(withMergeRecoveryEvents.length, 1);

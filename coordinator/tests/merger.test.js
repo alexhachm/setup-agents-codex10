@@ -248,6 +248,33 @@ describe('Request completion tracking', () => {
     assert.strictEqual(getRequestCompletionLogCount(reqId), 0);
   });
 
+  it('should clear stale completion metadata when onTaskCompleted moves request back to integrating', () => {
+    const reqId = db.createRequest('Retry merge for completed request');
+    const completedTaskId = db.createTask({ request_id: reqId, subject: 'Completed task', description: 'Done' });
+    const completedAt = new Date().toISOString();
+
+    db.updateTask(completedTaskId, { status: 'completed' });
+    db.updateRequest(reqId, {
+      status: 'completed',
+      completed_at: completedAt,
+      result: 'previous terminal result',
+    });
+
+    db.enqueueMerge({
+      request_id: reqId,
+      task_id: completedTaskId,
+      pr_url: 'https://github.com/org/repo/pull/104',
+      branch: 'agent-1',
+    });
+
+    merger.onTaskCompleted(completedTaskId);
+
+    const reopened = db.getRequest(reqId);
+    assert.strictEqual(reopened.status, 'integrating');
+    assert.strictEqual(reopened.completed_at, null);
+    assert.strictEqual(reopened.result, null);
+  });
+
   it('should emit request_completed exactly once when final task becomes terminal', () => {
     const reqId = db.createRequest('Feature');
     const mergedTaskId = db.createTask({ request_id: reqId, subject: 'Merged task', description: 'Already done' });

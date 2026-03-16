@@ -99,6 +99,24 @@ const PROJECT_MEMORY_LINEAGE_TYPES = Object.freeze([
   'validated_by',
   'consumed_by',
 ]);
+const REQUEST_TERMINAL_STATUSES = new Set(['completed', 'failed']);
+
+function normalizeRequestLifecycleStatus(status) {
+  if (status === null || status === undefined) return null;
+  const normalized = String(status).trim().toLowerCase();
+  return normalized || null;
+}
+
+function isTerminalRequestStatus(status) {
+  const normalized = normalizeRequestLifecycleStatus(status);
+  return normalized !== null && REQUEST_TERMINAL_STATUSES.has(normalized);
+}
+
+function shouldClearRequestCompletionMetadata(previousStatus, nextStatus) {
+  const normalizedNext = normalizeRequestLifecycleStatus(nextStatus);
+  if (normalizedNext === null) return false;
+  return isTerminalRequestStatus(previousStatus) && !isTerminalRequestStatus(normalizedNext);
+}
 
 function currentSqlTimestamp() {
   return new Date().toISOString().slice(0, 19).replace('T', ' ');
@@ -881,9 +899,17 @@ function getRequest(id) {
 
 function updateRequest(id, fields) {
   validateColumns('requests', fields);
+  const normalizedFields = { ...fields };
+  if (Object.prototype.hasOwnProperty.call(normalizedFields, 'status')) {
+    const current = getDb().prepare('SELECT status FROM requests WHERE id = ?').get(id);
+    if (shouldClearRequestCompletionMetadata(current && current.status, normalizedFields.status)) {
+      normalizedFields.completed_at = null;
+      normalizedFields.result = null;
+    }
+  }
   const sets = [];
   const vals = [];
-  for (const [k, v] of Object.entries(fields)) {
+  for (const [k, v] of Object.entries(normalizedFields)) {
     sets.push(`${k} = ?`);
     vals.push(v);
   }
