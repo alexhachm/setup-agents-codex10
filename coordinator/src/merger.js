@@ -4,6 +4,7 @@ const { execFileSync } = require('child_process');
 const path = require('path');
 const fs = require('fs');
 const db = require('./db');
+const recovery = require('./recovery');
 
 const BRANCH_RE = /^[a-zA-Z0-9._\/-]+$/;
 const PR_URL_RE = /^https:\/\/github\.com\/[a-zA-Z0-9._-]+\/[a-zA-Z0-9._-]+\/pull\/\d+$/;
@@ -43,6 +44,9 @@ const ASSIGNMENT_PRIORITY_DEFAULT_MAX_DEFER_AGE_MS = 120000;
 const ASSIGNMENT_PRIORITY_ENABLED_CONFIG_KEY = 'prioritize_assignment_over_merge';
 const ASSIGNMENT_PRIORITY_MAX_CONSECUTIVE_DEFERRALS_CONFIG_KEY = 'assignment_priority_merge_max_deferrals';
 const ASSIGNMENT_PRIORITY_MAX_DEFER_AGE_MS_CONFIG_KEY = 'assignment_priority_merge_max_age_ms';
+const MERGE_CIRCUIT_BREAKER_THRESHOLD_CONFIG_KEY = 'merge_circuit_breaker_threshold';
+const MERGE_CIRCUIT_BREAKER_DEFAULT_THRESHOLD = 3;
+const mergeFailureStateByMergeId = new Map();
 
 function parseBooleanConfig(value) {
   if (typeof value === 'boolean') return value;
@@ -122,6 +126,216 @@ function shouldDeferMergeForAssignmentPriority(entry) {
   return false;
 }
 
+function getMergeFailureState(mergeId) {
+  if (!mergeFailureStateByMergeId.has(mergeId)) {
+    mergeFailureStateByMergeId.set(mergeId, {
+      failure_count: 0,
+      retry_count: 0,
+      last_failure_signature: null,
+      identical_failure_streak: 0,
+      circuit_breaker_open: false,
+      circuit_breaker_opened_at: null,
+    });
+  }
+  return mergeFailureStateByMergeId.get(mergeId);
+}
+
+function resetMergeFailureState(mergeId) {
+  mergeFailureStateByMergeId.delete(mergeId);
+}
+
+function buildFailureSignature(classification) {
+  const normalizedError = String(classification.error || '')
+    .toLowerCase()
+    .replace(/\s+/g, ' ')
+    .trim();
+  return `${classification.category}:${classification.root_cause}:${normalizedError}`;
+}
+
+function classifyMergeFailure(result) {
+  const classification = recovery.classifyMergeFailure(result);
+  if (typeof result.root_cause === 'string' && result.root_cause.trim()) {
+    classification.root_cause = result.root_cause.trim();
+  }
+  return classification;
+}
+
+function registerMergeFailure(entry, classification) {
+  const state = getMergeFailureState(entry.id);
+  const signature = buildFailureSignature(classification);
+  const threshold = parsePositiveIntegerConfig(
+    db.getConfig(MERGE_CIRCUIT_BREAKER_THRESHOLD_CONFIG_KEY),
+    MERGE_CIRCUIT_BREAKER_DEFAULT_THRESHOLD
+  );
+
+  state.failure_count += 1;
+  if (state.last_failure_signature === signature) {
+    state.identical_failure_streak += 1;
+  } else {
+    state.last_failure_signature = signature;
+    state.identical_failure_streak = 1;
+  }
+
+  if (!state.circuit_breaker_open && state.identical_failure_streak >= threshold) {
+    state.circuit_breaker_open = true;
+    state.circuit_breaker_opened_at = new Date().toISOString();
+    db.log('coordinator', 'merge_circuit_breaker_opened', {
+      merge_id: entry.id,
+      request_id: entry.request_id,
+      task_id: entry.task_id,
+      failure_signature: signature,
+      identical_failure_streak: state.identical_failure_streak,
+      threshold,
+    });
+  }
+
+  return { state, signature, threshold };
+}
+
+function formatStoredMergeError(classification) {
+  return `[${classification.category}] ${classification.root_cause}: ${classification.error}`;
+}
+
+function runMergePreflight(entry, projectDir) {
+  const preflightChecks = [
+    {
+      name: 'path',
+      category: recovery.MERGE_FAILURE_CATEGORIES.PREFLIGHT_PATH,
+      run: () => {
+        if (!projectDir || !fs.existsSync(projectDir)) {
+          throw new Error(`project directory unavailable: ${projectDir || '(unset)'}`);
+        }
+        if (!fs.statSync(projectDir).isDirectory()) {
+          throw new Error(`project path is not a directory: ${projectDir}`);
+        }
+      },
+    },
+    {
+      name: 'git',
+      category: recovery.MERGE_FAILURE_CATEGORIES.PREFLIGHT_TOOLING,
+      run: () => safeExec('git', ['--version'], projectDir),
+    },
+    {
+      name: 'gh',
+      category: recovery.MERGE_FAILURE_CATEGORIES.PREFLIGHT_TOOLING,
+      run: () => safeExec('gh', ['--version'], projectDir),
+    },
+    {
+      name: 'auth',
+      category: recovery.MERGE_FAILURE_CATEGORIES.PREFLIGHT_AUTH,
+      run: () => safeExec('gh', ['auth', 'status'], projectDir),
+    },
+    {
+      name: 'network',
+      category: recovery.MERGE_FAILURE_CATEGORIES.PREFLIGHT_NETWORK,
+      run: () => safeExec('gh', ['api', 'rate_limit', '--jq', '.rate.remaining'], projectDir),
+    },
+  ];
+
+  for (const check of preflightChecks) {
+    try {
+      check.run();
+    } catch (error) {
+      const normalized = recovery.normalizeErrorMessage(error);
+      return {
+        success: false,
+        stage: 'preflight',
+        tier: 'preflight',
+        category: check.category,
+        root_cause: `infra.preflight.${check.name}`,
+        error: `preflight_${check.name}_failed: ${normalized}`,
+      };
+    }
+  }
+
+  db.log('coordinator', 'merge_preflight_passed', {
+    merge_id: entry.id,
+    request_id: entry.request_id,
+    task_id: entry.task_id,
+  });
+  return { success: true };
+}
+
+function applyMergeFailurePolicy(entry, result) {
+  const classification = classifyMergeFailure(result);
+  const policy = recovery.getMergeFailurePolicy(classification.category);
+  const { state, signature, threshold } = registerMergeFailure(entry, classification);
+
+  const baseDetails = {
+    merge_id: entry.id,
+    request_id: entry.request_id,
+    task_id: entry.task_id,
+    branch: entry.branch,
+    tier: result.tier,
+    stage: result.stage || null,
+    error: classification.error,
+    failure_category: classification.category,
+    root_cause: classification.root_cause,
+    failure_signature: signature,
+    failure_count: state.failure_count,
+    retry_count: state.retry_count,
+    identical_failure_streak: state.identical_failure_streak,
+    circuit_breaker_open: state.circuit_breaker_open,
+    circuit_breaker_threshold: threshold,
+    retryable: policy.retryable,
+    max_retries: policy.max_retries,
+  };
+
+  db.log('coordinator', 'merge_failure_classified', baseDetails);
+
+  if (policy.retryable && !state.circuit_breaker_open && state.retry_count < policy.max_retries) {
+    state.retry_count += 1;
+    const retryDetails = {
+      ...baseDetails,
+      retry_count: state.retry_count,
+      retry_attempt: state.retry_count,
+      retries_remaining: Math.max(policy.max_retries - state.retry_count, 0),
+    };
+    db.updateMerge(entry.id, {
+      status: 'pending',
+      error: formatStoredMergeError(classification),
+    });
+    db.log('coordinator', 'merge_retry_scheduled', retryDetails);
+    return { final: false };
+  }
+
+  const finalStatus = policy.final_status === 'conflict' ? 'conflict' : 'failed';
+  const storedError = formatStoredMergeError(classification);
+  const escalationDetails = {
+    ...baseDetails,
+    final_status: finalStatus,
+    retry_exhausted: policy.retryable && state.retry_count >= policy.max_retries,
+    circuit_breaker_open: state.circuit_breaker_open,
+  };
+
+  db.updateMerge(entry.id, { status: finalStatus, error: storedError });
+  db.log(
+    'coordinator',
+    classification.category === recovery.MERGE_FAILURE_CATEGORIES.FUNCTIONAL_CONFLICT
+      ? 'functional_conflict'
+      : 'merge_failed',
+    escalationDetails
+  );
+
+  if (policy.escalate) {
+    escalateToAllocator(
+      entry,
+      storedError,
+      classification.category === recovery.MERGE_FAILURE_CATEGORIES.FUNCTIONAL_CONFLICT,
+      {
+        failure_category: classification.category,
+        root_cause: classification.root_cause,
+        failure_count: state.failure_count,
+        retry_count: state.retry_count,
+        identical_failure_streak: state.identical_failure_streak,
+        circuit_breaker_open: state.circuit_breaker_open,
+      }
+    );
+  }
+
+  return { final: true };
+}
+
 function completeRequestIfTransition(requestId, result) {
   const completionTimestamp = new Date().toISOString();
   const updateResult = db.getDb().prepare(`
@@ -181,6 +395,7 @@ function onTaskCompleted(taskId) {
       // Reset recoverable merges to pending so the merger retries them
       for (const m of recoverableMerges) {
         db.updateMerge(m.id, { status: 'pending', error: null });
+        resetMergeFailureState(m.id);
       }
       db.updateRequest(task.request_id, { status: 'integrating' });
       db.log('coordinator', 'recoverable_merges_retried', {
@@ -227,34 +442,41 @@ function processQueue(projectDir, mergeExecutor = attemptMerge) {
 
     assignmentPriorityDeferralsByMergeId.delete(entry.id);
 
+    if (mergeExecutor === attemptMerge) {
+      const preflight = runMergePreflight(entry, projectDir);
+      if (!preflight.success) {
+        applyMergeFailurePolicy(entry, preflight);
+        return;
+      }
+    }
+
     db.updateMerge(entry.id, { status: 'merging' });
     db.log('coordinator', 'merge_start', { merge_id: entry.id, branch: entry.branch, pr: entry.pr_url });
 
-    const result = mergeExecutor(entry, projectDir);
+    let result;
+    try {
+      result = mergeExecutor(entry, projectDir);
+    } catch (error) {
+      result = {
+        success: false,
+        stage: 'executor',
+        tier: 'executor',
+        error: recovery.normalizeErrorMessage(error),
+      };
+    }
 
-    if (result.success) {
+    if (result && result.success) {
+      resetMergeFailureState(entry.id);
       db.updateMerge(entry.id, { status: 'merged', merged_at: new Date().toISOString() });
       db.log('coordinator', 'merge_success', { merge_id: entry.id, branch: entry.branch });
 
       // Check if entire request is now complete
       checkRequestCompletion(entry.request_id);
-    } else if (result.functional_conflict) {
-      db.updateMerge(entry.id, { status: 'failed', error: `functional_conflict: ${result.error}` });
-      db.log('coordinator', 'functional_conflict', {
-        merge_id: entry.id,
-        branch: entry.branch,
-        error: result.error,
-      });
     } else {
-      db.updateMerge(entry.id, {
-        status: result.conflict ? 'conflict' : 'failed',
-        error: result.error,
-      });
-      db.log('coordinator', 'merge_failed', {
-        merge_id: entry.id,
-        branch: entry.branch,
-        error: result.error,
-        tier: result.tier,
+      applyMergeFailurePolicy(entry, result || {
+        success: false,
+        error: 'merge executor returned empty result',
+        stage: 'executor',
       });
     }
   } finally {
@@ -268,8 +490,15 @@ function attemptMerge(entry, projectDir) {
   // Pre-merge: check if overlapping tasks were already merged → run validation
   const preValidation = runOverlapValidation(entry, projectDir);
   if (preValidation && !preValidation.passed) {
-    escalateToAllocator(entry, preValidation.error, true);
-    return { success: false, functional_conflict: true, error: preValidation.error, tier: 'validation' };
+    return {
+      success: false,
+      functional_conflict: true,
+      category: recovery.MERGE_FAILURE_CATEGORIES.FUNCTIONAL_CONFLICT,
+      root_cause: 'merge.overlap_validation_failed',
+      error: preValidation.error,
+      tier: 'validation',
+      stage: 'overlap_validation_pre',
+    };
   }
 
   // Tier 1: Clean merge via gh CLI
@@ -282,17 +511,31 @@ function attemptMerge(entry, projectDir) {
     // Post-rebase validation if overlapping tasks exist
     const postValidation = runOverlapValidation(entry, projectDir);
     if (postValidation && !postValidation.passed) {
-      escalateToAllocator(entry, postValidation.error, true);
-      return { success: false, functional_conflict: true, error: postValidation.error, tier: 'validation' };
+      return {
+        success: false,
+        functional_conflict: true,
+        category: recovery.MERGE_FAILURE_CATEGORIES.FUNCTIONAL_CONFLICT,
+        root_cause: 'merge.overlap_validation_failed',
+        error: postValidation.error,
+        tier: 'validation',
+        stage: 'overlap_validation_post_rebase',
+      };
     }
     // Rebase succeeded, try clean merge again
     const retry = tryCleanMerge(entry, projectDir);
     if (retry.success) return { success: true, tier: 2 };
   }
 
-  // Tiers 1 & 2 failed — escalate to allocator
-  escalateToAllocator(entry, tier2.error || tier1.error, false);
-  return { success: false, conflict: true, error: tier2.error || tier1.error, tier: 3 };
+  // Tiers 1 & 2 failed — route through taxonomy/policy handling
+  return {
+    success: false,
+    conflict: true,
+    category: recovery.MERGE_FAILURE_CATEGORIES.MERGE_CONFLICT,
+    root_cause: 'merge.tiered_merge_failed',
+    error: tier2.error || tier1.error,
+    tier: 3,
+    stage: 'tiered_merge',
+  };
 }
 
 // Find the worktree path for a merge entry's branch.
@@ -515,7 +758,7 @@ function runOverlapValidation(entry, projectDir) {
   }
 }
 
-function escalateToAllocator(entry, error, isFunctional) {
+function escalateToAllocator(entry, error, isFunctional, metadata = {}) {
   const task = db.getTask(entry.task_id);
   const mailType = isFunctional ? 'functional_conflict' : 'merge_failed';
   db.sendMail('allocator', mailType, {
@@ -533,6 +776,7 @@ function escalateToAllocator(entry, error, isFunctional) {
       assigned_to: task.assigned_to,
     } : null,
     overlapping_merged: isFunctional ? db.hasOverlappingMergedTasks(entry.task_id) : undefined,
+    ...metadata,
   });
 }
 
@@ -556,29 +800,101 @@ function isPrMerged(prUrl, projectDir) {
 }
 
 function tryCleanMerge(entry, projectDir) {
-  // Skip --delete-branch if the branch is checked out in a worktree
-  const skipDeleteBranch = entry.branch && isBranchInWorktree(entry.branch, projectDir);
+  // Do not bind merge success to branch cleanup success.
+  // Cleanup runs in a best-effort async path after merge state is known.
   const mergeArgs = ['pr', 'merge', entry.pr_url, '--merge'];
-  if (!skipDeleteBranch) {
-    mergeArgs.push('--delete-branch');
-  }
 
   try {
     safeExec('gh', mergeArgs, projectDir);
+    scheduleBestEffortCleanup(entry, projectDir, 'merge_success');
     return { success: true };
   } catch (e) {
-    // gh pr merge can fail on post-merge cleanup (e.g. branch deletion)
-    // even though the PR was actually merged. Check the real state.
+    // gh pr merge can fail during post-merge work while the PR itself is merged.
     if (isPrMerged(entry.pr_url, projectDir)) {
       db.log('coordinator', 'merge_post_cleanup_warning', {
         merge_id: entry.id,
         branch: entry.branch,
         warning: e.message,
       });
+      scheduleBestEffortCleanup(entry, projectDir, 'post_merge_warning');
       return { success: true };
     }
     return { success: false, error: e.message };
   }
+}
+
+function runBestEffortCleanup(entry, projectDir) {
+  const details = {
+    merge_id: entry.id,
+    request_id: entry.request_id,
+    task_id: entry.task_id,
+    branch: entry.branch,
+    pr_url: entry.pr_url,
+    remote_deleted: false,
+    local_deleted: false,
+    local_delete_skipped: false,
+    local_skip_reason: null,
+    errors: [],
+  };
+
+  if (!entry.branch) {
+    details.local_delete_skipped = true;
+    details.local_skip_reason = 'branch_missing';
+    return details;
+  }
+
+  try {
+    safeExec('git', ['push', 'origin', '--delete', entry.branch], projectDir);
+    details.remote_deleted = true;
+  } catch (error) {
+    details.errors.push(`remote_delete_failed: ${recovery.normalizeErrorMessage(error)}`);
+  }
+
+  if (isBranchInWorktree(entry.branch, projectDir)) {
+    details.local_delete_skipped = true;
+    details.local_skip_reason = 'branch_checked_out_in_worktree';
+    return details;
+  }
+
+  try {
+    safeExec('git', ['branch', '-D', entry.branch], projectDir);
+    details.local_deleted = true;
+  } catch (error) {
+    details.errors.push(`local_delete_failed: ${recovery.normalizeErrorMessage(error)}`);
+  }
+  return details;
+}
+
+function scheduleBestEffortCleanup(entry, projectDir, trigger) {
+  const logIfAvailable = (action, details) => {
+    try {
+      db.log('coordinator', action, details);
+    } catch {
+      // Tests may tear down the DB before async cleanup callbacks execute.
+    }
+  };
+
+  setImmediate(() => {
+    try {
+      const details = runBestEffortCleanup(entry, projectDir);
+      const payload = { ...details, trigger };
+      if (details.errors.length > 0) {
+        logIfAvailable('merge_cleanup_nonfatal_failure', payload);
+      } else {
+        logIfAvailable('merge_cleanup_completed', payload);
+      }
+    } catch (error) {
+      logIfAvailable('merge_cleanup_nonfatal_failure', {
+        merge_id: entry.id,
+        request_id: entry.request_id,
+        task_id: entry.task_id,
+        branch: entry.branch,
+        pr_url: entry.pr_url,
+        trigger,
+        errors: [`cleanup_unhandled_error: ${recovery.normalizeErrorMessage(error)}`],
+      });
+    }
+  });
 }
 
 
