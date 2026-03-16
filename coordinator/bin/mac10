@@ -811,6 +811,17 @@ function parseFailTaskArgs(optionalArgs) {
   };
 }
 
+function parseOptionalJsonArg(rawValue) {
+  if (rawValue === undefined || rawValue === null) return null;
+  const trimmed = String(rawValue).trim();
+  if (!trimmed) return null;
+  try {
+    return JSON.parse(trimmed);
+  } catch {
+    return trimmed;
+  }
+}
+
 async function main() {
   const rawArgv = process.argv.slice(2);
   if (rawArgv.length === 0) {
@@ -1167,6 +1178,181 @@ async function main() {
         if (result.ok) console.log('Task failure recorded.');
         else console.error(result.error);
         break;
+
+      case 'browser-create-session': {
+        if (argv.length < 4) {
+          console.error('Usage: mac10 browser-create-session <task_id> <workflow_url> <idempotency_key> [channel]');
+          process.exit(1);
+        }
+        const taskId = parseInt(argv[1], 10);
+        if (!Number.isInteger(taskId) || taskId <= 0) {
+          console.error('Error: task_id must be a positive integer');
+          process.exit(1);
+        }
+        result = await send(socketPath, 'browser-create-session', {
+          task_id: taskId,
+          workflow_url: argv[2],
+          idempotency_key: argv[3],
+          channel: argv[4],
+        });
+        if (result.ok) console.log(JSON.stringify(result, null, 2));
+        else console.error(result.error);
+        break;
+      }
+
+      case 'browser-attach-session': {
+        if (argv.length < 4) {
+          console.error('Usage: mac10 browser-attach-session <task_id> <session_id> <idempotency_key> [channel]');
+          process.exit(1);
+        }
+        const taskId = parseInt(argv[1], 10);
+        if (!Number.isInteger(taskId) || taskId <= 0) {
+          console.error('Error: task_id must be a positive integer');
+          process.exit(1);
+        }
+        result = await send(socketPath, 'browser-attach-session', {
+          task_id: taskId,
+          session_id: argv[2],
+          idempotency_key: argv[3],
+          channel: argv[4],
+        });
+        if (result.ok) console.log(JSON.stringify(result, null, 2));
+        else console.error(result.error);
+        break;
+      }
+
+      case 'browser-start-job': {
+        if (argv.length < 6) {
+          console.error('Usage: mac10 browser-start-job <task_id> <session_id> <workflow_url> <idempotency_key> <guidance>');
+          process.exit(1);
+        }
+        const taskId = parseInt(argv[1], 10);
+        if (!Number.isInteger(taskId) || taskId <= 0) {
+          console.error('Error: task_id must be a positive integer');
+          process.exit(1);
+        }
+        const guidance = argv.slice(5).join(' ').trim();
+        if (!guidance) {
+          console.error('Error: guidance must be non-empty');
+          process.exit(1);
+        }
+        result = await send(socketPath, 'browser-start-job', {
+          task_id: taskId,
+          session_id: argv[2],
+          workflow_url: argv[3],
+          idempotency_key: argv[4],
+          guidance,
+        });
+        if (result.ok) console.log(JSON.stringify(result, null, 2));
+        else console.error(result.error);
+        break;
+      }
+
+      case 'browser-callback-chunk': {
+        if (argv.length < 8) {
+          console.error('Usage: mac10 browser-callback-chunk <task_id> <session_id> <job_id> <callback_token> <idempotency_key> <chunk_index> <chunk>');
+          process.exit(1);
+        }
+        const taskId = parseInt(argv[1], 10);
+        if (!Number.isInteger(taskId) || taskId <= 0) {
+          console.error('Error: task_id must be a positive integer');
+          process.exit(1);
+        }
+        const chunkIndex = parseInt(argv[6], 10);
+        if (!Number.isInteger(chunkIndex) || chunkIndex < 0) {
+          console.error('Error: chunk_index must be a non-negative integer');
+          process.exit(1);
+        }
+        const chunk = argv.slice(7).join(' ');
+        if (!chunk) {
+          console.error('Error: chunk must be non-empty');
+          process.exit(1);
+        }
+        result = await send(socketPath, 'browser-callback-chunk', {
+          task_id: taskId,
+          session_id: argv[2],
+          job_id: argv[3],
+          callback_token: argv[4],
+          idempotency_key: argv[5],
+          chunk_index: chunkIndex,
+          chunk,
+        });
+        if (result.ok) console.log(JSON.stringify(result, null, 2));
+        else console.error(result.error);
+        break;
+      }
+
+      case 'browser-complete-job': {
+        if (argv.length < 6) {
+          console.error('Usage: mac10 browser-complete-job <task_id> <session_id> <job_id> <callback_token> <idempotency_key> [result_json_or_text]');
+          process.exit(1);
+        }
+        const taskId = parseInt(argv[1], 10);
+        if (!Number.isInteger(taskId) || taskId <= 0) {
+          console.error('Error: task_id must be a positive integer');
+          process.exit(1);
+        }
+        const rawResult = argv.slice(6).join(' ');
+        result = await send(socketPath, 'browser-complete-job', {
+          task_id: taskId,
+          session_id: argv[2],
+          job_id: argv[3],
+          callback_token: argv[4],
+          idempotency_key: argv[5],
+          result: parseOptionalJsonArg(rawResult),
+        });
+        if (result.ok) console.log(JSON.stringify(result, null, 2));
+        else console.error(result.error);
+        break;
+      }
+
+      case 'browser-fail-job': {
+        if (argv.length < 7) {
+          console.error('Usage: mac10 browser-fail-job <task_id> <session_id> <job_id> <callback_token> <idempotency_key> <error>');
+          process.exit(1);
+        }
+        const taskId = parseInt(argv[1], 10);
+        if (!Number.isInteger(taskId) || taskId <= 0) {
+          console.error('Error: task_id must be a positive integer');
+          process.exit(1);
+        }
+        const errorMessage = argv.slice(6).join(' ').trim();
+        if (!errorMessage) {
+          console.error('Error: error must be non-empty');
+          process.exit(1);
+        }
+        result = await send(socketPath, 'browser-fail-job', {
+          task_id: taskId,
+          session_id: argv[2],
+          job_id: argv[3],
+          callback_token: argv[4],
+          idempotency_key: argv[5],
+          error: errorMessage,
+        });
+        if (result.ok) console.log(JSON.stringify(result, null, 2));
+        else console.error(result.error);
+        break;
+      }
+
+      case 'browser-job-status': {
+        if (argv.length < 4) {
+          console.error('Usage: mac10 browser-job-status <task_id> <session_id> <job_id>');
+          process.exit(1);
+        }
+        const taskId = parseInt(argv[1], 10);
+        if (!Number.isInteger(taskId) || taskId <= 0) {
+          console.error('Error: task_id must be a positive integer');
+          process.exit(1);
+        }
+        result = await send(socketPath, 'browser-job-status', {
+          task_id: taskId,
+          session_id: argv[2],
+          job_id: argv[3],
+        });
+        if (result.ok) console.log(JSON.stringify(result, null, 2));
+        else console.error(result.error);
+        break;
+      }
 
       case 'distill':
         if (argv.length < 4) { console.error('Usage: mac10 distill <worker_id> <domain> <content>'); process.exit(1); }
@@ -1718,6 +1904,13 @@ WORKER:
   complete-task <worker_id> <task_id> [pr_url] [branch] [result] [--usage JSON]
   fail-task <worker_id> <task_id> [error] [--usage JSON]
   distill <worker_id> <domain> <content>
+  browser-create-session <task_id> <workflow_url> <idempotency_key> [channel]
+  browser-attach-session <task_id> <session_id> <idempotency_key> [channel]
+  browser-start-job <task_id> <session_id> <workflow_url> <idempotency_key> <guidance>
+  browser-callback-chunk <task_id> <session_id> <job_id> <callback_token> <idempotency_key> <chunk_index> <chunk>
+  browser-complete-job <task_id> <session_id> <job_id> <callback_token> <idempotency_key> [result_json_or_text]
+  browser-fail-job <task_id> <session_id> <job_id> <callback_token> <idempotency_key> <error>
+  browser-job-status <task_id> <session_id> <job_id>
 
 LOOPS:
   loop <prompt>                  Start a persistent autonomous loop

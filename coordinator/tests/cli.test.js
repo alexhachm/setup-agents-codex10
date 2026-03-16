@@ -154,6 +154,12 @@ function runMac10Cli(args) {
   });
 }
 
+function parseCliJsonOutput(rawOutput) {
+  const trimmed = String(rawOutput || '').trim();
+  if (!trimmed) return null;
+  return JSON.parse(trimmed);
+}
+
 function runGit(args, cwd = tmpDir) {
   return execFileSync('git', args, {
     cwd,
@@ -633,6 +639,195 @@ describe('CLI Server', () => {
     assert.strictEqual(completedTask.usage_cost_usd, null);
     assert.strictEqual(completedTask.usage_payload_json, null);
     assert.strictEqual(db.getWorker(1).status, 'completed_task');
+  });
+
+  it('should orchestrate browser research lifecycle with idempotent command replays', async () => {
+    const requestId = db.createRequest('Browser research orchestration');
+    const taskId = db.createTask({
+      request_id: requestId,
+      subject: 'Run browser research',
+      description: 'Need guided ChatGPT browser workflow',
+    });
+
+    const createSession = await sendCommand('browser-create-session', {
+      task_id: taskId,
+      workflow_url: 'https://chatgpt.com/g/guided-research',
+      idempotency_key: 'create-session-0001',
+    });
+    assert.strictEqual(createSession.ok, true);
+    assert.strictEqual(createSession.browser_offload_status, 'requested');
+    assert.match(createSession.session_id, /^session-[a-f0-9]{16}$/);
+
+    const createSessionReplay = await sendCommand('browser-create-session', {
+      task_id: taskId,
+      workflow_url: 'https://chatgpt.com/g/guided-research',
+      idempotency_key: 'create-session-0001',
+    });
+    assert.strictEqual(createSessionReplay.ok, true);
+    assert.strictEqual(createSessionReplay.idempotent, true);
+    assert.strictEqual(createSessionReplay.session_id, createSession.session_id);
+
+    const attachSession = await sendCommand('browser-attach-session', {
+      task_id: taskId,
+      session_id: createSession.session_id,
+      idempotency_key: 'attach-session-0001',
+    });
+    assert.strictEqual(attachSession.ok, true);
+    assert.strictEqual(attachSession.browser_offload_status, 'attached');
+
+    const startJob = await sendCommand('browser-start-job', {
+      task_id: taskId,
+      session_id: createSession.session_id,
+      workflow_url: 'https://chatgpt.com/g/guided-research',
+      guidance: 'Collect current security release notes and summarize key changes.',
+      idempotency_key: 'start-job-0001',
+    });
+    assert.strictEqual(startJob.ok, true);
+    assert.strictEqual(startJob.browser_offload_status, 'awaiting_callback');
+    assert.match(startJob.job_id, /^job-[a-f0-9]{16}$/);
+    assert.ok(startJob.callback_token.length >= 24);
+
+    const startReplay = await sendCommand('browser-start-job', {
+      task_id: taskId,
+      session_id: createSession.session_id,
+      workflow_url: 'https://chatgpt.com/g/guided-research',
+      guidance: 'Collect current security release notes and summarize key changes.',
+      idempotency_key: 'start-job-0001',
+    });
+    assert.strictEqual(startReplay.ok, true);
+    assert.strictEqual(startReplay.idempotent, true);
+    assert.strictEqual(startReplay.job_id, startJob.job_id);
+    assert.strictEqual(startReplay.callback_token, startJob.callback_token);
+
+    const chunkOne = await sendCommand('browser-callback-chunk', {
+      task_id: taskId,
+      session_id: createSession.session_id,
+      job_id: startJob.job_id,
+      callback_token: startJob.callback_token,
+      idempotency_key: 'chunk-0001',
+      chunk_index: 0,
+      chunk: 'alpha ',
+    });
+    assert.strictEqual(chunkOne.ok, true);
+    assert.strictEqual(chunkOne.callback_count, 1);
+
+    const chunkTwo = await sendCommand('browser-callback-chunk', {
+      task_id: taskId,
+      session_id: createSession.session_id,
+      job_id: startJob.job_id,
+      callback_token: startJob.callback_token,
+      idempotency_key: 'chunk-0002',
+      chunk_index: 1,
+      chunk: 'beta',
+    });
+    assert.strictEqual(chunkTwo.ok, true);
+    assert.strictEqual(chunkTwo.callback_count, 2);
+
+    const statusBeforeComplete = await sendCommand('browser-job-status', {
+      task_id: taskId,
+      session_id: createSession.session_id,
+      job_id: startJob.job_id,
+    });
+    assert.strictEqual(statusBeforeComplete.ok, true);
+    assert.strictEqual(statusBeforeComplete.browser_offload_status, 'awaiting_callback');
+    assert.strictEqual(statusBeforeComplete.callback_count, 2);
+
+    const completeJob = await sendCommand('browser-complete-job', {
+      task_id: taskId,
+      session_id: createSession.session_id,
+      job_id: startJob.job_id,
+      callback_token: startJob.callback_token,
+      idempotency_key: 'complete-job-0001',
+      result: { summary: 'complete' },
+    });
+    assert.strictEqual(completeJob.ok, true);
+    assert.strictEqual(completeJob.browser_offload_status, 'completed');
+
+    const statusAfterComplete = await sendCommand('browser-job-status', {
+      task_id: taskId,
+      session_id: createSession.session_id,
+      job_id: startJob.job_id,
+    });
+    assert.strictEqual(statusAfterComplete.ok, true);
+    assert.strictEqual(statusAfterComplete.browser_offload_status, 'completed');
+    assert.ok(statusAfterComplete.result);
+    assert.strictEqual(statusAfterComplete.result.callback_text, 'alpha beta');
+    assert.deepStrictEqual(statusAfterComplete.result.result, { summary: 'complete' });
+
+    const persistedTask = db.getTask(taskId);
+    assert.strictEqual(persistedTask.browser_offload_status, 'completed');
+    assert.ok(persistedTask.browser_offload_result);
+
+    const coordinatorEntries = db.getLog(500, 'coordinator');
+    const browserEvents = coordinatorEntries
+      .filter((entry) => entry.action.startsWith('browser_research_'))
+      .map((entry) => entry.action);
+    for (const expectedAction of [
+      'browser_research_session_created',
+      'browser_research_session_attached',
+      'browser_research_job_started',
+      'browser_research_callback_chunk_received',
+      'browser_research_job_completed',
+      'browser_research_job_status_fetched',
+    ]) {
+      assert.ok(browserEvents.includes(expectedAction), `Missing browser event: ${expectedAction}`);
+    }
+  });
+
+  it('should expose browser research command contracts through the mac10 CLI', async () => {
+    const requestId = db.createRequest('CLI browser contract test');
+    const taskId = db.createTask({
+      request_id: requestId,
+      subject: 'CLI browser research',
+      description: 'Exercise browser command flow over mac10 CLI',
+    });
+
+    const createCli = await runMac10Cli([
+      'browser-create-session',
+      String(taskId),
+      'https://chatgpt.com/g/cli-contract',
+      'cli-create-key-0001',
+    ]);
+    assert.strictEqual(createCli.status, 0, createCli.stderr);
+    const createPayload = parseCliJsonOutput(createCli.stdout);
+    assert.strictEqual(createPayload.ok, true);
+    assert.match(createPayload.session_id, /^session-[a-f0-9]{16}$/);
+
+    const attachCli = await runMac10Cli([
+      'browser-attach-session',
+      String(taskId),
+      createPayload.session_id,
+      'cli-attach-key-0001',
+    ]);
+    assert.strictEqual(attachCli.status, 0, attachCli.stderr);
+    const attachPayload = parseCliJsonOutput(attachCli.stdout);
+    assert.strictEqual(attachPayload.ok, true);
+    assert.strictEqual(attachPayload.browser_offload_status, 'attached');
+
+    const startCli = await runMac10Cli([
+      'browser-start-job',
+      String(taskId),
+      createPayload.session_id,
+      'https://chatgpt.com/g/cli-contract',
+      'cli-start-key-0001',
+      'Use browser guidance from CLI contract test',
+    ]);
+    assert.strictEqual(startCli.status, 0, startCli.stderr);
+    const startPayload = parseCliJsonOutput(startCli.stdout);
+    assert.strictEqual(startPayload.ok, true);
+    assert.strictEqual(startPayload.browser_offload_status, 'awaiting_callback');
+    assert.match(startPayload.job_id, /^job-[a-f0-9]{16}$/);
+
+    const statusCli = await runMac10Cli([
+      'browser-job-status',
+      String(taskId),
+      createPayload.session_id,
+      startPayload.job_id,
+    ]);
+    assert.strictEqual(statusCli.status, 0, statusCli.stderr);
+    const statusPayload = parseCliJsonOutput(statusCli.stdout);
+    assert.strictEqual(statusPayload.ok, true);
+    assert.strictEqual(statusPayload.browser_offload_status, 'awaiting_callback');
   });
 
   it('should skip reset-worker without ownership context when active assignment exists', async () => {
