@@ -23,7 +23,7 @@ Use only `./.codex/scripts/codex10 ...` for coordinator commands. Never invoke r
 tier1_count = 0       # Reset trigger at 4
 decomposition_count = 0  # Reset trigger at 6 (Tier 2 counts as 0.5)
 curation_due = false   # Set true every 2nd decomposition
-last_activity = now()  # For adaptive signal timeout
+last_activity_epoch = now_epoch()  # UNIX seconds for adaptive signal timeout
 backlog_threshold = 50 # Drain mode threshold
 ready_floor = 6        # Keep this many ready tasks when possible
 ```
@@ -56,9 +56,18 @@ Then begin the loop.
 **Repeat these steps forever:**
 
 ### Step 1: Wait for signal and check inbox
+Use adaptive timeout before each inbox check:
 ```bash
-bash .codex/scripts/signal-wait.sh .codex/signals/.codex10.handoff-signal 15
+now_epoch=$(date +%s)
+last_activity_epoch=${last_activity_epoch:-0}
+if [ $((now_epoch - last_activity_epoch)) -lt 30 ]; then
+  timeout=5
+else
+  timeout=15
+fi
+bash .codex/scripts/signal-wait.sh .codex/signals/.codex10.handoff-signal "$timeout"
 ```
+Use 5s timeout if activity was < 30s ago. Use 15s otherwise.
 Then check for new requests via codex10 CLI (source of truth — never read JSON files directly):
 ```bash
 ./.codex/scripts/codex10 inbox architect
@@ -110,9 +119,10 @@ echo "[$(date -u +%Y-%m-%dT%H:%M:%SZ)] [master-2] [TIER_CLASSIFY] id=[request_id
 Before acting on inbox order, measure queue pressure:
 
 ```bash
-pending_count=$(./.codex/scripts/codex10 status | sed -n '/=== Requests ===/,/=== Workers ===/p' | grep -c '\[pending\]')
+request_rows=$(./.codex/scripts/codex10 status | sed -n '/=== Requests ===/,/=== Workers ===/p')
+pending_count=$(printf '%s\n' "$request_rows" | awk '$1 ~ /^req-/ && $2 == "[pending]" {count++} END {print count+0}')
 ready_count=$(./.codex/scripts/codex10 ready-tasks | grep -c '^  #')
-oldest_pending_id=$(./.codex/scripts/codex10 status | sed -n '/=== Requests ===/,/=== Workers ===/p' | grep '\[pending\]' | awk '{print $1}' | tail -n 1)
+oldest_pending_id=$(printf '%s\n' "$request_rows" | awk '$1 ~ /^req-/ && $2 == "[pending]" {id=$1} END {print id}')
 ```
 
 If `pending_count > backlog_threshold`:
@@ -150,7 +160,7 @@ Only use this path for trivial docs/prompt/comment edits. If the request touches
    echo "[$(date -u +%Y-%m-%dT%H:%M:%SZ)] [master-2] [TIER1_EXECUTE] id=[request_id] file=[files] pr=[PR URL]" >> .codex/logs/activity.log
    ```
    `tier1_count += 1`
-   `last_activity = now()`
+   `last_activity_epoch = now_epoch()`
 
 8. **Check reset trigger:** If `tier1_count >= 4`, go to Step 7 (reset).
 
@@ -176,11 +186,22 @@ Go to Step 6.
 
 3. **Create and assign the task:**
    ```bash
-   echo '{"request_id":"[id]","subject":"[task title]","description":"DOMAIN: [domain]\nFILES: [files]\nVALIDATION: tier2\nTIER: 2\n\n[detailed requirements]\n\n[success criteria]","domain":"[domain]","tier":2,"priority":"normal","files":["file1.js","file2.js"],"validation":"npm run build"}' | ./.codex/scripts/codex10 create-task -
+   create_task_output="$(
+     echo '{"request_id":"[id]","subject":"[task title]","description":"DOMAIN: [domain]\nFILES: [files]\nVALIDATION: tier2\nTIER: 2\n\n[detailed requirements]\n\n[success criteria]","domain":"[domain]","tier":2,"priority":"normal","files":["file1.js","file2.js"],"validation":"npm run build"}' \
+       | ./.codex/scripts/codex10 create-task -
+   )"
+   task_id=$(printf '%s\n' "$create_task_output" | awk '/Task created:/ {print $3}')
+   [ -n "$task_id" ] || { echo "Failed to capture task_id from create-task output"; exit 1; }
+   printf '%s\n' "$create_task_output"
    ```
-   Then assign with the normalized numeric worker id:
+   Then assign with the captured `task_id` and normalized numeric worker id:
    ```bash
-   ./.codex/scripts/codex10 assign-task <task_id> "$worker_id"
+   ./.codex/scripts/codex10 assign-task "$task_id" "$worker_id"
+   ```
+
+   Record request tier/state so it does not remain pending:
+   ```bash
+   ./.codex/scripts/codex10 triage [id] 2 "Assigned Tier 2 task $task_id"
    ```
 
 4. **Release claim:**
@@ -194,7 +215,8 @@ Go to Step 6.
    echo "[$(date -u +%Y-%m-%dT%H:%M:%SZ)] [master-2] [TIER2_ASSIGN] id=[request_id] worker=worker-N task=\"[subject]\"" >> .codex/logs/activity.log
    ```
    `decomposition_count += 0.5`
-   `last_activity = now()`
+   `if decomposition_count is a whole even number (2, 4, 6, ...): curation_due = true`
+   `last_activity_epoch = now_epoch()`
 
 Go to Step 6.
 
@@ -202,45 +224,39 @@ Go to Step 6.
 
 1. **THINK DEEPLY** — this is your core value. Take your time.
 2. Optional teammate burst (only when criteria above are met): run read-only teammate analysis, then synthesize findings yourself.
-3. If clarification needed, write to clarification-queue.json and wait for response (poll every 10s).
-4. Write decomposed tasks to codex10.task-queue.json:
+3. If clarification is needed, request it via coordinator and block for a reply:
    ```bash
-   bash .codex/scripts/state-lock.sh .codex/state/codex10.task-queue.json 'cat > .codex/state/codex10.task-queue.json << TASKS
-   {
-     "request_id": "[request_id]",
-     "decomposed_at": "[ISO timestamp]",
-     "tasks": [
-       {
-         "subject": "[task title]",
-         "description": "REQUEST_ID: [id]\nDOMAIN: [domain]\nFILES: [specific files]\nVALIDATION: tier3\nTIER: 3\n\n[detailed requirements]\n\n[success criteria]",
-         "domain": "[domain]",
-         "files": ["file1.js", "file2.js"],
-         "priority": "normal",
-         "depends_on": []
-       }
-     ]
-   }
-   TASKS'
+   ./.codex/scripts/codex10 ask-clarification <request_id> "[specific question]"
+   ./.codex/scripts/codex10 inbox architect --block
    ```
-5. Update codex10.handoff.json to `"decomposed"`
-6. Signal Master-3:
+4. Record the Tier 3 decision in coordinator state:
    ```bash
-   touch .codex/signals/.codex10.task-signal
+   ./.codex/scripts/codex10 triage <request_id> 3 "Decomposed into [N] tasks"
    ```
-7. Log:
+5. Create each decomposed Tier 3 task via codex10, capturing output and task IDs as you go:
+   ```bash
+   create_task_output="$(
+     echo '{"request_id":"[id]","subject":"[task title]","description":"REQUEST_ID: [id]\nDOMAIN: [domain]\nFILES: [specific files]\nVALIDATION: tier3\nTIER: 3\n\n[detailed requirements]\n\n[success criteria]","domain":"[domain]","tier":3,"priority":"normal","files":["file1.js","file2.js"],"depends_on":[],"validation":"npm run build"}' \
+       | ./.codex/scripts/codex10 create-task -
+   )"
+   task_id=$(printf '%s\n' "$create_task_output" | awk '/Task created:/ {print $3}')
+   [ -n "$task_id" ] || { echo "Failed to capture Tier 3 task ID"; exit 1; }
+   printf '%s\n' "$create_task_output"
+   ```
+   Repeat for each subtask; serialize dependencies by passing prior task IDs in `depends_on` (for example `["$task_id_a"]`).
+6. Validate decomposition overlap via coordinator:
+   ```bash
+   ./.codex/scripts/codex10 check-overlaps <request_id>
+   ```
+   For CRITICAL overlaps, adjust decomposition so conflicting tasks are serialized via `depends_on` before workers execute them.
+7. Do not write `.codex/state/codex10.task-queue.json`, `.codex/state/codex10.handoff.json`, or signal files for decomposition handoff; `create-task` updates coordinator state directly.
+8. Log:
    ```bash
    echo "[$(date -u +%Y-%m-%dT%H:%M:%SZ)] [master-2] [DECOMPOSE_DONE] id=[request_id] tasks=[N] domains=[list]" >> .codex/logs/activity.log
    ```
    `decomposition_count += 1`
-   `last_activity = now()`
-
-8. **Check file overlaps between tasks:**
-   ```bash
-   ./.codex/scripts/codex10 check-overlaps <request_id>
-   ```
-   - **CRITICAL** (3+ shared files): Add `depends_on` edges to serialize the overlapping tasks — they must not run in parallel
-   - **HIGH** (2 shared files): Note in task description ("⚠ OVERLAP: shares [files] with task #N — merger will validate"), let merger validate
-   - **LOW** (1 shared file): Accept as-is, merger handles it
+   `if decomposition_count is a whole even number (2, 4, 6, ...): curation_due = true`
+   `last_activity_epoch = now_epoch()`
 
 ### Step 4: Curation check
 
@@ -264,19 +280,39 @@ Also check staleness:
 ```bash
 last_scan=$(jq -r '.scanned_at // "1970-01-01"' .codex/state/codebase-map.json 2>/dev/null)
 commits_since=$(git log --since="$last_scan" --oneline 2>/dev/null | wc -l | tr -d ' ')
+baseline_commit=$(git rev-list -1 --before="$last_scan" HEAD 2>/dev/null)
+if [ -n "$baseline_commit" ]; then
+  changed_files=$(git diff --name-only "$baseline_commit"..HEAD 2>/dev/null | sed '/^$/d' | sort -u)
+else
+  changed_files=$(git ls-files 2>/dev/null)
+fi
+changed_file_count=$(printf '%s\n' "$changed_files" | sed '/^$/d' | wc -l | tr -d ' ')
+total_domains=$(jq '(.domains // {}) | if type=="array" then length else (keys|length) end' .codex/state/codebase-map.json 2>/dev/null || echo 0)
+changed_domains=$(printf '%s\n' "$changed_files" | awk -F/ 'NF{print $1}' | sort -u | wc -l | tr -d ' ')
 ```
-If `commits_since >= 5`: do incremental rescan (read changed files, update map).
-If `commits_since >= 20` or changes span >50% of domains: full reset (Step 7).
+If `commits_since >= 20`: full reset (Step 7) immediately.
+If `changed_file_count > 120`: full reset (Step 7) immediately (incremental pass would be too broad).
+If `total_domains > 0` and `changed_domains * 2 >= total_domains`: full reset (Step 7) immediately.
 
-### Step 6: Wait and repeat
+If `commits_since >= 5` and none of the full-reset conditions above fired, run this incremental rescan:
+1. Review changed files in a bounded pass:
+   ```bash
+   printf '%s\n' "$changed_files" | sed '/^$/d' > .codex/state/reports/master2-incremental-scan-files.txt
+   ```
+   Use this list as the review queue and inspect each file before continuing.
+2. Refresh `codebase-map.json` scan timestamp:
+   ```bash
+   bash .codex/scripts/state-lock.sh .codex/state/codebase-map.json 'tmp=$(mktemp) && jq --arg ts "$(date -u +%Y-%m-%dT%H:%M:%SZ)" ".scanned_at=\$ts" .codex/state/codebase-map.json > "$tmp" && mv "$tmp" .codex/state/codebase-map.json'
+   ```
+3. Update knowledge entries impacted by reviewed files (at minimum `codebase-insights.md` if architecture understanding changed).
+4. Log the incremental scan:
+   ```bash
+   echo "[$(date -u +%Y-%m-%dT%H:%M:%SZ)] [master-2] [INCREMENTAL_SCAN] commits=${commits_since} files=${changed_file_count} domains=${changed_domains}" >> .codex/logs/activity.log
+   ```
 
-Adaptive signal timeout based on activity:
-```bash
-# If you just processed a request → shorter timeout (stay responsive)
-# If nothing happened → longer timeout (save resources)
-bash .codex/scripts/signal-wait.sh .codex/signals/.codex10.handoff-signal 15
-```
-Use 5s timeout if `last_activity` was < 30s ago. Use 15s otherwise.
+### Step 6: Loop continuation
+
+Step 1 already performs the per-iteration blocking wait with adaptive timeout.
 
 Go back to Step 1.
 
