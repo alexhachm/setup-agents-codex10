@@ -1181,23 +1181,97 @@ async function main() {
 
       case 'inbox': {
         if (!argv[1]) {
-          console.error('Usage: mac10 inbox <recipient> [--block] [--peek] [--timeout=ms] (canonical recipient: allocator; alias: master-3)');
+          console.error('Usage: mac10 inbox <recipient> [--block] [--peek] [--timeout=ms] [--type=message_type] [--request-id=request_id] (canonical recipient: allocator; alias: master-3)');
           process.exit(1);
         }
         const recipient = normalizeInboxRecipient(argv[1]);
-        const block = argv.includes('--block');
-        const peek = argv.includes('--peek');
-        const timeoutArg = argv.find(a => a.startsWith('--timeout='));
-        const parsedTimeout = timeoutArg ? parseInt(timeoutArg.split('=')[1], 10) : NaN;
-        if (timeoutArg && (!Number.isFinite(parsedTimeout) || parsedTimeout <= 0)) {
-          console.error('Error: --timeout must be a positive integer in milliseconds');
+        const options = argv.slice(2);
+        let block = false;
+        let peek = false;
+        let timeout = 300000;
+        let type;
+        let requestId;
+
+        for (let i = 0; i < options.length; i += 1) {
+          const option = options[i];
+          if (option === '--block') {
+            block = true;
+            continue;
+          }
+          if (option === '--peek') {
+            peek = true;
+            continue;
+          }
+          if (option === '--timeout') {
+            const timeoutValue = options[i + 1];
+            if (!timeoutValue) {
+              console.error('Error: --timeout flag requires a value in milliseconds');
+              process.exit(1);
+            }
+            const parsedTimeout = parseInt(timeoutValue, 10);
+            if (!Number.isFinite(parsedTimeout) || parsedTimeout <= 0) {
+              console.error('Error: --timeout must be a positive integer in milliseconds');
+              process.exit(1);
+            }
+            timeout = parsedTimeout;
+            i += 1;
+            continue;
+          }
+          if (option.startsWith('--timeout=')) {
+            const parsedTimeout = parseInt(option.split('=')[1], 10);
+            if (!Number.isFinite(parsedTimeout) || parsedTimeout <= 0) {
+              console.error('Error: --timeout must be a positive integer in milliseconds');
+              process.exit(1);
+            }
+            timeout = parsedTimeout;
+            continue;
+          }
+          if (option === '--type') {
+            const typeValue = options[i + 1];
+            if (!typeValue) {
+              console.error('Error: --type flag requires a message type value');
+              process.exit(1);
+            }
+            type = typeValue;
+            i += 1;
+            continue;
+          }
+          if (option.startsWith('--type=')) {
+            const typeValue = option.slice('--type='.length);
+            if (!typeValue) {
+              console.error('Error: --type flag requires a message type value');
+              process.exit(1);
+            }
+            type = typeValue;
+            continue;
+          }
+          if (option === '--request-id') {
+            const requestIdValue = options[i + 1];
+            if (!requestIdValue) {
+              console.error('Error: --request-id flag requires a request id value');
+              process.exit(1);
+            }
+            requestId = requestIdValue;
+            i += 1;
+            continue;
+          }
+          if (option.startsWith('--request-id=')) {
+            const requestIdValue = option.slice('--request-id='.length);
+            if (!requestIdValue) {
+              console.error('Error: --request-id flag requires a request id value');
+              process.exit(1);
+            }
+            requestId = requestIdValue;
+            continue;
+          }
+          console.error('Usage: mac10 inbox <recipient> [--block] [--peek] [--timeout=ms] [--type=message_type] [--request-id=request_id] (canonical recipient: allocator; alias: master-3)');
           process.exit(1);
         }
-        const timeout = Number.isFinite(parsedTimeout) ? parsedTimeout : 300000;
+
         if (block) {
-          result = await send(socketPath, 'inbox-block', { recipient, timeout, peek });
+          result = await send(socketPath, 'inbox-block', { recipient, timeout, peek, type, request_id: requestId });
         } else {
-          result = await send(socketPath, 'inbox', { recipient, peek });
+          result = await send(socketPath, 'inbox', { recipient, peek, type, request_id: requestId });
         }
         if (result.ok) {
           if (result.messages.length === 0) {
@@ -1610,7 +1684,7 @@ ARCHITECT:
   create-task <json>             Create task (JSON from stdin with -)
   tier1-complete <request_id> [result]
   ask-clarification <request_id> <question>
-  inbox <recipient> [--block] [--peek] [--timeout=ms]
+  inbox <recipient> [--block] [--peek] [--timeout=ms] [--type=message_type] [--request-id=request_id]
                                 canonical recipient: allocator (master-3 alias supported)
 
 ALLOCATOR:

@@ -18,6 +18,7 @@ Do not invoke raw `mac10` in this codex10 runtime.
 | **Get real status** | `./.claude/scripts/codex10 status` |
 | Check your inbox for requests | `./.claude/scripts/codex10 inbox architect` |
 | Wait for requests | `./.claude/scripts/codex10 inbox architect --block` |
+| Wait for clarification reply (scoped) | `./.claude/scripts/codex10 inbox architect --block --type=clarification_response --request-id=<request_id>` |
 | Triage a request | `./.claude/scripts/codex10 triage <request_id> <tier> "reasoning"` |
 | Create a task (Tier 2/3) | `echo '<json>' \| ./.claude/scripts/codex10 create-task -` |
 | Complete Tier 1 directly | `./.claude/scripts/codex10 tier1-complete <request_id> "result"` |
@@ -67,6 +68,7 @@ Before doing ANY work, classify the request:
 - Complex decomposition needed
 - Examples: "refactor the auth system", "add real-time collaboration"
 - Decompose into tasks via `./.claude/scripts/codex10 create-task` → Master-3 allocates
+- If clarification is required, ask then wait with filters: `./.claude/scripts/codex10 inbox architect --block --type=clarification_response --request-id=<request_id>`
 
 **Drain-mode override:** when pending requests exceed 50, bias toward Tier 2/Tier 3 for code changes and reserve Tier 1 for docs-only exceptions.
 
