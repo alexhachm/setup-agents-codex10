@@ -19,6 +19,7 @@ const THRESHOLDS = Object.freeze({
 });
 const MERGE_TIMEOUT_SEC = 300;
 const MERGE_CONFLICT_GRACE_SEC = 600;
+const LOOP_HEARTBEAT_STALE_SEC = 300;
 const MERGE_TIMEOUT_ERROR = `Merge timed out after ${MERGE_TIMEOUT_SEC / 60} minutes`;
 const SQLITE_DATETIME_PATTERN = /^(\d{4})-(\d{2})-(\d{2}) (\d{2}):(\d{2}):(\d{2})(?:\.(\d{1,3}))?$/;
 
@@ -613,48 +614,104 @@ function recoverStaleIntegrations(now, options = {}) {
   return repairedRequests;
 }
 
+function respawnLoopSentinel(loop, projectDir, launchStrategy) {
+  const path = require('path');
+  const scriptDir = process.env.MAC10_SCRIPT_DIR || path.resolve(__dirname, '..', '..');
+  const sentinelPath = path.join(scriptDir, 'scripts', 'loop-sentinel.sh');
+
+  if (launchStrategy === 'tmux') {
+    tmux.createWindow(loop.tmux_window, `bash "${sentinelPath}" ${loop.id} "${projectDir}"`, projectDir);
+    db.updateLoop(loop.id, {
+      tmux_session: tmux.SESSION,
+      last_heartbeat: new Date().toISOString(),
+    });
+    db.log('coordinator', 'loop_sentinel_respawned', { loop_id: loop.id });
+    return;
+  }
+
+  const childProcess = require('child_process');
+  const child = childProcess.execFile(
+    'bash',
+    [sentinelPath, String(loop.id), projectDir],
+    {
+      cwd: projectDir,
+      detached: true,
+      stdio: 'ignore',
+      env: { ...process.env },
+    },
+    (err) => {
+      if (err) {
+        db.log('coordinator', 'loop_respawn_error', { loop_id: loop.id, error: err.message });
+      }
+    }
+  );
+  if (child && typeof child.unref === 'function') {
+    child.unref();
+  }
+  db.updateLoop(loop.id, {
+    tmux_session: tmux.SESSION,
+    last_heartbeat: new Date().toISOString(),
+  });
+  db.log('coordinator', 'loop_sentinel_respawned', { loop_id: loop.id, launch_strategy: 'non_tmux' });
+}
+
+function getLoopHeartbeatAgeSeconds(now, loop, includeFallbackTimestamp = false) {
+  const heartbeatTimestamp = loop.last_heartbeat
+    || (includeFallbackTimestamp ? loop.updated_at || loop.created_at : null);
+  if (!heartbeatTimestamp) return null;
+  return getAgeSeconds(now, heartbeatTimestamp, {
+    loop_id: loop.id,
+    scope: 'loop_heartbeat_age',
+  });
+}
+
 function monitorLoops(projectDir) {
   const loops = db.listLoops('active');
   const now = Date.now();
 
   for (const loop of loops) {
-    if (!loop.tmux_window) continue;
+    if (loop.tmux_window) {
+      const paneAlive = tmux.isPaneAlive(loop.tmux_window);
 
-    const paneAlive = tmux.isPaneAlive(loop.tmux_window);
-
-    if (!paneAlive) {
-      // Sentinel died — respawn it
-      db.log('coordinator', 'loop_sentinel_dead', { loop_id: loop.id, window: loop.tmux_window });
-
-      const path = require('path');
-      const scriptDir = process.env.MAC10_SCRIPT_DIR || path.resolve(__dirname, '..', '..');
-      const sentinelPath = path.join(scriptDir, 'scripts', 'loop-sentinel.sh');
-
-      try {
-        tmux.createWindow(loop.tmux_window, `bash "${sentinelPath}" ${loop.id} "${projectDir}"`, projectDir);
-        db.updateLoop(loop.id, {
-          tmux_session: tmux.SESSION,
-          last_heartbeat: new Date().toISOString(),
-        });
-        db.log('coordinator', 'loop_sentinel_respawned', { loop_id: loop.id });
-      } catch (e) {
-        db.log('coordinator', 'loop_respawn_error', { loop_id: loop.id, error: e.message });
+      if (!paneAlive) {
+        // Sentinel died — respawn it
+        db.log('coordinator', 'loop_sentinel_dead', { loop_id: loop.id, window: loop.tmux_window });
+        try {
+          respawnLoopSentinel(loop, projectDir, 'tmux');
+        } catch (e) {
+          db.log('coordinator', 'loop_respawn_error', { loop_id: loop.id, error: e.message });
+        }
       }
-    }
 
-    // Log warning for stale heartbeats (>5 min) but don't terminate — sentinel auto-restarts
-    if (loop.last_heartbeat) {
-      const staleSec = getAgeSeconds(now, loop.last_heartbeat, {
-        loop_id: loop.id,
-        scope: 'loop_heartbeat_age',
-      });
-      if (staleSec === null) continue;
-      if (staleSec > 300) {
+      // Preserve current tmux stale-heartbeat monitoring behavior.
+      const staleSec = getLoopHeartbeatAgeSeconds(now, loop, false);
+      if (staleSec !== null && staleSec > LOOP_HEARTBEAT_STALE_SEC) {
         db.log('coordinator', 'loop_heartbeat_stale', {
           loop_id: loop.id,
           stale_sec: Math.round(staleSec),
         });
       }
+      continue;
+    }
+
+    // Non-tmux loops cannot be pane-checked; treat stale/missing heartbeat as dead and relaunch.
+    const staleSec = getLoopHeartbeatAgeSeconds(now, loop, true);
+    if (staleSec === null || staleSec <= LOOP_HEARTBEAT_STALE_SEC) continue;
+
+    db.log('coordinator', 'loop_heartbeat_stale', {
+      loop_id: loop.id,
+      stale_sec: Math.round(staleSec),
+    });
+    db.log('coordinator', 'loop_sentinel_dead', {
+      loop_id: loop.id,
+      window: null,
+      reason: 'heartbeat_stale',
+    });
+
+    try {
+      respawnLoopSentinel(loop, projectDir, 'non_tmux');
+    } catch (e) {
+      db.log('coordinator', 'loop_respawn_error', { loop_id: loop.id, error: e.message });
     }
   }
 }
