@@ -172,6 +172,26 @@ describe('Request completion tracking', () => {
     assert.strictEqual(result.all_done, false);
   });
 
+  it('should recover stale decomposed tier-3 zero-task requests during completion checks', () => {
+    const reqId = db.createRequest('Stale decomposed request');
+    db.updateRequest(reqId, { status: 'decomposed', tier: 3 });
+    db.getDb().prepare(
+      "UPDATE requests SET updated_at = datetime('now', '-3 minutes') WHERE id = ?"
+    ).run(reqId);
+
+    const result = db.checkRequestCompletion(reqId, { source: 'allocator_completion_check' });
+    assert.strictEqual(result.request_status, 'pending');
+    assert.strictEqual(result.total, 0);
+    assert.strictEqual(result.completed, 0);
+    assert.strictEqual(result.failed, 0);
+    assert.strictEqual(result.all_completed, false);
+    assert.strictEqual(result.all_done, false);
+    assert.strictEqual(result.stale_decomposed_recovered, true);
+
+    const request = db.getRequest(reqId);
+    assert.strictEqual(request.status, 'pending');
+  });
+
   it('should keep zero-task non-terminal requests as not done', () => {
     const reqId = db.createRequest('Zero task pending request');
 

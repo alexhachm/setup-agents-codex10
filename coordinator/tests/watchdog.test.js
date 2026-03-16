@@ -192,6 +192,54 @@ describe('Stale claim release', () => {
   });
 });
 
+describe('Stale decomposed request recovery', () => {
+  it('recovers stale decomposed tier-3 requests with zero tasks', () => {
+    const requestId = db.createRequest('Tier-3 decomposition stalled before task creation');
+    db.updateRequest(requestId, { status: 'decomposed', tier: 3 });
+    db.getDb().prepare(
+      "UPDATE requests SET updated_at = datetime('now', '-3 minutes') WHERE id = ?"
+    ).run(requestId);
+
+    tick(tmpDir);
+
+    const request = db.getRequest(requestId);
+    assert.strictEqual(request.status, 'pending');
+
+    const recoveryLog = db.getLog(50, 'coordinator')
+      .filter((entry) => entry.action === 'stale_decomposed_request_recovered')
+      .map((entry) => JSON.parse(entry.details))
+      .find((entry) => entry.request_id === requestId);
+    assert.ok(recoveryLog);
+    assert.strictEqual(recoveryLog.source, 'watchdog_tick');
+    assert.ok(recoveryLog.stale_sec >= THRESHOLDS.triage);
+  });
+
+  it('does not alter decomposed requests that already have tasks', () => {
+    const requestId = db.createRequest('Tier-3 request with active decomposition tasks');
+    db.updateRequest(requestId, { status: 'decomposed', tier: 3 });
+    db.getDb().prepare(
+      "UPDATE requests SET updated_at = datetime('now', '-3 minutes') WHERE id = ?"
+    ).run(requestId);
+    db.createTask({
+      request_id: requestId,
+      subject: 'Task already exists',
+      description: 'Decomposition has already started',
+      domain: 'coordinator-routing',
+    });
+
+    tick(tmpDir);
+
+    const request = db.getRequest(requestId);
+    assert.strictEqual(request.status, 'decomposed');
+
+    const recoveryLog = db.getLog(50, 'coordinator')
+      .filter((entry) => entry.action === 'stale_decomposed_request_recovered')
+      .map((entry) => JSON.parse(entry.details))
+      .find((entry) => entry.request_id === requestId);
+    assert.strictEqual(recoveryLog, undefined);
+  });
+});
+
 describe('Stale integration recovery', () => {
   it('keeps failed merge requests recoverable while remediation is active or just queued', () => {
     const requestId = db.createRequest('Failed merge remediation');

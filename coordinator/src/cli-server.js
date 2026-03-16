@@ -1854,9 +1854,6 @@ function handleCommand(cmd, conn, handlers) {
         const { request_id, tier, reasoning } = args;
         db.updateRequest(request_id, { tier, status: tier === 1 ? 'executing_tier1' : 'decomposed' });
         db.log('architect', 'triage', { request_id, tier, reasoning });
-        if (tier === 3) {
-          db.sendMail('allocator', 'tasks_ready', { request_id });
-        }
         respond(conn, { ok: true });
         break;
       }
@@ -1898,6 +1895,21 @@ function handleCommand(cmd, conn, handlers) {
               overlaps: overlaps.map(o => ({ task_id: o.task_id, shared_files: o.shared_files })),
             });
           }
+        }
+        const request = db.getRequest(args.request_id);
+        const totalTaskRow = db.getDb().prepare(
+          'SELECT COUNT(*) AS count FROM tasks WHERE request_id = ?'
+        ).get(args.request_id);
+        const totalTasks = Number(totalTaskRow && totalTaskRow.count) || 0;
+        if (request && Number(request.tier) >= 3 && totalTasks === 1) {
+          if (request.status === 'pending') {
+            db.updateRequest(args.request_id, { status: 'decomposed' });
+          }
+          db.sendMail('allocator', 'tasks_ready', {
+            request_id: args.request_id,
+            task_id: taskId,
+            trigger: 'first_task_created',
+          });
         }
         respond(conn, { ok: true, task_id: taskId, overlaps });
         break;
@@ -2445,7 +2457,9 @@ function handleCommand(cmd, conn, handlers) {
         break;
       }
       case 'check-completion': {
-        const completion = db.checkRequestCompletion(args.request_id);
+        const completion = db.checkRequestCompletion(args.request_id, {
+          source: 'check_completion_command',
+        });
         respond(conn, { ok: true, ...completion });
         break;
       }
@@ -2470,7 +2484,7 @@ function handleCommand(cmd, conn, handlers) {
         // Master-3 triggers integration when all tasks for a request complete
         const reqId = args.request_id;
         const forceRetry = args.retry_terminal === true || args.force_retry === true;
-        const completion = db.checkRequestCompletion(reqId);
+        const completion = db.checkRequestCompletion(reqId, { source: 'integrate_guard' });
         const canIntegrate = completion.all_completed === true && completion.failed === 0;
         if (!canIntegrate) {
           const error = completion.failed > 0

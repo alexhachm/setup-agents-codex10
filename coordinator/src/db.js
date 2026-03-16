@@ -14,6 +14,7 @@ const DEFAULT_LOOP_REQUEST_RETRY_AFTER_SEC = 3600;
 const DEFAULT_LOOP_REQUEST_SIMILARITY_THRESHOLD = 0.82;
 const LOOP_REQUEST_SIMILAR_RECENT_WINDOW_HOURS = 6;
 const LOOP_REQUEST_SIMILAR_CANDIDATE_LIMIT = 50;
+const DEFAULT_STALE_DECOMPOSED_RECOVERY_SEC = 120;
 const AUTONOMOUS_REQUEST_SIGNATURES = Object.freeze([
   Object.freeze({ id: 'master2_header', pattern: /You are \*\*Master-2: Architect\*\*/i }),
   Object.freeze({ id: 'worker_header', pattern: /You are a coding worker in the (?:mac10|codex10) multi-agent system/i }),
@@ -2507,6 +2508,78 @@ function getAllWorkers() {
   return getDb().prepare('SELECT * FROM workers ORDER BY id').all();
 }
 
+function resolveStaleDecomposedRecoveryThresholdSec(explicitThresholdSec = null) {
+  const parsedExplicit = Number.parseInt(String(explicitThresholdSec ?? ''), 10);
+  if (Number.isInteger(parsedExplicit) && parsedExplicit > 0) return parsedExplicit;
+  const configured = Number.parseInt(String(getConfig('watchdog_triage_sec') || ''), 10);
+  if (Number.isInteger(configured) && configured > 0) return configured;
+  return DEFAULT_STALE_DECOMPOSED_RECOVERY_SEC;
+}
+
+function recoverStaleDecomposedZeroTaskRequests(options = {}) {
+  const requestId = options && options.requestId !== undefined && options.requestId !== null
+    ? String(options.requestId).trim()
+    : '';
+  const source = options && typeof options.source === 'string' && options.source.trim()
+    ? options.source.trim()
+    : 'coordinator_repair';
+  const staleThresholdSec = resolveStaleDecomposedRecoveryThresholdSec(
+    options ? options.stale_threshold_sec : null
+  );
+  const requestFilterSql = requestId ? 'AND r.id = ?' : '';
+  const staleRows = getDb().prepare(`
+    SELECT
+      r.id AS request_id,
+      r.status AS status,
+      r.tier AS tier,
+      COALESCE(
+        CAST(strftime('%s', 'now') AS INTEGER) - CAST(strftime('%s', COALESCE(r.updated_at, r.created_at)) AS INTEGER),
+        0
+      ) AS stale_sec
+    FROM requests r
+    LEFT JOIN tasks t ON t.request_id = r.id
+    WHERE r.status = 'decomposed'
+      AND COALESCE(r.tier, 0) >= 3
+      ${requestFilterSql}
+    GROUP BY r.id
+    HAVING COUNT(t.id) = 0
+       AND COALESCE(
+         CAST(strftime('%s', 'now') AS INTEGER) - CAST(strftime('%s', COALESCE(r.updated_at, r.created_at)) AS INTEGER),
+         0
+       ) >= ?
+  `).all(...(requestId ? [requestId, staleThresholdSec] : [staleThresholdSec]));
+  if (!staleRows.length) return [];
+
+  const repaired = [];
+  const tx = getDb().transaction((rows) => {
+    const updateStmt = getDb().prepare(`
+      UPDATE requests
+      SET status = 'pending', updated_at = datetime('now')
+      WHERE id = ?
+        AND status = 'decomposed'
+    `);
+    for (const row of rows) {
+      const updateResult = updateStmt.run(row.request_id);
+      if (updateResult.changes < 1) continue;
+      const staleSec = Number.parseInt(String(row.stale_sec), 10) || staleThresholdSec;
+      const detail = {
+        request_id: row.request_id,
+        previous_status: 'decomposed',
+        recovered_status: 'pending',
+        stale_sec: staleSec,
+        stale_threshold_sec: staleThresholdSec,
+        source,
+        reason: 'decomposed_zero_tasks_stale',
+      };
+      repaired.push(detail);
+      log('coordinator', 'stale_decomposed_request_recovered', detail);
+    }
+  });
+  tx(staleRows);
+
+  return repaired;
+}
+
 function claimWorker(workerId, claimer) {
   const claimedAt = new Date().toISOString();
   const result = getDb().prepare(
@@ -2519,7 +2592,15 @@ function releaseWorker(workerId) {
   getDb().prepare('UPDATE workers SET claimed_by = NULL, claimed_at = NULL WHERE id = ?').run(workerId);
 }
 
-function checkRequestCompletion(requestId) {
+function checkRequestCompletion(requestId, options = {}) {
+  const recoverStale = !options || options.repair_stale_decomposed !== false;
+  const repaired = recoverStale
+    ? recoverStaleDecomposedZeroTaskRequests({
+      requestId,
+      source: options && options.source ? options.source : 'check_request_completion',
+      stale_threshold_sec: options ? options.stale_threshold_sec : null,
+    })
+    : [];
   const request = getDb().prepare(`
     SELECT status
     FROM requests
@@ -2548,6 +2629,7 @@ function checkRequestCompletion(requestId) {
     failed,
     all_completed: allCompleted,
     all_done: allCompleted || allFailed,
+    stale_decomposed_recovered: repaired.length > 0,
   };
 }
 
@@ -3302,7 +3384,8 @@ module.exports = {
   getResearchBatch, listResearchBatchStages, listResearchIntentFanout, markResearchBatchStage,
   listTasks, getReadyTasks, checkAndPromoteTasks, replanTaskDependency,
   registerWorker, getWorker, updateWorker, getIdleWorkers, getAllWorkers, claimWorker, releaseWorker,
-  checkRequestCompletion, getUsageCostBurnRate, getRequestLatestCompletedTaskCursor, hasRequestCompletedTaskProgressSince,
+  recoverStaleDecomposedZeroTaskRequests, checkRequestCompletion,
+  getUsageCostBurnRate, getRequestLatestCompletedTaskCursor, hasRequestCompletedTaskProgressSince,
   sendMail, checkMail, checkMailBlocking, purgeOldMail,
   enqueueMerge, getNextMerge, updateMerge,
   log, getLog,

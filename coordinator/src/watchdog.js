@@ -115,13 +115,15 @@ function stop() {
 
 function runStartupRecoverySweep() {
   if (!startupRecoverySweepPending) return;
+  const recoveredDecomposed = recoverStaleDecomposedRequests('startup_repair_sweep');
   recoverFailedRequestsWithActiveRemediation('startup_repair_sweep');
   const repairedRequests = recoverStaleIntegrations(Date.now(), { source: 'startup_repair_sweep' });
   startupRecoverySweepPending = false;
-  if (repairedRequests > 0) {
+  if (repairedRequests > 0 || recoveredDecomposed > 0) {
     db.log('coordinator', 'integration_repair_sweep', {
       source: 'startup',
       repaired_requests: repairedRequests,
+      recovered_decomposed_requests: recoveredDecomposed,
     });
   }
 }
@@ -184,6 +186,9 @@ function tick(projectDir) {
   // Keep failed requests visible to stale-integration recovery when remediation is active.
   recoverFailedRequestsWithActiveRemediation('watchdog_tick');
 
+  // Recover stale tier-3 decomposed requests that never produced tasks.
+  recoverStaleDecomposedRequests('watchdog_tick');
+
   // Recover stale integrations
   recoverStaleIntegrations(now);
 
@@ -205,6 +210,11 @@ function tick(projectDir) {
       db.log('coordinator', 'activity_log_purged', { count: logPurged.changes });
     }
   }
+}
+
+function recoverStaleDecomposedRequests(source = 'watchdog_tick') {
+  const repaired = db.recoverStaleDecomposedZeroTaskRequests({ source });
+  return Array.isArray(repaired) ? repaired.length : 0;
 }
 
 function escalate(worker, staleSec, projectDir) {
