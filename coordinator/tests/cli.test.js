@@ -72,6 +72,29 @@ function sendCommand(command, args) {
   });
 }
 
+function listMailForRecipient(recipient) {
+  return db.getDb().prepare(`
+    SELECT id, type, payload, consumed
+    FROM mail
+    WHERE recipient = ?
+    ORDER BY id ASC
+  `).all(recipient).map((row) => {
+    let parsedPayload = null;
+    try {
+      parsedPayload = row.payload ? JSON.parse(row.payload) : null;
+    } catch {
+      parsedPayload = null;
+    }
+    return { ...row, payload: parsedPayload };
+  });
+}
+
+function getConsumedByMarker(recipient) {
+  return Object.fromEntries(
+    listMailForRecipient(recipient).map((row) => [row.payload && row.payload.marker, row.consumed])
+  );
+}
+
 function runMac10Command(args, cwd) {
   return new Promise((resolve, reject) => {
     execFile(
@@ -1869,6 +1892,113 @@ describe('CLI Server', () => {
     assert.strictEqual(result.ok, true);
     assert.strictEqual(result.messages.length, 1);
     assert.strictEqual(result.messages[0].type, 'test_msg');
+  });
+
+  it('should filter inbox by type and consume only matched messages', async () => {
+    db.sendMail('architect', 'task_ready', { marker: 'type-match-1', request_id: 'req-type-a' });
+    db.sendMail('architect', 'task_ready', { marker: 'type-match-2', request_id: 'req-type-b' });
+    db.sendMail('architect', 'task_failed', { marker: 'type-other-1', request_id: 'req-type-a' });
+    db.sendMail('architect', 'task_failed', { marker: 'type-other-2', request_id: 'req-type-b' });
+
+    const result = await sendCommand('inbox', { recipient: 'architect', type: 'task_ready' });
+    assert.strictEqual(result.ok, true);
+    assert.strictEqual(result.messages.length, 2);
+    assert.deepStrictEqual(
+      result.messages.map((message) => message.payload.marker).sort(),
+      ['type-match-1', 'type-match-2']
+    );
+
+    assert.deepStrictEqual(getConsumedByMarker('architect'), {
+      'type-match-1': 1,
+      'type-match-2': 1,
+      'type-other-1': 0,
+      'type-other-2': 0,
+    });
+
+    const remaining = await sendCommand('inbox', { recipient: 'architect', peek: true });
+    assert.strictEqual(remaining.ok, true);
+    assert.deepStrictEqual(
+      remaining.messages.map((message) => message.payload.marker).sort(),
+      ['type-other-1', 'type-other-2']
+    );
+  });
+
+  it('should filter inbox by payload.request_id and consume only matched messages', async () => {
+    db.sendMail('architect', 'task_update', { marker: 'request-match-1', request_id: 'req-filter-match' });
+    db.sendMail('architect', 'task_failed', { marker: 'request-other-1', request_id: 'req-filter-other' });
+    db.sendMail('architect', 'task_completed', { marker: 'request-match-2', request_id: 'req-filter-match' });
+
+    const result = await sendCommand('inbox', {
+      recipient: 'architect',
+      request_id: 'req-filter-match',
+      'payload.request_id': 'req-filter-match',
+    });
+    assert.strictEqual(result.ok, true);
+    assert.strictEqual(result.messages.length, 2);
+    assert.ok(result.messages.every((message) => message.payload.request_id === 'req-filter-match'));
+    assert.deepStrictEqual(
+      result.messages.map((message) => message.payload.marker).sort(),
+      ['request-match-1', 'request-match-2']
+    );
+
+    assert.deepStrictEqual(getConsumedByMarker('architect'), {
+      'request-match-1': 1,
+      'request-other-1': 0,
+      'request-match-2': 1,
+    });
+
+    const remaining = await sendCommand('inbox', { recipient: 'architect', peek: true });
+    assert.strictEqual(remaining.ok, true);
+    assert.deepStrictEqual(
+      remaining.messages.map((message) => message.payload.marker),
+      ['request-other-1']
+    );
+  });
+
+  it('should keep inbox-block waiting for a filtered match and leave unrelated mail unconsumed', async () => {
+    let blockedError = null;
+    let blockedSettled = false;
+    const blockedPromise = sendCommand('inbox-block', {
+      recipient: 'architect',
+      timeout: 3000,
+      type: 'task_completed',
+      request_id: 'req-block-match',
+      'payload.request_id': 'req-block-match',
+    }).then((result) => {
+      blockedSettled = true;
+      return result;
+    }).catch((error) => {
+      blockedSettled = true;
+      blockedError = error;
+      return null;
+    });
+
+    db.sendMail('architect', 'task_failed', { marker: 'block-other', request_id: 'req-block-other' });
+    await new Promise((resolve) => setTimeout(resolve, 1200));
+    assert.strictEqual(blockedSettled, false);
+    assert.deepStrictEqual(getConsumedByMarker('architect'), {
+      'block-other': 0,
+    });
+
+    db.sendMail('architect', 'task_completed', { marker: 'block-match', request_id: 'req-block-match' });
+    const blocked = await blockedPromise;
+    assert.ifError(blockedError);
+    assert.ok(blocked);
+    assert.strictEqual(blocked.ok, true);
+    assert.strictEqual(blocked.messages.length, 1);
+    assert.strictEqual(blocked.messages[0].payload.marker, 'block-match');
+
+    assert.deepStrictEqual(getConsumedByMarker('architect'), {
+      'block-other': 0,
+      'block-match': 1,
+    });
+
+    const remaining = await sendCommand('inbox', { recipient: 'architect', peek: true });
+    assert.strictEqual(remaining.ok, true);
+    assert.deepStrictEqual(
+      remaining.messages.map((message) => message.payload.marker),
+      ['block-other']
+    );
   });
 
   it('should repair stuck state', async () => {
