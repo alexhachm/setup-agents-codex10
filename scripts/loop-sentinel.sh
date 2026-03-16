@@ -46,15 +46,61 @@ fi
 
 BACKOFF=5
 PRECHECK_BACKOFF=10
+HEARTBEAT_INTERVAL=30
+LAST_HEARTBEAT_TS=0
 
 echo "[loop-sentinel-$LOOP_ID] Starting in $PROJECT_DIR"
+
+send_loop_heartbeat() {
+  if "$MAC10_CMD" loop-heartbeat "$LOOP_ID" 2>/dev/null; then
+    LAST_HEARTBEAT_TS=$(date +%s)
+    return 0
+  fi
+
+  local exit_code=$?
+  if [ "$exit_code" -eq 2 ]; then
+    echo "[loop-sentinel-$LOOP_ID] Loop stopped, exiting."
+    exit 0
+  fi
+  return 0
+}
+
+maybe_loop_heartbeat() {
+  local now elapsed
+  now=$(date +%s)
+  elapsed=$((now - LAST_HEARTBEAT_TS))
+  if [ "$LAST_HEARTBEAT_TS" -eq 0 ] || [ "$elapsed" -ge "$HEARTBEAT_INTERVAL" ]; then
+    send_loop_heartbeat
+  fi
+}
+
+sleep_with_loop_heartbeats() {
+  local total_sleep="${1:-0}"
+  local remaining chunk
+
+  if [ "$total_sleep" -le 0 ]; then
+    return 0
+  fi
+
+  remaining="$total_sleep"
+  maybe_loop_heartbeat
+  while [ "$remaining" -gt 0 ]; do
+    chunk="$remaining"
+    if [ "$chunk" -gt "$HEARTBEAT_INTERVAL" ]; then
+      chunk="$HEARTBEAT_INTERVAL"
+    fi
+    sleep "$chunk"
+    remaining=$((remaining - chunk))
+    maybe_loop_heartbeat
+  done
+}
 
 while true; do
   # Check if loop is still active
   PROMPT_JSON=$("$MAC10_CMD" loop-prompt "$LOOP_ID" 2>/dev/null || echo "")
   if [ -z "$PROMPT_JSON" ]; then
     echo "[loop-sentinel-$LOOP_ID] Could not reach coordinator, retrying in ${BACKOFF}s..."
-    sleep "$BACKOFF"
+    sleep_with_loop_heartbeats "$BACKOFF"
     continue
   fi
 
@@ -98,7 +144,7 @@ while true; do
   ACTIVE_COUNT="${ACTIVE_COUNT:-0}"
   if [ "$ACTIVE_COUNT" -gt 0 ]; then
     echo "[loop-sentinel-$LOOP_ID] $ACTIVE_COUNT request(s) still active, skipping spawn (backoff=${PRECHECK_BACKOFF}s)"
-    sleep "$PRECHECK_BACKOFF"
+    sleep_with_loop_heartbeats "$PRECHECK_BACKOFF"
     PRECHECK_BACKOFF=$((PRECHECK_BACKOFF * 2))
     [ "$PRECHECK_BACKOFF" -gt 120 ] && PRECHECK_BACKOFF=120
     continue
@@ -145,14 +191,7 @@ while true; do
     echo "[loop-sentinel-$LOOP_ID] Healthy run (${DURATION}s), backoff → ${BACKOFF}s (pipeline processing time)"
   fi
 
-  # Check loop status before sleeping (fast exit if stopped)
-  "$MAC10_CMD" loop-heartbeat "$LOOP_ID" 2>/dev/null || {
-    EXIT_CODE=$?
-    if [ "$EXIT_CODE" -eq 2 ]; then
-      echo "[loop-sentinel-$LOOP_ID] Loop stopped, exiting."
-      exit 0
-    fi
-  }
-
-  sleep "$BACKOFF"
+  # Check loop status before sleeping (fast exit if stopped), then pulse heartbeats while waiting.
+  send_loop_heartbeat
+  sleep_with_loop_heartbeats "$BACKOFF"
 done
