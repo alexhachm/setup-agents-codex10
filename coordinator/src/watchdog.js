@@ -3,6 +3,7 @@
 const db = require('./db');
 const tmux = require('./tmux');
 const recovery = require('./recovery');
+const path = require('path');
 
 let intervalId = null;
 let lastMailPurge = 0;
@@ -625,24 +626,15 @@ function monitorLoops(projectDir) {
     if (!paneAlive) {
       // Sentinel died — respawn it
       db.log('coordinator', 'loop_sentinel_dead', { loop_id: loop.id, window: loop.tmux_window });
-
-      const path = require('path');
-      const scriptDir = process.env.MAC10_SCRIPT_DIR || path.resolve(__dirname, '..', '..');
-      const sentinelPath = path.join(scriptDir, 'scripts', 'loop-sentinel.sh');
-
-      try {
-        tmux.createWindow(loop.tmux_window, `bash "${sentinelPath}" ${loop.id} "${projectDir}"`, projectDir);
-        db.updateLoop(loop.id, {
-          tmux_session: tmux.SESSION,
-          last_heartbeat: new Date().toISOString(),
-        });
-        db.log('coordinator', 'loop_sentinel_respawned', { loop_id: loop.id });
-      } catch (e) {
-        db.log('coordinator', 'loop_respawn_error', { loop_id: loop.id, error: e.message });
-      }
+      respawnLoopSentinel(loop, projectDir, {
+        reason: 'pane_dead',
+        staleSec: null,
+        forceRestart: false,
+      });
+      continue;
     }
 
-    // Log warning for stale heartbeats (>5 min) but don't terminate — sentinel auto-restarts
+    // Stale heartbeat with live pane indicates a wedged sentinel. Force restart.
     if (loop.last_heartbeat) {
       const staleSec = getAgeSeconds(now, loop.last_heartbeat, {
         loop_id: loop.id,
@@ -654,8 +646,43 @@ function monitorLoops(projectDir) {
           loop_id: loop.id,
           stale_sec: Math.round(staleSec),
         });
+        respawnLoopSentinel(loop, projectDir, {
+          reason: 'heartbeat_stale',
+          staleSec,
+          forceRestart: true,
+        });
       }
     }
+  }
+}
+
+function respawnLoopSentinel(loop, projectDir, { reason, staleSec = null, forceRestart = false }) {
+  const scriptDir = process.env.MAC10_SCRIPT_DIR || path.resolve(__dirname, '..', '..');
+  const sentinelPath = path.join(scriptDir, 'scripts', 'loop-sentinel.sh');
+
+  try {
+    if (forceRestart) {
+      tmux.killWindow(loop.tmux_window);
+    }
+    tmux.createWindow(loop.tmux_window, `bash "${sentinelPath}" ${loop.id} "${projectDir}"`, projectDir);
+    db.updateLoop(loop.id, {
+      tmux_session: tmux.SESSION,
+      last_heartbeat: new Date().toISOString(),
+    });
+    db.log('coordinator', 'loop_sentinel_respawned', {
+      loop_id: loop.id,
+      reason,
+      stale_sec: staleSec === null ? null : Math.round(staleSec),
+      force_restart: forceRestart,
+    });
+  } catch (e) {
+    db.log('coordinator', 'loop_respawn_error', {
+      loop_id: loop.id,
+      reason,
+      stale_sec: staleSec === null ? null : Math.round(staleSec),
+      force_restart: forceRestart,
+      error: e.message,
+    });
   }
 }
 
