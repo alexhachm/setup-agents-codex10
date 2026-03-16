@@ -137,13 +137,24 @@ Only use this path for trivial docs/prompt/comment edits. If the request touches
 
 1. Identify the exact file(s) and change
 2. Make the change
-3. Run build check inline:
+3. Run script-aware validation inline (prefer `test`, fallback to `build` via `npm run <script>`):
    ```bash
-   npm run build 2>&1 || echo "BUILD_CHECK_RESULT: FAIL"
+   validation_cmd=""
+   if [ -f package.json ] && grep -Eq '"test"[[:space:]]*:' package.json; then
+     validation_cmd="npm test"
+   elif [ -f package.json ] && grep -Eq '"build"[[:space:]]*:' package.json; then
+     fallback_script="build"
+     validation_cmd="npm run $fallback_script"
+   fi
+
+   if [ -n "$validation_cmd" ]; then
+     eval "$validation_cmd" 2>&1 || echo "VALIDATION_RESULT: FAIL"
+   else
+     echo "VALIDATION_RESULT: SKIP (no test/build script found)"
+   fi
    ```
-   (Adapt build command to project — check package.json scripts)
-4. If build fails: fix or escalate to Tier 2
-5. If build passes: commit and push
+4. If validation fails: fix or escalate to Tier 2
+5. If validation passes: commit and push
    ```bash
    git add -A
    git diff --cached  # Secret check — ABORT if sensitive data
@@ -185,15 +196,20 @@ Go to Step 6.
    If claim fails, pick another idle worker and retry.
 
 3. **Create and assign the task** (script-aware validation):
-   - If `package.json` defines `build`, use `npm run build`.
-   - Otherwise, if it defines `test`, use `npm test`.
+   - If `package.json` defines `test`, use `npm test`.
+   - Otherwise, if it defines `build`, run that script via `npm run <script>`.
    - If neither script exists, omit `validation` so coordinator fallback applies.
    ```bash
+   validation_cmd=""
    validation_field=""
-   if [ -f package.json ] && grep -Eq '"build"[[:space:]]*:' package.json; then
-     validation_field=',"validation":"npm run build"'
-   elif [ -f package.json ] && grep -Eq '"test"[[:space:]]*:' package.json; then
-     validation_field=',"validation":"npm test"'
+   if [ -f package.json ] && grep -Eq '"test"[[:space:]]*:' package.json; then
+     validation_cmd="npm test"
+   elif [ -f package.json ] && grep -Eq '"build"[[:space:]]*:' package.json; then
+     fallback_script="build"
+     validation_cmd="npm run $fallback_script"
+   fi
+   if [ -n "$validation_cmd" ]; then
+     validation_field=$(printf ',\"validation\":\"%s\"' "$validation_cmd")
    fi
 
    task_payload='{"request_id":"[id]","subject":"[task title]","description":"DOMAIN: [domain]\nFILES: [files]\nVALIDATION: tier2\nTIER: 2\n\n[detailed requirements]\n\n[success criteria]","domain":"[domain]","tier":2,"priority":"normal","files":["file1.js","file2.js"]'"$validation_field"'}'
@@ -240,15 +256,20 @@ Go to Step 6.
    ```
 5. Create each decomposed Tier 3 task via codex10, capturing output and task IDs as you go.
    Use script-aware validation selection per target package:
-   - Prefer `npm run build` when `build` exists.
-   - Else use `npm test` when `test` exists.
+   - Prefer `npm test` when `test` exists.
+   - Else run `npm run <script>` for the `build` script when present.
    - Else omit `validation` and let coordinator fallback select the command.
    ```bash
+   validation_cmd=""
    validation_field=""
-   if [ -f package.json ] && grep -Eq '"build"[[:space:]]*:' package.json; then
-     validation_field=',"validation":"npm run build"'
-   elif [ -f package.json ] && grep -Eq '"test"[[:space:]]*:' package.json; then
-     validation_field=',"validation":"npm test"'
+   if [ -f package.json ] && grep -Eq '"test"[[:space:]]*:' package.json; then
+     validation_cmd="npm test"
+   elif [ -f package.json ] && grep -Eq '"build"[[:space:]]*:' package.json; then
+     fallback_script="build"
+     validation_cmd="npm run $fallback_script"
+   fi
+   if [ -n "$validation_cmd" ]; then
+     validation_field=$(printf ',\"validation\":\"%s\"' "$validation_cmd")
    fi
 
    task_payload='{"request_id":"[id]","subject":"[task title]","description":"REQUEST_ID: [id]\nDOMAIN: [domain]\nFILES: [specific files]\nVALIDATION: tier3\nTIER: 3\n\n[detailed requirements]\n\n[success criteria]","domain":"[domain]","tier":3,"priority":"normal","files":["file1.js","file2.js"],"depends_on":[]'"$validation_field"'}'
