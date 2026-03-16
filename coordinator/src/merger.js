@@ -40,9 +40,12 @@ let mergerIntervalId = null;
 const assignmentPriorityDeferralsByMergeId = new Map();
 const ASSIGNMENT_PRIORITY_DEFAULT_MAX_CONSECUTIVE_DEFERRALS = 3;
 const ASSIGNMENT_PRIORITY_DEFAULT_MAX_DEFER_AGE_MS = 120000;
+const ASSIGNMENT_PRIORITY_DEFAULT_ALLOCATOR_LOOP_STALE_MS = 300000;
 const ASSIGNMENT_PRIORITY_ENABLED_CONFIG_KEY = 'prioritize_assignment_over_merge';
 const ASSIGNMENT_PRIORITY_MAX_CONSECUTIVE_DEFERRALS_CONFIG_KEY = 'assignment_priority_merge_max_deferrals';
 const ASSIGNMENT_PRIORITY_MAX_DEFER_AGE_MS_CONFIG_KEY = 'assignment_priority_merge_max_age_ms';
+const ASSIGNMENT_PRIORITY_ALLOCATOR_LOOP_STALE_MS_CONFIG_KEY = 'assignment_priority_allocator_loop_stale_ms';
+const ALLOCATOR_LOOP_PROMPT_RE = /\/allocate-loop\b/i;
 
 function parseBooleanConfig(value) {
   if (typeof value === 'boolean') return value;
@@ -62,6 +65,46 @@ function getMergeQueueAgeMs(entry) {
   if (!Number.isFinite(createdAtMs)) return 0;
   const ageMs = Date.now() - createdAtMs;
   return ageMs > 0 ? ageMs : 0;
+}
+
+function getTimestampAgeMs(value) {
+  const parsed = Date.parse(value || '');
+  if (!Number.isFinite(parsed)) return null;
+  const ageMs = Date.now() - parsed;
+  return ageMs > 0 ? ageMs : 0;
+}
+
+function getAllocatorLoopHeartbeatState() {
+  const maxHeartbeatAgeMs = parsePositiveIntegerConfig(
+    db.getConfig(ASSIGNMENT_PRIORITY_ALLOCATOR_LOOP_STALE_MS_CONFIG_KEY),
+    ASSIGNMENT_PRIORITY_DEFAULT_ALLOCATOR_LOOP_STALE_MS
+  );
+
+  const activeLoops = db.listLoops('active');
+  const allocatorLoop = Array.isArray(activeLoops)
+    ? activeLoops.find((loop) => typeof loop.prompt === 'string' && ALLOCATOR_LOOP_PROMPT_RE.test(loop.prompt))
+    : null;
+
+  if (!allocatorLoop) {
+    return {
+      present: false,
+      loop_id: null,
+      heartbeat_age_ms: null,
+      max_heartbeat_age_ms: maxHeartbeatAgeMs,
+      stale: false,
+    };
+  }
+
+  const heartbeatReference = allocatorLoop.last_heartbeat || allocatorLoop.updated_at || allocatorLoop.created_at;
+  const heartbeatAgeMs = getTimestampAgeMs(heartbeatReference);
+  const stale = heartbeatAgeMs === null || heartbeatAgeMs >= maxHeartbeatAgeMs;
+  return {
+    present: true,
+    loop_id: allocatorLoop.id,
+    heartbeat_age_ms: heartbeatAgeMs,
+    max_heartbeat_age_ms: maxHeartbeatAgeMs,
+    stale,
+  };
 }
 
 function shouldDeferMergeForAssignmentPriority(entry) {
@@ -90,8 +133,10 @@ function shouldDeferMergeForAssignmentPriority(entry) {
   const pendingAgeMs = getMergeQueueAgeMs(entry);
   const thresholdBreachedByCount = deferredCount >= maxConsecutiveDeferrals;
   const thresholdBreachedByAge = pendingAgeMs >= maxDeferralAgeMs;
+  const allocatorLoopHeartbeatState = getAllocatorLoopHeartbeatState();
+  const thresholdBreachedByAllocatorLoopStale = allocatorLoopHeartbeatState.stale;
 
-  if (!thresholdBreachedByCount && !thresholdBreachedByAge) {
+  if (!thresholdBreachedByCount && !thresholdBreachedByAge && !thresholdBreachedByAllocatorLoopStale) {
     assignmentPriorityDeferralsByMergeId.set(entry.id, deferredCount);
     db.log('coordinator', 'merge_deferred_assignment_priority', {
       merge_id: entry.id,
@@ -102,6 +147,10 @@ function shouldDeferMergeForAssignmentPriority(entry) {
       max_consecutive_deferrals: maxConsecutiveDeferrals,
       pending_age_ms: pendingAgeMs,
       max_pending_age_ms: maxDeferralAgeMs,
+      allocator_loop_present: allocatorLoopHeartbeatState.present,
+      allocator_loop_id: allocatorLoopHeartbeatState.loop_id,
+      allocator_loop_heartbeat_age_ms: allocatorLoopHeartbeatState.heartbeat_age_ms,
+      allocator_loop_max_heartbeat_age_ms: allocatorLoopHeartbeatState.max_heartbeat_age_ms,
     });
     return true;
   }
@@ -118,6 +167,11 @@ function shouldDeferMergeForAssignmentPriority(entry) {
     max_pending_age_ms: maxDeferralAgeMs,
     breached_by_count: thresholdBreachedByCount,
     breached_by_age: thresholdBreachedByAge,
+    breached_by_allocator_loop_stale: thresholdBreachedByAllocatorLoopStale,
+    allocator_loop_present: allocatorLoopHeartbeatState.present,
+    allocator_loop_id: allocatorLoopHeartbeatState.loop_id,
+    allocator_loop_heartbeat_age_ms: allocatorLoopHeartbeatState.heartbeat_age_ms,
+    allocator_loop_max_heartbeat_age_ms: allocatorLoopHeartbeatState.max_heartbeat_age_ms,
   });
   return false;
 }

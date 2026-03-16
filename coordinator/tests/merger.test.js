@@ -278,7 +278,7 @@ describe('Request completion tracking', () => {
 });
 
 describe('Assignment-priority merge deferral', () => {
-  it('should defer merges first, then process one merge after bounded deferrals', () => {
+  function seedAssignmentPriorityMergeTask() {
     const reqId = db.createRequest('Feature');
     const mergedTaskId = db.createTask({ request_id: reqId, subject: 'Task ready to merge', description: 'Done' });
     const readyTaskId = db.createTask({ request_id: reqId, subject: 'Task still ready', description: 'Still assignable' });
@@ -287,17 +287,26 @@ describe('Assignment-priority merge deferral', () => {
     db.updateTask(readyTaskId, { status: 'ready', assigned_to: null });
     db.updateRequest(reqId, { status: 'integrating' });
 
-    db.setConfig('prioritize_assignment_over_merge', 'true');
-    db.setConfig('assignment_priority_merge_max_deferrals', '2');
-    db.setConfig('assignment_priority_merge_max_age_ms', '86400000');
-
     const enqueueResult = db.enqueueMerge({
       request_id: reqId,
       task_id: mergedTaskId,
       pr_url: 'https://github.com/acme/repo/pull/3',
       branch: 'agent-1',
     });
-    const mergeId = enqueueResult.lastInsertRowid;
+
+    return {
+      reqId,
+      readyTaskId,
+      mergeId: enqueueResult.lastInsertRowid,
+    };
+  }
+
+  it('should defer merges first, then process one merge after bounded deferrals', () => {
+    const { readyTaskId, mergeId } = seedAssignmentPriorityMergeTask();
+
+    db.setConfig('prioritize_assignment_over_merge', 'true');
+    db.setConfig('assignment_priority_merge_max_deferrals', '2');
+    db.setConfig('assignment_priority_merge_max_age_ms', '86400000');
 
     let mergeAttempts = 0;
     const mergeExecutor = () => {
@@ -327,6 +336,75 @@ describe('Assignment-priority merge deferral', () => {
     assert.strictEqual(starvationEscapeLogs.length, 1);
     assert.strictEqual(starvationEscapeLogs[0].merge_id, mergeId);
     assert.strictEqual(starvationEscapeLogs[0].breached_by_count, true);
+
+    const readyTaskAfterMerge = db.getTask(readyTaskId);
+    assert.strictEqual(readyTaskAfterMerge.status, 'ready');
+  });
+
+  it('should keep deferring during healthy allocator loop activity', () => {
+    const { mergeId } = seedAssignmentPriorityMergeTask();
+
+    db.setConfig('prioritize_assignment_over_merge', 'true');
+    db.setConfig('assignment_priority_merge_max_deferrals', '10');
+    db.setConfig('assignment_priority_merge_max_age_ms', '86400000');
+
+    const allocatorLoopId = db.createLoop('/allocate-loop');
+    db.updateLoop(allocatorLoopId, { last_heartbeat: new Date().toISOString() });
+
+    let mergeAttempts = 0;
+    merger.processQueue(tmpDir, () => {
+      mergeAttempts += 1;
+      return { success: true };
+    });
+
+    const mergeAfterPass = db.getDb().prepare('SELECT status FROM merge_queue WHERE id = ?').get(mergeId);
+    assert.strictEqual(mergeAttempts, 0);
+    assert.strictEqual(mergeAfterPass.status, 'pending');
+
+    const deferredLogs = readCoordinatorLogEntries('merge_deferred_assignment_priority');
+    assert.strictEqual(deferredLogs.length, 1);
+    assert.strictEqual(deferredLogs[0].merge_id, mergeId);
+    assert.strictEqual(deferredLogs[0].allocator_loop_present, true);
+    assert.strictEqual(deferredLogs[0].allocator_loop_id, allocatorLoopId);
+
+    const starvationEscapeLogs = readCoordinatorLogEntries('merge_assignment_priority_starvation_escape');
+    assert.strictEqual(starvationEscapeLogs.length, 0);
+  });
+
+  it('should bypass deferral when allocator loop heartbeat is stale and ready tasks exist', () => {
+    const { readyTaskId, mergeId } = seedAssignmentPriorityMergeTask();
+
+    db.setConfig('prioritize_assignment_over_merge', 'true');
+    db.setConfig('assignment_priority_merge_max_deferrals', '50');
+    db.setConfig('assignment_priority_merge_max_age_ms', '86400000');
+    db.setConfig('assignment_priority_allocator_loop_stale_ms', '120000');
+
+    const staleHeartbeat = new Date(Date.now() - 10 * 60 * 1000).toISOString();
+    const allocatorLoopId = db.createLoop('/allocate-loop');
+    db.updateLoop(allocatorLoopId, { last_heartbeat: staleHeartbeat });
+
+    let mergeAttempts = 0;
+    merger.processQueue(tmpDir, () => {
+      mergeAttempts += 1;
+      return { success: true };
+    });
+
+    const mergeAfterPass = db.getDb().prepare('SELECT status FROM merge_queue WHERE id = ?').get(mergeId);
+    assert.strictEqual(mergeAttempts, 1);
+    assert.strictEqual(mergeAfterPass.status, 'merged');
+
+    const deferredLogs = readCoordinatorLogEntries('merge_deferred_assignment_priority');
+    assert.strictEqual(deferredLogs.length, 0);
+
+    const starvationEscapeLogs = readCoordinatorLogEntries('merge_assignment_priority_starvation_escape');
+    assert.strictEqual(starvationEscapeLogs.length, 1);
+    assert.strictEqual(starvationEscapeLogs[0].merge_id, mergeId);
+    assert.strictEqual(starvationEscapeLogs[0].breached_by_count, false);
+    assert.strictEqual(starvationEscapeLogs[0].breached_by_age, false);
+    assert.strictEqual(starvationEscapeLogs[0].breached_by_allocator_loop_stale, true);
+    assert.strictEqual(starvationEscapeLogs[0].allocator_loop_present, true);
+    assert.strictEqual(starvationEscapeLogs[0].allocator_loop_id, allocatorLoopId);
+    assert.ok(starvationEscapeLogs[0].allocator_loop_heartbeat_age_ms >= 120000);
 
     const readyTaskAfterMerge = db.getTask(readyTaskId);
     assert.strictEqual(readyTaskAfterMerge.status, 'ready');
