@@ -2919,16 +2919,16 @@ function enqueueMerge({ request_id, task_id, pr_url, branch, priority, completio
   const normalizedPriority = Number.isInteger(priority) ? priority : 0;
   const parsedCheckpoint = parseCompletedTaskCursor(completion_checkpoint);
   const normalizedCheckpoint = parsedCheckpoint ? parsedCheckpoint.cursor : null;
-  // Atomic dedup+insert scoped to request/task ownership.
-  // This prevents cross-request PR dedupe from rebinding existing rows.
+  // Atomic dedup+insert scoped to request + PR identity ownership.
+  // A request can refresh the same PR+branch entry across follow-up tasks.
   const result = getDb().prepare(`
     INSERT INTO merge_queue (request_id, task_id, pr_url, branch, priority, completion_checkpoint)
     SELECT ?, ?, ?, ?, ?, ?
     WHERE NOT EXISTS (
       SELECT 1 FROM merge_queue
-      WHERE request_id = ? AND task_id = ?
+      WHERE request_id = ? AND pr_url = ? AND branch = ?
     )
-  `).run(request_id, task_id, pr_url, branch, normalizedPriority, normalizedCheckpoint, request_id, task_id);
+  `).run(request_id, task_id, pr_url, branch, normalizedPriority, normalizedCheckpoint, request_id, pr_url, branch);
   return {
     inserted: result.changes > 0,
     changes: result.changes,
