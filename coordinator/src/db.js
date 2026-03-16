@@ -2333,9 +2333,13 @@ function listTasks(filters = {}) {
 function getReadyTasks() {
   // Tasks that are ready and have no unfinished dependencies
   return getDb().prepare(`
-    SELECT * FROM tasks
-    WHERE status = 'ready' AND assigned_to IS NULL
-    ORDER BY CASE priority WHEN 'urgent' THEN 0 WHEN 'high' THEN 1 WHEN 'normal' THEN 2 WHEN 'low' THEN 3 END, id
+    SELECT t.*
+    FROM tasks t
+    JOIN requests r ON r.id = t.request_id
+    WHERE t.status = 'ready'
+      AND t.assigned_to IS NULL
+      AND r.status NOT IN ('completed', 'failed')
+    ORDER BY CASE t.priority WHEN 'urgent' THEN 0 WHEN 'high' THEN 1 WHEN 'normal' THEN 2 WHEN 'low' THEN 3 END, t.id
   `).all();
 }
 
@@ -2344,12 +2348,25 @@ function checkAndPromoteTasks() {
   // Batch promote pending tasks with no dependencies in a single SQL statement
   d.prepare(`
     UPDATE tasks SET status = 'ready', updated_at = datetime('now')
-    WHERE status = 'pending' AND (depends_on IS NULL OR depends_on = '[]')
+    WHERE status = 'pending'
+      AND (depends_on IS NULL OR depends_on = '[]')
+      AND EXISTS (
+        SELECT 1
+        FROM requests r
+        WHERE r.id = tasks.request_id
+          AND r.status NOT IN ('completed', 'failed')
+      )
   `).run();
 
   // For tasks with dependencies, check each one
   const pending = d.prepare(
-    "SELECT id, depends_on FROM tasks WHERE status = 'pending' AND depends_on IS NOT NULL AND depends_on != '[]'"
+    `SELECT t.id, t.depends_on
+     FROM tasks t
+     JOIN requests r ON r.id = t.request_id
+     WHERE t.status = 'pending'
+       AND t.depends_on IS NOT NULL
+       AND t.depends_on != '[]'
+       AND r.status NOT IN ('completed', 'failed')`
   ).all();
   for (const task of pending) {
     let deps;
