@@ -2348,6 +2348,8 @@ describe('CLI Server', () => {
     const claim = await sendCommand('claim-worker', { worker_id: 1, claimer: 'architect' });
     assert.strictEqual(claim.ok, true);
     assert.strictEqual(claim.claimed, true);
+    const claimedAt = db.getWorker(1).claimed_at;
+    assert.ok(claimedAt);
 
     const assignment = await sendCommand('assign-task', { task_id: taskId, worker_id: 1 });
     assert.strictEqual(assignment.ok, false);
@@ -2358,6 +2360,7 @@ describe('CLI Server', () => {
     assert.strictEqual(worker.status, 'idle');
     assert.strictEqual(worker.current_task_id, null);
     assert.strictEqual(worker.claimed_by, 'architect');
+    assert.strictEqual(worker.claimed_at, claimedAt);
 
     const task = db.getTask(taskId);
     assert.ok(task);
@@ -2587,6 +2590,54 @@ describe('CLI Server', () => {
     assert.ok(worker);
     assert.strictEqual(worker.status, 'idle');
     assert.strictEqual(worker.current_task_id, null);
+  });
+
+  it('should preserve claim metadata and return worker_claimed on assign-task rollback path', async () => {
+    db.registerWorker(1, '/wt-1', 'agent-1');
+
+    const taskId = createReadyTask({
+      subject: 'Regression: claimed rollback',
+      description: 'Ensure worker claims persist across rollback',
+      tier: 2,
+    });
+
+    const rollbackClaimedAt = '2026-03-16T00:00:00.000Z';
+
+    cliServer.stop();
+    server = cliServer.start(tmpDir, {
+      onTaskCompleted: () => {},
+      onLoopCreated: (loopId, prompt) => {
+        loopCreatedEvents.push({ loopId, prompt });
+      },
+      onAssignTask: (_task, worker) => {
+        db.updateWorker(worker.id, {
+          status: 'idle',
+          current_task_id: null,
+          claimed_by: 'architect',
+          claimed_at: rollbackClaimedAt,
+        });
+        const err = new Error('worker_claimed');
+        err.code = 'worker_claimed';
+        throw err;
+      },
+    });
+    await waitForCliServerReady();
+
+    const assignment = await sendCommand('assign-task', { task_id: taskId, worker_id: 1 });
+    assert.strictEqual(assignment.ok, false);
+    assert.strictEqual(assignment.error, 'worker_claimed');
+
+    const task = db.getTask(taskId);
+    assert.ok(task);
+    assert.strictEqual(task.status, 'ready');
+    assert.strictEqual(task.assigned_to, null);
+
+    const worker = db.getWorker(1);
+    assert.ok(worker);
+    assert.strictEqual(worker.status, 'idle');
+    assert.strictEqual(worker.current_task_id, null);
+    assert.strictEqual(worker.claimed_by, 'architect');
+    assert.strictEqual(worker.claimed_at, rollbackClaimedAt);
   });
 
   it('should label explicit model overrides as config-fallback in response and logs', async () => {

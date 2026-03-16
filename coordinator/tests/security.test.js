@@ -580,6 +580,31 @@ describe('Atomic task assignment via CLI', () => {
     assert.strictEqual(db.getTask(t2).assigned_to, null);
   });
 
+  it('should reject assignment to claimed idle workers and preserve claim metadata', async () => {
+    db.registerWorker(1, '/wt-1', 'agent-1');
+    const reqId = db.createRequest('Claimed worker rejection');
+    const taskId = db.createTask({ request_id: reqId, subject: 'Claimed task', description: 'D' });
+    db.updateTask(taskId, { status: 'ready' });
+
+    const claim = await sendCommand('claim-worker', { worker_id: 1, claimer: 'architect' });
+    assert.strictEqual(claim.ok, true);
+    assert.strictEqual(claim.claimed, true);
+    const claimedAt = db.getWorker(1).claimed_at;
+    assert.ok(claimedAt);
+
+    const assignment = await sendCommand('assign-task', { task_id: taskId, worker_id: 1 });
+    assert.strictEqual(assignment.ok, false);
+    assert.strictEqual(assignment.error, 'worker_claimed');
+
+    const worker = db.getWorker(1);
+    assert.strictEqual(worker.status, 'idle');
+    assert.strictEqual(worker.current_task_id, null);
+    assert.strictEqual(worker.claimed_by, 'architect');
+    assert.strictEqual(worker.claimed_at, claimedAt);
+    assert.strictEqual(db.getTask(taskId).status, 'ready');
+    assert.strictEqual(db.getTask(taskId).assigned_to, null);
+  });
+
   it('should persist non-null routing telemetry on task rows after assign-task', async () => {
     db.registerWorker(1, '/wt-1', 'agent-1');
     const reqId = db.createRequest('Routing telemetry');
