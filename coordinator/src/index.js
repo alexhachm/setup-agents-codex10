@@ -238,6 +238,11 @@ const handlers = {
     }
     db.log('coordinator', 'loop_spawned', { loop_id: loopId, window: windowName });
   },
+  onBrowserSessionEvent: (event) => {
+    try {
+      db.log('coordinator', 'browser_offload_event', event);
+    } catch {}
+  },
 };
 cliServer.start(projectDir, handlers);
 console.log('CLI server listening.');

@@ -5,6 +5,7 @@ const http = require('http');
 const WebSocket = require('ws');
 const path = require('path');
 const fs = require('fs');
+const crypto = require('crypto');
 const { spawn } = require('child_process');
 const db = require('./db');
 const instanceRegistry = require('./instance-registry');
@@ -13,6 +14,35 @@ const { parseBudgetStateConfig } = require('./cli-server');
 const REPO_RE = /^(https?:\/\/github\.com\/)?[a-zA-Z0-9._-]+\/[a-zA-Z0-9._-]+(\.git)?$/;
 const SAFE_PATH_RE = /^(?:\/|[A-Za-z]:[\\/])[a-zA-Z0-9._\\/: -]+$/;
 const ROUTING_BUDGET_STATE_KEY = 'routing_budget_state';
+const BROWSER_SESSION_ID_RE = /^[a-zA-Z0-9._:-]{10,128}$/;
+const BROWSER_OFFLOAD_STATUS_ORDER = Object.freeze([
+  'not_requested',
+  'requested',
+  'queued',
+  'launching',
+  'attached',
+  'running',
+  'awaiting_callback',
+  'completed',
+  'failed',
+  'cancelled',
+]);
+const BROWSER_ACTIVE_STATUSES = new Set([
+  'requested',
+  'queued',
+  'launching',
+  'attached',
+  'running',
+  'awaiting_callback',
+]);
+const BROWSER_TERMINAL_STATUSES = new Set(['completed', 'failed', 'cancelled']);
+const BROWSER_BRIDGE_DEFAULT_TIMEOUT_MS = 5 * 60 * 1000;
+const BROWSER_BRIDGE_MIN_TIMEOUT_MS = 5000;
+const BROWSER_BRIDGE_MAX_TIMEOUT_MS = 30 * 60 * 1000;
+const BROWSER_BRIDGE_ALLOWED_ORIGINS_DEFAULT = Object.freeze([
+  'https://chatgpt.com',
+  'https://chat.openai.com',
+]);
 const USAGE_COST_BURN_RATE_DEFAULTS = Object.freeze({
   usd_15m: 0,
   usd_60m: 0,
@@ -26,6 +56,15 @@ let wss = null;
 let setupProcess = null;
 let broadcastIntervalId = null;
 let pingIntervalId = null;
+let browserBridgeEnabled = true;
+let browserSessions = new Map();
+let browserSessionsByTaskId = new Map();
+let browserSessionTimeouts = new Map();
+let browserAllowedOrigins = new Set(BROWSER_BRIDGE_ALLOWED_ORIGINS_DEFAULT);
+let browserSessionCounter = 0;
+let browserSessionTimeoutMs = BROWSER_BRIDGE_DEFAULT_TIMEOUT_MS;
+let browserAllowMissingOrigin = false;
+let browserEventHook = null;
 const LAUNCH_READINESS_MAX_ATTEMPTS = 20;
 const LAUNCH_READINESS_RETRY_MS = 500;
 const LAUNCH_HTTP_TIMEOUT_MS = 1500;
@@ -131,6 +170,414 @@ function cleanupFailedLaunch(pid, port) {
     try { process.kill(pid, 'SIGTERM'); } catch {}
   }
   try { instanceRegistry.deregister(port); } catch {}
+}
+
+function nowIso() {
+  return new Date().toISOString();
+}
+
+function normalizeBrowserOffloadStatus(value) {
+  if (value === null || value === undefined) return 'not_requested';
+  const normalized = String(value).trim().toLowerCase();
+  if (!normalized) return 'not_requested';
+  return BROWSER_OFFLOAD_STATUS_ORDER.includes(normalized) ? normalized : 'not_requested';
+}
+
+function statusOrderIndex(status) {
+  return BROWSER_OFFLOAD_STATUS_ORDER.indexOf(status);
+}
+
+function buildBrowserSessionId() {
+  browserSessionCounter += 1;
+  const seq = String(browserSessionCounter).padStart(4, '0');
+  return `browser-${Date.now()}-${seq}-${crypto.randomBytes(3).toString('hex')}`;
+}
+
+function buildBrowserToken() {
+  return crypto.randomBytes(24).toString('hex');
+}
+
+function normalizeBrowserSessionId(value) {
+  const normalized = String(value || '').trim();
+  if (!normalized) return null;
+  return BROWSER_SESSION_ID_RE.test(normalized) ? normalized : null;
+}
+
+function timingSafeTokenMatches(expected, provided) {
+  const expectedBuf = Buffer.from(String(expected || ''), 'utf8');
+  const providedBuf = Buffer.from(String(provided || ''), 'utf8');
+  if (!expectedBuf.length || expectedBuf.length !== providedBuf.length) {
+    return false;
+  }
+  try {
+    return crypto.timingSafeEqual(expectedBuf, providedBuf);
+  } catch {
+    return false;
+  }
+}
+
+function clampBrowserTimeoutMs(value, fallback = BROWSER_BRIDGE_DEFAULT_TIMEOUT_MS) {
+  const parsed = Number.parseInt(String(value ?? fallback), 10);
+  if (!Number.isFinite(parsed)) return fallback;
+  if (parsed < BROWSER_BRIDGE_MIN_TIMEOUT_MS) return BROWSER_BRIDGE_MIN_TIMEOUT_MS;
+  if (parsed > BROWSER_BRIDGE_MAX_TIMEOUT_MS) return BROWSER_BRIDGE_MAX_TIMEOUT_MS;
+  return parsed;
+}
+
+function parseBooleanConfig(value, fallback = false) {
+  if (value === null || value === undefined) return fallback;
+  const normalized = String(value).trim().toLowerCase();
+  if (!normalized) return fallback;
+  return ['1', 'true', 'yes', 'on'].includes(normalized);
+}
+
+function parseAllowedOriginsConfig(rawValue) {
+  if (rawValue === null || rawValue === undefined) {
+    return new Set(BROWSER_BRIDGE_ALLOWED_ORIGINS_DEFAULT);
+  }
+  const trimmed = String(rawValue).trim();
+  if (!trimmed) {
+    return new Set(BROWSER_BRIDGE_ALLOWED_ORIGINS_DEFAULT);
+  }
+  let values = null;
+  try {
+    const parsed = JSON.parse(trimmed);
+    if (Array.isArray(parsed)) values = parsed;
+  } catch {}
+  if (!values) values = trimmed.split(',');
+  const origins = new Set();
+  for (const value of values) {
+    const normalized = normalizeOrigin(value);
+    if (normalized) origins.add(normalized);
+  }
+  if (!origins.size) {
+    return new Set(BROWSER_BRIDGE_ALLOWED_ORIGINS_DEFAULT);
+  }
+  return origins;
+}
+
+function normalizeOrigin(originValue) {
+  if (!originValue) return null;
+  const trimmed = String(originValue).trim();
+  if (!trimmed) return null;
+  try {
+    const parsed = new URL(trimmed);
+    if (parsed.protocol !== 'http:' && parsed.protocol !== 'https:') return null;
+    return parsed.origin.toLowerCase();
+  } catch {
+    return null;
+  }
+}
+
+function refreshBrowserBridgeConfig() {
+  try {
+    browserSessionTimeoutMs = clampBrowserTimeoutMs(
+      db.getConfig('browser_bridge_callback_timeout_ms'),
+      BROWSER_BRIDGE_DEFAULT_TIMEOUT_MS
+    );
+    browserAllowedOrigins = parseAllowedOriginsConfig(
+      db.getConfig('browser_bridge_allowed_origins')
+    );
+    browserAllowMissingOrigin = parseBooleanConfig(
+      db.getConfig('browser_bridge_allow_missing_origin'),
+      false
+    );
+  } catch {
+    browserSessionTimeoutMs = BROWSER_BRIDGE_DEFAULT_TIMEOUT_MS;
+    browserAllowedOrigins = new Set(BROWSER_BRIDGE_ALLOWED_ORIGINS_DEFAULT);
+    browserAllowMissingOrigin = false;
+  }
+}
+
+function hasAllowedBrowserOrigin(origin) {
+  const normalized = normalizeOrigin(origin);
+  if (!normalized) return false;
+  return browserAllowedOrigins.has(normalized);
+}
+
+function readBearerToken(req) {
+  const auth = String(req.headers.authorization || '').trim();
+  if (!auth) return null;
+  const match = auth.match(/^Bearer\s+(.+)$/i);
+  if (!match) return null;
+  const token = String(match[1] || '').trim();
+  return token || null;
+}
+
+function isJsonLikeContentType(req) {
+  const contentType = String(req.headers['content-type'] || '').toLowerCase();
+  return !contentType || contentType.includes('application/json');
+}
+
+function safeJsonStringify(value) {
+  if (value === null || value === undefined) return null;
+  try {
+    return JSON.stringify(value);
+  } catch {
+    return JSON.stringify({ value: String(value) });
+  }
+}
+
+function summarizeBrowserError(error) {
+  if (error instanceof Error) return error.message;
+  if (error === null || error === undefined) return 'unknown error';
+  const text = String(error).trim();
+  return text ? text : 'unknown error';
+}
+
+function buildBrowserBridgeAccess(session, includeSecrets = false) {
+  const payload = {
+    session_id: session.id,
+    task_id: session.taskId,
+    request_id: session.requestId,
+    channel: session.channel,
+    status: session.status,
+    callback_timeout_ms: session.timeoutMs,
+    launch_url: `https://chatgpt.com/?mac10_bridge_session=${encodeURIComponent(session.id)}&mac10_bridge_token=${encodeURIComponent(session.bridgeToken)}`,
+    attach_endpoint: '/api/browser/attach',
+    callback_endpoint: `/api/browser/callback/${encodeURIComponent(session.id)}`,
+  };
+  if (includeSecrets) {
+    payload.bridge_token = session.bridgeToken;
+    payload.callback_token = session.callbackToken;
+  }
+  return payload;
+}
+
+function buildBrowserSessionPublic(session, { includeSecrets = false } = {}) {
+  const payload = {
+    session_id: session.id,
+    task_id: session.taskId,
+    request_id: session.requestId,
+    channel: session.channel,
+    status: session.status,
+    created_at: session.createdAt,
+    updated_at: session.updatedAt,
+    launched_at: session.launchedAt,
+    attached_at: session.attachedAt,
+    completed_at: session.completedAt,
+    last_callback_at: session.lastCallbackAt,
+    deadline_at: session.deadlineAt,
+    timeout_ms: session.timeoutMs,
+    last_error: session.lastError,
+    progress_count: session.progress.length,
+    latest_progress: session.progress.length ? session.progress[session.progress.length - 1] : null,
+    result: session.result,
+    bridge: buildBrowserBridgeAccess(session, includeSecrets),
+  };
+  return payload;
+}
+
+function listBrowserSessionsPublic() {
+  return Array.from(browserSessions.values())
+    .map((session) => buildBrowserSessionPublic(session))
+    .sort((a, b) => String(b.created_at || '').localeCompare(String(a.created_at || '')));
+}
+
+function clearBrowserSessionTimeout(sessionId) {
+  const timeout = browserSessionTimeouts.get(sessionId);
+  if (timeout) clearTimeout(timeout);
+  browserSessionTimeouts.delete(sessionId);
+}
+
+function scheduleBrowserSessionTimeout(sessionId) {
+  clearBrowserSessionTimeout(sessionId);
+  const session = browserSessions.get(sessionId);
+  if (!session || BROWSER_TERMINAL_STATUSES.has(session.status)) return;
+  const deadlineMs = Date.parse(session.deadlineAt || '');
+  if (!Number.isFinite(deadlineMs)) return;
+  const delayMs = Math.max(0, deadlineMs - Date.now());
+  const timeout = setTimeout(() => {
+    handleBrowserSessionTimeout(sessionId);
+  }, delayMs);
+  if (typeof timeout.unref === 'function') timeout.unref();
+  browserSessionTimeouts.set(sessionId, timeout);
+}
+
+function upsertBrowserSession(session) {
+  browserSessions.set(session.id, session);
+  browserSessionsByTaskId.set(session.taskId, session.id);
+  scheduleBrowserSessionTimeout(session.id);
+}
+
+function terminateBrowserSession(session) {
+  if (!session) return;
+  clearBrowserSessionTimeout(session.id);
+}
+
+function getSessionByTaskId(taskId) {
+  const key = Number.parseInt(taskId, 10);
+  if (!Number.isInteger(key) || key <= 0) return null;
+  const sessionId = browserSessionsByTaskId.get(key);
+  return sessionId ? browserSessions.get(sessionId) || null : null;
+}
+
+function notifyBrowserEvent(event, session, details = {}) {
+  const payload = {
+    type: 'browser_offload_event',
+    event,
+    task_id: session ? session.taskId : null,
+    request_id: session ? session.requestId : null,
+    session_id: session ? session.id : null,
+    status: session ? session.status : null,
+    timestamp: nowIso(),
+    session: session ? buildBrowserSessionPublic(session) : null,
+    ...details,
+  };
+  broadcast(payload);
+  if (typeof browserEventHook === 'function') {
+    try {
+      browserEventHook(payload);
+    } catch {}
+  }
+}
+
+function getTaskStrict(taskId) {
+  const parsedTaskId = Number.parseInt(taskId, 10);
+  if (!Number.isInteger(parsedTaskId) || parsedTaskId <= 0) {
+    throw new Error('task_id must be a positive integer');
+  }
+  const task = db.getTask(parsedTaskId);
+  if (!task) {
+    throw new Error(`Task ${parsedTaskId} not found`);
+  }
+  return task;
+}
+
+function applyTaskStatusTarget(taskId, targetStatus, updates = {}) {
+  const target = normalizeBrowserOffloadStatus(targetStatus);
+  const task = getTaskStrict(taskId);
+  const current = normalizeBrowserOffloadStatus(task.browser_offload_status);
+  const currentIndex = statusOrderIndex(current);
+  const targetIndex = statusOrderIndex(target);
+  if (targetIndex < 0) throw new Error(`Invalid browser offload status: ${targetStatus}`);
+  if (currentIndex < 0) throw new Error(`Task ${taskId} has invalid browser offload status: ${current}`);
+  if (currentIndex > targetIndex) {
+    throw new Error(`Cannot move browser offload status backward from "${current}" to "${target}"`);
+  }
+  if (currentIndex === targetIndex) {
+    if (updates && Object.keys(updates).length > 0) {
+      db.updateTask(taskId, updates);
+    }
+    return db.getTask(taskId);
+  }
+  let nextTask = task;
+  for (let i = currentIndex + 1; i <= targetIndex; i++) {
+    const status = BROWSER_OFFLOAD_STATUS_ORDER[i];
+    const statusUpdates = i === targetIndex ? updates : {};
+    nextTask = db.transitionTaskBrowserOffload(taskId, status, statusUpdates);
+  }
+  return nextTask;
+}
+
+function recordTaskBrowserFailure(taskId, errorMessage, fallbackUpdates = {}) {
+  const normalizedError = String(errorMessage || 'Browser offload failed').trim() || 'Browser offload failed';
+  const task = db.getTask(taskId);
+  if (!task) return null;
+  const status = normalizeBrowserOffloadStatus(task.browser_offload_status);
+  const failureUpdates = {
+    browser_offload_error: normalizedError,
+    ...fallbackUpdates,
+  };
+  try {
+    if (status === 'failed') {
+      db.updateTask(taskId, failureUpdates);
+      return db.getTask(taskId);
+    }
+    if (status === 'completed' || status === 'cancelled') {
+      db.updateTask(taskId, failureUpdates);
+      return db.getTask(taskId);
+    }
+    return applyTaskStatusTarget(taskId, 'failed', failureUpdates);
+  } catch {
+    try {
+      db.updateTask(taskId, failureUpdates);
+    } catch {}
+    return db.getTask(taskId);
+  }
+}
+
+function failBrowserSession(session, errorMessage, { reason = 'failed', updateTask = true } = {}) {
+  if (!session) return;
+  session.status = 'failed';
+  session.lastError = String(errorMessage || 'Browser offload failed').trim() || 'Browser offload failed';
+  session.updatedAt = nowIso();
+  session.completedAt = session.completedAt || session.updatedAt;
+  session.deadlineAt = session.updatedAt;
+  upsertBrowserSession(session);
+  terminateBrowserSession(session);
+  if (updateTask) {
+    recordTaskBrowserFailure(session.taskId, session.lastError, {
+      browser_session_id: session.id,
+      browser_channel: session.channel,
+    });
+  }
+  notifyBrowserEvent(reason, session, { error: session.lastError });
+}
+
+function handleBrowserSessionTimeout(sessionId) {
+  const session = browserSessions.get(sessionId);
+  if (!session || BROWSER_TERMINAL_STATUSES.has(session.status)) return;
+  const deadlineMs = Date.parse(session.deadlineAt || '');
+  if (Number.isFinite(deadlineMs) && deadlineMs > Date.now()) {
+    scheduleBrowserSessionTimeout(session.id);
+    return;
+  }
+  failBrowserSession(
+    session,
+    `No browser callback received before timeout (${session.timeoutMs}ms)`,
+    { reason: 'timeout', updateTask: true }
+  );
+}
+
+function requireBrowserBridgeRoute(req, res) {
+  if (!browserBridgeEnabled) {
+    res.status(404).json({ ok: false, error: 'Browser bridge APIs are disabled' });
+    return false;
+  }
+  if (!isJsonLikeContentType(req)) {
+    res.status(415).json({ ok: false, error: 'application/json content type is required' });
+    return false;
+  }
+  return true;
+}
+
+function requireBrowserOrigin(req, res) {
+  const originHeader = req.headers.origin;
+  if (!originHeader && browserAllowMissingOrigin) {
+    return { ok: true, origin: null };
+  }
+  const normalizedOrigin = normalizeOrigin(originHeader);
+  if (!normalizedOrigin) {
+    res.status(403).json({
+      ok: false,
+      error: 'Origin is required for browser bridge routes',
+      allowed_origins: Array.from(browserAllowedOrigins),
+    });
+    return { ok: false, origin: null };
+  }
+  if (!hasAllowedBrowserOrigin(normalizedOrigin)) {
+    res.status(403).json({
+      ok: false,
+      error: 'Origin is not allowed for browser bridge routes',
+      origin: normalizedOrigin,
+      allowed_origins: Array.from(browserAllowedOrigins),
+    });
+    return { ok: false, origin: normalizedOrigin };
+  }
+  return { ok: true, origin: normalizedOrigin };
+}
+
+function resolveSessionForStatus({ sessionId = null, taskId = null } = {}) {
+  const normalizedSessionId = normalizeBrowserSessionId(sessionId);
+  if (normalizedSessionId) {
+    return browserSessions.get(normalizedSessionId) || null;
+  }
+  const parsedTaskId = Number.parseInt(taskId, 10);
+  if (Number.isInteger(parsedTaskId) && parsedTaskId > 0) {
+    return getSessionByTaskId(parsedTaskId);
+  }
+  return null;
 }
 
 function isPlainObject(value) {
@@ -340,6 +787,7 @@ function buildStatePayload({ includeLogs = false, includeLoops = false } = {}) {
     requests,
     workers,
     tasks: hydratedTasks,
+    browser_offload_sessions: listBrowserSessionsPublic(),
     routing_budget_state: routingBudgetState,
     routing_budget_source: routingBudgetSource,
     usage_cost_burn_rate: usageCostBurnRate,
@@ -358,6 +806,15 @@ function buildStatePayload({ includeLogs = false, includeLoops = false } = {}) {
 function start(projectDir, port = 3100, scriptDir = null, handlers = {}) {
   const app = express();
   const namespace = process.env.MAC10_NAMESPACE || 'mac10';
+  browserBridgeEnabled = handlers.browserBridgeEnabled !== false;
+  browserEventHook = typeof handlers.onBrowserSessionEvent === 'function'
+    ? handlers.onBrowserSessionEvent
+    : null;
+  browserSessions = new Map();
+  browserSessionsByTaskId = new Map();
+  browserSessionTimeouts = new Map();
+  browserSessionCounter = 0;
+  refreshBrowserBridgeConfig();
   server = http.createServer(app);
   wss = new WebSocket.Server({ server });
   wss.on('error', (err) => {
@@ -948,6 +1405,413 @@ function start(projectDir, port = 3100, scriptDir = null, handlers = {}) {
     }
   });
 
+  // --- Browser offload bridge endpoints ---
+
+  app.post('/api/browser/launch', (req, res) => {
+    if (!requireBrowserBridgeRoute(req, res)) return;
+    refreshBrowserBridgeConfig();
+
+    try {
+      const taskId = Number.parseInt(req.body.task_id ?? req.body.taskId, 10);
+      if (!Number.isInteger(taskId) || taskId <= 0) {
+        return res.status(400).json({ ok: false, error: 'task_id must be a positive integer' });
+      }
+      const existingSession = getSessionByTaskId(taskId);
+      if (existingSession && BROWSER_ACTIVE_STATUSES.has(existingSession.status)) {
+        notifyBrowserEvent('launch_reused', existingSession, { reused: true });
+        return res.json({
+          ok: true,
+          reused: true,
+          session: buildBrowserSessionPublic(existingSession),
+          bridge_credentials: {
+            session_id: existingSession.id,
+            bridge_token: existingSession.bridgeToken,
+            launch_url: buildBrowserBridgeAccess(existingSession, true).launch_url,
+            attach_endpoint: '/api/browser/attach',
+          },
+        });
+      }
+
+      const task = getTaskStrict(taskId);
+      const payloadValue = Object.prototype.hasOwnProperty.call(req.body, 'payload')
+        ? req.body.payload
+        : req.body.browser_offload_payload;
+      const payloadText = payloadValue === undefined
+        ? null
+        : (typeof payloadValue === 'string' ? payloadValue : safeJsonStringify(payloadValue));
+      const timeoutMs = clampBrowserTimeoutMs(
+        req.body.callback_timeout_ms ?? req.body.timeout_ms,
+        browserSessionTimeoutMs
+      );
+      const now = nowIso();
+      const sessionId = buildBrowserSessionId();
+      const channel = String(req.body.channel || `browser:task-${taskId}:${sessionId}`).trim();
+
+      try {
+        applyTaskStatusTarget(taskId, 'launching', {
+          browser_session_id: sessionId,
+          browser_channel: channel,
+          browser_offload_payload: payloadText,
+          browser_offload_result: null,
+          browser_offload_error: null,
+        });
+      } catch (error) {
+        const message = summarizeBrowserError(error);
+        recordTaskBrowserFailure(taskId, `Launch failed: ${message}`);
+        return res.status(409).json({
+          ok: false,
+          stage: 'launch_transition',
+          error: message,
+        });
+      }
+
+      const session = {
+        id: sessionId,
+        taskId,
+        requestId: task.request_id || null,
+        channel,
+        status: 'launching',
+        createdAt: now,
+        updatedAt: now,
+        launchedAt: now,
+        attachedAt: null,
+        completedAt: null,
+        lastCallbackAt: null,
+        deadlineAt: new Date(Date.now() + timeoutMs).toISOString(),
+        timeoutMs,
+        lastError: null,
+        result: null,
+        progress: [],
+        attachedOrigin: null,
+        bridgeToken: buildBrowserToken(),
+        callbackToken: buildBrowserToken(),
+      };
+      upsertBrowserSession(session);
+      notifyBrowserEvent('launched', session, {
+        bridge_credentials: {
+          session_id: session.id,
+          launch_url: buildBrowserBridgeAccess(session, true).launch_url,
+          attach_endpoint: '/api/browser/attach',
+        },
+      });
+
+      res.json({
+        ok: true,
+        session: buildBrowserSessionPublic(session),
+        bridge_credentials: {
+          session_id: session.id,
+          bridge_token: session.bridgeToken,
+          launch_url: buildBrowserBridgeAccess(session, true).launch_url,
+          attach_endpoint: '/api/browser/attach',
+          callback_timeout_ms: session.timeoutMs,
+        },
+      });
+    } catch (e) {
+      res.status(500).json({ ok: false, error: summarizeBrowserError(e) });
+    }
+  });
+
+  app.post('/api/browser/attach', (req, res) => {
+    if (!requireBrowserBridgeRoute(req, res)) return;
+    refreshBrowserBridgeConfig();
+    const originCheck = requireBrowserOrigin(req, res);
+    if (!originCheck.ok) return;
+
+    try {
+      const sessionId = normalizeBrowserSessionId(req.body.session_id ?? req.body.sessionId);
+      if (!sessionId) {
+        return res.status(400).json({ ok: false, error: 'session_id is required' });
+      }
+      const session = browserSessions.get(sessionId);
+      if (!session) {
+        return res.status(404).json({ ok: false, error: `Unknown browser session: ${sessionId}` });
+      }
+      if (BROWSER_TERMINAL_STATUSES.has(session.status)) {
+        return res.status(409).json({
+          ok: false,
+          error: `Session is already terminal (${session.status})`,
+          session: buildBrowserSessionPublic(session),
+        });
+      }
+
+      const providedBridgeToken = String(
+        req.body.bridge_token || req.headers['x-mac10-bridge-token'] || ''
+      ).trim();
+      if (!timingSafeTokenMatches(session.bridgeToken, providedBridgeToken)) {
+        notifyBrowserEvent('attach_rejected', session, { reason: 'invalid_bridge_token' });
+        return res.status(401).json({ ok: false, error: 'Invalid bridge token' });
+      }
+
+      const requestedTaskId = Number.parseInt(req.body.task_id ?? req.body.taskId, 10);
+      if (Number.isInteger(requestedTaskId) && requestedTaskId > 0 && requestedTaskId !== session.taskId) {
+        notifyBrowserEvent('attach_rejected', session, {
+          reason: 'task_mismatch',
+          provided_task_id: requestedTaskId,
+        });
+        return res.status(409).json({ ok: false, error: 'task_id does not match session task' });
+      }
+
+      try {
+        applyTaskStatusTarget(session.taskId, 'attached', {
+          browser_session_id: session.id,
+          browser_channel: session.channel,
+          browser_offload_error: null,
+        });
+        applyTaskStatusTarget(session.taskId, 'running');
+        applyTaskStatusTarget(session.taskId, 'awaiting_callback');
+      } catch (error) {
+        failBrowserSession(
+          session,
+          `Attach transition failed: ${summarizeBrowserError(error)}`,
+          { reason: 'attach_failed', updateTask: true }
+        );
+        return res.status(409).json({
+          ok: false,
+          stage: 'attach_transition',
+          error: summarizeBrowserError(error),
+        });
+      }
+
+      const now = nowIso();
+      session.status = 'awaiting_callback';
+      session.attachedAt = now;
+      session.updatedAt = now;
+      session.deadlineAt = new Date(Date.now() + session.timeoutMs).toISOString();
+      session.attachedOrigin = originCheck.origin;
+      session.callbackToken = buildBrowserToken();
+      upsertBrowserSession(session);
+      notifyBrowserEvent('attached', session, { origin: originCheck.origin });
+
+      res.json({
+        ok: true,
+        session: buildBrowserSessionPublic(session),
+        callback_credentials: {
+          session_id: session.id,
+          callback_token: session.callbackToken,
+          callback_endpoint: `/api/browser/callback/${encodeURIComponent(session.id)}`,
+          authorization: `Bearer ${session.callbackToken}`,
+          callback_timeout_ms: session.timeoutMs,
+        },
+      });
+    } catch (e) {
+      res.status(500).json({ ok: false, error: summarizeBrowserError(e) });
+    }
+  });
+
+  app.get('/api/browser/status', (req, res) => {
+    if (!requireBrowserBridgeRoute(req, res)) return;
+    refreshBrowserBridgeConfig();
+    try {
+      const session = resolveSessionForStatus({
+        sessionId: req.query.session_id || req.query.sessionId,
+        taskId: req.query.task_id || req.query.taskId,
+      });
+      const parsedTaskId = Number.parseInt(req.query.task_id ?? req.query.taskId, 10);
+
+      if (!session) {
+        if (Number.isInteger(parsedTaskId) && parsedTaskId > 0) {
+          const task = db.getTask(parsedTaskId);
+          if (!task) {
+            return res.status(404).json({ ok: false, error: `Task ${parsedTaskId} not found` });
+          }
+          return res.json({
+            ok: true,
+            session: null,
+            task_id: parsedTaskId,
+            browser_offload_status: normalizeBrowserOffloadStatus(task.browser_offload_status),
+            browser_session_id: task.browser_session_id || null,
+            browser_channel: task.browser_channel || null,
+            browser_offload_error: task.browser_offload_error || null,
+          });
+        }
+        return res.status(404).json({ ok: false, error: 'Browser session not found' });
+      }
+
+      const task = db.getTask(session.taskId);
+      res.json({
+        ok: true,
+        session: buildBrowserSessionPublic(session),
+        task: task || null,
+      });
+    } catch (e) {
+      res.status(500).json({ ok: false, error: summarizeBrowserError(e) });
+    }
+  });
+
+  app.get('/api/browser/sessions/:sessionId', (req, res) => {
+    if (!requireBrowserBridgeRoute(req, res)) return;
+    const sessionId = normalizeBrowserSessionId(req.params.sessionId);
+    if (!sessionId) {
+      return res.status(400).json({ ok: false, error: 'Invalid session id' });
+    }
+    const session = browserSessions.get(sessionId);
+    if (!session) {
+      return res.status(404).json({ ok: false, error: 'Browser session not found' });
+    }
+    const task = db.getTask(session.taskId);
+    return res.json({
+      ok: true,
+      session: buildBrowserSessionPublic(session),
+      task: task || null,
+    });
+  });
+
+  app.post('/api/browser/callback/:sessionId', (req, res) => {
+    if (!requireBrowserBridgeRoute(req, res)) return;
+    refreshBrowserBridgeConfig();
+    const originCheck = requireBrowserOrigin(req, res);
+    if (!originCheck.ok) return;
+
+    try {
+      const sessionId = normalizeBrowserSessionId(req.params.sessionId);
+      if (!sessionId) {
+        return res.status(400).json({ ok: false, error: 'Invalid session id' });
+      }
+      const session = browserSessions.get(sessionId);
+      if (!session) {
+        return res.status(404).json({ ok: false, error: 'Browser session not found' });
+      }
+      const tokenFromRequest = readBearerToken(req) || String(req.body.callback_token || '').trim();
+      if (!timingSafeTokenMatches(session.callbackToken, tokenFromRequest)) {
+        notifyBrowserEvent('callback_rejected', session, { reason: 'invalid_callback_token' });
+        return res.status(401).json({ ok: false, error: 'Invalid callback token' });
+      }
+      if (session.attachedOrigin && originCheck.origin && session.attachedOrigin !== originCheck.origin) {
+        notifyBrowserEvent('callback_rejected', session, {
+          reason: 'origin_mismatch',
+          expected_origin: session.attachedOrigin,
+          origin: originCheck.origin,
+        });
+        return res.status(403).json({
+          ok: false,
+          error: 'Callback origin does not match attached origin',
+        });
+      }
+      if (BROWSER_TERMINAL_STATUSES.has(session.status)) {
+        notifyBrowserEvent('callback_ignored', session, { reason: 'terminal_session' });
+        return res.status(409).json({
+          ok: false,
+          error: `Session is already terminal (${session.status})`,
+          session: buildBrowserSessionPublic(session),
+        });
+      }
+      const callbackTaskId = Number.parseInt(req.body.task_id ?? req.body.taskId, 10);
+      if (Number.isInteger(callbackTaskId) && callbackTaskId > 0 && callbackTaskId !== session.taskId) {
+        notifyBrowserEvent('callback_rejected', session, {
+          reason: 'task_mismatch',
+          provided_task_id: callbackTaskId,
+        });
+        return res.status(409).json({ ok: false, error: 'task_id does not match session task' });
+      }
+
+      const event = String(req.body.event || req.body.status || '').trim().toLowerCase();
+      if (!event) {
+        return res.status(400).json({ ok: false, error: 'event is required' });
+      }
+
+      const now = nowIso();
+      const updateDeadline = () => {
+        session.updatedAt = now;
+        session.lastCallbackAt = now;
+        session.deadlineAt = new Date(Date.now() + session.timeoutMs).toISOString();
+      };
+
+      if (event === 'progress' || event === 'partial' || event === 'heartbeat') {
+        try {
+          applyTaskStatusTarget(session.taskId, 'awaiting_callback', {
+            browser_session_id: session.id,
+            browser_channel: session.channel,
+          });
+        } catch (error) {
+          failBrowserSession(
+            session,
+            `Progress callback transition failed: ${summarizeBrowserError(error)}`,
+            { reason: 'callback_failed', updateTask: true }
+          );
+          return res.status(409).json({ ok: false, error: summarizeBrowserError(error) });
+        }
+
+        updateDeadline();
+        session.status = 'awaiting_callback';
+        const progressPayload = Object.prototype.hasOwnProperty.call(req.body, 'progress')
+          ? req.body.progress
+          : (Object.prototype.hasOwnProperty.call(req.body, 'message') ? req.body.message : req.body.data);
+        const progressEntry = {
+          at: now,
+          event,
+          payload: progressPayload === undefined ? null : progressPayload,
+        };
+        session.progress.push(progressEntry);
+        if (session.progress.length > 100) session.progress.shift();
+        upsertBrowserSession(session);
+        notifyBrowserEvent('progress', session, { progress: progressEntry });
+        return res.json({
+          ok: true,
+          status: session.status,
+          session: buildBrowserSessionPublic(session),
+        });
+      }
+
+      if (event === 'completed' || event === 'complete' || event === 'result') {
+        const resultPayload = Object.prototype.hasOwnProperty.call(req.body, 'result')
+          ? req.body.result
+          : (Object.prototype.hasOwnProperty.call(req.body, 'data') ? req.body.data : null);
+        try {
+          applyTaskStatusTarget(session.taskId, 'completed', {
+            browser_session_id: session.id,
+            browser_channel: session.channel,
+            browser_offload_result: safeJsonStringify(resultPayload),
+            browser_offload_error: null,
+          });
+        } catch (error) {
+          failBrowserSession(
+            session,
+            `Completion callback transition failed: ${summarizeBrowserError(error)}`,
+            { reason: 'callback_failed', updateTask: true }
+          );
+          return res.status(409).json({ ok: false, error: summarizeBrowserError(error) });
+        }
+        session.status = 'completed';
+        session.result = resultPayload === undefined ? null : resultPayload;
+        session.lastError = null;
+        session.updatedAt = now;
+        session.lastCallbackAt = now;
+        session.completedAt = now;
+        session.deadlineAt = now;
+        upsertBrowserSession(session);
+        terminateBrowserSession(session);
+        notifyBrowserEvent('completed', session, { result: session.result });
+        return res.json({
+          ok: true,
+          status: session.status,
+          session: buildBrowserSessionPublic(session),
+        });
+      }
+
+      if (event === 'failed' || event === 'error') {
+        const errorMessage = String(req.body.error || req.body.message || 'Browser callback reported failure').trim();
+        session.lastCallbackAt = now;
+        failBrowserSession(session, errorMessage || 'Browser callback reported failure', {
+          reason: 'callback_failed',
+          updateTask: true,
+        });
+        return res.json({
+          ok: true,
+          status: 'failed',
+          session: buildBrowserSessionPublic(session),
+        });
+      }
+
+      notifyBrowserEvent('callback_rejected', session, { reason: 'unsupported_event', event });
+      return res.status(400).json({
+        ok: false,
+        error: `Unsupported callback event: ${event}`,
+      });
+    } catch (e) {
+      res.status(500).json({ ok: false, error: summarizeBrowserError(e) });
+    }
+  });
+
   // --- Changes endpoints ---
 
   app.get('/api/changes', (req, res) => {
@@ -1111,6 +1975,14 @@ function broadcast(data) {
 function stop() {
   if (broadcastIntervalId) { clearInterval(broadcastIntervalId); broadcastIntervalId = null; }
   if (pingIntervalId) { clearInterval(pingIntervalId); pingIntervalId = null; }
+  for (const timeout of browserSessionTimeouts.values()) {
+    clearTimeout(timeout);
+  }
+  browserSessionTimeouts.clear();
+  browserSessions.clear();
+  browserSessionsByTaskId.clear();
+  browserBridgeEnabled = true;
+  browserEventHook = null;
   if (setupProcess) {
     try { setupProcess.kill(); } catch {}
     setupProcess = null;
