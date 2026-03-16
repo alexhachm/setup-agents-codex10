@@ -7,6 +7,7 @@ const fs = require('fs');
 const os = require('os');
 
 const db = require('../src/db');
+const merger = require('../src/merger');
 
 let tmpDir;
 
@@ -49,6 +50,54 @@ describe('Request state machine', () => {
 
     const completed = db.listRequests('completed');
     assert.strictEqual(completed.length, 1);
+  });
+});
+
+describe('Merger request completion gating', () => {
+  it('should not complete on merge success while sibling task is unfinished', () => {
+    const reqId = db.createRequest('Feature with merge + sibling task');
+    const mergedTaskId = db.createTask({
+      request_id: reqId,
+      subject: 'Merged task',
+      description: 'Has PR merged by merger',
+    });
+    const unfinishedTaskId = db.createTask({
+      request_id: reqId,
+      subject: 'Unfinished sibling',
+      description: 'Still assigned when merge completes',
+    });
+
+    db.updateTask(mergedTaskId, { status: 'completed' });
+    db.updateTask(unfinishedTaskId, { status: 'assigned' });
+    db.updateRequest(reqId, { status: 'integrating' });
+
+    db.enqueueMerge({
+      request_id: reqId,
+      task_id: mergedTaskId,
+      pr_url: 'https://github.com/org/repo/pull/250',
+      branch: 'agent-1',
+    });
+
+    merger.processQueue(tmpDir, () => ({ success: true }));
+
+    const requestAfterMerge = db.getRequest(reqId);
+    assert.notStrictEqual(requestAfterMerge.status, 'completed');
+
+    const mailsAfterMerge = db
+      .checkMail('master-1', false)
+      .filter((msg) => msg.type === 'request_completed' && msg.payload.request_id === reqId);
+    assert.strictEqual(mailsAfterMerge.length, 0);
+
+    db.updateTask(unfinishedTaskId, { status: 'completed' });
+    merger.onTaskCompleted(unfinishedTaskId);
+
+    const requestAfterAllDone = db.getRequest(reqId);
+    assert.strictEqual(requestAfterAllDone.status, 'completed');
+
+    const completionMails = db
+      .checkMail('master-1')
+      .filter((msg) => msg.type === 'request_completed' && msg.payload.request_id === reqId);
+    assert.strictEqual(completionMails.length, 1);
   });
 });
 
