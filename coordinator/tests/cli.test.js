@@ -1759,6 +1759,60 @@ describe('CLI Server', () => {
     assert.strictEqual(rows[0].task_id, taskA);
   });
 
+  it('should refresh one merge queue row across repeated complete-task cycles for the same request PR ownership', async () => {
+    db.registerWorker(1, '/wt-1', 'agent-1');
+
+    const requestId = db.createRequest('Repeated completion dedupe');
+    const taskA = db.createTask({ request_id: requestId, subject: 'Task A', description: 'Do A' });
+    const taskB = db.createTask({ request_id: requestId, subject: 'Task B', description: 'Do B retry' });
+
+    db.updateTask(taskA, { status: 'assigned', assigned_to: 1 });
+    db.updateWorker(1, { status: 'assigned', current_task_id: taskA });
+
+    const first = await sendCommand('complete-task', {
+      worker_id: '1',
+      task_id: String(taskA),
+      pr_url: 'https://github.com/org/repo/pull/420',
+      branch: 'agent-1',
+      result: 'Task A done',
+    });
+    assert.strictEqual(first.ok, true);
+
+    const firstQueueRow = db.getDb().prepare(`
+      SELECT id, task_id, status
+      FROM merge_queue
+      WHERE request_id = ? AND pr_url = ? AND branch = ?
+      ORDER BY id ASC
+      LIMIT 1
+    `).get(requestId, 'https://github.com/org/repo/pull/420', 'agent-1');
+    assert.ok(firstQueueRow);
+    assert.strictEqual(firstQueueRow.task_id, taskA);
+    assert.strictEqual(firstQueueRow.status, 'pending');
+
+    db.updateTask(taskB, { status: 'assigned', assigned_to: 1 });
+    db.updateWorker(1, { status: 'assigned', current_task_id: taskB });
+
+    const second = await sendCommand('complete-task', {
+      worker_id: '1',
+      task_id: String(taskB),
+      pr_url: 'https://github.com/org/repo/pull/420',
+      branch: 'agent-1',
+      result: 'Task B done',
+    });
+    assert.strictEqual(second.ok, true);
+
+    const queueRows = db.getDb().prepare(`
+      SELECT id, task_id, status
+      FROM merge_queue
+      WHERE request_id = ? AND pr_url = ? AND branch = ?
+      ORDER BY id ASC
+    `).all(requestId, 'https://github.com/org/repo/pull/420', 'agent-1');
+    assert.strictEqual(queueRows.length, 1);
+    assert.strictEqual(queueRows[0].id, firstQueueRow.id);
+    assert.strictEqual(queueRows[0].task_id, taskB);
+    assert.strictEqual(queueRows[0].status, 'pending');
+  });
+
   it('should fail integrate when completed tasks reuse a PR URL owned by another request', async () => {
     const requestA = db.createRequest('Request A');
     const taskA = db.createTask({ request_id: requestA, subject: 'Task A', description: 'Do A' });
