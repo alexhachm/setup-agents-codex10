@@ -889,7 +889,11 @@ function updateRequest(id, fields) {
   }
   sets.push("updated_at = datetime('now')");
   vals.push(id);
-  getDb().prepare(`UPDATE requests SET ${sets.join(', ')} WHERE id = ?`).run(...vals);
+  const result = getDb().prepare(`UPDATE requests SET ${sets.join(', ')} WHERE id = ?`).run(...vals);
+  return {
+    changes: result.changes,
+    lastInsertRowid: result.lastInsertRowid,
+  };
 }
 
 function listRequests(status) {
