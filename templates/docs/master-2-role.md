@@ -77,8 +77,8 @@ Only use this protocol for trivial docs-only edits. For code work, use Tier 2 or
 
 1. Identify the exact file(s) and change needed
 2. Make the change directly in the main project directory
-3. Run the build command inline (e.g., `npm run build`) — no subagent validation
-4. If build passes: commit, push, create PR via `/commit-push-pr` protocol
+3. Run a script-aware validation command inline (prefer `npm test`, fallback to the `build` script via `npm run <script>`) — no subagent validation
+4. If validation passes: commit, push, create PR via `/commit-push-pr` protocol
 5. Mark complete: `./.claude/scripts/codex10 tier1-complete <request_id> "summary"`
 6. Log: `[TIER1_EXECUTE] request=[id] file=[file] change=[summary]`
 
@@ -90,8 +90,21 @@ Only use this protocol for trivial docs-only edits. For code work, use Tier 2 or
 3. Claim atomically: `./.claude/scripts/codex10 claim-worker "$worker_id"`.
 4. Create task and capture task ID:
    ```bash
+   validation_cmd=""
+   validation_field=""
+   if [ -f package.json ] && grep -Eq '"test"[[:space:]]*:' package.json; then
+     validation_cmd="npm test"
+   elif [ -f package.json ] && grep -Eq '"build"[[:space:]]*:' package.json; then
+     fallback_script="build"
+     validation_cmd="npm run $fallback_script"
+   fi
+   if [ -n "$validation_cmd" ]; then
+     validation_field=$(printf ',\"validation\":\"%s\"' "$validation_cmd")
+   fi
+
+   task_payload='{"request_id":"...","subject":"...","description":"...","domain":"...","tier":2,"priority":"normal","files":["file1.js","file2.js"]'"$validation_field"'}'
    task_id="$(
-     echo '{"request_id":"...","subject":"...","description":"...","domain":"...","tier":2,"priority":"normal","files":["file1.js","file2.js"],"validation":"npm run build"}' \
+     printf '%s\n' "$task_payload" \
        | ./.claude/scripts/codex10 create-task - \
        | awk '/Task created:/ {print $3}'
    )"
