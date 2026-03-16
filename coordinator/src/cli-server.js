@@ -396,6 +396,13 @@ function normalizeInboxRecipient(recipient) {
   return INBOX_RECIPIENT_ALIASES[recipient] || recipient;
 }
 
+function extractInboxMailFilters(args = {}) {
+  const filters = {};
+  if (typeof args.type === 'string') filters.type = args.type;
+  if (typeof args.request_id === 'string') filters.request_id = args.request_id;
+  return filters;
+}
+
 const COMMAND_SCHEMAS = {
   'request':           { required: ['description'], types: { description: 'string' } },
   'fix':               { required: ['description'], types: { description: 'string' } },
@@ -417,8 +424,8 @@ const COMMAND_SCHEMAS = {
   'complete-task':     { required: ['worker_id', 'task_id'], types: { worker_id: 'string', usage: 'object' } },
   'fail-task':         { required: ['worker_id', 'task_id', 'error'], types: { worker_id: 'string', error: 'string', usage: 'object' } },
   'distill':           { required: ['worker_id'], types: { worker_id: 'string' } },
-  'inbox':             { required: ['recipient'], types: { recipient: 'string' } },
-  'inbox-block':       { required: ['recipient'], types: { recipient: 'string', timeout: 'number', peek: 'boolean' } },
+  'inbox':             { required: ['recipient'], types: { recipient: 'string', peek: 'boolean', type: 'string', request_id: 'string' } },
+  'inbox-block':       { required: ['recipient'], types: { recipient: 'string', timeout: 'number', peek: 'boolean', type: 'string', request_id: 'string' } },
   'ready-tasks':       { required: [], types: {} },
   'assign-task':       { required: ['task_id', 'worker_id'], types: { task_id: 'number', worker_id: 'number' } },
   'claim-worker':      { required: ['worker_id', 'claimer'], types: { worker_id: 'number', claimer: 'string' } },
@@ -2212,13 +2219,15 @@ function handleCommand(cmd, conn, handlers) {
       // === SHARED commands ===
       case 'inbox': {
         const recipient = normalizeInboxRecipient(args.recipient);
-        const msgs = db.checkMail(recipient, !args.peek);
+        const filters = extractInboxMailFilters(args);
+        const msgs = db.checkMail(recipient, !args.peek, filters);
         respond(conn, { ok: true, messages: msgs });
         break;
       }
       case 'inbox-block': {
         // Async blocking inbox check — polls without freezing the event loop
         const recipient = normalizeInboxRecipient(args.recipient);
+        const filters = extractInboxMailFilters(args);
         const timeoutMs = args.timeout || 300000;
         const consume = !args.peek;
         const pollMs = 1000;
@@ -2232,7 +2241,7 @@ function handleCommand(cmd, conn, handlers) {
         const poll = () => {
           if (cancelled) return;
           try {
-            const msgs = db.checkMail(recipient, consume);
+            const msgs = db.checkMail(recipient, consume, filters);
             if (msgs.length > 0) {
               respond(conn, { ok: true, messages: msgs });
               return;
