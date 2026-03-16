@@ -8,7 +8,7 @@ const os = require('os');
 
 const db = require('../src/db');
 const tmux = require('../src/tmux');
-const { THRESHOLDS, tick } = require('../src/watchdog');
+const { THRESHOLDS, LOOP_STALE_HEARTBEAT_SEC, tick } = require('../src/watchdog');
 
 let tmpDir;
 
@@ -194,9 +194,48 @@ describe('Stale claim release', () => {
 });
 
 describe('Loop heartbeat recovery', () => {
+  it('does not emit stale telemetry for healthy loops with long backoff cadence', () => {
+    const loopId = db.createLoop('Healthy loop long backoff');
+    const healthyHeartbeat = new Date(
+      Date.now() - Math.max(1, LOOP_STALE_HEARTBEAT_SEC - 30) * 1000
+    ).toISOString();
+    db.updateLoop(loopId, {
+      tmux_window: 'loop-healthy',
+      tmux_session: 'test-session',
+      last_heartbeat: healthyHeartbeat,
+    });
+
+    const originalIsPaneAlive = tmux.isPaneAlive;
+    const originalKillWindow = tmux.killWindow;
+    const originalCreateWindow = tmux.createWindow;
+    const killCalls = [];
+    const createCalls = [];
+
+    tmux.isPaneAlive = (windowName) => windowName === 'loop-healthy';
+    tmux.killWindow = (windowName) => killCalls.push(windowName);
+    tmux.createWindow = (windowName, command, cwd) => createCalls.push({ windowName, command, cwd });
+
+    try {
+      tick(tmpDir);
+    } finally {
+      tmux.isPaneAlive = originalIsPaneAlive;
+      tmux.killWindow = originalKillWindow;
+      tmux.createWindow = originalCreateWindow;
+    }
+
+    assert.deepStrictEqual(killCalls, []);
+    assert.deepStrictEqual(createCalls, []);
+
+    const staleLog = db.getLog(100, 'coordinator')
+      .filter((entry) => entry.action === 'loop_heartbeat_stale')
+      .map((entry) => JSON.parse(entry.details))
+      .find((entry) => entry.loop_id === loopId);
+    assert.strictEqual(staleLog, undefined);
+  });
+
   it('restarts stale loops when tmux pane is still alive', () => {
     const loopId = db.createLoop('Recover stale loop');
-    const staleHeartbeat = new Date(Date.now() - 301 * 1000).toISOString();
+    const staleHeartbeat = new Date(Date.now() - (LOOP_STALE_HEARTBEAT_SEC + 60) * 1000).toISOString();
     db.updateLoop(loopId, {
       tmux_window: 'loop-1',
       tmux_session: 'test-session',
@@ -236,7 +275,8 @@ describe('Loop heartbeat recovery', () => {
       .map((entry) => JSON.parse(entry.details))
       .find((entry) => entry.loop_id === loopId);
     assert.ok(staleLog);
-    assert.ok(staleLog.stale_sec > 300);
+    assert.ok(staleLog.stale_sec > LOOP_STALE_HEARTBEAT_SEC);
+    assert.strictEqual(staleLog.threshold_sec, LOOP_STALE_HEARTBEAT_SEC);
 
     const respawnLog = db.getLog(100, 'coordinator')
       .filter((entry) => entry.action === 'loop_sentinel_respawned')
