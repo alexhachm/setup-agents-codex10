@@ -331,6 +331,47 @@ describe('Assignment-priority merge deferral', () => {
     const readyTaskAfterMerge = db.getTask(readyTaskId);
     assert.strictEqual(readyTaskAfterMerge.status, 'ready');
   });
+
+  it('should not defer merges because of stale ready tasks on completed requests', () => {
+    const reqId = db.createRequest('Feature');
+    const mergedTaskId = db.createTask({ request_id: reqId, subject: 'Task ready to merge', description: 'Done' });
+    db.updateTask(mergedTaskId, { status: 'completed' });
+    db.updateRequest(reqId, { status: 'integrating' });
+
+    const completedReqId = db.createRequest('Completed feature');
+    const staleReadyTaskId = db.createTask({
+      request_id: completedReqId,
+      subject: 'Stale ready task',
+      description: 'Should not influence assignment-priority deferral',
+    });
+    db.updateTask(staleReadyTaskId, { status: 'ready', assigned_to: null });
+    db.updateRequest(completedReqId, { status: 'completed' });
+
+    db.setConfig('prioritize_assignment_over_merge', 'true');
+    db.setConfig('assignment_priority_merge_max_deferrals', '2');
+    db.setConfig('assignment_priority_merge_max_age_ms', '86400000');
+
+    const enqueueResult = db.enqueueMerge({
+      request_id: reqId,
+      task_id: mergedTaskId,
+      pr_url: 'https://github.com/acme/repo/pull/4',
+      branch: 'agent-1',
+    });
+    const mergeId = enqueueResult.lastInsertRowid;
+
+    let mergeAttempts = 0;
+    merger.processQueue(tmpDir, () => {
+      mergeAttempts += 1;
+      return { success: true };
+    });
+
+    const mergeAfterPass = db.getDb().prepare('SELECT status FROM merge_queue WHERE id = ?').get(mergeId);
+    assert.strictEqual(mergeAttempts, 1);
+    assert.strictEqual(mergeAfterPass.status, 'merged');
+
+    const deferredLogs = readCoordinatorLogEntries('merge_deferred_assignment_priority');
+    assert.strictEqual(deferredLogs.length, 0);
+  });
 });
 
 describe('Overlap validation command selection', () => {

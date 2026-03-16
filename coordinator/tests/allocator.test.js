@@ -40,6 +40,62 @@ describe('Allocator tick (thin notifier)', () => {
     assert.strictEqual(ready.length, 1);
   });
 
+  it('should ignore ready and pending tasks from terminal requests', () => {
+    db.registerWorker(1, '/wt-1', 'agent-1');
+
+    const activeReqId = db.createRequest('Active request');
+    const activePendingTaskId = db.createTask({
+      request_id: activeReqId,
+      subject: 'Active pending task',
+      description: 'Should be promoted',
+    });
+
+    const completedReqId = db.createRequest('Completed request');
+    const completedPendingTaskId = db.createTask({
+      request_id: completedReqId,
+      subject: 'Completed pending task',
+      description: 'Should stay pending',
+    });
+    const completedReadyTaskId = db.createTask({
+      request_id: completedReqId,
+      subject: 'Completed ready task',
+      description: 'Should be ignored by ready discovery',
+    });
+    db.updateTask(completedReadyTaskId, { status: 'ready', assigned_to: null });
+    db.updateRequest(completedReqId, { status: 'completed' });
+
+    const failedReqId = db.createRequest('Failed request');
+    const failedPendingTaskId = db.createTask({
+      request_id: failedReqId,
+      subject: 'Failed pending task',
+      description: 'Should stay pending',
+    });
+    const failedReadyTaskId = db.createTask({
+      request_id: failedReqId,
+      subject: 'Failed ready task',
+      description: 'Should be ignored by ready discovery',
+    });
+    db.updateTask(failedReadyTaskId, { status: 'ready', assigned_to: null });
+    db.updateRequest(failedReqId, { status: 'failed' });
+
+    // Drain existing mail
+    db.checkMail('allocator');
+
+    allocator.tick();
+
+    assert.strictEqual(db.getTask(activePendingTaskId).status, 'ready');
+    assert.strictEqual(db.getTask(completedPendingTaskId).status, 'pending');
+    assert.strictEqual(db.getTask(failedPendingTaskId).status, 'pending');
+
+    const readyTaskIds = db.getReadyTasks().map((task) => task.id);
+    assert.deepStrictEqual(readyTaskIds, [activePendingTaskId]);
+
+    const mail = db.checkMail('allocator');
+    const available = mail.filter((entry) => entry.type === 'tasks_available');
+    assert.strictEqual(available.length, 1);
+    assert.strictEqual(available[0].payload.ready_count, 1);
+  });
+
   it('should send tasks_available mail when ready tasks and idle workers exist', () => {
     db.registerWorker(1, '/wt-1', 'agent-1');
     const reqId = db.createRequest('Test');
