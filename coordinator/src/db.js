@@ -15,6 +15,8 @@ const DEFAULT_LOOP_REQUEST_SIMILARITY_THRESHOLD = 0.82;
 const LOOP_REQUEST_SIMILAR_RECENT_WINDOW_HOURS = 6;
 const LOOP_REQUEST_SIMILAR_CANDIDATE_LIMIT = 50;
 const DEFAULT_STALE_DECOMPOSED_RECOVERY_SEC = 120;
+const DEFAULT_STALLED_ASSIGNMENT_RECOVERY_SEC = 180;
+const DEFAULT_TASK_LIVENESS_MAX_REASSIGNMENTS = 2;
 const REQUEST_TERMINAL_STATUSES = new Set(['completed', 'failed']);
 const TASK_PRIORITY_RANK = Object.freeze({ urgent: 0, high: 1, normal: 2, low: 3 });
 const PRIORITY_OVERRIDE_MARKER_RE = /\bpriority\s+override\b/i;
@@ -103,7 +105,6 @@ const PROJECT_MEMORY_LINEAGE_TYPES = Object.freeze([
   'validated_by',
   'consumed_by',
 ]);
-const REQUEST_TERMINAL_STATUSES = new Set(['completed', 'failed']);
 
 function normalizeRequestLifecycleStatus(status) {
   if (status === null || status === undefined) return null;
@@ -427,6 +428,7 @@ const VALID_COLUMNS = Object.freeze({
   tasks: new Set([
     'request_id', 'subject', 'description', 'domain', 'files', 'priority', 'tier', 'depends_on',
     'assigned_to', 'status', 'pr_url', 'branch', 'validation', 'overlap_with',
+    'liveness_reassign_count', 'liveness_last_reassign_at', 'liveness_last_reassign_reason',
     'routing_class', 'routed_model', 'model_source', 'reasoning_effort',
     'browser_offload_status', 'browser_session_id', 'browser_channel',
     'browser_offload_payload', 'browser_offload_result', 'browser_offload_error',
@@ -490,6 +492,21 @@ function ensureTaskRoutingTelemetryColumns(database) {
   }
   if (!taskCols.includes('reasoning_effort')) {
     database.exec("ALTER TABLE tasks ADD COLUMN reasoning_effort TEXT");
+  }
+}
+
+function ensureTaskLivenessRecoveryColumns(database) {
+  const taskCols = database.prepare("PRAGMA table_info(tasks)").all().map((column) => column.name);
+  if (taskCols.length === 0) return;
+
+  if (!taskCols.includes('liveness_reassign_count')) {
+    database.exec("ALTER TABLE tasks ADD COLUMN liveness_reassign_count INTEGER NOT NULL DEFAULT 0");
+  }
+  if (!taskCols.includes('liveness_last_reassign_at')) {
+    database.exec("ALTER TABLE tasks ADD COLUMN liveness_last_reassign_at TEXT");
+  }
+  if (!taskCols.includes('liveness_last_reassign_reason')) {
+    database.exec("ALTER TABLE tasks ADD COLUMN liveness_last_reassign_reason TEXT");
   }
 }
 
@@ -834,6 +851,7 @@ function init(projectDir) {
     if (!taskCols.includes('overlap_with')) {
       db.exec("ALTER TABLE tasks ADD COLUMN overlap_with TEXT");
     }
+    ensureTaskLivenessRecoveryColumns(db);
     ensureTaskRoutingTelemetryColumns(db);
     ensureTaskBrowserOffloadColumns(db);
     ensureTaskUsageTelemetryColumns(db);
@@ -850,6 +868,7 @@ function init(projectDir) {
   const schema = fs.readFileSync(path.join(__dirname, 'schema.sql'), 'utf8');
   db.exec(schema);
   ensureMergeQueueColumns(db);
+  ensureTaskLivenessRecoveryColumns(db);
   ensureTaskRoutingTelemetryColumns(db);
   ensureTaskBrowserOffloadColumns(db);
   ensureTaskUsageTelemetryColumns(db);
@@ -2602,6 +2621,256 @@ function getAllWorkers() {
   return getDb().prepare('SELECT * FROM workers ORDER BY id').all();
 }
 
+function resolveStalledAssignmentRecoveryThresholdSec(explicitThresholdSec = null) {
+  const parsedExplicit = parsePositiveInt(explicitThresholdSec);
+  if (parsedExplicit !== null) return parsedExplicit;
+  const configured = parsePositiveInt(getConfig('watchdog_stalled_assignment_sec'));
+  if (configured !== null) return configured;
+  const terminateThreshold = parsePositiveInt(getConfig('watchdog_terminate_sec'));
+  if (terminateThreshold !== null) return terminateThreshold;
+  return DEFAULT_STALLED_ASSIGNMENT_RECOVERY_SEC;
+}
+
+function resolveTaskLivenessMaxReassignments(explicitMaxReassignments = null) {
+  const parsedExplicit = parsePositiveInt(explicitMaxReassignments);
+  if (parsedExplicit !== null) return parsedExplicit;
+  const configured = parsePositiveInt(getConfig('watchdog_task_reassign_limit'));
+  if (configured !== null) return configured;
+  return DEFAULT_TASK_LIVENESS_MAX_REASSIGNMENTS;
+}
+
+function resolveAssignmentLivenessAgeMs(assignment, nowMs) {
+  const heartbeatAgeMs = coordinatorAgeMs(assignment.last_heartbeat, nowMs);
+  const launchedAgeMs = coordinatorAgeMs(assignment.launched_at, nowMs);
+  if (heartbeatAgeMs === null && launchedAgeMs === null) return null;
+  if (heartbeatAgeMs === null) return launchedAgeMs;
+  if (launchedAgeMs === null) return heartbeatAgeMs;
+  return Math.min(heartbeatAgeMs, launchedAgeMs);
+}
+
+function normalizeRecoverySource(source, fallback = 'coordinator_recovery') {
+  if (typeof source !== 'string') return fallback;
+  const trimmed = source.trim();
+  return trimmed || fallback;
+}
+
+function recoverStalledAssignments(options = {}) {
+  const source = normalizeRecoverySource(options.source, 'coordinator_recovery');
+  const nowMsCandidate = Number(options.now_ms);
+  const nowMs = Number.isFinite(nowMsCandidate) ? nowMsCandidate : Date.now();
+  const nowIso = new Date(nowMs).toISOString();
+  const includeHeartbeatStale = options.include_heartbeat_stale !== false;
+  const includeOrphans = options.include_orphans !== false;
+  const staleThresholdSec = resolveStalledAssignmentRecoveryThresholdSec(options.stale_threshold_sec);
+  const maxReassignments = resolveTaskLivenessMaxReassignments(options.max_reassignments);
+  const reasonOverride = typeof options.reason_override === 'string' && options.reason_override.trim()
+    ? options.reason_override.trim()
+    : null;
+  const taskIdFilter = parsePositiveInt(options.task_id);
+  const workerIdFilter = parsePositiveInt(options.worker_id);
+
+  let sql = `
+    SELECT
+      t.id AS task_id,
+      t.request_id,
+      t.subject,
+      t.domain,
+      t.files,
+      t.tier,
+      t.status AS task_status,
+      t.assigned_to,
+      COALESCE(t.liveness_reassign_count, 0) AS liveness_reassign_count,
+      w.id AS worker_id,
+      w.status AS worker_status,
+      w.current_task_id,
+      w.last_heartbeat,
+      w.launched_at
+    FROM tasks t
+    LEFT JOIN workers w ON w.id = t.assigned_to
+    WHERE t.status IN ('assigned', 'in_progress')
+      AND t.assigned_to IS NOT NULL
+  `;
+  const vals = [];
+  if (taskIdFilter !== null) {
+    sql += ' AND t.id = ?';
+    vals.push(taskIdFilter);
+  }
+  if (workerIdFilter !== null) {
+    sql += ' AND t.assigned_to = ?';
+    vals.push(workerIdFilter);
+  }
+  sql += ' ORDER BY t.id ASC';
+
+  const candidates = getDb().prepare(sql).all(...vals);
+  if (!candidates.length) return [];
+
+  const recovered = [];
+  const tx = getDb().transaction((rows) => {
+    const markReadyStmt = getDb().prepare(`
+      UPDATE tasks
+      SET
+        status = 'ready',
+        assigned_to = NULL,
+        started_at = NULL,
+        liveness_reassign_count = ?,
+        liveness_last_reassign_at = ?,
+        liveness_last_reassign_reason = ?,
+        updated_at = datetime('now')
+      WHERE id = ?
+        AND assigned_to = ?
+        AND status IN ('assigned', 'in_progress')
+    `);
+    const markFailedStmt = getDb().prepare(`
+      UPDATE tasks
+      SET
+        status = 'failed',
+        assigned_to = NULL,
+        result = ?,
+        completed_at = ?,
+        liveness_last_reassign_at = ?,
+        liveness_last_reassign_reason = ?,
+        updated_at = datetime('now')
+      WHERE id = ?
+        AND assigned_to = ?
+        AND status IN ('assigned', 'in_progress')
+    `);
+    const resetWorkerStmt = getDb().prepare(`
+      UPDATE workers
+      SET
+        status = 'idle',
+        current_task_id = NULL,
+        claimed_by = NULL,
+        claimed_at = NULL,
+        pid = NULL,
+        last_heartbeat = ?
+      WHERE id = ?
+        AND (current_task_id IS NULL OR current_task_id = ?)
+        AND status IN ('assigned', 'busy', 'running', 'idle')
+    `);
+
+    for (const candidate of rows) {
+      const taskId = Number(candidate.task_id);
+      const assignedWorkerId = Number(candidate.assigned_to);
+      const reassignCount = Number(candidate.liveness_reassign_count) || 0;
+      const currentTaskId = parsePositiveInt(candidate.current_task_id);
+      const workerStatus = String(candidate.worker_status || '').trim().toLowerCase();
+      const livenessAgeMs = resolveAssignmentLivenessAgeMs(candidate, nowMs);
+      const staleSec = livenessAgeMs === null ? null : livenessAgeMs / 1000;
+      const hasWorkerRow = candidate.worker_id !== null && candidate.worker_id !== undefined;
+
+      let reason = reasonOverride;
+      if (!reason) {
+        if (!hasWorkerRow) {
+          reason = 'worker_missing';
+        } else if (includeOrphans) {
+          if (workerStatus === 'idle' && currentTaskId !== taskId) {
+            reason = 'worker_idle_orphan';
+          } else if (currentTaskId !== null && currentTaskId !== taskId) {
+            reason = 'worker_task_pointer_mismatch';
+          }
+        }
+      }
+      if (!reason && includeHeartbeatStale) {
+        if (livenessAgeMs === null) {
+          reason = 'missing_worker_liveness_anchor';
+        } else if (staleSec >= staleThresholdSec) {
+          reason = 'worker_liveness_stale';
+        }
+      }
+      if (!reason) continue;
+
+      const diagnosticsBase = {
+        source,
+        task_id: taskId,
+        request_id: candidate.request_id,
+        worker_id: hasWorkerRow ? Number(candidate.worker_id) : null,
+        reason,
+        stale_sec: staleSec === null ? null : Math.round(staleSec),
+        stale_threshold_sec: staleThresholdSec,
+        reassignment_count: reassignCount,
+        max_reassignments: maxReassignments,
+        task_status: candidate.task_status,
+        worker_status: workerStatus || null,
+        worker_current_task_id: currentTaskId,
+      };
+
+      if (reassignCount >= maxReassignments) {
+        const failureResultText = `Liveness recovery exhausted after ${reassignCount} reassignments (${reason})`;
+        const failResult = markFailedStmt.run(
+          failureResultText,
+          nowIso,
+          nowIso,
+          reason,
+          taskId,
+          assignedWorkerId
+        );
+        if (failResult.changes < 1) continue;
+
+        if (hasWorkerRow && (currentTaskId === null || currentTaskId === taskId)) {
+          resetWorkerStmt.run(nowIso, Number(candidate.worker_id), taskId);
+        }
+
+        const failedDetail = {
+          ...diagnosticsBase,
+          outcome: 'failed_retry_exhausted',
+          result: failureResultText,
+        };
+        recovered.push(failedDetail);
+        log('coordinator', 'task_liveness_retry_exhausted', failedDetail);
+        sendMail('allocator', 'task_failed', {
+          worker_id: hasWorkerRow ? Number(candidate.worker_id) : null,
+          task_id: taskId,
+          request_id: candidate.request_id,
+          error: failureResultText,
+          subject: candidate.subject || null,
+          domain: candidate.domain || null,
+          files: candidate.files || null,
+          tier: candidate.tier || null,
+          assigned_to: hasWorkerRow ? Number(candidate.worker_id) : null,
+          original_task: {
+            subject: candidate.subject || null,
+            domain: candidate.domain || null,
+            files: candidate.files || null,
+            tier: candidate.tier || null,
+            assigned_to: hasWorkerRow ? Number(candidate.worker_id) : null,
+          },
+        });
+        continue;
+      }
+
+      const nextReassignCount = reassignCount + 1;
+      const reassignResult = markReadyStmt.run(
+        nextReassignCount,
+        nowIso,
+        reason,
+        taskId,
+        assignedWorkerId
+      );
+      if (reassignResult.changes < 1) continue;
+
+      if (hasWorkerRow && (currentTaskId === null || currentTaskId === taskId)) {
+        resetWorkerStmt.run(nowIso, Number(candidate.worker_id), taskId);
+      }
+
+      const recoveredDetail = {
+        ...diagnosticsBase,
+        outcome: 'reassigned',
+        reassignment_count: nextReassignCount,
+      };
+      recovered.push(recoveredDetail);
+      log('coordinator', 'task_liveness_recovered', recoveredDetail);
+      if (reason === 'worker_idle_orphan' || reason === 'worker_task_pointer_mismatch') {
+        log('coordinator', 'orphan_task_recovered', recoveredDetail);
+      } else {
+        log('coordinator', 'task_reassigned', recoveredDetail);
+      }
+    }
+  });
+  tx(candidates);
+
+  return recovered;
+}
+
 function resolveStaleDecomposedRecoveryThresholdSec(explicitThresholdSec = null) {
   const parsedExplicit = Number.parseInt(String(explicitThresholdSec ?? ''), 10);
   if (Number.isInteger(parsedExplicit) && parsedExplicit > 0) return parsedExplicit;
@@ -3482,6 +3751,7 @@ module.exports = {
   getResearchBatch, listResearchBatchStages, listResearchIntentFanout, markResearchBatchStage,
   listTasks, getReadyTasks, checkAndPromoteTasks, replanTaskDependency,
   registerWorker, getWorker, updateWorker, getIdleWorkers, getAllWorkers, claimWorker, releaseWorker,
+  recoverStalledAssignments,
   recoverStaleDecomposedZeroTaskRequests, checkRequestCompletion,
   getUsageCostBurnRate, getRequestLatestCompletedTaskCursor, hasRequestCompletedTaskProgressSince,
   sendMail, checkMail, checkMailBlocking, purgeOldMail,

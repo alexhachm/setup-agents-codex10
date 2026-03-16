@@ -181,8 +181,18 @@ function tick(projectDir) {
   // Stale claim cleanup: workers claimed but no task assigned for >2 minutes
   releaseStaleClaimsCheck(now);
 
-  // Orphan task recovery: tasks assigned but worker is idle
-  recoverOrphanTasks();
+  // Assignment recovery: reclaim orphaned/stalled tasks with bounded retries.
+  const recoveredAssignments = recoverOrphanTasks('watchdog_tick');
+  if (recoveredAssignments.length > 0) {
+    const reassignedCount = recoveredAssignments.filter((entry) => entry.outcome === 'reassigned').length;
+    const exhaustedCount = recoveredAssignments.filter((entry) => entry.outcome === 'failed_retry_exhausted').length;
+    db.log('coordinator', 'stalled_assignment_recovery', {
+      source: 'watchdog_tick',
+      recovered_assignments: recoveredAssignments.length,
+      reassigned: reassignedCount,
+      retry_exhausted: exhaustedCount,
+    });
+  }
 
   // Keep failed requests visible to stale-integration recovery when remediation is active.
   recoverFailedRequestsWithActiveRemediation('watchdog_tick');
@@ -268,32 +278,34 @@ function escalate(worker, staleSec, projectDir) {
 }
 
 function handleDeath(worker, reason) {
+  const assignedTaskId = Number.parseInt(String(worker.current_task_id || ''), 10);
+
   db.log('coordinator', 'worker_death', {
     worker_id: worker.id,
     reason,
     task_id: worker.current_task_id,
   });
 
-  // If worker had a task, conditionally mark it for reassignment
-  // Uses a single conditional UPDATE to avoid TOCTOU race with worker's complete-task
-  if (worker.current_task_id) {
-    const result = db.getDb().prepare(
-      "UPDATE tasks SET status='ready', assigned_to=NULL, updated_at=datetime('now') WHERE id=? AND status NOT IN ('completed','failed')"
-    ).run(worker.current_task_id);
-    if (result.changes > 0) {
-      db.log('coordinator', 'task_reassigned', {
-        task_id: worker.current_task_id,
-        reason: `worker-${worker.id} died (${reason})`,
-      });
-    }
-  }
-
   // Reset worker
   db.updateWorker(worker.id, {
     status: 'idle',
     current_task_id: null,
+    claimed_by: null,
+    claimed_at: null,
     pid: null,
+    last_heartbeat: new Date().toISOString(),
   });
+
+  if (Number.isInteger(assignedTaskId) && assignedTaskId > 0) {
+    db.recoverStalledAssignments({
+      source: 'watchdog_worker_death',
+      task_id: assignedTaskId,
+      worker_id: worker.id,
+      include_heartbeat_stale: false,
+      include_orphans: true,
+      reason_override: `worker_death:${reason}`,
+    });
+  }
 }
 
 function checkWorkerFatigue() {
@@ -340,20 +352,13 @@ function releaseStaleClaimsCheck(now) {
   }
 }
 
-function recoverOrphanTasks() {
-  // Tasks that are 'assigned' or 'in_progress' but their worker is idle
-  const orphans = db.getDb().prepare(`
-    SELECT t.* FROM tasks t
-    JOIN workers w ON t.assigned_to = w.id
-    WHERE t.status IN ('assigned', 'in_progress')
-      AND w.status = 'idle'
-      AND w.current_task_id IS NULL
-  `).all();
-
-  for (const task of orphans) {
-    db.updateTask(task.id, { status: 'ready', assigned_to: null });
-    db.log('coordinator', 'orphan_task_recovered', { task_id: task.id });
-  }
+function recoverOrphanTasks(source = 'watchdog_tick') {
+  return db.recoverStalledAssignments({
+    source,
+    include_orphans: true,
+    include_heartbeat_stale: true,
+    stale_threshold_sec: getThresholds().terminate,
+  });
 }
 
 function hasActiveRemediationTasks(requestId) {
