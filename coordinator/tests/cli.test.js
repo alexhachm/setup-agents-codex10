@@ -2110,8 +2110,8 @@ describe('CLI Server', () => {
     }
   });
 
-  it('should reject loop-heartbeat for non-active loops without mutating last_heartbeat', async () => {
-    for (const status of ['stopped', 'paused', 'failed']) {
+  it('should preserve last_heartbeat for stopped/paused loop-heartbeat and return loop status', async () => {
+    for (const status of ['stopped', 'paused']) {
       const created = await sendCommand('loop', { prompt: `Heartbeat guard ${status}` });
       assert.strictEqual(created.ok, true);
 
@@ -2122,13 +2122,32 @@ describe('CLI Server', () => {
       });
 
       const heartbeat = await sendCommand('loop-heartbeat', { loop_id: created.loop_id });
-      assert.strictEqual(heartbeat.ok, false);
-      assert.strictEqual(heartbeat.error, `Loop is ${status}, not active`);
+      assert.strictEqual(heartbeat.ok, true);
+      assert.strictEqual(heartbeat.status, status);
 
       const loop = db.getLoop(created.loop_id);
       assert.strictEqual(loop.status, status);
       assert.strictEqual(loop.last_heartbeat, baselineHeartbeat);
     }
+  });
+
+  it('should reject failed loop-heartbeat without mutating last_heartbeat', async () => {
+    const created = await sendCommand('loop', { prompt: 'Heartbeat guard failed' });
+    assert.strictEqual(created.ok, true);
+
+    const baselineHeartbeat = new Date(Date.now() - 60000).toISOString();
+    db.updateLoop(created.loop_id, {
+      status: 'failed',
+      last_heartbeat: baselineHeartbeat,
+    });
+
+    const heartbeat = await sendCommand('loop-heartbeat', { loop_id: created.loop_id });
+    assert.strictEqual(heartbeat.ok, false);
+    assert.strictEqual(heartbeat.error, 'Loop is failed, not active');
+
+    const loop = db.getLoop(created.loop_id);
+    assert.strictEqual(loop.status, 'failed');
+    assert.strictEqual(loop.last_heartbeat, baselineHeartbeat);
   });
 
   it('should keep active loop checkpoint and heartbeat behavior unchanged', async () => {
