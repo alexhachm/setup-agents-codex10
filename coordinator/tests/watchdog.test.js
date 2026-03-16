@@ -122,6 +122,76 @@ describe('Heartbeat staleness', () => {
   });
 });
 
+describe('Stale claim release', () => {
+  it('releases stale claims using claimed_at age instead of heartbeat age', () => {
+    db.registerWorker(1, '/wt-1', 'agent-1');
+
+    db.updateWorker(1, {
+      status: 'idle',
+      current_task_id: null,
+      claimed_by: 'architect',
+      claimed_at: new Date(Date.now() - 121 * 1000).toISOString(),
+      last_heartbeat: new Date().toISOString(),
+    });
+
+    tick(tmpDir);
+
+    const worker = db.getWorker(1);
+    assert.strictEqual(worker.claimed_by, null);
+    assert.strictEqual(worker.claimed_at, null);
+
+    const releaseLog = db.getLog(50, 'coordinator')
+      .filter((entry) => entry.action === 'stale_claim_released')
+      .map((entry) => JSON.parse(entry.details))
+      .find((entry) => entry.worker_id === 1);
+    assert.ok(releaseLog);
+    assert.ok(releaseLog.stale_sec > 120);
+  });
+
+  it('does not release claims from stale heartbeat when claimed_at is fresh', () => {
+    db.registerWorker(1, '/wt-1', 'agent-1');
+
+    db.updateWorker(1, {
+      status: 'idle',
+      current_task_id: null,
+      claimed_by: 'architect',
+      claimed_at: new Date(Date.now() - 30 * 1000).toISOString(),
+      last_heartbeat: new Date(Date.now() - 3600 * 1000).toISOString(),
+    });
+
+    tick(tmpDir);
+
+    const worker = db.getWorker(1);
+    assert.strictEqual(worker.claimed_by, 'architect');
+    assert.ok(worker.claimed_at);
+  });
+
+  it('releases wedged claims with missing claimed_at and logs diagnostic reason', () => {
+    db.registerWorker(1, '/wt-1', 'agent-1');
+
+    db.updateWorker(1, {
+      status: 'idle',
+      current_task_id: null,
+      claimed_by: 'architect',
+      claimed_at: null,
+      last_heartbeat: new Date().toISOString(),
+    });
+
+    tick(tmpDir);
+
+    const worker = db.getWorker(1);
+    assert.strictEqual(worker.claimed_by, null);
+    assert.strictEqual(worker.claimed_at, null);
+
+    const releaseLog = db.getLog(50, 'coordinator')
+      .filter((entry) => entry.action === 'stale_claim_released')
+      .map((entry) => JSON.parse(entry.details))
+      .find((entry) => entry.worker_id === 1);
+    assert.ok(releaseLog);
+    assert.strictEqual(releaseLog.reason, 'missing_claimed_at');
+  });
+});
+
 describe('Stale integration recovery', () => {
   it('keeps failed merge requests recoverable while remediation is active or just queued', () => {
     const requestId = db.createRequest('Failed merge remediation');
