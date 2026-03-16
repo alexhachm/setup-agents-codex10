@@ -643,12 +643,15 @@ describe('CLI Server', () => {
     const reqId = db.createRequest('Reset guard with ownership context');
     const taskId = db.createTask({ request_id: reqId, subject: 'Guard reset with token', description: 'Ensure stale sentinel cannot clobber' });
     const assignmentToken = '2026-03-16T10:00:00.000Z';
+    const claimedAt = '2026-03-16T09:59:30.000Z';
 
     db.updateTask(taskId, { status: 'assigned', assigned_to: 1 });
     db.updateWorker(1, {
       status: 'busy',
       current_task_id: taskId,
       launched_at: assignmentToken,
+      claimed_by: 'architect',
+      claimed_at: claimedAt,
     });
 
     const myTask = await sendCommand('my-task', { worker_id: '1' });
@@ -673,6 +676,8 @@ describe('CLI Server', () => {
     const worker = db.getWorker(1);
     assert.strictEqual(worker.status, 'idle');
     assert.strictEqual(worker.current_task_id, null);
+    assert.strictEqual(worker.claimed_by, null);
+    assert.strictEqual(worker.claimed_at, null);
 
     const resetEvents = getWorkerResetEvents(1, 'sentinel_reset');
     assert.ok(resetEvents.length >= 1);
@@ -2337,6 +2342,25 @@ describe('CLI Server', () => {
     assert.strictEqual(db.getTask(blockedTaskId).status, 'pending');
   });
 
+  it('should set claimed_at on claim-worker and clear it on release-worker', async () => {
+    db.registerWorker(1, '/wt-1', 'agent-1');
+
+    const claim = await sendCommand('claim-worker', { worker_id: 1, claimer: 'architect' });
+    assert.strictEqual(claim.ok, true);
+    assert.strictEqual(claim.claimed, true);
+
+    const claimedWorker = db.getWorker(1);
+    assert.strictEqual(claimedWorker.claimed_by, 'architect');
+    assert.ok(claimedWorker.claimed_at);
+
+    const release = await sendCommand('release-worker', { worker_id: 1 });
+    assert.strictEqual(release.ok, true);
+
+    const releasedWorker = db.getWorker(1);
+    assert.strictEqual(releasedWorker.claimed_by, null);
+    assert.strictEqual(releasedWorker.claimed_at, null);
+  });
+
   it('should reject assign-task for claimed workers without mutating task or claim state', async () => {
     db.registerWorker(1, '/wt-1', 'agent-1');
     const taskId = createReadyTask({
@@ -2348,6 +2372,10 @@ describe('CLI Server', () => {
     const claim = await sendCommand('claim-worker', { worker_id: 1, claimer: 'architect' });
     assert.strictEqual(claim.ok, true);
     assert.strictEqual(claim.claimed, true);
+    const claimedWorker = db.getWorker(1);
+    assert.strictEqual(claimedWorker.claimed_by, 'architect');
+    assert.ok(claimedWorker.claimed_at);
+    const claimedAt = claimedWorker.claimed_at;
 
     const assignment = await sendCommand('assign-task', { task_id: taskId, worker_id: 1 });
     assert.strictEqual(assignment.ok, false);
@@ -2358,11 +2386,36 @@ describe('CLI Server', () => {
     assert.strictEqual(worker.status, 'idle');
     assert.strictEqual(worker.current_task_id, null);
     assert.strictEqual(worker.claimed_by, 'architect');
+    assert.strictEqual(worker.claimed_at, claimedAt);
 
     const task = db.getTask(taskId);
     assert.ok(task);
     assert.strictEqual(task.status, 'ready');
     assert.strictEqual(task.assigned_to, null);
+  });
+
+  it('should clear orphaned claimed_at metadata when assigning an unclaimed worker', async () => {
+    db.registerWorker(1, '/wt-1', 'agent-1');
+    const taskId = createReadyTask({
+      subject: 'Claim metadata cleanup on assign',
+      description: 'Assignment should clear stale claimed_at rows',
+      tier: 2,
+    });
+
+    db.updateWorker(1, {
+      status: 'idle',
+      claimed_by: null,
+      claimed_at: '2026-03-16T08:00:00.000Z',
+    });
+
+    const assignment = await sendCommand('assign-task', { task_id: taskId, worker_id: 1 });
+    assert.strictEqual(assignment.ok, true);
+
+    const worker = db.getWorker(1);
+    assert.strictEqual(worker.status, 'assigned');
+    assert.strictEqual(worker.current_task_id, taskId);
+    assert.strictEqual(worker.claimed_by, null);
+    assert.strictEqual(worker.claimed_at, null);
   });
 
   it('should label default fallback assignments as fallback-default in response and logs', async () => {

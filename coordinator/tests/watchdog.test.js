@@ -148,7 +148,7 @@ describe('Stale claim release', () => {
     assert.ok(releaseLog.stale_sec > 120);
   });
 
-  it('does not release claims from stale heartbeat when claimed_at is fresh', () => {
+  it('keeps fresh claims with stale heartbeats until claimed_at exceeds timeout', () => {
     db.registerWorker(1, '/wt-1', 'agent-1');
 
     db.updateWorker(1, {
@@ -161,9 +161,26 @@ describe('Stale claim release', () => {
 
     tick(tmpDir);
 
-    const worker = db.getWorker(1);
+    let worker = db.getWorker(1);
     assert.strictEqual(worker.claimed_by, 'architect');
     assert.ok(worker.claimed_at);
+
+    db.updateWorker(1, {
+      claimed_at: new Date(Date.now() - 121 * 1000).toISOString(),
+    });
+
+    tick(tmpDir);
+
+    worker = db.getWorker(1);
+    assert.strictEqual(worker.claimed_by, null);
+    assert.strictEqual(worker.claimed_at, null);
+
+    const releaseLog = db.getLog(50, 'coordinator')
+      .filter((entry) => entry.action === 'stale_claim_released')
+      .map((entry) => JSON.parse(entry.details))
+      .find((entry) => entry.worker_id === 1);
+    assert.ok(releaseLog);
+    assert.ok(releaseLog.stale_sec > 120);
   });
 
   it('releases wedged claims with missing claimed_at and logs diagnostic reason', () => {
