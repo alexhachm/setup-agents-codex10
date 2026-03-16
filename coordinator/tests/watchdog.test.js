@@ -7,6 +7,7 @@ const fs = require('fs');
 const os = require('os');
 
 const db = require('../src/db');
+const tmux = require('../src/tmux');
 const { THRESHOLDS, tick } = require('../src/watchdog');
 
 let tmpDir;
@@ -189,6 +190,105 @@ describe('Stale claim release', () => {
       .find((entry) => entry.worker_id === 1);
     assert.ok(releaseLog);
     assert.strictEqual(releaseLog.reason, 'missing_claimed_at');
+  });
+});
+
+describe('Loop heartbeat recovery', () => {
+  it('restarts stale loops when tmux pane is still alive', () => {
+    const loopId = db.createLoop('Recover stale loop');
+    const staleHeartbeat = new Date(Date.now() - 301 * 1000).toISOString();
+    db.updateLoop(loopId, {
+      tmux_window: 'loop-1',
+      tmux_session: 'test-session',
+      last_heartbeat: staleHeartbeat,
+    });
+
+    const originalIsPaneAlive = tmux.isPaneAlive;
+    const originalKillWindow = tmux.killWindow;
+    const originalCreateWindow = tmux.createWindow;
+    const killCalls = [];
+    const createCalls = [];
+
+    tmux.isPaneAlive = (windowName) => windowName === 'loop-1';
+    tmux.killWindow = (windowName) => killCalls.push(windowName);
+    tmux.createWindow = (windowName, command, cwd) => createCalls.push({ windowName, command, cwd });
+
+    try {
+      tick(tmpDir);
+    } finally {
+      tmux.isPaneAlive = originalIsPaneAlive;
+      tmux.killWindow = originalKillWindow;
+      tmux.createWindow = originalCreateWindow;
+    }
+
+    assert.deepStrictEqual(killCalls, ['loop-1']);
+    assert.strictEqual(createCalls.length, 1);
+    assert.strictEqual(createCalls[0].windowName, 'loop-1');
+    assert.strictEqual(createCalls[0].cwd, tmpDir);
+    assert.match(createCalls[0].command, new RegExp(`\\s${loopId}\\s`));
+
+    const updatedLoop = db.getLoop(loopId);
+    assert.ok(updatedLoop.last_heartbeat);
+    assert.ok(Date.parse(updatedLoop.last_heartbeat) > Date.parse(staleHeartbeat));
+
+    const staleLog = db.getLog(100, 'coordinator')
+      .filter((entry) => entry.action === 'loop_heartbeat_stale')
+      .map((entry) => JSON.parse(entry.details))
+      .find((entry) => entry.loop_id === loopId);
+    assert.ok(staleLog);
+    assert.ok(staleLog.stale_sec > 300);
+
+    const respawnLog = db.getLog(100, 'coordinator')
+      .filter((entry) => entry.action === 'loop_sentinel_respawned')
+      .map((entry) => JSON.parse(entry.details))
+      .find((entry) => entry.loop_id === loopId);
+    assert.ok(respawnLog);
+    assert.strictEqual(respawnLog.reason, 'stale_heartbeat');
+    assert.strictEqual(respawnLog.forced_restart, true);
+  });
+
+  it('keeps pane-death recovery to a single respawn action', () => {
+    const loopId = db.createLoop('Recover dead loop pane');
+    const staleHeartbeat = new Date(Date.now() - 301 * 1000).toISOString();
+    db.updateLoop(loopId, {
+      tmux_window: 'loop-2',
+      tmux_session: 'test-session',
+      last_heartbeat: staleHeartbeat,
+    });
+
+    const originalIsPaneAlive = tmux.isPaneAlive;
+    const originalKillWindow = tmux.killWindow;
+    const originalCreateWindow = tmux.createWindow;
+    const killCalls = [];
+    const createCalls = [];
+
+    tmux.isPaneAlive = (windowName) => windowName !== 'loop-2';
+    tmux.killWindow = (windowName) => killCalls.push(windowName);
+    tmux.createWindow = (windowName, command, cwd) => createCalls.push({ windowName, command, cwd });
+
+    try {
+      tick(tmpDir);
+    } finally {
+      tmux.isPaneAlive = originalIsPaneAlive;
+      tmux.killWindow = originalKillWindow;
+      tmux.createWindow = originalCreateWindow;
+    }
+
+    assert.strictEqual(createCalls.length, 1);
+    assert.strictEqual(createCalls[0].windowName, 'loop-2');
+    assert.deepStrictEqual(killCalls, []);
+
+    const deadLog = db.getLog(100, 'coordinator')
+      .filter((entry) => entry.action === 'loop_sentinel_dead')
+      .map((entry) => JSON.parse(entry.details))
+      .find((entry) => entry.loop_id === loopId);
+    assert.ok(deadLog);
+
+    const staleLog = db.getLog(100, 'coordinator')
+      .filter((entry) => entry.action === 'loop_heartbeat_stale')
+      .map((entry) => JSON.parse(entry.details))
+      .find((entry) => entry.loop_id === loopId);
+    assert.strictEqual(staleLog, undefined);
   });
 });
 
