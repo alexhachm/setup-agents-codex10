@@ -32,3 +32,10 @@ Mistakes made by workers. Read before starting any task to avoid repeating them.
 - 2026-03-13: Before shipping a new worker task, create/switch to a task-specific branch first; reusing a merged task branch can unintentionally push new commits onto an old PR branch history.
 
 - 2026-03-13: For validation-only merge-conflict tasks, use `codex10 complete-task <worker> <task> "<result summary>"` (result-only positional arg) to avoid passing placeholder PR/branch values that may misparse.
+- 2026-03-13: Escaping backticks inside double-quoted `gh pr create --body` strings can still trigger bash command substitution in this environment; use a single-quoted heredoc/body-file with plain text instead.
+
+- 2026-03-16: `codex10 complete-task` normalizes branch metadata to canonical worker branch names (for example `agent-3`) and may warn when task-specific branch names are passed; treat this as expected and ensure the PR URL remains the authoritative shipping artifact.
+
+- 2026-03-16: In this WSL/Windows setup, `gh pr create --body-file` can fail to resolve both `/tmp/...` and `/mnt/...` paths even when files exist; use inline `--body` text to avoid path-translation failures.
+- 2026-03-16: In worker-loop runs, `codex10 my-task` can return empty while a coordinator-provided task context is still actionable; if a concrete task ID is provided, verify with `codex10 start-task <worker> <task>` before treating the cycle as idle.
+- 2026-03-16: Merger assignment-priority liveness changes need dual regression coverage (healthy allocator heartbeat still defers, stale allocator heartbeat escapes); testing only stale path can silently regress normal assignment-priority behavior.

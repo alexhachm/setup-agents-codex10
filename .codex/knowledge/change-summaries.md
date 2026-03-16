@@ -1,6 +1,186 @@
+## [46] FIX: functional conflict between tasks #19 and #20/#21 — 2026-03-16
+- Domain: coordinator-core
+- Files: coordinator/src/watchdog.js, coordinator/src/db.js, coordinator/src/schema.sql, coordinator/tests/watchdog.test.js, coordinator/tests/allocator.test.js, coordinator/tests/cli.test.js
+- What changed: Validation-only overlap checkpoint after syncing to origin/main; scoped diff for all task files was empty, so no reland edits were required. Ran tier-2 regression `cd coordinator && npm test -- tests/watchdog.test.js tests/allocator.test.js tests/cli.test.js` with 215/215 passing.
+- PR: validation-only (no code changes)
+
+## [44] FIX: functional conflict between tasks #25 and #20/#21 — 2026-03-16
+- Domain: coordinator-core
+- Files: coordinator/src/watchdog.js, coordinator/src/db.js, coordinator/src/schema.sql, coordinator/tests/watchdog.test.js, coordinator/tests/allocator.test.js, coordinator/tests/cli.test.js
+- What changed: Validation-only overlap checkpoint after syncing to origin/main; scoped diff for all task files was empty, so no reland edits were needed. Ran tier-2 regression `cd coordinator && npm test -- tests/watchdog.test.js tests/allocator.test.js tests/cli.test.js` with 212/212 passing.
+- PR: validation-only (no code changes)
+
+## [306] FIX: functional conflict between tasks #52 and #259 — 2026-03-13
+- Domain: orchestration-docs
+- Files: coordinator/src/overlay.js, .claude/commands/worker-loop.md, templates/commands/worker-loop.md, templates/worker-claude.md
+- What changed: Validation-only overlap checkpoint after syncing to origin/main; scoped diff for all four files was empty, so no reland edits were required. Ran tier-2 regression `cd coordinator && npm test -- tests/security.test.js tests/cli.test.js` with 193/193 passing.
+- PR: validation-only (no code changes)
+
+## [304] FIX: functional conflict between tasks #52 and #254 — 2026-03-13
+- Domain: orchestration-docs
+- Files: coordinator/src/overlay.js, .claude/commands/worker-loop.md, templates/commands/worker-loop.md, templates/worker-claude.md
+- What changed: Validation-only overlap checkpoint after syncing to origin/main; scoped diff for all four files was empty, so no reland edits were required. Ran tier-2 regression `cd coordinator && npm test -- tests/security.test.js tests/cli.test.js` with 193/193 passing.
+- PR: validation-only (no code changes)
+
+## [297] FIX: functional conflict between tasks #52 and #248 — 2026-03-13
+- Domain: orchestration-docs
+- Files: coordinator/src/overlay.js, .claude/commands/worker-loop.md, templates/commands/worker-loop.md, templates/worker-claude.md
+- What changed: Validation-only overlap checkpoint after syncing to origin/main; scoped diff for all four files was empty, so no reland edits were required. Ran tier-2 regression `cd coordinator && npm test -- tests/security.test.js tests/cli.test.js` with 193/193 passing.
+- PR: validation-only (no code changes)
+
+## [292] FIX: functional conflict between tasks #52 and #242 — 2026-03-13
+- Domain: orchestration-docs
+- Files: coordinator/src/overlay.js, .claude/commands/worker-loop.md, templates/commands/worker-loop.md, templates/worker-claude.md
+- What changed: Validation-only overlap checkpoint after syncing to origin/main; scoped diff for all four files was empty so no reland edits were required. Ran tier-2 regression `cd coordinator && npm test -- tests/security.test.js tests/cli.test.js` with 193/193 passing.
+- PR: validation-only (no code changes)
+
+## [274] FIX: merge conflict for request req-a0b3fcce — 2026-03-13
+- Domain: orchestration-docs
+- Files: coordinator/src/overlay.js, .claude/commands/worker-loop.md, templates/commands/worker-loop.md, templates/worker-claude.md
+- What changed: Validation-only merge-conflict checkpoint after syncing to origin/main; scoped diff for all four files was empty and no conflict markers were present. Ran tier-2 regression `cd coordinator && npm test -- tests/security.test.js tests/cli.test.js` with 193/193 passing.
+- PR: validation-only (no code changes)
+
+## [275] FIX: merge conflict for task #233 — 2026-03-13
+- Domain: coordinator-lifecycle
+- Files: coordinator/bin/mac10, coordinator/src/index.js, coordinator/src/cli-server.js, coordinator/tests/cli.test.js
+- What changed: Validation-only merge-conflict checkpoint after syncing to origin/main; scoped diff for all four files was empty and no conflict markers were present. Ran tier-2 regression `cd coordinator && npm test -- tests/cli.test.js` with 193/193 passing.
+- PR: validation-only (no code changes)
+
+## [271] FIX: merge conflict for request req-a0b3fcce — 2026-03-13
+- Domain: orchestration-docs
+- Files: coordinator/src/overlay.js, .claude/commands/worker-loop.md, templates/commands/worker-loop.md, templates/worker-claude.md
+- What changed: Validation-only merge-conflict checkpoint after syncing to origin/main; scoped diff for all four files was empty and no conflict markers were present. Ran tier-2 regression `cd coordinator && npm test -- tests/security.test.js tests/cli.test.js` with 193/193 passing.
+- PR: validation-only (no code changes)
+
+## [263] FIX: functional conflict between tasks #169 and #224 — 2026-03-13
+- Domain: coordinator-lifecycle
+- Files: coordinator/src/cli-server.js, coordinator/tests/cli.test.js
+- What changed: Validation-only overlap checkpoint after syncing to origin/main; scoped diff for both lifecycle files was empty, so no reland edits were required. Ran tier-2 regression `cd coordinator && npm test -- tests/cli.test.js` with 187/187 passing, including missing-build-script and `task.validation` fallback command-selection coverage.
+- PR: validation-only (no code changes)
+
+## [260] FIX: functional conflict between tasks #169 and #250 — 2026-03-13
+- Domain: coordinator-lifecycle
+- Files: coordinator/src/cli-server.js, coordinator/tests/cli.test.js
+- What changed: Validation-only overlap checkpoint after syncing to origin/main; scoped diff for both lifecycle files was empty, so no reland edits were required. Ran tier-2 regression `cd coordinator && npm test -- tests/cli.test.js` with 187/187 passing, including missing-build-script and task.validation fallback command-selection coverage.
+- PR: validation-only (no code changes)
+
+## [259] FIX: functional conflict between tasks #52 and #249 — 2026-03-13
+- Domain: orchestration-docs
+- Files: coordinator/src/overlay.js, .claude/commands/worker-loop.md, templates/commands/worker-loop.md, templates/worker-claude.md
+- What changed: Validation-only overlap checkpoint after syncing to origin/main; scoped diff for all four files was empty, so no reland edits were required. Ran tier-2 regression `cd coordinator && npm test -- tests/security.test.js tests/cli.test.js` with 187/187 passing.
+- PR: validation-only (no code changes)
+
+## [254] FIX: functional conflict between tasks #52 and #229 — 2026-03-13
+- Domain: orchestration-docs
+- Files: coordinator/src/overlay.js, .claude/commands/worker-loop.md, templates/commands/worker-loop.md, templates/worker-claude.md
+- What changed: Validation-only overlap checkpoint after syncing to origin/main; scoped diff for all four files was empty, so no reland edits were required. Ran tier-2 regression `cd coordinator && npm test -- tests/security.test.js tests/cli.test.js` with 187/187 passing.
+- PR: validation-only (no code changes)
+
+## [247] FIX: functional conflict between tasks #169 and #221 — 2026-03-13
+- Domain: coordinator-lifecycle
+- Files: coordinator/src/cli-server.js, coordinator/tests/cli.test.js
+- What changed: Validation-only overlap checkpoint after syncing to origin/main; scoped diff for both lifecycle files was empty, so no reland edits were required. Ran tier-2 regression `cd coordinator && npm test -- tests/cli.test.js` with 187/187 passing, including missing-build-script and task.validation fallback command-selection coverage.
+- PR: validation-only (no code changes)
+
+## [245] FIX: functional conflict between tasks #169 and #217 — 2026-03-13
+- Domain: coordinator-lifecycle
+- Files: coordinator/src/cli-server.js, coordinator/tests/cli.test.js
+- What changed: Validation-only overlap checkpoint after syncing to origin/main; scoped diff for both lifecycle files was empty, so no reland edits were required. Ran tier-2 regression `cd coordinator && npm test -- tests/cli.test.js` with 187/187 passing, including missing-build-script and task.validation fallback command-selection coverage.
+- PR: validation-only (no code changes)
+
+## [244] FIX: functional conflict between tasks #52 and #215 — 2026-03-13
+- Domain: orchestration-docs
+- Files: coordinator/src/overlay.js, .claude/commands/worker-loop.md, templates/commands/worker-loop.md, templates/worker-claude.md
+- What changed: Validation-only overlap checkpoint after syncing to origin/main; scoped diff for all four files was empty, so no reland edits were needed. Ran tier-2 regression `cd coordinator && npm test -- tests/security.test.js tests/cli.test.js` with 187/187 passing.
+- PR: validation-only (no code changes)
+
+## [229] FIX: functional conflict between tasks #52 and #109 — 2026-03-13
+- Domain: orchestration-docs
+- Files: coordinator/src/overlay.js, .claude/commands/worker-loop.md, templates/commands/worker-loop.md, templates/worker-claude.md
+- What changed: Validation-only overlap checkpoint after syncing to origin/main; scoped diff for all four files was empty, so no reland edits were required. Ran tier-2 regression `cd coordinator && npm test -- tests/security.test.js tests/cli.test.js` with 187/187 passing.
+- PR: validation-only (no code changes)
+
+## [227] FIX: functional conflict between tasks #52 and #91 — 2026-03-13
+- Domain: orchestration-docs
+- Files: coordinator/src/overlay.js, .claude/commands/worker-loop.md, templates/commands/worker-loop.md, templates/worker-claude.md
+- What changed: Validation-only overlap checkpoint after syncing to origin/main; scoped diff for all four files was empty, confirming no reland edits were needed. Ran tier-2 regression `cd coordinator && npm test -- tests/security.test.js tests/cli.test.js` with 187/187 passing, including overlap validation command-selection coverage.
+- PR: validation-only (no code changes)
+
+## [225] FIX: functional conflict between tasks #169 and #165 — 2026-03-13
+- Domain: coordinator-lifecycle
+- Files: coordinator/src/cli-server.js, coordinator/tests/cli.test.js
+- What changed: Validation-only overlap checkpoint after syncing to origin/main; scoped diff for both lifecycle files was empty, so no reland edits were required. Ran tier-2 regression `cd coordinator && npm test -- tests/cli.test.js` with 187/187 passing, including missing-build-script and `task.validation` fallback command-selection coverage.
+- PR: validation-only (no code changes)
+
+## [220] FIX: merge conflict for request req-a0b3fcce — 2026-03-13
+- Domain: orchestration-docs
+- Files: coordinator/src/overlay.js, .claude/commands/worker-loop.md, templates/commands/worker-loop.md, templates/worker-claude.md
+- What changed: Validation-only merge-conflict checkpoint after syncing to origin/main; scoped diff for all four files was empty and no conflict markers were present. Ran tier-2 regression `cd coordinator && npm test -- tests/security.test.js tests/cli.test.js` with 187/187 passing, including overlap validation command-selection coverage.
+- PR: validation-only (no code changes)
+
+## [221] FIX: functional conflict between tasks #169 and #159 — 2026-03-13
+- Domain: coordinator-lifecycle
+- Files: coordinator/src/cli-server.js, coordinator/tests/cli.test.js
+- What changed: Validation-only overlap checkpoint after syncing to origin/main; scoped diff for both lifecycle files was empty, so no reland edits were required. Ran tier-2 regression `cd coordinator && npm test -- tests/cli.test.js` with 187/187 passing, including missing-build-script and `task.validation` overlap command-selection coverage.
+- PR: validation-only (no code changes)
+
+## [207] FIX: functional conflict for task #61 (validation) — 2026-03-13
+- Domain: orchestration-docs
+- Files: coordinator/src/overlay.js, .claude/commands/worker-loop.md, templates/commands/worker-loop.md, templates/worker-claude.md
+- What changed: Validation-only overlap checkpoint after syncing to origin/main; scoped diff for all four files was empty, so no reland edits were required. Ran tier-2 regression `cd coordinator && npm test -- tests/security.test.js tests/cli.test.js` with 186/186 passing.
+- PR: validation-only (no code changes)
+
+## [204] FIX: functional conflict for task #195 (validation) — 2026-03-13
+- Domain: coordinator-lifecycle
+- Files: coordinator/src/cli-server.js, coordinator/tests/cli.test.js
+- What changed: Validation-only overlap checkpoint after syncing to origin/main; scoped diff for both lifecycle files was empty, so no reland edits were required. Ran tier-2 regression `cd coordinator && npm test -- tests/cli.test.js` with 186/186 passing, including overlap validation command-selection coverage for missing build scripts and `task.validation` fallback behavior.
+- PR: validation-only (no code changes)
+
+## [196] FIX: functional conflict for task #190 (validation) — 2026-03-13
+- Domain: coordinator-lifecycle
+- Files: coordinator/src/cli-server.js, coordinator/tests/cli.test.js
+- What changed: Validation-only overlap checkpoint after syncing to origin/main; scoped diff for both lifecycle files was empty, so no reland edits were required. Ran tier-2 regression `cd coordinator && npm test -- tests/cli.test.js` with 186/186 passing, including overlap validation command-selection coverage for missing build scripts and `task.validation` fallback behavior.
+- PR: validation-only (no code changes)
+
+## [195] FIX: functional conflict for task #187 (validation) — 2026-03-13
+- Domain: coordinator-lifecycle
+- Files: coordinator/src/cli-server.js, coordinator/tests/cli.test.js
+- What changed: Validation-only overlap checkpoint after syncing to origin/main; scoped diff for both lifecycle files was empty, so no reland edits were required. Ran tier-2 regression `cd coordinator && npm test -- tests/cli.test.js` with 186/186 passing.
+- PR: validation-only (no code changes)
+
+## [175] FIX: functional conflict chain for merged task #105 (tasks #121/#129) — 2026-03-13
+- Domain: coordinator-core
+- Files: coordinator/src/db.js, coordinator/tests/cli.test.js
+- What changed: Validation-only overlap conflict checkpoint after syncing to origin/main; scoped diff for both files was empty. Ran tier-2 regression `cd coordinator && npm test -- tests/cli.test.js` with 182/182 passing.
+- PR: validation-only (no code changes)
+
+## [174] FIX: merge conflict chain for PR #100 (tasks #159/#163/#165) — 2026-03-13
+- Domain: coordinator-lifecycle
+- Files: coordinator/src/cli-server.js, coordinator/tests/cli.test.js
+- What changed: Validation-only merge/functional conflict checkpoint after syncing to origin/main; scoped diff was empty for both lifecycle files. Ran tier-2 regression `cd coordinator && npm test -- tests/cli.test.js` with 182/182 passing.
+- PR: validation-only (no code changes)
+
+## [166] FIX: functional conflict between tasks #105 and #164 — 2026-03-13
+- Domain: coordinator-core
+- Files: coordinator/src/db.js, coordinator/tests/cli.test.js
+- What changed: Validation-only overlap check after syncing to origin/main; scoped diff was empty for both requested files, so no reland edits were needed. Ran tier-2 regression `cd coordinator && npm test -- tests/cli.test.js` with 182/182 passing.
+- PR: validation-only (no code changes)
+
+## [163] FIX: merge conflict for task #159 — 2026-03-13
+- Domain: coordinator-lifecycle
+- Files: coordinator/src/cli-server.js, coordinator/tests/cli.test.js
+- What changed: Validation-only merge-conflict resolution check after rebase; scoped files already matched origin/main with no conflict markers. Ran tier-2 coordinator suite to confirm merge readiness.
+- PR: validation-only (no code changes)
+
 ## [119] Fix createLoopRequest duplicate ordering ahead of cooldown/rate-limit — 2026-03-13
 - Domain: coordinator-core
 - Files: coordinator/src/db.js, coordinator/tests/state-machine.test.js
+
+## [146] FIX: functional conflict between task #105 and task #143 — 2026-03-13
+- Domain: coordinator-core
+- Files: coordinator/src/db.js, coordinator/tests/cli.test.js
+- What changed: Validation-only overlap check; scoped files already matched origin/main and required Tier-2 CLI regression suite passed.
+- PR: validation-only (no code changes)
 - What changed: Reordered createLoopRequest so active exact/similar duplicate detection runs before cooldown and max-per-hour suppression, added explicit dedupe reason metadata, and preserved throughput suppression for non-duplicate traffic. Added state-machine regressions covering immediate exact duplicate, near-identical active duplicate, and non-duplicate cooldown/rate-limit behavior.
 - PR: https://github.com/alexhachm/setup-agents-codex10/pull/151
 
@@ -1421,3 +1601,1419 @@ CLI TCP bridge listening on localhost:31729
 - Files: coordinator/src/cli-server.js, coordinator/tests/cli.test.js
 - What changed: Validation-only completion on synced `origin/main`; confirmed overlap-validation compatibility fix is already present (`start()` defaults `npm_config_if_present=true` only when unset) and regression coverage exists in CLI tests. Re-ran `cd coordinator && npm test` with 182/182 passing; no file edits were required.
 - PR: N/A (validation-only)
+
+## [145] FIX: functional conflict between task #52 and task #140 — 2026-03-13
+- Domain: orchestration-docs
+- Files: coordinator/src/overlay.js, .claude/commands/worker-loop.md, templates/commands/worker-loop.md, templates/worker-claude.md
+- What changed: Hardened overlay validation rendering for string/array/object payloads and documented that `tier2`/`tier3` are metadata, not executable commands. Synced worker loop/template docs for suffix-safe worker ID parsing and optional completion telemetry syntax to prevent implicit `npm run build` assumptions.
+- PR: https://github.com/alexhachm/setup-agents-codex10/pull/153
+
+## [146] FIX: functional conflict between task #105 and task #143 — 2026-03-13
+- Domain: coordinator-core
+- Files: coordinator/src/db.js, coordinator/tests/cli.test.js
+- What changed: Validation-only overlap resolution; after syncing to origin/main, scoped diff for the target files was empty and tier-2 CLI regression test passed.
+- PR: validation-only (no code changes)
+
+## [148] FIX: functional conflict after task #68 merge validation — 2026-03-13
+- Domain: coordinator-routing
+- Files: coordinator/src/cli-server.js, coordinator/tests/cli.test.js
+- What changed: Validation-only overlap reconciliation on synced `origin/main`; scoped files already matched main and no reland edits were required. Re-ran tier-2 validation with `cd coordinator && npm test -- tests/cli.test.js` and confirmed full pass (182/182).
+- PR: validation-only (no code changes)
+
+## [149] FIX: functional conflict between tasks #105 and #146 — 2026-03-13
+- Domain: coordinator-core
+- Files: coordinator/src/db.js, coordinator/tests/cli.test.js
+- What changed: Validation-only overlap conflict resolution on synced `origin/main`; scoped diff for both target files was empty, so no code edits were required. Re-ran `cd coordinator && npm test -- tests/cli.test.js` and confirmed full pass (182/182).
+- PR: validation-only (no code changes)
+
+## [147] FIX: functional conflict between task #52 and task #145 — 2026-03-13
+- Domain: orchestration-docs
+- Files: coordinator/src/overlay.js, .claude/commands/worker-loop.md, templates/commands/worker-loop.md, templates/worker-claude.md
+- What changed: Reconciled worker-loop/template/overlay validation semantics by making worker ID parsing suffix-safe, clarifying that `tier2`/`tier3` are metadata (not shell commands), and explicitly forbidding implicit `npm run build`. Hardened overlay validation rendering across string/array/object payloads so generated worker overlays preserve the same guidance.
+- PR: https://github.com/alexhachm/setup-agents-codex10/pull/154
+
+## [150] FIX: merge conflict for task #149 — 2026-03-13
+- Domain: coordinator-core
+- Files: coordinator/src/db.js, coordinator/tests/cli.test.js
+- What changed: Validation-only overlap reconciliation on synced `origin/main`; scoped diff for both task files was empty so no code edits were required. Re-ran `cd coordinator && npm test -- tests/cli.test.js` with full pass (182/182).
+- PR: validation-only (no code changes)
+
+## [148] FIX: functional conflict after task #68 merge validation — 2026-03-13
+- Domain: coordinator-routing
+- Files: coordinator/src/cli-server.js, coordinator/tests/cli.test.js
+- What changed: Validation-only overlap reconciliation on synced `origin/main`; scoped files already matched main with no reland edits required. Re-ran tier-2 validation with `cd coordinator && npm test -- tests/cli.test.js` and confirmed full pass (182/182).
+- PR: validation-only (no code changes)
+
+## [151] FIX: functional conflict chain after task #45 merge — 2026-03-13
+- Domain: coordinator-routing
+- Files: coordinator/src/cli-server.js, coordinator/tests/cli.test.js
+- What changed: Validation-only conflict resolution check; scoped files already matched origin/main with `npm_config_if_present` startup defaulting and overlap-validation coverage present. Re-ran Tier-2 validation (`cd coordinator && npm test -- tests/cli.test.js`) and confirmed 182/182 passing.
+- PR: validation-only (no code changes)
+
+## [147] FIX: functional conflict between task #52 and task #145 — 2026-03-13
+- Domain: orchestration-docs
+- Files: coordinator/src/overlay.js, .claude/commands/worker-loop.md, templates/commands/worker-loop.md, templates/worker-claude.md
+- What changed: Confirmed overlap-fix commit is present on branch and reconciles worker-loop validation semantics (tier metadata vs explicit commands), suffix-safe worker ID parsing, and overlay validation rendering across string/array/object payloads.
+- PR: https://github.com/alexhachm/setup-agents-codex10/pull/154
+- Validation: `cd coordinator && npm test -- tests/cli.test.js` passed (182/182).
+
+## [151] FIX: functional conflict chain after task #45 merge — 2026-03-13
+- Domain: coordinator-routing
+- Files: coordinator/src/cli-server.js, coordinator/tests/cli.test.js
+- What changed: Validation-only checkpoint on synced `origin/main`; confirmed overlap-build compatibility fix is present (`npm_config_if_present` defaults only when unset) and scoped files already match main. Re-ran Tier-2 validation via `cd coordinator && npm test -- tests/cli.test.js` with 182/182 passing.
+- PR: validation-only (no code changes)
+## [152] FIX: functional conflict chain after task #52 merge — 2026-03-13
+- Domain: orchestration-docs
+- Files: coordinator/src/overlay.js, .claude/commands/worker-loop.md, templates/commands/worker-loop.md, templates/worker-claude.md
+- What changed: Made overlay validation rendering resilient across string/array/object payloads and added explicit guidance that tier shorthand (`tier2`/`tier3`) is metadata only with no implicit `npm run build`. Updated worker-loop/template docs for suffix-safe worker ID parsing and aligned worker completion argument naming.
+- PR: https://github.com/alexhachm/setup-agents-codex10/pull/155
+
+## [154] FIX: merge conflict for request req-7a344cb6 — 2026-03-13
+- Domain: coordinator-core
+- Files: coordinator/src/db.js, coordinator/tests/cli.test.js
+- What changed: Validation-only overlap merge resolution; after syncing to origin/main, scoped diff was empty so no code edits were required. Re-ran tier-2 validation command and confirmed full pass (182/182).
+- PR: validation-only (no code changes)
+## [153] Sync codex10 architect-loop prompt contract + template mirror — 2026-03-13
+- Domain: orchestration-docs
+- Files: .claude/commands/architect-loop.md, templates/commands/architect-loop.md, setup.sh
+- What changed: Synced Step 3b/3c coordinator-native contract in active/template architect-loop prompts, preserved anchored Step 2a pending-row parsing, and added setup force-refresh propagation for architect-loop mirrors.
+- PR: https://github.com/alexhachm/setup-agents-codex10/pull/156
+
+## [155] FIX: functional conflict chain after task #52 merge — 2026-03-13
+- Domain: orchestration-docs
+- Files: coordinator/src/overlay.js, .claude/commands/worker-loop.md, templates/commands/worker-loop.md, templates/worker-claude.md
+- What changed: Hardened overlay validation rendering to support string/array/object payloads, including `tier2`/`tier3` metadata guidance and explicit no-implicit-build notes. Synced worker docs/templates to suffix-safe worker-id parsing and explicit validation semantics so workers run only task-provided commands.
+- PR: https://github.com/alexhachm/setup-agents-codex10/pull/157
+
+## [156] Fix OpenAI audio-token usage telemetry ingestion parity — 2026-03-13
+- Domain: coordinator-telemetry
+- Files: coordinator/bin/mac10, coordinator/src/cli-server.js, coordinator/src/schema.sql, coordinator/src/db.js, coordinator/tests/cli.test.js
+- What changed: Added canonical input/output audio token usage fields with OpenAI prompt/input and completion/output detail alias normalization parity across mac10 CLI parsing and server ingestion. Extended task persistence schema/migrations/column allowlists for audio usage columns and added CLI regressions proving canonical vs provider-alias payload parity for complete-task and fail-task flows.
+- PR: https://github.com/alexhachm/setup-agents-codex10/pull/158
+
+## [159] Guard loop-checkpoint to active loops + regression test — 2026-03-13
+- Domain: coordinator-lifecycle
+- Files: coordinator/src/cli-server.js, coordinator/tests/cli.test.js
+- What changed: Validation-only completion on synced origin/main; confirmed `loop-checkpoint` rejects non-active loop status without mutating `iteration_count`/`last_checkpoint`, and matching regression coverage exists in CLI tests. Re-ran tier-2 validation command with full pass.
+- PR: validation-only (no code changes)
+## [158] FIX: merge conflict for request req-a0b3fcce — 2026-03-13
+- Domain: orchestration-docs
+- Files: coordinator/src/overlay.js, .claude/commands/worker-loop.md, templates/commands/worker-loop.md, templates/worker-claude.md
+- What changed: Updated worker-loop docs and worker template to treat tier shorthand validation as metadata, avoid implicit npm run build assumptions, and keep complete-task syntax aligned with optional usage telemetry. Hardened overlay validation rendering across string/array/object payloads with explicit tier metadata notes.
+- PR: https://github.com/alexhachm/setup-agents-codex10/pull/159
+
+## [159] Guard loop-checkpoint to active loops + regression test — 2026-03-13
+- Domain: coordinator-lifecycle
+- Files: coordinator/src/cli-server.js, coordinator/tests/cli.test.js
+- What changed: Validation-only completion on synced `origin/main`; confirmed `loop-checkpoint` rejects non-active loop status with clear error and no mutation to `iteration_count`/`last_checkpoint` in stopped/non-active states, with regression coverage asserting this behavior.
+- PR: validation-only (no code changes)
+
+## [160] FIX: functional conflict during req-7a344cb6 integration — 2026-03-13
+- Domain: coordinator-core
+- Files: coordinator/src/db.js, coordinator/tests/cli.test.js
+- What changed: Validation-only overlap check on synced origin/main; scoped file diff was empty and Tier-2 CLI regression suite passed.
+- PR: validation-only (no code changes)
+
+## [164] FIX: functional conflict between tasks #105 and #160 — 2026-03-13
+- Domain: coordinator-core
+- Files: coordinator/src/db.js, coordinator/tests/cli.test.js
+- What changed: Validation-only resolution after syncing to origin/main; scoped file diff against origin/main was empty, so no code reland was needed. Re-ran Tier-2 regression `cd coordinator && npm test -- tests/cli.test.js` with 182/182 passing.
+- PR: validation-only (no code changes)
+
+## [162] Re-land fallback routing safeguards in cli-server + regression tests — 2026-03-13
+- Domain: coordinator-routing
+- Files: coordinator/src/cli-server.js, coordinator/tests/cli.test.js
+- What changed: Validation-only checkpoint on synced `origin/main`; confirmed fallback safeguards are already present in the active fallback path, including scalar budget parsing, budget-aware effective-class shifts, metadata-driven code-heavy escalation, and downgrade routing telemetry semantics.
+- PR: validation-only (no code changes)
+## [161] Sync Master-2 loop contract to latest triage/backlog/reset spec — 2026-03-13
+- Domain: orchestration-docs
+- Files: .claude/commands/architect-loop.md, templates/commands/architect-loop.md, .claude/docs/master-2-role.md
+- What changed: Re-synced Master-2 role guidance to the current architect-loop contract with explicit triage-first Tier handling, anchored backlog-drain parsing, Tier2 claim/create/assign/release flow, Tier3 overlap plus coordinator-native signaling semantics, and reset/adaptive-wait parity. Architect-loop runtime/template mirrors were verified in-sync.
+- PR: https://github.com/alexhachm/setup-agents-codex10/pull/160
+
+## [165] FIX: merge conflict for task #163 — 2026-03-13
+- Domain: coordinator-lifecycle
+- Files: coordinator/src/cli-server.js, coordinator/tests/cli.test.js
+- What changed: Validation-only merge-conflict resolution check after syncing to origin/main; scoped diff for target files was empty and no reland edits were required. Re-ran Tier-2 CLI tests to confirm merge readiness.
+- PR: validation-only (no code changes)
+## [167] FIX: functional conflict chain for merged task #52 — 2026-03-13
+- Domain: orchestration-docs
+- Files: coordinator/src/overlay.js, .claude/commands/worker-loop.md, templates/commands/worker-loop.md, templates/worker-claude.md
+- What changed: Hardened overlay validation rendering across string/array/object payloads and documented tier shorthand as metadata with explicit no-implicit-build guidance. Synced worker-loop/template docs for suffix-safe worker ID parsing and optional complete-task usage/result syntax parity.
+- PR: https://github.com/alexhachm/setup-agents-codex10/pull/161
+
+## [170] FIX: functional conflict/merge chain after task #166 — 2026-03-13
+- Domain: coordinator-core
+- Files: coordinator/src/db.js, coordinator/tests/cli.test.js
+- What changed: Validation-only reconciliation on synced `origin/main`; confirmed scoped diff against origin/main was empty for both files and no reland edits were required. Ran Tier-2 regression `cd coordinator && npm test -- tests/cli.test.js` with 182/182 passing.
+- PR: validation-only (no code changes)
+
+## [161] Sync Master-2 loop contract to latest triage/backlog/reset spec — 2026-03-13
+- Domain: orchestration-docs
+- Files: .claude/commands/architect-loop.md, templates/commands/architect-loop.md, .claude/docs/master-2-role.md
+- What changed: Tightened Step 2 triage-first gating, strengthened Step 2a backlog-drain control with anchored re-measure parsing and oldest-first semantics, and aligned role guidance for reset cadence/distillation without changing Tier 2/Tier 3 ordering or signaling semantics.
+- PR: local branch update (no PR created in this run)
+## [167] FIX: functional conflict chain for merged task #52 — 2026-03-13
+- Domain: orchestration-docs
+- Files: coordinator/src/overlay.js, .claude/commands/worker-loop.md, templates/commands/worker-loop.md, templates/worker-claude.md
+- What changed: Re-landed worker-loop/overlay parity for suffix-safe worker ID parsing, validation shorthand metadata guidance, and no-implicit-build instructions. Aligned completion syntax to `complete-task <worker_id> <task_id> [pr_url] [branch] [result] [--usage JSON]` across overlay and worker docs.
+- PR: https://github.com/alexhachm/setup-agents-codex10/pull/161
+
+## [168] Fix loop-sentinel ACTIVE_COUNT parsing with loop-requests --json parity — 2026-03-13
+- Domain: orchestration-scripts
+- Files: scripts/loop-sentinel.sh, .codex/scripts/loop-sentinel.sh, coordinator/bin/mac10
+- What changed: Updated both loop-sentinel ACTIVE_COUNT precheck parsers to consume `loop-requests --json` payloads and preserve the non-terminal status set (`pending`, `triaging`, `executing_tier1`, `decomposed`, `in_progress`, `integrating`). Added loop-requests payload normalization/render helper in coordinator CLI so human output and `--json` mode stay aligned for the same request list.
+- PR: https://github.com/alexhachm/setup-agents-codex10/pull/162
+
+## [169] FIX: merge conflict chain for PR #100 (tasks #159/#163/#165) — 2026-03-13
+- Domain: coordinator-lifecycle
+- Files: coordinator/src/cli-server.js, coordinator/tests/cli.test.js
+- What changed: Validation-only merge-conflict reconciliation after syncing to origin/main; scoped diff for both files was empty, so no reland edits were needed. Re-ran Tier-2 validation (`cd coordinator && npm test -- tests/cli.test.js`) with 182/182 passing.
+- PR: validation-only (no code changes)
+
+## [173] FIX: functional conflict between tasks #105 and #170 — 2026-03-13
+- Domain: coordinator-core
+- Files: coordinator/src/db.js, coordinator/tests/cli.test.js
+- What changed: Validation-only overlap resolution after sync to origin/main; scoped diff against main was empty for both target files. Ran tier-2 regression `cd coordinator && npm test -- tests/cli.test.js` with 182/182 passing.
+- PR: validation-only (no code changes)
+
+## [171] Fix partial routing_budget_state scalar fallback merge + regressions — 2026-03-13
+- Domain: coordinator-routing
+- Files: coordinator/src/cli-server.js, coordinator/src/web-server.js, coordinator/tests/cli.test.js
+- What changed: Added partial-object budget normalization so missing/null flagship fields in `routing_budget_state` are filled from scalar fallback keys without overriding explicit object values. Reused the same parser in fallback routing and `/api/status` budget snapshot logic, and added regression tests for mixed object+scalar routing/snapshot parity.
+- PR: https://github.com/alexhachm/setup-agents-codex10/pull/163
+## [172] FIX: functional conflict between tasks #52 and #167 — 2026-03-13
+- Domain: orchestration-docs
+- Files: coordinator/src/overlay.js, .claude/commands/worker-loop.md, templates/commands/worker-loop.md, templates/worker-claude.md
+- What changed: Hardened overlay validation rendering to support string/array/object payloads, including tier-metadata no-implicit-build guidance. Synced worker-loop/template docs for suffix-safe worker ID parsing and explicit validation semantics, and aligned completion syntax with optional usage telemetry.
+- PR: https://github.com/alexhachm/setup-agents-codex10/pull/164
+
+## [173] FIX: functional conflict between tasks #105 and #170 — 2026-03-13
+- Domain: coordinator-core
+- Files: coordinator/src/db.js, coordinator/tests/cli.test.js
+- What changed: Validation-only overlap resolution after syncing to origin/main; scoped diff for both target files was empty, so no reland edits were required. Ran `cd coordinator && npm test -- tests/cli.test.js` and confirmed 182/182 passing.
+- PR: validation-only (no code changes)
+
+## [174] FIX: merge conflict chain for PR #100 (tasks #159/#163/#165) — 2026-03-13
+- Domain: coordinator-lifecycle
+- Files: coordinator/src/cli-server.js, coordinator/tests/cli.test.js
+- What changed: Validation-only merge-conflict checkpoint after syncing to origin/main; scoped diff for both lifecycle files was empty. Ran Tier-2 regression `cd coordinator && npm test -- tests/cli.test.js` with 182/182 passing.
+- PR: validation-only (no code changes)
+
+## [168] Fix loop-sentinel ACTIVE_COUNT parsing with loop-requests --json parity — 2026-03-13
+- Domain: orchestration-scripts
+- Files: scripts/loop-sentinel.sh, .codex/scripts/loop-sentinel.sh, coordinator/bin/mac10
+- What changed: Hardened `loop-requests` payload normalization in CLI JSON/human modes to preserve request arrays across response shapes, and updated both sentinel ACTIVE_COUNT parsers to prefer the first non-empty machine-readable request array while keeping the active status allowlist unchanged.
+- PR: https://github.com/alexhachm/setup-agents-codex10/pull/165
+
+## [179] FIX: functional conflict for task #165 — 2026-03-13
+- Domain: coordinator-lifecycle
+- Files: coordinator/src/cli-server.js, coordinator/tests/cli.test.js
+- What changed: Validation-only overlap reconciliation after sync to origin/main; scoped diff for both lifecycle files was empty, so no reland edits were needed. Ran `cd coordinator && npm test -- tests/cli.test.js` with 184/184 passing.
+- PR: validation-only (no code changes)
+
+## [178] FIX: functional conflict for task #170 — 2026-03-13
+- Domain: coordinator-core
+- Files: coordinator/src/db.js, coordinator/tests/cli.test.js
+- What changed: Validation-only overlap reconciliation after syncing to origin/main; scoped diff for both files was empty. Ran `cd coordinator && npm test -- tests/cli.test.js` and confirmed 184/184 passing.
+- PR: validation-only (no code changes)
+
+## [176] FIX: functional conflict chain for merged task #52 (tasks #53/#57/#61) — 2026-03-13
+- Domain: orchestration-docs
+- Files: coordinator/src/overlay.js, .claude/commands/worker-loop.md, templates/commands/worker-loop.md, templates/worker-claude.md
+- What changed: Added explicit guardrails across overlay + worker docs that `tier2`/`tier3` are metadata and workers must run only task-provided commands, preventing implicit `npm run build` fallback behavior.
+- PR: https://github.com/alexhachm/setup-agents-codex10/pull/166
+
+## [177] FIX: functional conflict for task #167 — 2026-03-13
+- Domain: orchestration-docs
+- Files: coordinator/src/overlay.js, .claude/commands/worker-loop.md, templates/commands/worker-loop.md, templates/worker-claude.md
+- What changed: Validation-only reconciliation after syncing to origin/main; scoped diff for all requested files was empty, so no reland edits were needed. Ran tier-2 validation with `cd coordinator && npm test -- tests/cli.test.js` and confirmed 184/184 passing.
+- PR: validation-only (no code changes)
+
+## [181] FIX: functional conflict for task #179 — 2026-03-13
+- Domain: coordinator-lifecycle
+- Files: coordinator/src/cli-server.js, coordinator/tests/cli.test.js
+- What changed: Validation-only overlap reconciliation after syncing to origin/main; scoped diff against main was empty for both target files. Ran Tier-2 regression `cd coordinator && npm test -- tests/cli.test.js` with 184/184 passing.
+- PR: validation-only (no code changes)
+
+## [168] Fix loop-sentinel ACTIVE_COUNT parsing with loop-requests --json parity — 2026-03-13
+- Domain: orchestration-scripts
+- Files: scripts/loop-sentinel.sh, .codex/scripts/loop-sentinel.sh, coordinator/bin/mac10
+- What changed: Updated loop-request payload normalization in `coordinator/bin/mac10` to accept array and nested request-list shapes, and aligned sentinel ACTIVE_COUNT parsing to consume `loop-requests --json` payloads while counting non-terminal statuses (`pending`, `triaging`, `executing_tier1`, `decomposed`, `in_progress`, `integrating`). Verified tracked/runtime sentinel parser parity.
+- PR: https://github.com/alexhachm/setup-agents-codex10/pull/165
+
+## [178] FIX: functional conflict for task #170 — 2026-03-13
+- Domain: coordinator-core
+- Files: coordinator/src/db.js, coordinator/tests/cli.test.js
+- What changed: Validation-only overlap reconciliation after syncing to origin/main; scoped diff for both files was empty, so no reland edits were required. Ran `cd coordinator && npm test -- tests/cli.test.js` with 184/184 passing.
+- PR: validation-only (no code changes)
+
+## [183] FIX: functional conflict between tasks #169 and #181 — 2026-03-13
+- Domain: coordinator-lifecycle
+- Files: coordinator/src/cli-server.js, coordinator/tests/cli.test.js
+- What changed: Validation-only overlap checkpoint after syncing to origin/main; scoped diff for lifecycle files was empty, so no reland edits were required. Ran tier-2 regression `cd coordinator && npm test -- tests/cli.test.js` with 184/184 passing.
+- PR: validation-only (no code changes)
+
+## [182] FIX: functional conflict between tasks #52 and #177 — 2026-03-13
+- Domain: orchestration-docs
+- Files: coordinator/src/overlay.js, .claude/commands/worker-loop.md, templates/commands/worker-loop.md, templates/worker-claude.md
+- What changed: Validation-only overlap checkpoint after rebase to origin/main; scoped files already included the no-implicit-build validation guidance and completion telemetry syntax parity. Re-ran tier-2 coordinator tests (`npm test -- tests/security.test.js tests/cli.test.js`) with 184/184 passing.
+- PR: validation-only (no code changes)
+
+## [184] FIX: functional conflict between tasks #169 and #183 — 2026-03-13
+- Domain: coordinator-lifecycle
+- Files: coordinator/src/cli-server.js, coordinator/tests/cli.test.js
+- What changed: Validation-only overlap checkpoint after syncing to origin/main; scoped diff for both lifecycle files was empty. Ran tier-2 regression `cd coordinator && npm test -- tests/cli.test.js` with 184/184 passing.
+- PR: validation-only (no code changes)
+
+## [185] FIX: functional conflict between tasks #169 and #183 — 2026-03-13
+- Domain: coordinator-lifecycle
+- Files: coordinator/src/cli-server.js, coordinator/tests/cli.test.js
+- What changed: Validation-only overlap checkpoint after syncing to origin/main; scoped diff for both lifecycle files was empty, confirming no reland edits required. Ran tier-2 regression `cd coordinator && npm test -- tests/cli.test.js` with 184/184 passing, including overlap validation command-selection cases for missing build-script handling and `task.validation` fallback.
+- PR: validation-only (no code changes)
+
+## [185] FIX: functional conflict between tasks #169 and #183 — 2026-03-13
+- Domain: coordinator-lifecycle
+- Files: coordinator/src/cli-server.js, coordinator/tests/cli.test.js
+- What changed: Validation-only overlap checkpoint after syncing to origin/main; scoped diff for both files was empty. Ran tier-2 regression `cd coordinator && npm test -- tests/cli.test.js` with 184/184 passing, including overlap validation command-selection coverage.
+- PR: validation-only (no code changes)
+
+## [182] FIX: functional conflict between tasks #52 and #177 — 2026-03-13
+- Domain: orchestration-docs
+- Files: coordinator/src/overlay.js, .claude/commands/worker-loop.md, templates/commands/worker-loop.md, templates/worker-claude.md
+- What changed: Aligned worker-facing validation guidance so tier shorthand (`tier2`/`tier3`) is treated as workflow metadata and explicit task commands are required, preventing inferred `npm run build` behavior. Synced overlay protocol/default base text with worker-loop/template semantics.
+- PR: https://github.com/alexhachm/setup-agents-codex10/pull/168
+
+## [187] FIX: functional conflict for task #185 — 2026-03-13
+- Domain: coordinator-lifecycle
+- Files: coordinator/src/cli-server.js, coordinator/tests/cli.test.js
+- What changed: Validation-only overlap checkpoint after syncing to origin/main; scoped diff for both lifecycle files was empty so no reland edits were needed. Ran tier-2 regression `cd coordinator && npm test -- tests/cli.test.js` with 184/184 passing, including overlap validation command-selection behavior for missing build scripts and task.validation fallback.
+- PR: validation-only (no code changes)
+
+## [186] Add loop prompt refresh command for active loops — 2026-03-13
+- Domain: coordinator-routing
+- Files: coordinator/src/cli-server.js, coordinator/src/db.js, coordinator/bin/mac10, coordinator/tests/cli.test.js
+- What changed: Added a new `loop-set-prompt` coordinator command and CLI surface to update an existing loop prompt without recreating the loop, gated to `active`/`paused` statuses via a DB helper that reuses safe loop update logic. Added loop regressions covering prompt refresh via `loop-prompt`, state preservation (`status`, `iteration_count`, `last_checkpoint`), and rejection for disallowed loop statuses.
+- PR: https://github.com/alexhachm/setup-agents-codex10/pull/169
+
+## [188] FIX: functional conflict for task #47 — 2026-03-13
+- Domain: orchestration-docs
+- Files: coordinator/src/overlay.js, .claude/commands/worker-loop.md, templates/commands/worker-loop.md, templates/worker-claude.md
+- What changed: Validation-only functional-conflict check after syncing to origin/main; scoped diff for all four files was empty and existing content already includes suffix-safe worker ID parsing, validation-metadata-only guidance, and completion usage syntax parity.
+- PR: validation-only (no code changes)
+
+## [180] Forward-compatible usage payload handling for complete/fail task — 2026-03-13
+- Domain: coordinator-core
+- Files: coordinator/bin/mac10, coordinator/src/cli-server.js, coordinator/tests/cli.test.js
+- What changed: Updated complete-task/fail-task usage normalization to preserve unknown provider usage keys for diagnostics while keeping canonical known-field validation and persistence unchanged. Replaced unknown-key rejection regressions with success-path coverage asserting known metric persistence plus diagnostic capture of `service_tier`, `tool_use_prompt_token_count`, and `thoughts_token_count`.
+- PR: https://github.com/alexhachm/setup-agents-codex10/pull/170
+
+## [190] FIX: functional conflict for task #159 — 2026-03-13
+- Domain: coordinator-lifecycle
+- Files: coordinator/src/cli-server.js, coordinator/tests/cli.test.js
+- What changed: Validation-only overlap checkpoint after syncing to origin/main; scoped diff for both lifecycle files was empty so no reland edits were required. Ran tier-2 regression `cd coordinator && npm test -- tests/cli.test.js` with 184/184 passing, including overlap validation command-selection cases for missing build scripts and task.validation fallback behavior.
+- PR: validation-only (no code changes)
+
+## [189] FIX: merge conflict for request req-a0b3fcce — 2026-03-13
+- Domain: orchestration-docs
+- Files: coordinator/src/overlay.js, .claude/commands/worker-loop.md, templates/commands/worker-loop.md, templates/worker-claude.md
+- What changed: Validation-only merge-conflict checkpoint after syncing to origin/main; scoped diff for all four files was empty, so no reland edits were required. Ran tier-2 regression `cd coordinator && npm test -- tests/security.test.js tests/cli.test.js` with 184/184 passing.
+- PR: validation-only (no code changes)
+
+## [180] Forward-compatible usage payload handling for complete/fail task — 2026-03-13
+- Domain: coordinator-core
+- Files: coordinator/bin/mac10, coordinator/src/cli-server.js, coordinator/tests/cli.test.js
+- What changed: Implemented forward-compatible usage normalization so unknown provider keys no longer reject complete-task/fail-task payloads, while preserving known usage metric validation/persistence and adding regression tests for extra fields (`service_tier`, `tool_use_prompt_token_count`, `thoughts_token_count`).
+- PR: https://github.com/alexhachm/setup-agents-codex10/pull/170
+
+## [191] FIX: functional conflict for task #182 — 2026-03-13
+- Domain: orchestration-docs
+- Files: coordinator/src/overlay.js, .claude/commands/worker-loop.md, templates/commands/worker-loop.md, templates/worker-claude.md
+- What changed: Validation-only overlap check after syncing to origin/main; scoped files already contained no-implicit-build validation metadata guidance and completion telemetry syntax parity. Ran `cd coordinator && npm test` with 184/184 passing.
+- PR: validation-only (no code changes)
+
+## [193] FIX: merge conflict for request req-d6cdbbf7 — 2026-03-13
+- Domain: coordinator-lifecycle
+- Files: coordinator/src/cli-server.js, coordinator/tests/cli.test.js
+- What changed: Validation-only merge-conflict checkpoint after syncing to origin/main; scoped diff was empty for both lifecycle files so no reland edits were required. Ran tier-2 CLI regression `cd coordinator && npm test -- tests/cli.test.js` with 184/184 passing.
+- PR: validation-only (no code changes)
+
+## [192] FIX: merge conflict for request req-a0b3fcce (2) — 2026-03-13
+- Domain: orchestration-docs
+- Files: coordinator/src/overlay.js, .claude/commands/worker-loop.md, templates/commands/worker-loop.md, templates/worker-claude.md
+- What changed: Validation-only merge-conflict checkpoint after syncing to origin/main; scoped diff for all four files was empty, and current content already preserves suffix-safe worker-ID parsing, validation metadata/no-implicit-build guidance, and completion usage syntax parity. Ran tier-2 regression `cd coordinator && npm test -- tests/security.test.js tests/cli.test.js` with 186/186 passing.
+- PR: validation-only (no code changes)
+## [191] FIX: functional conflict for task #182 — 2026-03-13
+- Domain: orchestration-docs
+- Files: coordinator/src/overlay.js, .claude/commands/worker-loop.md, templates/commands/worker-loop.md, templates/worker-claude.md
+- What changed: Validation-only overlap check after syncing with origin/main; all scoped files already contained tier metadata/no-implicit-build guidance and required parity. Ran `cd coordinator && npm test -- tests/cli.test.js` with 186/186 passing.
+- PR: validation-only (no code changes)
+
+## [197] FIX: functional conflict for task #189 (validation) — 2026-03-13
+- Domain: orchestration-docs
+- Files: coordinator/src/overlay.js, .claude/commands/worker-loop.md, templates/commands/worker-loop.md, templates/worker-claude.md
+- What changed: Validation-only overlap checkpoint after syncing to origin/main; scoped diff for all four files was empty, so no reland edits were required. Ran tier-2 regression `cd coordinator && npm test -- tests/security.test.js tests/cli.test.js` with 186/186 passing.
+- PR: validation-only (no code changes)
+
+## [194] Sync allocator role-doc contracts with runtime mailbox and assignment behavior — 2026-03-13
+- Domain: orchestration-docs
+- Files: .codex/docs/master-3-role.md, templates/docs/master-3-role.md, .claude/docs/master-3-role.md, setup.sh
+- What changed: Removed lingering `master-3` inbox recipient wording from allocator role-doc mirrors and kept assignment workflow guidance aligned so `assign-task` remains the worker wake/spawn action without manual `launch-worker` follow-up. Preserved setup reset copy reference to `templates/docs/master-3-role.md` and clarified the force-refresh intent.
+- PR: https://github.com/alexhachm/setup-agents-codex10/pull/171
+
+## [198] FIX: functional conflict for task #188 (validation) — 2026-03-13
+- Domain: orchestration-docs
+- Files: coordinator/src/overlay.js, .claude/commands/worker-loop.md, templates/commands/worker-loop.md, templates/worker-claude.md
+- What changed: Validation-only overlap checkpoint after syncing to origin/main; scoped diff for all target files was empty and no reland edits were required. Ran tier-2 regression command (`cd coordinator && npm test -- tests/merger.test.js tests/security.test.js`) with full pass.
+- PR: validation-only (no code changes)
+
+## [200] FIX: merge conflict for request req-d6cdbbf7 (validation chain) — 2026-03-13
+- Domain: coordinator-lifecycle
+- Files: coordinator/src/cli-server.js, coordinator/tests/cli.test.js
+- What changed: Validation-only merge-conflict checkpoint after syncing to origin/main; scoped diff for both lifecycle files was empty so no reland edits were required. Ran tier-2 regression `cd coordinator && npm test -- tests/cli.test.js` with 186/186 passing.
+- PR: validation-only (no code changes)
+
+## [203] FIX: functional conflict for task #192 (validation) — 2026-03-13
+- Domain: orchestration-docs
+- Files: coordinator/src/overlay.js, .claude/commands/worker-loop.md, templates/commands/worker-loop.md, templates/worker-claude.md
+- What changed: Validation-only overlap closure after syncing to origin/main; scoped diff for all four target files was empty, so no reland edits were needed. Ran coordinator Tier-2 regressions covering overlay/domain safety and overlap validation command selection with full pass.
+- PR: validation-only (no code changes)
+
+## [205] FIX: functional conflict for task #53 (validation) — 2026-03-13
+- Domain: orchestration-docs
+- Files: coordinator/src/overlay.js, .claude/commands/worker-loop.md, templates/commands/worker-loop.md, templates/worker-claude.md
+- What changed: Validation-only overlap checkpoint after syncing to origin/main; scoped diff for all four files was empty, so no reland edits were required. Ran tier-2 regression `cd coordinator && npm test -- tests/security.test.js tests/cli.test.js` with 186/186 passing.
+- PR: validation-only (no code changes)
+
+## [201] Persist raw task usage payload JSON with mapped usage columns — 2026-03-13
+- Domain: coordinator-telemetry
+- Files: coordinator/src/schema.sql, coordinator/src/db.js, coordinator/src/cli-server.js, coordinator/src/web-server.js, gui/public/app.js
+- What changed: Added `tasks.usage_payload_json` with safe DB migration + allowlist support, persisted normalized complete/fail usage payload JSON (including unknown keys) while keeping existing `usage_*` mapped columns, and exposed parsed payload fallbacks through web/UI telemetry paths.
+- PR: https://github.com/alexhachm/setup-agents-codex10/pull/172
+
+## [208] FIX: functional conflict for task #130 (validation) — 2026-03-13
+- Domain: orchestration-docs
+- Files: coordinator/src/overlay.js, .claude/commands/worker-loop.md, templates/commands/worker-loop.md, templates/worker-claude.md
+- What changed: Validation-only overlap checkpoint after syncing to origin/main; scoped diff for all four target files was empty so no reland edits were required. Ran tier-2 regression `cd coordinator && npm test -- tests/security.test.js tests/cli.test.js` with 186/186 passing.
+- PR: validation-only (no code changes)
+
+## [209] FIX: functional conflict for task #135 (validation) — 2026-03-13
+- Domain: orchestration-docs
+- Files: coordinator/src/overlay.js, .claude/commands/worker-loop.md, templates/commands/worker-loop.md, templates/worker-claude.md
+- What changed: Validation-only overlap checkpoint after sync; scoped diff against origin/main was empty for all requested files, so no reland edits were needed. Ran `cd coordinator && npm test -- tests/security.test.js tests/cli.test.js` with 186/186 passing.
+- PR: validation-only (no code changes)
+
+## [201] Persist raw task usage payload JSON with mapped usage columns — 2026-03-13
+- Domain: coordinator-telemetry
+- Files: coordinator/src/schema.sql, coordinator/src/db.js, coordinator/src/cli-server.js, coordinator/src/web-server.js, gui/public/app.js
+- What changed: Validation-only follow-up on branch `agent-4-task-201`; confirmed `usage_payload_json` migration/allowlist persistence and parsed API/UI exposure are present, then re-ran tier-2 coordinator tests with full pass.
+- PR: https://github.com/alexhachm/setup-agents-codex10/pull/172
+
+## [209] FIX: functional conflict for task #135 (validation) — 2026-03-13
+- Domain: orchestration-docs
+- Files: coordinator/src/overlay.js, .claude/commands/worker-loop.md, templates/commands/worker-loop.md, templates/worker-claude.md
+- What changed: Validation-only overlap checkpoint after syncing to origin/main; scoped diff for all four files was empty, so no reland edits were required. Ran tier-2 regression `cd coordinator && npm test -- tests/merger.test.js tests/cli.test.js` with 186/186 passing.
+- PR: validation-only (no code changes)
+
+## [210] FIX: functional conflict between tasks #169 and #190 — 2026-03-13
+- Domain: coordinator-lifecycle
+- Files: coordinator/src/cli-server.js, coordinator/tests/cli.test.js
+- What changed: Validation-only overlap checkpoint after rebasing onto origin/main; scoped diff for both lifecycle files was empty so no reland edits were required. Ran tier-2 regression `cd coordinator && npm test -- tests/cli.test.js` and confirmed pass (186/186), including overlap command-selection coverage for missing build scripts and `task.validation` fallback behavior.
+- PR: validation-only (no code changes)
+
+## [211] FIX: functional conflict between tasks #52 and #189 — 2026-03-13
+- Domain: orchestration-docs
+- Files: coordinator/src/overlay.js, .claude/commands/worker-loop.md, templates/commands/worker-loop.md, templates/worker-claude.md
+- What changed: Validation-only overlap checkpoint after syncing to origin/main; scoped diff for all four files was empty, so no reland edits were needed. Ran tier-2 regression `cd coordinator && npm test -- tests/security.test.js tests/cli.test.js` with 186/186 passing.
+- PR: validation-only (no code changes)
+
+## [212] FIX: functional conflict between tasks #169 and #193 — 2026-03-13
+- Domain: coordinator-lifecycle
+- Files: coordinator/src/cli-server.js, coordinator/tests/cli.test.js
+- What changed: Validation-only overlap checkpoint after syncing to origin/main; scoped diff for both lifecycle files was empty, so no reland edits were required. Ran `cd coordinator && npm test -- tests/cli.test.js` with 186/186 passing, including missing-build-script and `task.validation` fallback overlap command-selection coverage.
+- PR: validation-only (no code changes)
+
+## [214] FIX: functional conflict between tasks #169 and #195 — 2026-03-13
+- Domain: coordinator-lifecycle
+- Files: coordinator/src/cli-server.js, coordinator/tests/cli.test.js
+- What changed: Validation-only overlap checkpoint after syncing to origin/main; scoped diff for both lifecycle files was empty, so no reland edits were required. Re-ran `cd coordinator && npm test -- tests/cli.test.js` with 187/187 passing, including missing-build-script and `task.validation` overlap command-selection coverage.
+- PR: validation-only (no code changes)
+
+## [215] FIX: functional conflict between tasks #52 and #197 — 2026-03-13
+- Domain: orchestration-docs
+- Files: coordinator/src/overlay.js, .claude/commands/worker-loop.md, templates/commands/worker-loop.md, templates/worker-claude.md
+- What changed: Validation-only overlap checkpoint after syncing to origin/main; scoped diff for all requested files was empty so no reland edits were required. Ran tier-2 regression `cd coordinator && npm test -- tests/security.test.js tests/cli.test.js` with 187/187 passing.
+- PR: validation-only (no code changes)
+
+## [216] Include failed-task spend in burn-rate aggregation + regression test — 2026-03-13
+- Domain: coordinator-core
+- Files: coordinator/src/db.js, coordinator/tests/state-machine.test.js
+- What changed: Updated getUsageCostBurnRate SQL to aggregate usage spend for terminal task rows with status completed or failed in both global burn windows and request-scoped totals while preserving completed_at filters. Added a state-machine regression that creates in-window completed and failed tasks with usage_cost_usd and verifies both global/request totals include both rows while rows lacking completed_at remain excluded.
+- PR: https://github.com/alexhachm/setup-agents-codex10/pull/174
+
+## [217] FIX: functional conflict between tasks #169 and #212 — 2026-03-13
+- Domain: coordinator-lifecycle
+- Files: coordinator/src/cli-server.js, coordinator/tests/cli.test.js
+- What changed: Validation-only overlap checkpoint after syncing to origin/main; scoped diff for both lifecycle files was empty, so no reland edits were needed. Ran tier-2 regression `cd coordinator && npm test -- tests/cli.test.js` with 187/187 passing, including missing-build-script and task.validation command-selection coverage.
+- PR: validation-only (no code changes)
+
+## [218] FIX: functional conflict between tasks #52 and #213 — 2026-03-13
+- Domain: orchestration-docs
+- Files: coordinator/src/overlay.js, .claude/commands/worker-loop.md, templates/commands/worker-loop.md, templates/worker-claude.md
+- What changed: Validation-only overlap checkpoint after syncing to origin/main; scoped diff for all target files was empty and existing wording already enforces validation metadata semantics (`tier2`/`tier3`) with no implicit `npm run build`. Re-ran tier-2 regression `cd coordinator && npm test -- tests/security.test.js tests/cli.test.js` with 187/187 passing.
+- PR: validation-only (no code changes)
+
+## [219] FIX: functional conflict between tasks #52 and #47 (validation) — 2026-03-13
+- Domain: orchestration-docs
+- Files: coordinator/src/overlay.js, .claude/commands/worker-loop.md, templates/commands/worker-loop.md, templates/worker-claude.md
+- What changed: Validation-only overlap checkpoint after syncing to origin/main; scoped diff for all four files was empty and existing docs/overlay already state that tier shorthand is metadata-only with no implicit `npm run build`. Ran tier-2 regression `cd coordinator && npm test -- tests/cli.test.js` with 187/187 passing.
+- PR: validation-only (no code changes)
+
+## [222] Re-land loop-set-prompt command handling for active loops — 2026-03-13
+- Domain: coordinator-lifecycle
+- Files: coordinator/bin/mac10, coordinator/src/cli-server.js, coordinator/tests/cli.test.js
+- What changed: Validation-only overlap checkpoint after syncing to origin/main; scoped diff for all three files was empty, confirming `loop-set-prompt` CLI help/dispatch and server lifecycle-guarded prompt snapshot updates are already present. Ran tier-2 regression `cd coordinator && npm test -- tests/cli.test.js` with 187/187 passing, including active/paused prompt update success and stopped-loop rejection coverage.
+- PR: validation-only (no code changes)
+
+## [221] FIX: functional conflict between tasks #169 and #159 — 2026-03-13
+- Domain: coordinator-lifecycle
+- Files: coordinator/src/cli-server.js, coordinator/tests/cli.test.js
+- What changed: Validation-only overlap checkpoint on synced origin/main; scoped diff for both lifecycle files was empty, so no reland edits were required. Ran `cd coordinator && npm test -- tests/cli.test.js` with 187/187 passing, including overlap validation command-selection coverage for missing build scripts and `task.validation` fallback behavior.
+- PR: validation-only (no code changes)
+
+## [220] FIX: merge conflict for request req-a0b3fcce — 2026-03-13
+- Domain: orchestration-docs
+- Files: coordinator/src/overlay.js, .claude/commands/worker-loop.md, templates/commands/worker-loop.md, templates/worker-claude.md
+- What changed: Validation-only overlap checkpoint after sync; scoped diff against origin/main was empty for all target files, so no reland edits were needed. Ran tier-2 regression `cd coordinator && npm test -- tests/security.test.js tests/cli.test.js` with 187/187 passing.
+- PR: validation-only (no code changes)
+
+## [223] FIX: functional conflict between tasks #169 and #214 — 2026-03-13
+- Domain: coordinator-lifecycle
+- Files: coordinator/src/cli-server.js, coordinator/tests/cli.test.js
+- What changed: Validation-only overlap checkpoint after syncing to origin/main; scoped diff for both lifecycle files was empty, so no reland edits were required. Ran tier-2 regression `cd coordinator && npm test -- tests/cli.test.js` with 187/187 passing, including missing-build-script and `task.validation` fallback command-selection coverage.
+- PR: validation-only (no code changes)
+
+## [222] Re-land loop-set-prompt command handling for active loops — 2026-03-13
+- Domain: coordinator-lifecycle
+- Files: coordinator/bin/mac10, coordinator/src/cli-server.js, coordinator/tests/cli.test.js
+- What changed: Validation-only checkpoint after sync to origin/main; scoped diff for all target files was empty. Confirmed loop-set-prompt CLI help/dispatch, server lifecycle guard with persisted prompt snapshot update, and active/stopped loop coverage are present; ran `cd coordinator && npm test -- tests/cli.test.js` with 187/187 passing.
+- PR: validation-only (no code changes)
+
+## [224] FIX: functional conflict between tasks #169 and #163 — 2026-03-13
+- Domain: coordinator-lifecycle
+- Files: coordinator/src/cli-server.js, coordinator/tests/cli.test.js
+- What changed: Validation-only overlap checkpoint after syncing to origin/main; scoped diff for both lifecycle files was empty, so no reland edits were required. Ran `cd coordinator && npm test -- tests/cli.test.js` with 187/187 passing, including missing-build-script and `task.validation` fallback overlap command-selection coverage.
+- PR: validation-only (no code changes)
+
+## [226] FIX: functional conflict between tasks #52 and #83 — 2026-03-13
+- Domain: orchestration-docs
+- Files: coordinator/src/overlay.js, .claude/commands/worker-loop.md, templates/commands/worker-loop.md, templates/worker-claude.md
+- What changed: Validation-only overlap checkpoint after syncing to origin/main; scoped diff for all four files was empty and current guidance already treats tier validation shorthand as metadata with no implicit `npm run build`. Ran tier-2 regression `cd coordinator && npm test -- tests/security.test.js tests/cli.test.js` with 187/187 passing.
+- PR: validation-only (no code changes)
+
+## [224] FIX: functional conflict between tasks #169 and #163 — 2026-03-13
+- Domain: coordinator-lifecycle
+- Files: coordinator/src/cli-server.js, coordinator/tests/cli.test.js
+- What changed: Validation-only overlap checkpoint after syncing to origin/main; scoped diff for both lifecycle files was empty, so no reland edits were required. Ran tier-2 regression `cd coordinator && npm test -- tests/cli.test.js` with 187/187 passing, including missing-build-script and `task.validation` fallback command-selection coverage.
+- PR: validation-only (no code changes)
+
+## [231] FIX: functional conflict between tasks #52 and #118 — 2026-03-13
+- Domain: orchestration-docs
+- Files: coordinator/src/overlay.js, .claude/commands/worker-loop.md, templates/commands/worker-loop.md, templates/worker-claude.md
+- What changed: Validation-only overlap checkpoint after syncing to origin/main; scoped diff for all four files was empty and existing docs/overlay already enforce validation-metadata semantics (`tier2`/`tier3`) with explicit no-implicit-`npm run build` guidance. Ran tier-2 regression `cd coordinator && npm test -- tests/security.test.js tests/cli.test.js` with 187/187 passing.
+- PR: validation-only (no code changes)
+
+## [225] FIX: functional conflict between tasks #169 and #165 — 2026-03-13
+- Domain: coordinator-lifecycle
+- Files: coordinator/src/cli-server.js, coordinator/tests/cli.test.js
+- What changed: Validation-only conflict checkpoint after syncing to origin/main; scoped diff for both files was clean so no reland edits were required. Ran `cd coordinator && npm test -- tests/cli.test.js` with 187/187 passing, including overlap command-selection coverage for missing build scripts and `task.validation` fallback behavior.
+- PR: validation-only (no code changes)
+
+## [232] FIX: functional conflict between tasks #52 and #130 — 2026-03-13
+- Domain: orchestration-docs
+- Files: coordinator/src/overlay.js, .claude/commands/worker-loop.md, templates/commands/worker-loop.md, templates/worker-claude.md
+- What changed: Validation-only overlap checkpoint after syncing to origin/main; scoped diff for all four files was empty, so no reland edits were required. Ran tier-2 regression `cd coordinator && npm test -- tests/security.test.js tests/cli.test.js` with 187/187 passing, covering missing-build-script overlap validation behavior.
+- PR: validation-only (no code changes)
+
+## [228] FIX: functional conflict between tasks #52 and #102 — 2026-03-13
+- Domain: orchestration-docs
+- Files: coordinator/src/overlay.js, .claude/commands/worker-loop.md, templates/commands/worker-loop.md, templates/worker-claude.md
+- What changed: Validation-only overlap checkpoint after syncing to origin/main; scoped diff for all requested files was empty, so no reland edits were needed. Ran tier-2 regression `cd coordinator && npm test -- tests/security.test.js tests/cli.test.js` with 187/187 passing, including overlap validation command-selection coverage.
+- PR: validation-only (no code changes)
+
+## [230] FIX: functional conflict between tasks #52 and #116 — 2026-03-13
+- Domain: orchestration-docs
+- Files: coordinator/src/overlay.js, .claude/commands/worker-loop.md, templates/commands/worker-loop.md, templates/worker-claude.md
+- What changed: Validation-only overlap checkpoint after syncing to origin/main; scoped diff for all target files was empty and existing content already enforces tier-validation metadata semantics with no implicit `npm run build`. Ran tier-2 regression `cd coordinator && npm test -- tests/security.test.js tests/cli.test.js` with 187/187 passing.
+- PR: validation-only (no code changes)
+
+## [234] FIX: functional conflict between tasks #52 and #147 — 2026-03-13
+- Domain: orchestration-docs
+- Files: coordinator/src/overlay.js, .claude/commands/worker-loop.md, templates/commands/worker-loop.md, templates/worker-claude.md
+- What changed: Validation-only overlap checkpoint after syncing to origin/main; scoped diff for all four files was empty, so no reland edits were required. Ran tier-2 regression `cd coordinator && npm test -- tests/security.test.js tests/cli.test.js` with 187/187 passing.
+- PR: validation-only (no code changes)
+
+## [233] Canonicalize coordinator project identity and block duplicate runtime starts — 2026-03-13
+- Domain: coordinator-lifecycle
+- Files: coordinator/bin/mac10, coordinator/src/index.js, coordinator/src/cli-server.js, coordinator/tests/cli.test.js
+- What changed: Validation-only closeout on synced origin/main; requested canonical path normalization, duplicate-runtime guarding, and alias-path regression coverage were already present. Re-ran Tier-2 validation command `cd coordinator && npm test` with 187/187 passing.
+- PR: validation-only (no code changes)
+
+## [228] FIX: functional conflict between tasks #52 and #102 — 2026-03-13
+- Domain: orchestration-docs
+- Files: coordinator/src/overlay.js, .claude/commands/worker-loop.md, templates/commands/worker-loop.md, templates/worker-claude.md
+- What changed: Validation-only overlap checkpoint after syncing to origin/main; scoped diff for all four files was empty, confirming no reland edits were needed. Ran tier-2 regression `cd coordinator && npm test -- tests/security.test.js tests/cli.test.js` with 187/187 passing.
+- PR: validation-only (no code changes)
+
+## [234] FIX: functional conflict between tasks #52 and #147 — 2026-03-13
+- Domain: orchestration-docs
+- Files: coordinator/src/overlay.js, .claude/commands/worker-loop.md, templates/commands/worker-loop.md, templates/worker-claude.md
+- What changed: Validation-only overlap closure after sync to origin/main; scoped diff for all four files was empty, so no reland edits were needed. Ran tier-2 regression `cd coordinator && npm test -- tests/security.test.js tests/cli.test.js` with 187/187 passing.
+- PR: validation-only (no code changes)
+
+## [236] FIX: functional conflict between tasks #52 and #198 — 2026-03-13
+- Domain: orchestration-docs
+- Files: coordinator/src/overlay.js, .claude/commands/worker-loop.md, templates/commands/worker-loop.md, templates/worker-claude.md
+- What changed: Validation-only overlap checkpoint after syncing to origin/main; scoped diff for all four files was empty, so no reland edits were required. Ran tier-2 regression `cd coordinator && npm test -- tests/security.test.js tests/cli.test.js` with 187/187 passing.
+- PR: validation-only (no code changes)
+
+## [235] FIX: functional conflict between tasks #169 and #196 — 2026-03-13
+- Domain: coordinator-lifecycle
+- Files: coordinator/src/cli-server.js, coordinator/tests/cli.test.js
+- What changed: Validation-only overlap checkpoint after syncing to origin/main; scoped diff for both lifecycle files was empty, so no reland edits were required. Ran tier-2 regression `cd coordinator && npm test -- tests/cli.test.js` with 187/187 passing, including missing-build-script and `task.validation` fallback command-selection coverage.
+- PR: validation-only (no code changes)
+
+## [237] FIX: functional conflict between tasks #169 and #199 — 2026-03-13
+- Domain: coordinator-lifecycle
+- Files: coordinator/src/cli-server.js, coordinator/tests/cli.test.js
+- What changed: Validation-only overlap checkpoint after syncing to origin/main; scoped diff for both lifecycle files was empty, so no reland edits were required. Ran tier-2 regression `cd coordinator && npm test -- tests/cli.test.js` with 187/187 passing, including missing-build-script and `task.validation` fallback command-selection coverage.
+- PR: validation-only (no code changes)
+
+## [236] FIX: functional conflict between tasks #52 and #198 — 2026-03-13
+- Domain: orchestration-docs
+- Files: coordinator/src/overlay.js, .claude/commands/worker-loop.md, templates/commands/worker-loop.md, templates/worker-claude.md
+- What changed: Validation-only overlap checkpoint after syncing to origin/main; scoped diff for all four files was empty, so no reland edits were required. Ran tier-2 regression `cd coordinator && npm test -- tests/security.test.js tests/cli.test.js` with 187/187 passing.
+- PR: validation-only (no code changes)
+
+## [239] FIX: functional conflict between tasks #169 and #204 — 2026-03-13
+- Domain: coordinator-lifecycle
+- Files: coordinator/src/cli-server.js, coordinator/tests/cli.test.js
+- What changed: Validation-only overlap checkpoint after syncing to origin/main; scoped diff for both lifecycle files was empty, so no reland edits were required. Ran `cd coordinator && npm test -- tests/cli.test.js` with 187/187 passing, including missing-build-script and `task.validation` fallback command-selection coverage.
+- PR: validation-only (no code changes)
+
+## [238] FIX: functional conflict between tasks #169 and #200 — 2026-03-13
+- Domain: coordinator-lifecycle
+- Files: coordinator/src/cli-server.js, coordinator/tests/cli.test.js
+- What changed: Validation-only overlap checkpoint after syncing to origin/main; scoped diff for both lifecycle files was empty, so no reland edits were required. Ran tier-2 regression `cd coordinator && npm test -- tests/cli.test.js` with 187/187 passing, including missing-build-script and `task.validation` fallback command-selection coverage.
+- PR: validation-only (no code changes)
+
+## [240] FIX: functional conflict between tasks #52 and #211 — 2026-03-13
+- Domain: orchestration-docs
+- Files: coordinator/src/overlay.js, .claude/commands/worker-loop.md, templates/commands/worker-loop.md, templates/worker-claude.md
+- What changed: Validation-only overlap checkpoint after syncing to origin/main; scoped diff for all four files was empty, so no reland edits were required. Ran tier-2 regression `cd coordinator && npm test -- tests/security.test.js tests/cli.test.js` with 187/187 passing.
+- PR: validation-only (no code changes)
+
+## [239] FIX: functional conflict between tasks #169 and #204 — 2026-03-13
+- Domain: coordinator-lifecycle
+- Files: coordinator/src/cli-server.js, coordinator/tests/cli.test.js
+- What changed: Validation-only overlap checkpoint after syncing to origin/main; scoped diff for both lifecycle files was empty, so no reland edits were required. Ran tier-2 regression `cd coordinator && npm test -- tests/cli.test.js` with 187/187 passing, including missing-build-script and `task.validation` fallback command-selection coverage.
+- PR: validation-only (no code changes)
+
+## [241] FIX: functional conflict between tasks #169 and #212 — 2026-03-13
+- Domain: coordinator-lifecycle
+- Files: coordinator/src/cli-server.js, coordinator/tests/cli.test.js
+- What changed: Validation-only overlap checkpoint after syncing to origin/main; scoped diff for both lifecycle files was empty, so no reland edits were required. Ran tier-2 regression `cd coordinator && npm test -- tests/cli.test.js` with 187/187 passing, including missing-build-script and `task.validation` fallback command-selection coverage.
+- PR: validation-only (no code changes)
+
+## [242] FIX: functional conflict between tasks #52 and #213 — 2026-03-13
+- Domain: orchestration-docs
+- Files: coordinator/src/overlay.js, .claude/commands/worker-loop.md, templates/commands/worker-loop.md, templates/worker-claude.md
+- What changed: Validation-only overlap checkpoint after syncing to origin/main; scoped diff for all four files was empty, so no reland edits were required. Ran tier-2 regression `cd coordinator && npm test -- tests/security.test.js tests/cli.test.js` with 187/187 passing.
+- PR: validation-only (no code changes)
+
+## [243] FIX: functional conflict between tasks #169 and #214 — 2026-03-13
+- Domain: coordinator-lifecycle
+- Files: coordinator/src/cli-server.js, coordinator/tests/cli.test.js
+- What changed: Validation-only overlap checkpoint after syncing to origin/main; scoped diff for both lifecycle files was empty, so no reland edits were required. Ran `cd coordinator && npm test -- tests/cli.test.js` with 187/187 passing, including missing-build-script and `task.validation` fallback command-selection coverage.
+- PR: validation-only (no code changes)
+
+## [246] FIX: functional conflict between tasks #52 and #218 — 2026-03-13
+- Domain: orchestration-docs
+- Files: coordinator/src/overlay.js, .claude/commands/worker-loop.md, templates/commands/worker-loop.md, templates/worker-claude.md
+- What changed: Validation-only overlap checkpoint after syncing to origin/main; scoped diff for all four files was empty, so no reland edits were required. Ran tier-2 regression `cd coordinator && npm test -- tests/security.test.js tests/cli.test.js` with 187/187 passing.
+- PR: validation-only (no code changes)
+
+## [248] FIX: functional conflict between tasks #52 and #219 — 2026-03-13
+- Domain: orchestration-docs
+- Files: coordinator/src/overlay.js, .claude/commands/worker-loop.md, templates/commands/worker-loop.md, templates/worker-claude.md
+- What changed: Validation-only overlap checkpoint after syncing to origin/main; scoped diff for all four files was empty, so no reland edits were needed. Ran tier-2 regression `cd coordinator && npm test -- tests/security.test.js tests/cli.test.js` with 187/187 passing, confirming no implicit `npm run build` regression.
+- PR: validation-only (no code changes)
+
+## [249] FIX: functional conflict between tasks #52 and #220 — 2026-03-13
+- Domain: orchestration-docs
+- Files: coordinator/src/overlay.js, .claude/commands/worker-loop.md, templates/commands/worker-loop.md, templates/worker-claude.md
+- What changed: Validation-only overlap checkpoint after syncing to origin/main; scoped diff for all four files was empty, so no reland edits were required. Ran tier-2 regression `cd coordinator && npm test -- tests/security.test.js tests/cli.test.js` with 187/187 passing.
+- PR: validation-only (no code changes)
+
+## [250] FIX: functional conflict between tasks #169 and #223 — 2026-03-13
+- Domain: coordinator-lifecycle
+- Files: coordinator/src/cli-server.js, coordinator/tests/cli.test.js
+- What changed: Validation-only overlap checkpoint after syncing to origin/main; scoped diff for both lifecycle files was empty, so no reland edits were required. Ran tier-2 regression `cd coordinator && npm test -- tests/cli.test.js` with 187/187 passing, including missing-build-script and task.validation fallback command-selection coverage.
+- PR: validation-only (no code changes)
+
+## [252] FIX: functional conflict between tasks #52 and #226 — 2026-03-13
+- Domain: orchestration-docs
+- Files: coordinator/src/overlay.js, .claude/commands/worker-loop.md, templates/commands/worker-loop.md, templates/worker-claude.md
+- What changed: Validation-only overlap checkpoint after syncing to origin/main; scoped diff for all four files was empty, so no reland edits were required. Ran tier-2 regression `cd coordinator && npm test -- tests/security.test.js tests/cli.test.js` with 187/187 passing.
+- PR: validation-only (no code changes)
+
+## [256] Fix zero-task terminal completion reporting in check-completion — 2026-03-13
+- Domain: coordinator-lifecycle
+- Files: coordinator/src/db.js, coordinator/bin/mac10, coordinator/tests/allocator.test.js
+- What changed: Updated request completion evaluation to include parent request status so zero-task requests become terminal only when request status is completed/failed, added explicit mac10 check-completion labels for those no-task terminal states, and added allocator regressions for pending/completed/failed zero-task request outcomes.
+- PR: https://github.com/alexhachm/setup-agents-codex10/pull/177
+## [255] Sync Master-2 architect loop contract across active/runtime mirrors — 2026-03-13
+- Domain: orchestration-docs
+- Files: .codex/docs/master-2-role.md, .codex/commands-codex10/architect-loop.md, .codex/commands/architect-loop.md, .claude/docs/master-2-role.md, .claude/commands/architect-loop.md
+- What changed: Re-synced codex/claude master-2 role + architect-loop mirrors to a unified codex10-only contract (triage-first flow, anchored backlog-drain parsing, Tier 1 docs-only boundaries, Tier 2 claim/create/assign/release semantics, Tier 3 coordinator-native decomposition boundaries, adaptive wait, and reset/distillation guidance). No tracked code diff was required against origin/main for the .claude mirrors in this worktree.
+- PR: validation-only (runtime mirror sync)
+
+## [257] Bound cache-hit telemetry to provider-safe 0-100% logic in dashboard/popout — 2026-03-13
+- Domain: dashboard-ui
+- Files: gui/public/app.js, gui/public/popout.js, coordinator/tests/dashboard-render.test.js
+- What changed: Updated dashboard and popout cache-hit normalization to use a provider-safe denominator when cached tokens exceed input tokens and clamp computed ratios to 0..1 before rendering percentages. Added regression coverage for Anthropic-style payloads in both dashboard and popout render harnesses while keeping normal payload expectations intact.
+- PR: https://github.com/alexhachm/setup-agents-codex10/pull/178
+## [253] FIX: functional conflict between tasks #52 and #227 — 2026-03-13
+- Domain: orchestration-docs
+- Files: coordinator/src/overlay.js, .claude/commands/worker-loop.md, templates/commands/worker-loop.md, templates/worker-claude.md
+- What changed: Validation-only overlap checkpoint after syncing to origin/main; scoped diff for all four files was empty and current guidance already treats tier validation shorthand as metadata with explicit no-implicit-`npm run build` behavior. Ran tier-2 regression `cd coordinator && npm test -- tests/security.test.js tests/cli.test.js` with 187/187 passing.
+- PR: validation-only (no code changes)
+
+
+## [251] FIX: functional conflict between tasks #169 and #224 — 2026-03-13
+- Domain: coordinator-lifecycle
+- Files: coordinator/src/cli-server.js, coordinator/tests/cli.test.js
+- What changed: Validation-only overlap checkpoint after syncing/rebasing to origin/main; scoped diff for both lifecycle files was empty, so no reland edits were required. Ran tier-2 regression `cd coordinator && npm test -- tests/cli.test.js` with 187/187 passing, including missing-build-script and task.validation fallback command-selection coverage.
+- PR: validation-only (no code changes)
+
+## [258] FIX: functional conflict between tasks #169 and #247 — 2026-03-13
+- Domain: coordinator-lifecycle
+- Files: coordinator/src/cli-server.js, coordinator/tests/cli.test.js
+- What changed: Validation-only overlap checkpoint after syncing to origin/main; scoped diff for both lifecycle files was empty, so no reland edits were required. Ran tier-2 regression `cd coordinator && npm test -- tests/cli.test.js` with 187/187 passing, including missing-build-script and `task.validation` fallback command-selection coverage.
+- PR: validation-only (no code changes)
+
+## [259] FIX: functional conflict between tasks #52 and #249 — 2026-03-13
+- Domain: orchestration-docs
+- Files: coordinator/src/overlay.js, .claude/commands/worker-loop.md, templates/commands/worker-loop.md, templates/worker-claude.md
+- What changed: Validation-only overlap checkpoint after syncing to origin/main; scoped diff for all requested files was empty, so no reland edits were required. Ran tier-2 regression `cd coordinator && npm test -- tests/security.test.js tests/cli.test.js` with 187/187 passing.
+- PR: validation-only (no code changes)
+
+## [260] FIX: functional conflict between tasks #169 and #250 — 2026-03-13
+- Domain: coordinator-lifecycle
+- Files: coordinator/src/cli-server.js, coordinator/tests/cli.test.js
+- What changed: Validation-only overlap checkpoint after syncing/rebasing to origin/main; scoped diff for both files was empty, so no reland edits were needed. Ran tier-2 regression `cd coordinator && npm test -- tests/cli.test.js` with 187/187 passing, including missing-build-script and `task.validation` fallback command-selection coverage.
+- PR: validation-only (no code changes)
+## [261] FIX: functional conflict between tasks #52 and #253 — 2026-03-13
+- Domain: orchestration-docs
+- Files: coordinator/src/overlay.js, .claude/commands/worker-loop.md, templates/commands/worker-loop.md, templates/worker-claude.md
+- What changed: Validation-only overlap checkpoint after syncing to origin/main; scoped diff for all four files was empty, so no reland edits were required. Ran tier-2 regression `cd coordinator && npm test -- tests/security.test.js tests/cli.test.js` with 187/187 passing.
+- PR: validation-only (no code changes)
+
+## [262] FIX: functional conflict between tasks #52 and #252 — 2026-03-13
+- Domain: orchestration-docs
+- Files: coordinator/src/overlay.js, .claude/commands/worker-loop.md, templates/commands/worker-loop.md, templates/worker-claude.md
+- What changed: Validation-only overlap checkpoint after syncing to origin/main; scoped diff for all four files was empty, so no reland edits were required. Ran tier-2 regression `cd coordinator && npm test -- tests/security.test.js tests/cli.test.js` with 187/187 passing.
+- PR: validation-only (no code changes)
+
+## [264] FIX: functional conflict between tasks #52 and #229 — 2026-03-13
+- Domain: orchestration-docs
+- Files: coordinator/src/overlay.js, .claude/commands/worker-loop.md, templates/commands/worker-loop.md, templates/worker-claude.md
+- What changed: Validation-only overlap checkpoint after syncing to origin/main; scoped diff for all four files was empty, so no reland edits were required. Ran tier-2 regression `cd coordinator && npm test -- tests/security.test.js tests/cli.test.js` with 187/187 passing.
+- PR: validation-only (no code changes)
+
+## [265] FIX: functional conflict between tasks #169 and #247 — 2026-03-13
+- Domain: coordinator-lifecycle
+- Files: coordinator/src/cli-server.js, coordinator/tests/cli.test.js
+- What changed: Validation-only overlap checkpoint after syncing to origin/main; scoped diff for both lifecycle files was empty, so no reland edits were required. Ran tier-2 regression `cd coordinator && npm test -- tests/cli.test.js` with 187/187 passing, including missing-build-script and task.validation fallback command-selection coverage.
+- PR: validation-only (no code changes)
+## [266] FIX: functional conflict between tasks #52 and #249 — 2026-03-13
+- Domain: orchestration-docs
+- Files: coordinator/src/overlay.js, .claude/commands/worker-loop.md, templates/commands/worker-loop.md, templates/worker-claude.md
+- What changed: Validation-only overlap checkpoint after syncing to origin/main; scoped diff for all requested files was empty, so no reland edits were required. Ran tier-2 regression `cd coordinator && npm test -- tests/security.test.js tests/cli.test.js` with 187/187 passing.
+- PR: validation-only (no code changes)
+
+## [268] FIX: functional conflict between tasks #52 and #253 — 2026-03-13
+- Domain: orchestration-docs
+- Files: coordinator/src/overlay.js, .claude/commands/worker-loop.md, templates/commands/worker-loop.md, templates/worker-claude.md
+- What changed: Validation-only overlap checkpoint after syncing to origin/main; scoped diff for all four files was empty, so no reland edits were required. Ran tier-2 regression `cd coordinator && npm test -- tests/security.test.js tests/cli.test.js` with 187/187 passing.
+- PR: validation-only (no code changes)
+
+## [267] FIX: functional conflict between tasks #169 and #250 — 2026-03-13
+- Domain: coordinator-lifecycle
+- Files: coordinator/src/cli-server.js, coordinator/tests/cli.test.js
+- What changed: Validation-only overlap checkpoint after syncing to origin/main; scoped diff for both lifecycle files was empty, so no reland edits were required. Ran tier-2 regression `cd coordinator && npm test -- tests/cli.test.js` with 187/187 passing, including missing-build-script and task.validation fallback command-selection coverage.
+- PR: validation-only (no code changes)
+
+## [273] Re-land loop lifecycle write guards for checkpoint/heartbeat — 2026-03-13
+- Domain: coordinator-lifecycle
+- Files: coordinator/src/cli-server.js, coordinator/tests/cli.test.js
+- What changed: Validation-only reland checkpoint after syncing to origin/main; scoped diff for both lifecycle files was empty and active-status guard logic plus non-active mutation regressions were already present. Re-ran Tier-2 validation `cd coordinator && npm test -- tests/cli.test.js` with 187/187 passing.
+- PR: validation-only (no code changes)
+
+## [269] FIX: functional conflict between tasks #52 and #47 — 2026-03-13
+- Domain: orchestration-docs
+- Files: coordinator/src/overlay.js, .claude/commands/worker-loop.md, templates/commands/worker-loop.md, templates/worker-claude.md
+- What changed: Validation-only overlap checkpoint after syncing to origin/main; scoped diff for all four files was empty, so no reland edits were required. Ran tier-2 regression `cd coordinator && npm test -- tests/security.test.js tests/cli.test.js` with 187/187 passing.
+- PR: validation-only (no code changes)
+
+## [270] FIX: functional conflict between tasks #169 and #159 — 2026-03-13
+- Domain: coordinator-lifecycle
+- Files: coordinator/src/cli-server.js, coordinator/tests/cli.test.js
+- What changed: Validation-only overlap checkpoint after syncing/rebasing to origin/main; scoped diff for both lifecycle files was empty, so no reland edits were required. Ran tier-2 regression `cd coordinator && npm test -- tests/cli.test.js` with 187/187 passing, including missing-build-script and `task.validation` fallback command-selection coverage.
+- PR: validation-only (no code changes)
+
+## [271] FIX: merge conflict for request req-a0b3fcce — 2026-03-13
+- Domain: orchestration-docs
+- Files: coordinator/src/overlay.js, .claude/commands/worker-loop.md, templates/commands/worker-loop.md, templates/worker-claude.md
+- What changed: Validation-only merge-conflict checkpoint after sync to origin/main; scoped diff was empty and no conflict markers were present. Ran tier-2 regression `cd coordinator && npm test -- tests/security.test.js tests/cli.test.js` with 187/187 passing.
+- PR: validation-only (no code changes)
+
+## [272] FIX: merge conflict for request req-d6cdbbf7 — 2026-03-13
+- Domain: coordinator-lifecycle
+- Files: coordinator/src/cli-server.js, coordinator/tests/cli.test.js
+- What changed: Validation-only merge-conflict checkpoint after rebasing to origin/main; scoped diff for both lifecycle files was empty, so no reland edits were required. Ran tier-2 regression `cd coordinator && npm test -- tests/cli.test.js` with 191/191 passing, including missing-build-script and task.validation fallback command-selection coverage.
+- PR: validation-only (no code changes)
+
+## [276] FIX: merge conflict for request req-d6cdbbf7 — 2026-03-13
+- Domain: coordinator-lifecycle
+- Files: coordinator/src/cli-server.js, coordinator/tests/cli.test.js
+- What changed: Validation-only merge-conflict checkpoint after syncing to origin/main; scoped diff for both lifecycle files was empty, so no reland edits were required. Ran tier-2 regression `cd coordinator && npm test -- tests/cli.test.js` with 193/193 passing, including overlap validation command-selection coverage for missing build scripts and task.validation fallback behavior.
+- PR: validation-only (no code changes)
+
+## [274] FIX: merge conflict for request req-a0b3fcce — 2026-03-13
+- Domain: orchestration-docs
+- Files: coordinator/src/overlay.js, .claude/commands/worker-loop.md, templates/commands/worker-loop.md, templates/worker-claude.md
+- What changed: Validation-only merge-conflict checkpoint after sync; scoped diff vs origin/main was empty and no conflict markers were present. Ran tier-2 regression `cd coordinator && npm test -- tests/security.test.js tests/cli.test.js` with 193/193 passing.
+- PR: validation-only (no code changes)
+
+## [276] FIX: merge conflict for request req-d6cdbbf7 — 2026-03-13
+- Domain: coordinator-lifecycle
+- Files: coordinator/src/cli-server.js, coordinator/tests/cli.test.js
+- What changed: Validation-only merge-conflict checkpoint after syncing to origin/main; scoped diff for both lifecycle files was empty, confirming missing-build-script overlap handling and task.validation fallback behavior were already present. Ran tier-2 regression `cd coordinator && npm test -- tests/cli.test.js` with 193/193 passing.
+- PR: validation-only (no code changes)
+
+## [277] FIX: repeated functional conflict chain (npm run build missing script) — 2026-03-13
+- Domain: orchestration-docs
+- Files: coordinator/src/overlay.js, .claude/commands/worker-loop.md, templates/commands/worker-loop.md, templates/worker-claude.md
+- What changed: Validation-only overlap checkpoint after sync to origin/main; scoped diff for all four files was empty so no reland edits were required. Ran tier-2 regression `cd coordinator && npm test -- tests/security.test.js tests/cli.test.js` with 193/193 passing.
+- PR: validation-only (no code changes)
+
+## [278] FIX: repeated functional conflict chain (PR #100 / missing build script validation) — 2026-03-13
+- Domain: coordinator-lifecycle
+- Files: coordinator/src/cli-server.js, coordinator/tests/cli.test.js
+- What changed: Validation-only overlap checkpoint after syncing/rebasing to origin/main; scoped diff for both lifecycle files was empty, so no reland edits were needed. Ran tier-2 regression `cd coordinator && npm test -- tests/cli.test.js` with 193/193 passing, including missing-build-script and `task.validation` fallback command-selection coverage.
+- PR: validation-only (no code changes)
+
+## [280] FIX: recurring functional-conflict merge chain (missing build script validation) — 2026-03-13
+- Domain: orchestration-docs
+- Files: coordinator/src/overlay.js, .claude/commands/worker-loop.md, templates/commands/worker-loop.md, templates/worker-claude.md
+- What changed: Validation-only overlap closure after syncing to origin/main; scoped diff for all target files was empty, so no reland edits were needed. Ran `cd coordinator && npm test -- tests/security.test.js tests/cli.test.js` with 193/193 passing.
+- PR: validation-only (no code changes)
+
+## [279] FIX: recurring PR #100 functional-conflict chain (missing build script validation) — 2026-03-13
+- Domain: coordinator-lifecycle
+- Files: coordinator/src/cli-server.js, coordinator/tests/cli.test.js
+- What changed: Validation-only functional-conflict checkpoint after syncing to origin/main; scoped diff for both lifecycle files was empty so no reland edits were needed. Ran tier-2 regression `cd coordinator && npm test -- tests/cli.test.js` with 193/193 passing, including missing-build-script and `task.validation` fallback overlap validation coverage.
+- PR: validation-only (no code changes)
+
+## [277] FIX: repeated functional conflict chain (npm run build missing script) — 2026-03-13
+- Domain: orchestration-docs
+- Files: coordinator/src/overlay.js, .claude/commands/worker-loop.md, templates/commands/worker-loop.md, templates/worker-claude.md
+- What changed: Validation-only overlap checkpoint after sync to origin/main; scoped diff for all four files was empty and existing docs already state tier shorthand is metadata only with no implicit `npm run build`. Ran tier-2 regression `cd coordinator && npm test -- tests/security.test.js tests/cli.test.js` with 193/193 passing.
+- PR: validation-only (no code changes)
+
+## [277] FIX: repeated functional conflict chain (npm run build missing script) — 2026-03-13
+- Domain: orchestration-docs
+- Files: coordinator/src/overlay.js, .claude/commands/worker-loop.md, templates/commands/worker-loop.md, templates/worker-claude.md
+- What changed: Validation-only overlap checkpoint after syncing to origin/main; scoped diff for all four files was empty, so no reland edits were required. Ran tier-2 regression `cd coordinator && npm test -- tests/security.test.js tests/cli.test.js` with 193/193 passing.
+- PR: validation-only (no code changes)
+
+## [279] FIX: recurring PR #100 functional-conflict chain (missing build script validation) — 2026-03-13
+- Domain: coordinator-lifecycle
+- Files: coordinator/src/cli-server.js, coordinator/tests/cli.test.js
+- What changed: Validation-only functional-conflict checkpoint after syncing to origin/main; scoped diff for both lifecycle files was clean, so no reland edits were needed. Ran tier-2 regression `cd coordinator && npm test -- tests/cli.test.js` with 193/193 passing, including overlap validation command-selection coverage for missing build scripts and `task.validation` fallback behavior.
+- PR: validation-only (no code changes)
+
+## [282] FIX: functional conflict between tasks #169 and #224 — 2026-03-13
+- Domain: coordinator-lifecycle
+- Files: coordinator/src/cli-server.js, coordinator/tests/cli.test.js
+- What changed: Validation-only overlap checkpoint after syncing to origin/main; scoped diff for both lifecycle files was empty, so no reland edits were required. Ran tier-2 regression `cd coordinator && npm test -- tests/cli.test.js` with 193/193 passing, including missing-build-script and `task.validation` fallback command-selection coverage.
+- PR: validation-only (no code changes)
+
+## [283] FIX: functional conflict between tasks #52 and #226 — 2026-03-13
+- Domain: orchestration-docs
+- Files: coordinator/src/overlay.js, .claude/commands/worker-loop.md, templates/commands/worker-loop.md, templates/worker-claude.md
+- What changed: Validation-only overlap checkpoint after syncing to origin/main; scoped diff for all four files was empty, so no reland edits were required. Ran tier-2 regression `cd coordinator && npm test -- tests/security.test.js tests/cli.test.js` with 193/193 passing.
+- PR: validation-only (no code changes)
+
+## [281] Harden Master-2 incremental-rescan reports-path creation across docs and setup — 2026-03-13
+- Domain: orchestration-docs
+- Files: .codex/commands-codex10/architect-loop.md, .codex/docs/master-2-role.md, templates/commands/architect-loop.md, templates/docs/master-2-role.md, setup.sh
+- What changed: Added explicit `mkdir -p` guards before incremental rescan report redirection in Master-2 command/role docs and mirror templates, and updated setup provisioning to create `.codex/state/reports` for fresh installs.
+- PR: https://github.com/alexhachm/setup-agents-codex10/pull/179
+
+## [286] FIX: functional conflict between tasks #169 and #235 — 2026-03-13
+- Domain: coordinator-lifecycle
+- Files: coordinator/src/cli-server.js, coordinator/tests/cli.test.js
+- What changed: Validation-only functional-conflict checkpoint after syncing/rebasing to origin/main; scoped diff for both files was empty so no reland edits were required. Ran tier-2 regression `cd coordinator && npm test -- tests/cli.test.js` with 193/193 passing, including missing-build-script and `task.validation` fallback command-selection coverage.
+- PR: validation-only (no code changes)
+
+## [284] FIX: functional conflict between tasks #52 and #227 — 2026-03-13
+- Domain: orchestration-docs
+- Files: coordinator/src/overlay.js, .claude/commands/worker-loop.md, templates/commands/worker-loop.md, templates/worker-claude.md
+- What changed: Validation-only overlap checkpoint after syncing to origin/main; scoped diff for all four files was empty, so no reland edits were required. Ran tier-2 regression `cd coordinator && npm test -- tests/security.test.js tests/cli.test.js` with 193/193 passing.
+- PR: validation-only (no code changes)
+
+## [285] FIX: functional conflict between tasks #52 and #229 — 2026-03-13
+- Domain: orchestration-docs
+- Files: coordinator/src/overlay.js, .claude/commands/worker-loop.md, templates/commands/worker-loop.md, templates/worker-claude.md
+- What changed: Validation-only overlap checkpoint after syncing to origin/main; scoped diff for all four files was empty, so no reland edits were required. Ran tier-2 regression `cd coordinator && npm test -- tests/security.test.js tests/cli.test.js` with 193/193 passing.
+- PR: validation-only (no code changes)
+
+## [289] FIX: functional conflict between tasks #169 and #238 — 2026-03-13
+- Domain: coordinator-lifecycle
+- Files: coordinator/src/cli-server.js, coordinator/tests/cli.test.js
+- What changed: Validation-only overlap checkpoint after syncing/rebasing to origin/main; scoped diff for both lifecycle files was empty, so no reland edits were required. Ran tier-2 regression `cd coordinator && npm test -- tests/cli.test.js` with 193/193 passing, including missing-build-script and `task.validation` fallback command-selection coverage.
+- PR: validation-only (no code changes)
+
+## [287] FIX: functional conflict between tasks #52 and #236 — 2026-03-13
+- Domain: orchestration-docs
+- Files: coordinator/src/overlay.js, .claude/commands/worker-loop.md, templates/commands/worker-loop.md, templates/worker-claude.md
+- What changed: Validation-only overlap checkpoint after syncing to origin/main; scoped diff for all four files was empty, so no reland edits were required. Ran tier-2 regression `cd coordinator && npm test -- tests/security.test.js tests/cli.test.js` with 193/193 passing.
+- PR: validation-only (no code changes)
+
+## [288] FIX: functional conflict between tasks #169 and #237 — 2026-03-13
+- Domain: coordinator-lifecycle
+- Files: coordinator/src/cli-server.js, coordinator/tests/cli.test.js
+- What changed: Validation-only overlap checkpoint after syncing to origin/main; scoped diff for both lifecycle files was empty, so no reland edits were required. Ran tier-2 regression `cd coordinator && npm test -- tests/cli.test.js` with 193/193 passing, including missing-build-script and task.validation fallback command-selection coverage.
+- PR: validation-only (no code changes)
+
+## [290] FIX: functional conflict between tasks #52 and #240 — 2026-03-13
+- Domain: orchestration-docs
+- Files: coordinator/src/overlay.js, .claude/commands/worker-loop.md, templates/commands/worker-loop.md, templates/worker-claude.md
+- What changed: Validation-only overlap checkpoint after syncing to origin/main; scoped diff for all four files was empty, so no reland edits were required. Ran tier-2 regression `cd coordinator && npm test -- tests/security.test.js tests/cli.test.js` with 193/193 passing.
+- PR: validation-only (no code changes)
+
+## [294] FIX: functional conflict between tasks #52 and #244 — 2026-03-13
+- Domain: orchestration-docs
+- Files: coordinator/src/overlay.js, .claude/commands/worker-loop.md, templates/commands/worker-loop.md, templates/worker-claude.md
+- What changed: Validation-only overlap checkpoint after syncing to origin/main; scoped diff for all four files was empty and no conflict markers were present. Ran tier-2 regression `cd coordinator && npm test -- tests/security.test.js tests/cli.test.js` with 193/193 passing.
+- PR: validation-only (no code changes)
+
+## [296] FIX: functional conflict between tasks #52 and #246 — 2026-03-13
+- Domain: orchestration-docs
+- Files: coordinator/src/overlay.js, .claude/commands/worker-loop.md, templates/commands/worker-loop.md, templates/worker-claude.md
+- What changed: Validation-only overlap checkpoint after sync to origin/main; scoped diff for all four files was empty, so no reland edits were required. Ran tier-2 regression `cd coordinator && npm test -- tests/security.test.js tests/cli.test.js` with 193/193 passing.
+- PR: validation-only (no code changes)
+## [293] FIX: functional conflict between tasks #169 and #243 — 2026-03-13
+- Domain: coordinator-lifecycle
+- Files: coordinator/src/cli-server.js, coordinator/tests/cli.test.js
+- What changed: Validation-only overlap checkpoint after syncing/rebasing to origin/main; scoped diff for both lifecycle files was empty, so no reland edits were required. Ran tier-2 regression `cd coordinator && npm test -- tests/cli.test.js` with 193/193 passing, including missing-build-script and task.validation fallback command-selection coverage.
+- PR: validation-only (no code changes)
+
+## [299] FIX: functional conflict between tasks #52 and #249 — 2026-03-13
+- Domain: orchestration-docs
+- Files: coordinator/src/overlay.js, .claude/commands/worker-loop.md, templates/commands/worker-loop.md, templates/worker-claude.md
+- What changed: Validation-only overlap checkpoint after syncing to origin/main; scoped diff for all four files was empty, so no reland edits were required. Ran tier-2 regression `cd coordinator && npm test -- tests/security.test.js tests/cli.test.js` with 193/193 passing.
+- PR: validation-only (no code changes)
+
+
+## [301] FIX: functional conflict between tasks #52 and #252 — 2026-03-13
+- Domain: orchestration-docs
+- Files: coordinator/src/overlay.js, .claude/commands/worker-loop.md, templates/commands/worker-loop.md, templates/worker-claude.md
+- What changed: Validation-only overlap closure after syncing to origin/main; scoped diff for all four files was empty, so no reland edits were required. Ran tier-2 regression `cd coordinator && npm test -- tests/security.test.js tests/cli.test.js` with 193/193 passing.
+- PR: validation-only (no code changes)
+
+## [295] FIX: functional conflict between tasks #169 and #245 — 2026-03-13
+- Domain: coordinator-lifecycle
+- Files: coordinator/src/cli-server.js, coordinator/tests/cli.test.js
+- What changed: Validation-only overlap checkpoint after syncing to origin/main; scoped diff for both lifecycle files was empty so no reland edits were required. Ran tier-2 regression `cd coordinator && npm test -- tests/cli.test.js` with 193/193 passing, including missing-build-script handling and `task.validation` fallback command-selection coverage.
+- PR: validation-only (no code changes)
+
+## [302] FIX: functional conflict between tasks #52 and #253 — 2026-03-13
+- Domain: orchestration-docs
+- Files: coordinator/src/overlay.js, .claude/commands/worker-loop.md, templates/commands/worker-loop.md, templates/worker-claude.md
+- What changed: Validation-only overlap checkpoint after syncing to origin/main; scoped diff for all four files was empty, so no reland edits were required. Ran tier-2 regression `cd coordinator && npm test -- tests/security.test.js tests/cli.test.js` with 193/193 passing.
+- PR: validation-only (no code changes)
+
+## [304] FIX: functional conflict between tasks #52 and #254 — 2026-03-13
+- Domain: orchestration-docs
+- Files: coordinator/src/overlay.js, .claude/commands/worker-loop.md, templates/commands/worker-loop.md, templates/worker-claude.md
+- What changed: Validation-only overlap checkpoint after syncing to origin/main; scoped diff for all four files was empty so no reland edits were needed. Ran tier-2 regression `cd coordinator && npm test -- tests/security.test.js tests/cli.test.js` with 193/193 passing.
+- PR: validation-only (no code changes)
+
+## [309] Recover stale decomposed zero-task requests in watchdog — 2026-03-13
+- Domain: coordinator-routing
+- Files: coordinator/src/watchdog.js, coordinator/tests/watchdog.test.js
+- What changed: Added watchdog recovery for requests stuck in decomposed with zero tasks for >=15 minutes, failing them with explicit diagnostics, `stale_decomposition_recovered` telemetry, and `master-1` request_failed notification. Wired recovery into startup sweep and periodic ticks, and added regressions for stale/recent/has-task decomposition scenarios.
+- PR: https://github.com/alexhachm/setup-agents-codex10/pull/180
+
+## [298] FIX: functional conflict between tasks #169 and #247 — 2026-03-13
+- Domain: coordinator-lifecycle
+- Files: coordinator/src/cli-server.js, coordinator/tests/cli.test.js
+- What changed: Validation-only overlap checkpoint after syncing/rebasing to origin/main; scoped diff for both lifecycle files was empty, so no reland edits were required. Ran tier-2 regression `cd coordinator && npm test -- tests/cli.test.js` with 193/193 passing, including missing-build-script and `task.validation` fallback command-selection coverage.
+- PR: validation-only (no code changes)
+
+## [302] FIX: functional conflict between tasks #52 and #253 — 2026-03-13
+- Domain: orchestration-docs
+- Files: coordinator/src/overlay.js, .claude/commands/worker-loop.md, templates/commands/worker-loop.md, templates/worker-claude.md
+- What changed: Validation-only overlap checkpoint after syncing to origin/main; scoped diff for all four files was empty, so no reland edits were required. Ran tier-2 regression `cd coordinator && npm test -- tests/security.test.js tests/cli.test.js` with 193/193 passing.
+- PR: validation-only (no code changes)
+
+## [300] FIX: functional conflict between tasks #169 and #250 — 2026-03-13
+- Domain: coordinator-lifecycle
+- Files: coordinator/src/cli-server.js, coordinator/tests/cli.test.js
+- What changed: Validation-only overlap checkpoint after syncing/rebasing to origin/main; scoped diff for both lifecycle files was empty, so no reland edits were required. Ran tier-2 regression `cd coordinator && npm test -- tests/cli.test.js` with 193/193 passing, including missing-build-script and `task.validation` fallback command-selection coverage.
+- PR: validation-only (no code changes)
+
+## [303] FIX: functional conflict between tasks #169 and #251 — 2026-03-13
+- Domain: coordinator-lifecycle
+- Files: coordinator/src/cli-server.js, coordinator/tests/cli.test.js
+- What changed: Validation-only overlap checkpoint after syncing to origin/main; scoped diff for both lifecycle files was empty, so no reland edits were required. Ran tier-2 regression `cd coordinator && npm test -- tests/cli.test.js` with 193/193 passing, including missing-build-script and `task.validation` fallback command-selection coverage.
+- PR: validation-only (no code changes)
+## [306] FIX: functional conflict between tasks #52 and #259 — 2026-03-13
+- Domain: orchestration-docs
+- Files: coordinator/src/overlay.js, .claude/commands/worker-loop.md, templates/commands/worker-loop.md, templates/worker-claude.md
+- What changed: Validation-only overlap checkpoint after syncing to origin/main; scoped diff for all four files was empty, so no reland edits were required. Ran tier-2 regression `cd coordinator && npm test -- tests/security.test.js tests/cli.test.js` with 193/193 passing.
+- PR: validation-only (no code changes)
+
+
+## [310] Resync template architect-loop to codex10 coordinator-native contract — 2026-03-13
+- Domain: orchestration-docs
+- Files: templates/commands/architect-loop.md
+- What changed: Added Tier-2 coordinator `triage` call after captured `task_id` assignment, and tightened Tier-3 decomposition wording to require captured task IDs for dependency wiring while keeping coordinator-native `triage/create-task/check-overlaps` flow with no manual queue/signal handoffs.
+- PR: local completion (no PR created in this environment)
+## [305] FIX: functional conflict between tasks #169 and #258 — 2026-03-13
+- Domain: coordinator-lifecycle
+- Files: coordinator/src/cli-server.js, coordinator/tests/cli.test.js
+- What changed: Validation-only overlap checkpoint after syncing/rebasing to origin/main; scoped diff for both lifecycle files was clean, so no reland edits were required. Ran tier-2 regression `cd coordinator && npm test -- tests/cli.test.js` with 193/193 passing, including missing-build-script and `task.validation` fallback command-selection coverage.
+- PR: validation-only (no code changes)
+
+## [307] FIX: functional conflict between tasks #169 and #260 — 2026-03-13
+- Domain: coordinator-lifecycle
+- Files: coordinator/src/cli-server.js, coordinator/tests/cli.test.js
+- What changed: Validation-only overlap checkpoint after syncing/rebasing to origin/main; scoped diff for both lifecycle files was clean, so no reland edits were required. Ran tier-2 regression `cd coordinator && npm test -- tests/cli.test.js` with 193/193 passing, confirming missing-build-script and `task.validation` fallback command-selection behavior already on main.
+- PR: validation-only (no code changes)
+
+## [305] FIX: functional conflict between tasks #169 and #258 — 2026-03-13
+- Domain: coordinator-lifecycle
+- Files: coordinator/src/cli-server.js, coordinator/tests/cli.test.js
+- What changed: Validation-only overlap checkpoint after syncing to origin/main; scoped diff for both lifecycle files was empty, so no reland edits were required. Ran tier-2 regression `cd coordinator && npm test -- tests/cli.test.js` with 193/193 passing, including missing-build-script and `task.validation` fallback command-selection coverage.
+- PR: validation-only (no code changes)
+
+## [307] FIX: functional conflict between tasks #169 and #260 — 2026-03-13
+- Domain: coordinator-lifecycle
+- Files: coordinator/src/cli-server.js, coordinator/tests/cli.test.js
+- What changed: Validation-only overlap checkpoint after syncing to origin/main; scoped diff for both lifecycle files was empty, so no reland edits were required. Ran tier-2 regression `cd coordinator && npm test -- tests/cli.test.js` with 193/193 passing, including missing-build-script and `task.validation` fallback command-selection coverage.
+- PR: validation-only (no code changes)
+
+## [308] Preserve unknown nested usage-detail keys in complete/fail task normalization — 2026-03-13
+- Domain: coordinator-routing
+- Files: coordinator/src/cli-server.js, coordinator/bin/mac10, coordinator/tests/cli.test.js
+- What changed: Updated usage normalization for complete/fail task paths to preserve unmapped nested counters from usage detail objects and cache_creation in usage_payload_json while keeping canonical usage_* mappings unchanged. Added regression coverage for complete-task and fail-task nested-key passthrough and aligned cache_creation validation expectations.
+- PR: https://github.com/alexhachm/setup-agents-codex10/pull/182
+
+## [17] FIX: Define browser-offload task model and persistence — task failure — 2026-03-16
+- Domain: coordinator-core
+- Files: coordinator/src/schema.sql, coordinator/src/db.js, coordinator/tests/state-machine.test.js
+- What changed: Added persisted browser-offload task model columns in schema + idempotent DB migrations, exposed/allowed browser-offload fields in task updates, and introduced guarded browser-offload lifecycle transition logic. Added state-machine regression tests for valid lifecycle progression and invalid transition rejection.
+- PR: https://github.com/alexhachm/setup-agents-codex10/pull/183
+
+## [16] Fix: URGENT unblock heartbeat-timeout dependency deadlock — 2026-03-16
+- Domain: coordinator-core
+- Files: coordinator/src/db.js, coordinator/src/cli-server.js, coordinator/bin/mac10, coordinator/tests/state-machine.test.js, coordinator/tests/cli.test.js
+- What changed: Added a new `replan-dependency` flow (DB helper + RPC + CLI) to atomically replace blocked dependency IDs across pending tasks and auto-promote newly unblocked tasks. Added regression coverage for successful/global + request-scoped replanning and failed-replacement validation.
+- PR: https://github.com/alexhachm/setup-agents-codex10/pull/184
+
+## [16] Fix: URGENT unblock heartbeat-timeout dependency deadlock (revalidation) — 2026-03-16
+- Domain: unset
+- Files: coordinator/src/db.js, coordinator/src/cli-server.js, coordinator/bin/mac10, coordinator/tests/state-machine.test.js, coordinator/tests/cli.test.js
+- What changed: Validation-only follow-up on synced origin/main with zero branch diff; re-ran coordinator regression suite and confirmed the dependency-replanning unblock path remains healthy.
+- PR: https://github.com/alexhachm/setup-agents-codex10/pull/184
+## [18] BUG audit follow-up: worker orchestration instability runtime fixes — 2026-03-16
+- Domain: unset
+- Files: scripts/worker-sentinel.sh, .claude/scripts/worker-sentinel.sh, coordinator/src/cli-server.js, coordinator/src/db.js, coordinator/tests/cli.test.js, coordinator/tests/web-server.test.js
+- What changed: Worker sentinel now captures assignment ownership context and sends periodic heartbeats while codex is running, reset-worker now skips context-less/stale resets to prevent assignment clobber races, and request creation rejects autonomous command-template payloads from entering the user request queue. Added CLI/Web regressions for reset ownership and prompt-payload rejection paths.
+- PR: https://github.com/alexhachm/setup-agents-codex10/pull/185
+
+## [18] BUG audit follow-up runtime stability hardening (validation) — 2026-03-16
+- Domain: coordinator-lifecycle
+- Files: scripts/worker-sentinel.sh, .claude/scripts/worker-sentinel.sh, coordinator/src/cli-server.js, coordinator/src/db.js, coordinator/tests/cli.test.js, coordinator/tests/web-server.test.js
+- What changed: Validation-only rerun confirmed the durable fixes are present on origin/main: sentinel ownership context passthrough, sentinel-managed heartbeat loop during codex exec, stale reset ownership guards, and autonomous command-template request rejection.
+- PR: https://github.com/alexhachm/setup-agents-codex10/pull/185
+
+## [18] Fix: worker orchestration instability follow-up (validation) — 2026-03-16
+- Domain: unset
+- Files: scripts/worker-sentinel.sh, coordinator/src/cli-server.js, coordinator/src/db.js, coordinator/tests/cli.test.js, coordinator/tests/web-server.test.js
+- What changed: Validation-only rerun after syncing to origin/main; verified sentinel ownership-context passthrough, sentinel-managed heartbeat loop during codex exec, reset-worker stale ownership guards, and autonomous command-template request rejection are present in tracked runtime paths. Ran Tier-2 regression `cd coordinator && npm test -- tests/cli.test.js tests/web-server.test.js` with 203/203 passing.
+- PR: validation-only (no code changes)
+
+## [6] Implement quota-aware batching data model and planner primitives — 2026-03-16
+- Domain: coordinator-core
+- Files: coordinator/src/schema.sql, coordinator/src/db.js, coordinator/src/index.js
+- What changed: Added persisted research intent/batch/stage/fanout schema with dedupe, scoring, batch cap, timeout, and retry-aware partial-failure state. Added DB APIs for enqueue+dedupe, deterministic candidate scoring, bounded staged plan materialization, stage/fanout status transitions, and coordinator planner tick startup/shutdown wiring.
+- PR: https://github.com/alexhachm/setup-agents-codex10/pull/186
+
+## [18] Fix: BUG audit follow-up runtime stability hardening — 2026-03-16
+- Domain: unset
+- Files: scripts/worker-sentinel.sh, .claude/scripts/worker-sentinel.sh, coordinator/src/cli-server.js, coordinator/src/db.js, coordinator/tests/cli.test.js, coordinator/tests/web-server.test.js
+- What changed: Validation-only checkpoint on synced origin/main confirmed all requested safeguards are present: sentinel ownership-context reset passthrough, sentinel-managed heartbeat loop during codex execution, reset-worker stale context/race guards, and autonomous command-template payload rejection for request creation.
+- PR: validation-only (no code changes)
+
+## [10] Design project-memory persistence model and snapshot index — 2026-03-16
+- Domain: coordinator-core
+- Files: coordinator/src/schema.sql, coordinator/src/db.js, coordinator/src/index.js
+- What changed: Added persistent project-memory tables for versioned snapshots, snapshot index, insight artifacts, and lineage links with request/task/run lineage, dedupe fingerprints, relevance scores, and governance metadata fields. Added DB APIs to create/query snapshots/artifacts/lineage, idempotent schema migration wiring, and startup snapshot-index rebuild.
+- PR: https://github.com/alexhachm/setup-agents-codex10/pull/187
+
+## [10] Design project-memory persistence model and snapshot index (validation) — 2026-03-16
+- Domain: coordinator-core
+- Files: coordinator/src/schema.sql, coordinator/src/db.js, coordinator/src/index.js
+- What changed: Validation-only checkpoint after syncing to origin/main confirmed scoped diff is empty for all task files. Ran Tier-3 equivalents with `cd coordinator && npm test -- tests/state-machine.test.js` (203/203 pass) and `cd coordinator && node --test tests/web-server.test.js` (5/5 pass).
+- PR: validation-only (no code changes)
+
+## [20] Add claimed_at lifecycle support for worker claims — 2026-03-16
+- Domain: coordinator-core
+- Files: coordinator/src/schema.sql, coordinator/src/db.js, coordinator/src/cli-server.js
+- What changed: Added `workers.claimed_at` to schema plus idempotent migration/backfill for existing DBs, then updated worker claim/release and claim-clearing lifecycle paths so `claimed_by` and `claimed_at` are always updated together.
+- PR: https://github.com/alexhachm/setup-agents-codex10/pull/188
+
+## [19] Fix stale worker-claim expiry to use claim timestamp — 2026-03-16
+- Domain: coordinator-core
+- Files: coordinator/src/watchdog.js, coordinator/src/db.js, coordinator/src/schema.sql, coordinator/tests/watchdog.test.js, coordinator/tests/allocator.test.js, coordinator/tests/cli.test.js, coordinator/src/cli-server.js
+- What changed: Added persisted `workers.claimed_at` support (schema + migration + allowlist), switched claim/release to atomically manage claim timestamps, and updated stale-claim cleanup to expire strictly by claim age while safely skipping legacy null-claim rows. Added watchdog/allocator/CLI regressions to prove fresh claims survive old heartbeats until timeout and claim metadata clears consistently across assignment/reset/repair flows.
+- PR: https://github.com/alexhachm/setup-agents-codex10/pull/189
+
+## [21] Use claimed_at for stale-claim expiry in watchdog — 2026-03-16
+- Domain: coordinator-routing
+- Files: coordinator/src/watchdog.js, coordinator/tests/watchdog.test.js
+- What changed: `releaseStaleClaimsCheck` now evaluates claim staleness from `workers.claimed_at` only and releases malformed claimed rows missing `claimed_at` with diagnostic reason `missing_claimed_at`. Added watchdog regression coverage for stale/fresh `claimed_at` behavior and missing-`claimed_at` wedge recovery.
+- PR: https://github.com/alexhachm/setup-agents-codex10/pull/190
+
+## [19] Fix stale worker-claim expiry to use claim timestamp — 2026-03-16
+- Domain: coordinator-core
+- Files: coordinator/src/watchdog.js, coordinator/tests/watchdog.test.js, coordinator/tests/allocator.test.js, coordinator/tests/cli.test.js
+- What changed: Switched watchdog stale-claim release to evaluate `claimed_at` age only (with legacy null-safe skip), and ensured watchdog reset paths clear `claimed_by`/`claimed_at` consistently. Added regressions proving fresh claims survive old-heartbeat workers until claim timeout and claim metadata lifecycle remains consistent across allocator and CLI reset/repair paths.
+- PR: https://github.com/alexhachm/setup-agents-codex10/pull/189
+
+## [22] Add regression coverage for fresh-claim/old-heartbeat race — 2026-03-16
+- Domain: coordinator-tests
+- Files: coordinator/src/watchdog.js, coordinator/tests/allocator.test.js, coordinator/tests/watchdog.test.js, coordinator/tests/cli.test.js
+- What changed: Added watchdog stale-claim race regressions proving fresh claims survive stale heartbeats until claim-age timeout, and extended allocator/CLI claim lifecycle coverage to assert claimed_at is set on claim and cleared on release, assignment cleanup, and reset flows.
+- PR: https://github.com/alexhachm/setup-agents-codex10/pull/191
+
+## [23] FIX: functional conflict between tasks #20 and #19 — 2026-03-16
+- Domain: coordinator-core
+- Files: coordinator/src/watchdog.js, coordinator/src/db.js, coordinator/src/schema.sql, coordinator/tests/watchdog.test.js, coordinator/tests/allocator.test.js, coordinator/tests/cli.test.js
+- What changed: Validation-only overlap resolution after syncing to origin/main; scoped diff for all task files was empty, so no reland edits were required. Ran `cd coordinator && npm test -- tests/watchdog.test.js tests/allocator.test.js tests/cli.test.js` with 203/203 passing.
+- PR: validation-only (no code changes)
+
+## [25] FIX: functional conflict between tasks #20 and #19 — 2026-03-16
+- Domain: coordinator-core
+- Files: coordinator/src/watchdog.js, coordinator/src/db.js, coordinator/src/schema.sql, coordinator/tests/watchdog.test.js, coordinator/tests/allocator.test.js, coordinator/tests/cli.test.js
+- What changed: Validation-only overlap checkpoint after syncing to origin/main; scoped diff for all six files was empty, so no reland edits were required. Ran `cd coordinator && npm test -- tests/watchdog.test.js tests/allocator.test.js tests/cli.test.js` with 206/206 passing.
+- PR: validation-only (no code changes)
+
+## [25] FIX: functional conflict between tasks #20 and #19 — 2026-03-16
+- Domain: coordinator-core
+- Files: coordinator/src/watchdog.js, coordinator/src/db.js, coordinator/src/schema.sql, coordinator/tests/watchdog.test.js, coordinator/tests/allocator.test.js, coordinator/tests/cli.test.js
+- What changed: Validation-only overlap checkpoint after syncing to origin/main; scoped diff across all task files was empty, so no reland edits were required. Re-ran `cd coordinator && npm test -- tests/watchdog.test.js tests/allocator.test.js tests/cli.test.js` and confirmed 206/206 passing.
+- PR: validation-only (no code changes)
+
+## [26] FIX: merge conflict for task #22 — 2026-03-16
+- Domain: coordinator-tests
+- Files: coordinator/tests/allocator.test.js, coordinator/tests/watchdog.test.js, coordinator/tests/cli.test.js
+- What changed: Validation-only overlap resolution after syncing/rebasing to origin/main; scoped diff for all three test files was empty and no conflict markers were present. Ran `cd coordinator && npm test -- tests/allocator.test.js tests/watchdog.test.js tests/cli.test.js` with 206/206 passing.
+- PR: validation-only (no code changes)
+
+## [27] Implement filtered inbox consume semantics in DB and CLI server — 2026-03-16
+- Domain: coordinator-routing
+- Files: coordinator/src/db.js, coordinator/src/cli-server.js
+- What changed: Added optional inbox/inbox-block filters (`type`, `request_id`) in CLI command schemas/handlers and forwarded them to DB lookup APIs. Extended `checkMail` consume semantics so only rows matching recipient + optional filters are consumed, preventing filtered waits from consuming unrelated mailbox messages.
+- PR: https://github.com/alexhachm/setup-agents-codex10/pull/192
+
+## [28] Add inbox filter flags to mac10 CLI and clarify architect wait docs — 2026-03-16
+- Domain: coordinator-surface
+- Files: coordinator/bin/mac10, .codex/docs/master-2-role.md, templates/docs/master-2-role.md
+- What changed: Extended `mac10 inbox` option parsing/usage to support `--type` and `--request-id`, forwarding both filters in blocking and non-blocking inbox payloads. Updated architect role docs to use filtered blocking waits for clarification responses scoped by request ID.
+- PR: https://github.com/alexhachm/setup-agents-codex10/pull/193
+
+## [29] Add regression tests for filtered inbox consume behavior — 2026-03-16
+- Domain: coordinator-tests
+- Files: coordinator/tests/cli.test.js
+- What changed: Added CLI-server integration regressions for inbox type filtering, payload.request_id filtering, and inbox-block filtered wait semantics; assertions verify only matched messages are consumed and unrelated messages remain unconsumed.
+- PR: https://github.com/alexhachm/setup-agents-codex10/pull/194
+
+## [30] FIX: functional conflict between tasks #25 and #20/#21 — 2026-03-16
+- Domain: coordinator-core
+- Files: coordinator/src/watchdog.js, coordinator/src/db.js, coordinator/src/schema.sql, coordinator/tests/watchdog.test.js, coordinator/tests/allocator.test.js, coordinator/tests/cli.test.js
+- What changed: Validation-only overlap checkpoint after syncing to origin/main; scoped diff for all six files was empty so no reland edits were required. Ran tier-2 regression `cd coordinator && npm test -- tests/watchdog.test.js tests/allocator.test.js tests/cli.test.js` with 206/206 passing.
+- PR: validation-only (no code changes)
+
+## [31] FIX: merge conflict for task #22 — 2026-03-16
+- Domain: coordinator-tests
+- Files: coordinator/tests/allocator.test.js, coordinator/tests/watchdog.test.js, coordinator/tests/cli.test.js
+- What changed: Validation-only merge-conflict checkpoint after syncing to origin/main; scoped diff for all three files was empty and no conflict markers were present. Ran `cd coordinator && npm test -- tests/allocator.test.js tests/watchdog.test.js tests/cli.test.js` with 206/206 passing.
+- PR: validation-only (no code changes)
+
+## [30] FIX: functional conflict between tasks #25 and #20/#21 — 2026-03-16
+- Domain: coordinator-core
+- Files: coordinator/src/watchdog.js, coordinator/src/db.js, coordinator/src/schema.sql, coordinator/tests/watchdog.test.js, coordinator/tests/allocator.test.js, coordinator/tests/cli.test.js
+- What changed: Validation-only overlap checkpoint after syncing with origin/main; scoped diff for all task files was empty, so no reland edits were required. Ran `cd coordinator && npm test -- tests/watchdog.test.js tests/allocator.test.js tests/cli.test.js` and confirmed 206/206 passing.
+- PR: validation-only (no code changes)
+
+## [32] Enforce claimed-worker guard in assign-task and add regression tests — 2026-03-16
+- Domain: coordinator-routing
+- Files: coordinator/src/cli-server.js, coordinator/tests/cli.test.js, coordinator/tests/security.test.js
+- What changed: Added claim-aware rollback handling in `assign-task` so claim-related spawn rollback returns `worker_claimed` and preserves live `claimed_by`/`claimed_at` metadata. Expanded CLI/security regressions to verify deterministic rejection of claimed idle workers and metadata integrity across both direct rejection and rollback paths.
+- PR: https://github.com/alexhachm/setup-agents-codex10/pull/195
+
+## [32] Enforce claimed-worker guard in assign-task and add regression tests — 2026-03-16
+- Domain: coordinator-routing
+- Files: coordinator/src/cli-server.js, coordinator/tests/cli.test.js, coordinator/tests/security.test.js
+- What changed: Validation-only completion on synced origin/main; deterministic claimed-worker assignment rejection and rollback claim-preservation coverage were already present. Verified impacted suites via `cd coordinator && npm test -- tests/cli.test.js tests/security.test.js` (211/211 passing).
+- PR: validation-only (no code changes)
+
+## [33] FIX: functional conflict between tasks #23 and #25 — 2026-03-16
+- Domain: coordinator-core
+- Files: coordinator/src/watchdog.js, coordinator/src/db.js, coordinator/src/schema.sql, coordinator/tests/watchdog.test.js, coordinator/tests/allocator.test.js, coordinator/tests/cli.test.js
+- What changed: Validation-only overlap resolution after syncing to origin/main; scoped diff for all six files was empty so no reland edits were required. Ran tier-2 regression `cd coordinator && npm test -- tests/watchdog.test.js tests/allocator.test.js tests/cli.test.js` with 211/211 passing, including overlap validation command-selection coverage for missing build scripts.
+- PR: validation-only (no code changes)
+
+## [34] FIX: merge conflict for task #22 — 2026-03-16
+- Domain: coordinator-tests
+- Files: coordinator/tests/allocator.test.js, coordinator/tests/watchdog.test.js, coordinator/tests/cli.test.js
+- What changed: Validation-only merge-conflict checkpoint after syncing to origin/main; scoped diff for all three files was empty and no conflict markers were present. Ran `cd coordinator && npm test -- tests/allocator.test.js tests/watchdog.test.js tests/cli.test.js` with 211/211 passing.
+- PR: validation-only (no code changes)
+
+## [35] Guard request completion on task-level all_done in merger — 2026-03-16
+- Domain: coordinator-routing
+- Files: coordinator/src/merger.js, coordinator/tests/state-machine.test.js
+- What changed: Updated merge-driven request completion in merger to require both all merge rows merged and `db.checkRequestCompletion(requestId).all_done` before completion side effects. Added a state-machine regression that proves merge success does not complete a request or emit `request_completed` while a sibling task is unfinished, and does complete once all tasks are done.
+- PR: https://github.com/alexhachm/setup-agents-codex10/pull/196
+
+## [36] FIX: merge conflict for task #22 — 2026-03-16
+- Domain: coordinator-tests
+- Files: coordinator/tests/allocator.test.js, coordinator/tests/watchdog.test.js, coordinator/tests/cli.test.js
+- What changed: Validation-only merge-conflict checkpoint after rebasing onto origin/main; scoped diff for all three files was empty and no conflict markers were present. Ran tier-2 regression `cd coordinator && npm test -- tests/allocator.test.js tests/watchdog.test.js tests/cli.test.js` with 212/212 passing.
+- PR: validation-only (no code changes)
+
+## [37] FIX: merge conflict for task #22 — 2026-03-16
+- Domain: coordinator-tests
+- Files: coordinator/tests/allocator.test.js, coordinator/tests/watchdog.test.js, coordinator/tests/cli.test.js
+- What changed: Validation-only merge-conflict checkpoint after syncing to origin/main; scoped diff for all three files was empty and conflict-marker scan found none. Ran tier-2 validation `cd coordinator && npm test -- tests/allocator.test.js tests/watchdog.test.js tests/cli.test.js` with 212/212 passing.
+- PR: validation-only (no code changes)
+
+## [37] FIX: merge conflict for task #22 — 2026-03-16
+- Domain: coordinator-tests
+- Files: coordinator/tests/allocator.test.js, coordinator/tests/watchdog.test.js, coordinator/tests/cli.test.js
+- What changed: Validation-only merge-conflict checkpoint after rebasing onto origin/main; scoped diff for all three files was empty and no conflict markers were present. Ran tier-2 regression `cd coordinator && npm test -- tests/allocator.test.js tests/watchdog.test.js tests/cli.test.js` with 212/212 passing.
+- PR: validation-only (no code changes)
+
+## [39] FIX: functional conflict between tasks #30 and #20/#21 — 2026-03-16
+- Domain: coordinator-core
+- Files: coordinator/src/watchdog.js, coordinator/src/db.js, coordinator/src/schema.sql, coordinator/tests/watchdog.test.js, coordinator/tests/allocator.test.js, coordinator/tests/cli.test.js
+- What changed: Validation-only overlap checkpoint after syncing to origin/main; scoped diff for all six files was empty, so no reland edits were required. Ran `cd coordinator && npm test -- tests/watchdog.test.js tests/allocator.test.js tests/cli.test.js` with 212/212 passing.
+- PR: validation-only (no code changes)
+
+## [38] FIX: functional conflict between tasks #19 and #20/#21 — 2026-03-16
+- Domain: coordinator-core
+- Files: coordinator/src/watchdog.js, coordinator/src/db.js, coordinator/src/schema.sql, coordinator/tests/watchdog.test.js, coordinator/tests/allocator.test.js, coordinator/tests/cli.test.js
+- What changed: Validation-only overlap resolution after sync/rebase; scoped diff against origin/main was empty for all task files, so no reland edits were required. Ran `cd coordinator && npm test -- tests/watchdog.test.js tests/allocator.test.js tests/cli.test.js` with 212/212 passing.
+- PR: validation-only (no code changes)
+
+## [41] FIX: functional conflict between tasks #38 and #20/#21 — 2026-03-16
+- Domain: coordinator-core
+- Files: coordinator/src/watchdog.js, coordinator/src/db.js, coordinator/src/schema.sql, coordinator/tests/watchdog.test.js, coordinator/tests/allocator.test.js, coordinator/tests/cli.test.js
+- What changed: Validation-only overlap conflict resolution after syncing to origin/main; scoped diff for all task files was empty so no reland edits were required. Ran tier-2 regression `cd coordinator && npm test -- tests/watchdog.test.js tests/allocator.test.js tests/cli.test.js` with 212/212 passing.
+- PR: validation-only (no code changes)
+
+## [42] FIX: merge conflict for task #22 — 2026-03-16
+- Domain: coordinator-tests
+- Files: coordinator/tests/allocator.test.js, coordinator/tests/watchdog.test.js, coordinator/tests/cli.test.js
+- What changed: Validation-only merge-conflict checkpoint after syncing to origin/main; scoped diff for all three test files was empty and no conflict markers were present. Ran `cd coordinator && npm test -- tests/allocator.test.js tests/watchdog.test.js tests/cli.test.js` with 212/212 passing.
+- PR: validation-only (no code changes)
+
+## [24] Recover decomposed requests stuck at zero tasks — 2026-03-16
+- Domain: coordinator-routing
+- Files: coordinator/src/watchdog.js, coordinator/src/db.js, coordinator/src/cli-server.js, coordinator/tests/watchdog.test.js, coordinator/tests/allocator.test.js
+- What changed: Added shared stale decomposed 0-task recovery in DB, wired it into watchdog and check-completion/integrate guards, and moved Tier-3 allocator wakeup mail to first task creation to avoid decomposed 0/0 stalls. Added watchdog and allocator regressions covering stale 0/0 recovery and non-regression when tasks already exist.
+- PR: https://github.com/alexhachm/setup-agents-codex10/pull/197
+
+## [47] Sync codex10 allocator prompt mirrors to mailbox-driven wake flow — 2026-03-16
+- Domain: orchestration-scripts
+- Files: .codex/commands-codex10/allocate-loop.md, templates/commands/allocate-loop.md, scripts/launch-agent.sh, setup.sh
+- What changed: Synced the runtime codex10 allocator mirror to canonical mailbox-driven wake/completion handling, moved launch prompt resolution to prefer codex10 mirrors/templates ahead of legacy commands, and copied commands-codex10 mirrors into worktrees during setup to avoid stale allocator instructions in fresh sessions.
+- PR: https://github.com/alexhachm/setup-agents-codex10/pull/198
+
+## [40] FIX: functional conflict between tasks #39 and #20/#21 — 2026-03-16
+- Domain: coordinator-core
+- Files: coordinator/src/watchdog.js, coordinator/src/db.js, coordinator/src/schema.sql, coordinator/tests/watchdog.test.js, coordinator/tests/allocator.test.js, coordinator/tests/cli.test.js
+- What changed: Validation-only overlap checkpoint after syncing to origin/main; scoped diff for all six files was empty so no reland edits were required. Ran `cd coordinator && npm test -- tests/watchdog.test.js tests/allocator.test.js tests/cli.test.js` with 212/212 passing.
+- PR: validation-only (no code changes)
+
+## [43] FIX: functional conflict between tasks #23 and #20/#21 — 2026-03-16
+- Domain: coordinator-core
+- Files: coordinator/src/watchdog.js, coordinator/src/db.js, coordinator/src/schema.sql, coordinator/tests/watchdog.test.js, coordinator/tests/allocator.test.js, coordinator/tests/cli.test.js
+- What changed: Validation-only overlap checkpoint after syncing to origin/main; scoped diff for all requested files was empty so no reland edits were needed. Ran tier-2 regression `cd coordinator && npm test -- tests/watchdog.test.js tests/allocator.test.js tests/cli.test.js` with 212/212 passing.
+- PR: validation-only (no code changes)
+
+## [47] Sync codex10 allocator prompt mirrors to mailbox-driven wake flow — 2026-03-16
+- Domain: orchestration-scripts
+- Files: .codex/commands-codex10/allocate-loop.md, templates/commands/allocate-loop.md, scripts/launch-agent.sh, setup.sh
+- What changed: Validation-only checkpoint after syncing to origin/main; scoped files already matched canonical allocator mailbox contract (mailbox `inbox allocator --block`, supported allocator event names, and assignment-first completion behavior), and setup/launch wiring already pointed to refreshed codex10 allocator mirrors.
+- PR: validation-only (no code changes)
+
+## [45] FIX: functional conflict between tasks #30 and #20/#21 — 2026-03-16
+- Domain: coordinator-core
+- Files: coordinator/src/watchdog.js, coordinator/src/db.js, coordinator/src/schema.sql, coordinator/tests/watchdog.test.js, coordinator/tests/allocator.test.js, coordinator/tests/cli.test.js
+- What changed: Validation-only overlap checkpoint after syncing to origin/main; scoped diff for all task files was empty, so no reland edits were required. Ran tier-2 regression `cd coordinator && npm test -- tests/watchdog.test.js tests/allocator.test.js tests/cli.test.js` with 215/215 passing.
+- PR: validation-only (no code changes)
+
+## [48] FIX: functional conflict between tasks #45 and #20/#21 — 2026-03-16
+- Domain: coordinator-core
+- Files: coordinator/src/watchdog.js, coordinator/src/db.js, coordinator/src/schema.sql, coordinator/tests/watchdog.test.js, coordinator/tests/allocator.test.js, coordinator/tests/cli.test.js
+- What changed: Validation-only overlap checkpoint after syncing to origin/main; scoped diff for all task files was empty, so no reland edits were required. Ran tier-2 regression `cd coordinator && npm test -- tests/watchdog.test.js tests/allocator.test.js tests/cli.test.js` with 215/215 passing.
+- PR: validation-only (no code changes)
+
+## [49] FIX: functional conflict between tasks #46 and #20/#21 — 2026-03-16
+- Domain: coordinator-core
+- Files: coordinator/src/watchdog.js, coordinator/src/db.js, coordinator/src/schema.sql, coordinator/tests/watchdog.test.js, coordinator/tests/allocator.test.js, coordinator/tests/cli.test.js
+- What changed: Validation-only overlap checkpoint after syncing to origin/main; scoped diff for all task files was empty, so no reland edits were required. Ran tier-2 regression `cd coordinator && npm test -- tests/watchdog.test.js tests/allocator.test.js tests/cli.test.js` with 215/215 passing.
+- PR: validation-only (no code changes)
+
+## [50] FIX: merge conflict for task #22 — 2026-03-16
+- Domain: coordinator-tests
+- Files: coordinator/tests/allocator.test.js, coordinator/tests/watchdog.test.js, coordinator/tests/cli.test.js
+- What changed: Validation-only merge-conflict checkpoint after rebasing onto origin/main; scoped diff for all three files was empty and conflict-marker scan returned none. Ran `cd coordinator && npm test -- tests/allocator.test.js tests/watchdog.test.js tests/cli.test.js` with 215/215 passing.
+- PR: validation-only (no code changes)
+
+## [50] FIX: merge conflict for task #22 — 2026-03-16
+- Domain: coordinator-tests
+- Files: coordinator/tests/allocator.test.js, coordinator/tests/watchdog.test.js, coordinator/tests/cli.test.js
+- What changed: Validation-only merge-conflict checkpoint after syncing with origin/main; scoped diff for all three files was empty and no conflict markers were present. Ran `cd coordinator && npm test -- tests/allocator.test.js tests/watchdog.test.js tests/cli.test.js` with 215/215 passing.
+- PR: validation-only (no code changes)
+
+## [51] Fix overlap merge validation command selection and missing-build handling — 2026-03-16
+- Domain: coordinator-routing
+- Files: coordinator/src/merger.js, coordinator/tests/merger.test.js
+- What changed: Validation-only checkpoint after syncing to origin/main; overlap validation already selected task-specific/default available commands and skipped absent build/test scripts without false functional-conflict failures. Re-ran `cd coordinator && npm test -- tests/merger.test.js` with 215/215 passing.
+- PR: validation-only (no code changes)
+
+## [52] FIX: merge conflict for task #22 — 2026-03-16
+- Domain: coordinator-tests
+- Files: coordinator/tests/allocator.test.js, coordinator/tests/watchdog.test.js, coordinator/tests/cli.test.js
+- What changed: Validation-only merge-conflict checkpoint after rebasing to origin/main; scoped diff for all three files was empty and no conflict markers were present. Ran tier-2 regression `cd coordinator && npm test -- tests/allocator.test.js tests/watchdog.test.js tests/cli.test.js` with 215/215 passing.
+- PR: validation-only (no code changes)
+
+## [53] FIX: merge conflict for task #51 — 2026-03-16
+- Domain: coordinator-routing
+- Files: coordinator/src/merger.js, coordinator/tests/merger.test.js
+- What changed: Validation-only merge-conflict checkpoint after syncing to origin/main; scoped files already matched main with no conflict markers, so no reland edits were needed. Ran tier-2 validation `cd coordinator && npm test -- tests/merger.test.js` with 215/215 passing.
+- PR: validation-only (no code changes)
+
+## [54] FIX: merge conflict for task #51 — 2026-03-16
+- Domain: coordinator-routing
+- Files: coordinator/src/merger.js, coordinator/tests/merger.test.js
+- What changed: Validation-only merge-conflict checkpoint after syncing to origin/main; scoped files already matched main with no conflict markers, so no reland edits were required. Ran tier-2 scoped validation `cd coordinator && node --test tests/merger.test.js` with 18/18 passing.
+- PR: validation-only (no code changes)
+
+## [55] FIX: merge conflict for task #22 — 2026-03-16
+- Domain: coordinator-tests
+- Files: coordinator/tests/allocator.test.js, coordinator/tests/watchdog.test.js, coordinator/tests/cli.test.js
+- What changed: Validation-only merge-conflict checkpoint after syncing to origin/main; scoped diff for all three files was empty and no conflict markers were present. Ran tier-2 regression `cd coordinator && npm test -- tests/allocator.test.js tests/watchdog.test.js tests/cli.test.js` with 215/215 passing.
+- PR: validation-only (no code changes)
+
+## [54] FIX: merge conflict for task #51 — 2026-03-16
+- Domain: coordinator-routing
+- Files: coordinator/src/merger.js, coordinator/tests/merger.test.js
+- What changed: Validation-only merge-conflict checkpoint after syncing to origin/main; scoped diff for both files was empty and no conflict markers were present. Ran `cd coordinator && npm test -- tests/merger.test.js` with 215/215 passing.
+- PR: validation-only (no code changes)
+
+## [55] FIX: merge conflict for task #22 — 2026-03-16
+- Domain: coordinator-tests
+- Files: coordinator/tests/allocator.test.js, coordinator/tests/watchdog.test.js, coordinator/tests/cli.test.js
+- What changed: Validation-only merge-conflict checkpoint after syncing to origin/main; scoped diff for all three files was empty and no conflict markers were present. Ran tier-2 regression `cd coordinator && npm test -- tests/allocator.test.js tests/watchdog.test.js tests/cli.test.js` with 215/215 passing.
+- PR: validation-only (no code changes)
+
+## [58] Prevent merger starvation when assignment deferral has no progress — 2026-03-16
+- Domain: coordinator-routing
+- Files: coordinator/src/merger.js, coordinator/tests/merger.test.js
+- What changed: Added allocator-loop heartbeat staleness as an additional assignment-priority starvation escape in merger deferral, while keeping bounded deferral behavior for healthy assignment activity. Expanded merger regressions to prove healthy-loop deferral still holds and stale-loop + ready-task conditions now continue merge processing.
+- PR: https://github.com/alexhachm/setup-agents-codex10/pull/199
+
+## [58] Prevent merger starvation when assignment deferral has no progress — 2026-03-16
+- Domain: coordinator-routing
+- Files: coordinator/src/merger.js, coordinator/tests/merger.test.js
+- What changed: Confirmed branch commit `356b7f8` implements assignment-priority liveness escape via bounded deferrals, merge-age budget, and allocator-loop heartbeat staleness detection while preserving healthy-loop deferral behavior. Revalidated regression coverage for stale-loop and healthy-loop paths in `tests/merger.test.js` and full tier-2 suite pass.
+- PR: https://github.com/alexhachm/setup-agents-codex10/pull/199
+
+## [59] Replace hardcoded npm run build validation defaults in architect instruction mirrors — 2026-03-16
+- Domain: orchestration-scripts
+- Files: .codex/commands/architect-loop.md, .codex/commands-codex10/architect-loop.md, templates/commands/architect-loop.md, .codex/docs/master-2-role.md, templates/docs/master-2-role.md
+- What changed: Updated Tier-1 guidance to script-aware validation (test-first with script fallback) and replaced hardcoded Tier-2/Tier-3 create-task validation examples with dynamic validation_field generation so defaults no longer force missing build scripts.
+- PR: https://github.com/alexhachm/setup-agents-codex10/pull/200
+
+## [59] Replace hardcoded npm run build validation defaults in architect instruction mirrors — 2026-03-16
+- Domain: orchestration-scripts
+- Files: .codex/commands/architect-loop.md, .codex/commands-codex10/architect-loop.md, templates/commands/architect-loop.md, .codex/docs/master-2-role.md, templates/docs/master-2-role.md
+- What changed: Confirmed mirrors use script-aware validation defaults (test-first with build fallback) and removed any hardcoded default validation:"npm run build" guidance in Tier-1/Tier-2/Tier-3 instructions.
+- PR: https://github.com/alexhachm/setup-agents-codex10/pull/200
+
+## [60] Add loop-refresh-prompt command for active loop prompt updates — 2026-03-16
+- Domain: coordinator-routing
+- Files: coordinator/src/cli-server.js, coordinator/bin/mac10, coordinator/src/db.js, coordinator/tests/cli.test.js
+- What changed: Added explicit `loop-refresh-prompt` command wiring in CLI server and mac10 CLI, backed by a DB helper that reuses loop `updateLoop` flow for active loops. Added regressions for successful refresh + immediate `loop-prompt` readback and missing-loop/invalid-input errors.
+- PR: https://github.com/alexhachm/setup-agents-codex10/pull/201
+
+## [60] Add loop-refresh-prompt command for active loop prompt updates — 2026-03-16
+- Domain: coordinator-routing
+- Files: coordinator/src/cli-server.js, coordinator/bin/mac10, coordinator/src/db.js, coordinator/tests/cli.test.js
+- What changed: Validation-only checkpoint on existing task branch/PR. Confirmed `loop-refresh-prompt` command wiring, DB update flow via `updateLoop`, CLI exposure/help output, lifecycle logging, immediate `loop-prompt` readback behavior, and error handling tests are present and passing.
+- PR: https://github.com/alexhachm/setup-agents-codex10/pull/201
+
+## [61] Fix loop sentinel active-request precheck to use JSON-aware active count — 2026-03-16
+- Domain: orchestration-scripts
+- Files: scripts/loop-sentinel.sh, .codex/scripts/loop-sentinel.sh
+- What changed: Replaced precheck counting with JSON-driven request status parsing from loop-requests --json using first-non-empty request-array selection, and added explicit safe fallback/backoff when command/JSON parsing fails so sentinel never treats parser failure as zero active work. Verified runtime repros for two integrating requests and invalid JSON fallback.
+- PR: https://github.com/alexhachm/setup-agents-codex10/pull/new/agent-2-task61-loop-sentinel-active-count
+
+## [61] Fix loop sentinel active-request precheck to use JSON-aware active count — 2026-03-16
+- Domain: orchestration-scripts
+- Files: scripts/loop-sentinel.sh, .codex/scripts/loop-sentinel.sh
+- What changed: Hardened ACTIVE_COUNT precheck by requiring non-empty JSON command output and explicit JSON parse/shape validation before counting active request statuses. Empty/invalid/unavailable JSON now maps to explicit error states that force deterministic backoff instead of incorrectly proceeding with ACTIVE_COUNT=0.
+- PR: https://github.com/alexhachm/setup-agents-codex10/compare/main...agent-2-task61-loop-sentinel-active-count
+
+## [63] Add stale-loop recovery for stale heartbeat in watchdog monitorLoops — 2026-03-16
+- Domain: coordinator-routing
+- Files: coordinator/src/watchdog.js, coordinator/tests/watchdog.test.js
+- What changed: Watchdog now force-restarts active loops when heartbeat staleness exceeds the threshold even if the tmux pane is still alive, while preserving single-respawn pane-death handling. Added regressions that assert stale live-pane recovery and non-duplicate pane-death recovery behavior.
+- PR: https://github.com/alexhachm/setup-agents-codex10/pull/new/agent-1-task63-stale-loop-recovery
+
+## [56] FIX: merge conflict for task #22 — 2026-03-16
+- Domain: coordinator-tests
+- Files: coordinator/tests/allocator.test.js, coordinator/tests/watchdog.test.js, coordinator/tests/cli.test.js
+- What changed: Validation-only merge-conflict checkpoint after syncing to origin/main; scoped diffs for all three files were empty and no conflict markers were present. Ran tier-2 regression `cd coordinator && npm test -- tests/allocator.test.js tests/watchdog.test.js tests/cli.test.js` with 215/215 passing.
+- PR: validation-only (no code changes)
+
+## [64] Fix: PRIORITY OVERRIDE: Execute request req-b78f6d2b immediately as top priority — 2026-03-16
+- Domain: coordinator-core
+- Files: coordinator/src/db.js, coordinator/tests/state-machine.test.js
+- What changed: Added active priority-override request targeting to ready-task ordering so tasks for override-targeted requests are scheduled ahead of normal backlog priority until the target request reaches a terminal state. Added regressions proving override precedence and terminal-state fallback ordering.
+- PR: https://github.com/alexhachm/setup-agents-codex10/pull/202
+
+## [62] Filter ready-task discovery/promotion to active requests only — 2026-03-16
+- Domain: coordinator-core
+- Files: coordinator/src/db.js, coordinator/tests/allocator.test.js, coordinator/tests/merger.test.js
+- What changed: Updated ready-task discovery and pending-to-ready promotion to exclude tasks attached to completed/failed requests. Added allocator and merger regressions ensuring stale terminal-request pending/ready tasks do not affect ready counts or assignment-priority merge deferral.
+- PR: https://github.com/alexhachm/setup-agents-codex10/pull/203

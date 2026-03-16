@@ -467,3 +467,123 @@
 ## 2026-03-13 — Task 142 validation-only overlap-build conflict check
 - For merge-validation conflicts reporting `npm run build` missing script, first diff scoped files against `origin/main`; if `npm_config_if_present` startup default + tests are already present, treat as validation-only.
 - Tier-2 verification for this path is covered by `cd coordinator && npm test -- tests/cli.test.js`, which exercises overlap validation command selection and npm env default/override behavior.
+
+## 2026-03-13 — Task 148 overlap validation-only checkpoint
+- For req-592efca7/task 148, scoped overlap files (`coordinator/src/cli-server.js`, `coordinator/tests/cli.test.js`) were already aligned with `origin/main`; no reland edits were required.
+- Tier-2 confirmation remained `cd coordinator && npm test -- tests/cli.test.js` with full pass (182/182), including startup `npm_config_if_present` compatibility coverage.
+
+## 2026-03-13 — Task 148 overlap validation checkpoint
+- For req-592efca7 overlap reconciliation in coordinator-routing, `origin/main` already contains the npm build-script compatibility guard (`process.env.npm_config_if_present='true'` only when unset) in `coordinator/src/cli-server.js`.
+- CLI regression coverage for defaulting and explicit override preservation is already present in `coordinator/tests/cli.test.js`; tier-2 validation remains `cd coordinator && npm test -- tests/cli.test.js`.
+- 2026-03-13: For overlap-validation conflict requests scoped to `coordinator/src/cli-server.js` and `coordinator/tests/cli.test.js`, first diff against `origin/main`; if the `npm_config_if_present` startup default and its CLI regressions already exist, handle as validation-only and close with Tier-2 evidence.
+
+## 2026-03-13 — Task 151 validation-only overlap conflict checkpoint
+- Synced `origin/main` already contains overlap-build compatibility in `coordinator/src/cli-server.js` (`process.env.npm_config_if_present` defaults to `'true'` only when unset).
+- `coordinator/tests/cli.test.js` already includes startup default/override regressions plus overlap validation command-selection coverage guarding missing build-script behavior.
+- For this conflict signature (`Missing script: build`), check `git diff origin/main -- coordinator/src/cli-server.js coordinator/tests/cli.test.js` first; if clean, treat as validation-only after Tier-2 CLI suite confirmation.
+
+## 2026-03-13 — Task 162 validation-only fallback safeguards checkpoint
+- Synced `origin/main` already contains the requested fallback reland in `coordinator/src/cli-server.js`: scalar budget fallback parsing, budget-aware effective-class shifts, metadata-driven code-heavy escalation, and downgrade routing telemetry (`routing_reason`/`model_source`) semantics.
+- Existing regressions in `coordinator/tests/cli.test.js` already cover constrained scalar downscale and metadata-heavy generic-task classification; required validation command passed: `cd coordinator && npm test -- tests/cli.test.js`.
+
+## 2026-03-13 — Idle follow-up (worker 4)
+- Startup protocol completed (knowledge read, `my-task` poll + 5s retry + 15s follow-up).
+- Coordinator status shows `req-a079b39b` already completed and no active assignment for worker-4; no coordinator-routing code changes made in this cycle.
+
+## 2026-03-13 — Partial routing_budget_state object merge parity
+- `parseBudgetStateConfig(raw, getConfig)` now supports merged normalization: when JSON budget objects are present but missing/null scalar-backed flagship fields, fill those gaps from scalar keys (`routing_budget_flagship_*` then legacy `flagship_budget_*`) while preserving explicit object values.
+- `fallbackModelRouter.getBudgetState` should consume this merged parser directly so routing/downscale decisions and budget telemetry use the same threshold evaluation semantics.
+- `/api/status` budget snapshots should reuse the same parser and keep source attribution as `config:routing_budget_state` whenever an object config exists, even if scalar fallback fills missing fields.
+
+## 2026-03-13 — Idle follow-up (worker 4)
+- Startup/read/poll/follow-up checks completed with no assigned task.
+- No coordinator-routing code changes were made in this cycle.
+
+## 2026-03-13 — Loop prompt refresh command gating and state preservation
+- Add loop prompt refresh as a dedicated command (`loop-set-prompt`) rather than loop recreation, and gate updates by explicit status allowlist (`active`, `paused`).
+- Keep prompt refresh write-path in DB helpers (`setLoopPrompt` -> `updateLoop`) so command handlers avoid duplicated SQL/write logic.
+- Regression coverage should assert both refreshed `loop-prompt` text and invariant loop progress fields (`status`, `iteration_count`, `last_checkpoint`) across success and rejection paths.
+
+## 2026-03-13 — Idle follow-up (worker 4)
+- Startup knowledge read + task polling (initial, 5s retry, 15s follow-up) returned no assigned task.
+- No coordinator-routing code changes were required in this cycle.
+
+## 2026-03-13 — Watchdog stale decomposition deadlock recovery
+- Add a dedicated watchdog repair pass for `requests.status='decomposed'` with `COUNT(tasks)=0` and stale `updated_at` age >= 900s.
+- Recovery should fail the request with explicit diagnostic `result`, emit `stale_decomposition_recovered` log details (`source`, `age_sec`, status transition metadata), and notify `master-1` via `request_failed` so deadlocked requests are visible.
+- Run this repair in both startup sweep and regular watchdog ticks alongside existing failed-request reopen and stale-integration recovery passes.
+
+## 2026-03-13 — Nested usage-detail passthrough in usage normalization
+- Preserve unknown nested keys under usage detail objects (`input_tokens_details`, `prompt_tokens_details`, `completion_tokens_details`, `output_tokens_details`) and `cache_creation` in normalized usage payloads so they survive into `usage_payload_json`.
+- Keep canonical usage mappings unchanged by continuing to map known nested alias counters into canonical fields and usage_* DB columns.
+- Unknown nested cache_creation keys are now forward-compatible passthrough values; only known nested cache_creation counters are integer-validated/folded.
+
+## 2026-03-16 — Watchdog stale-claim expiry source of truth
+- `releaseStaleClaimsCheck` must compute claim age from `workers.claimed_at` only; do not fall back to `last_heartbeat` or `created_at`.
+- If `claimed_by` is set but `claimed_at` is missing, release immediately with diagnostic reason `missing_claimed_at` to prevent wedged claims.
+- Regression coverage should include both parity guards: stale heartbeat + fresh `claimed_at` must not release, while stale `claimed_at` must release even with fresh heartbeat.
+
+## 2026-03-16 — Filtered inbox consume semantics
+- Extend `db.checkMail(recipient, consume, filters)` with optional `filters.type` and `filters.request_id`; keep defaults so existing callers stay unchanged.
+- In consume mode, select by recipient (+ optional type), parse payload, then mark consumed only for rows that match optional `request_id` to avoid consuming unrelated mail.
+- Wire `inbox` and `inbox-block` schemas/handlers to accept/pass `type` and `request_id`; polling with filters now waits for matching mail without draining other messages.
+
+## 2026-03-16 — assign-task claimed-worker rollback parity
+- In `assign-task`, claim-related spawn rollback should return `ok:false` with `error=worker_claimed` to match direct transaction rejection payloads.
+- Preserve live worker claim metadata (`claimed_by`/`claimed_at`) during rollback when the spawn failure indicates claim ownership, instead of blindly restoring stale pre-assignment values.
+- Keep regression coverage split across CLI and security suites: direct claimed-idle rejection + claim metadata integrity, and rollback-path claim preservation.
+
+## 2026-03-16 — Task 32 validation-only checkpoint (assign-task claim guard)
+- Synced `origin/main` already enforces deterministic `worker_claimed` rejection in `assign-task` when `freshWorker.claimed_by` is set before assignment mutation.
+- Rollback path in `assign-task` preserves claim metadata (`claimed_by`, `claimed_at`) and returns `ok:false,error=worker_claimed` when spawn errors indicate claim takeover.
+- Regression coverage already exists in both `coordinator/tests/cli.test.js` and `coordinator/tests/security.test.js` for claimed idle worker rejection and claim metadata preservation.
+
+## 2026-03-16 — Merge-driven completion gate via task all_done
+- In `merger.checkRequestCompletion`, request completion side effects should run only when all merge_queue rows are merged and `db.checkRequestCompletion(requestId).all_done` is true.
+- Preserve `merge_success` logging even when sibling tasks are unfinished; keep request non-completed and suppress `master-1` `request_completed` mail until all tasks become done.
+- Regression coverage can live in `coordinator/tests/state-machine.test.js` by driving `merger.processQueue` with one merged task + one assigned sibling, then finalizing the sibling and asserting delayed completion mail emission.
+
+## 2026-03-16 — Idle follow-up (worker 1)
+- Startup protocol completed (knowledge read + assignment polling + 5s retry + 15s follow-up) with no assigned task.
+- No coordinator-routing code changes were made in this cycle.
+
+## 2026-03-16 — Overlap validation command selection safety
+- `runOverlapValidation` in `coordinator/src/merger.js` should run task-level validation commands when provided, otherwise choose only available default scripts (`build` then `test`) from `package.json`.
+- Missing build/test scripts must not cause a false `functional_conflict`; default validation should be skipped with an explicit log reason when no script is configured.
+- Regression coverage lives in `coordinator/tests/merger.test.js` under `Overlap validation command selection` and should keep merge liveness assertions for repos without build scripts.
+
+## 2026-03-16 — Task 53 merge-conflict validation checkpoint
+- For merge-conflict reland requests scoped to specific files, first verify conflict markers and scoped diff vs `origin/main`; if both are clean/empty, treat as validation-only.
+- Tier-2 evidence for this checkpoint was `cd coordinator && npm test -- tests/merger.test.js` (215/215 passing).
+
+## 2026-03-16 — Task 54 validation-only merge-conflict checkpoint
+- For merger merge-conflict fix tasks scoped to `coordinator/src/merger.js` and `coordinator/tests/merger.test.js`, first verify `git diff origin/main -- <files>` and conflict-marker scan; if empty, complete as validation-only.
+- Prefer scoped tier-2 validation with `cd coordinator && node --test tests/merger.test.js` to avoid unrelated full-suite CLI timeout noise.
+
+## 2026-03-16 — Task 54 merge-conflict reland validation (worker 1)
+- Scoped merge-conflict files (`coordinator/src/merger.js`, `coordinator/tests/merger.test.js`) can already be resolved on synced `origin/main`; confirm with conflict-marker scan plus `git diff origin/main -- <files>` before editing.
+- Tier-2 evidence for this checkpoint: `cd coordinator && npm test -- tests/merger.test.js` (215/215 passing in this run).
+
+## 2026-03-16 — Merger assignment-priority stale-loop liveness escape
+- `shouldDeferMergeForAssignmentPriority` now treats stale allocator loop heartbeat as an immediate starvation-escape condition (in addition to bounded deferral count/age).
+- Allocator loop detection is based on active loop prompts matching `/allocate-loop`, using heartbeat fallback timestamps (`last_heartbeat` -> `updated_at` -> `created_at`) and configurable stale threshold `assignment_priority_allocator_loop_stale_ms` (default 300000ms).
+- Regression coverage in `coordinator/tests/merger.test.js` now asserts both sides: healthy allocator loop still defers, stale allocator loop with ready tasks bypasses deferral and drains merges.
+
+## 2026-03-16 — Task 58 assignment-priority deferral liveness
+- Merge deferral should preserve assignment priority during healthy allocator heartbeats, but must escape when no progress signals appear (consecutive defer threshold, pending-age budget, or stale allocator loop heartbeat).
+- Regression safety should cover both sides explicitly: healthy loop keeps `merge_deferred_assignment_priority`, stale loop emits `merge_assignment_priority_starvation_escape` and allows pending merges to drain.
+
+## 2026-03-16 — loop-refresh-prompt command path
+- Added `loop-refresh-prompt` as an explicit active-loop prompt refresh command, separate from `loop-set-prompt` (active/paused).
+- Reused DB loop update flow by introducing `refreshLoopPrompt` -> `setLoopPrompt(..., ['active'])` so persistence still routes through `updateLoop`.
+- CLI/server/test parity: parser + help exposure in `coordinator/bin/mac10`, command schema/handler in `cli-server`, and regressions for success + missing-loop + invalid-input handling.
+
+## 2026-03-16 — Task 60 loop-refresh-prompt validation checkpoint
+- `loop-refresh-prompt` is wired end-to-end in `coordinator/src/cli-server.js`, `coordinator/bin/mac10`, and `coordinator/src/db.js` via `refreshLoopPrompt -> setLoopPrompt -> updateLoop`, constrained to active loops and returning refreshed prompt payload fields immediately.
+- CLI regressions in `coordinator/tests/cli.test.js` cover both success (`loop-prompt` reflects refreshed prompt) and error paths (missing loop + invalid `loop_id`).
+- In this environment, `cd coordinator && npm test` repeatedly shows a pre-existing timeout cluster in unrelated `complete-task`/`integrate` lifecycle tests (lines ~590/836/1292/1710/1762/1846), while loop-refresh tests pass.
+
+## 2026-03-16 — Stale loop heartbeat self-healing in watchdog
+- In `monitorLoops`, stale heartbeat with a live pane should trigger deterministic sentinel restart (`killWindow` then `createWindow`) and refresh `last_heartbeat` immediately.
+- Keep pane-death path single-action by `continue`-ing after respawn to avoid stale-branch duplicate restart attempts in the same tick.
+- Regressions should stub tmux methods through `tick()` and assert both stale-live-pane recovery and unchanged pane-death single-respawn semantics.

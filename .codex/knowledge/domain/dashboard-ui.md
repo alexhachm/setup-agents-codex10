@@ -59,3 +59,8 @@
 - On synced `origin/main`, dashboard (`gui/public/app.js`) and popout (`gui/public/popout.js`) already render aggregate `cache-create` plus TTL chips (`cache-create-5m`, `cache-create-1h`) with alias-safe top-level/camelCase/nested usage reads.
 - Existing `coordinator/tests/dashboard-render.test.js` coverage already asserts populated TTL chip rendering and null/absent omission behavior for both dashboard and popout harnesses.
 - For validation-only dashboard-ui tasks, confirm scoped diff vs `origin/main` first and provide explicit regression evidence (`node --test tests/dashboard-render.test.js` and/or `npm test`) before completion.
+
+## 2026-03-13 — Cache-hit denominator safety for Anthropic-style usage payloads
+- Dashboard and popout `readTaskTelemetry` should compute cache-hit as `cached/input` for normal payloads, but switch to `cached/(input+cached)` when `cached_tokens > input_tokens` to align with providers that report uncached input separately.
+- Clamp computed cache-hit ratios to `0..1` before percent formatting so chips cannot exceed `100.0%` or drop below `0.0%` when telemetry has unexpected values.
+- Regression harness tests in `coordinator/tests/dashboard-render.test.js` should include one dashboard and one popout Anthropi-style case plus normal baseline assertions to prevent future parser drift.

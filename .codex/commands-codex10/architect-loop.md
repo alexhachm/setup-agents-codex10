@@ -137,13 +137,24 @@ Only use this path for trivial docs/prompt/comment edits. If the request touches
 
 1. Identify the exact file(s) and change
 2. Make the change
-3. Run build check inline:
+3. Run script-aware validation inline (prefer `test`, fallback to `build` via `npm run <script>`):
    ```bash
-   npm run build 2>&1 || echo "BUILD_CHECK_RESULT: FAIL"
+   validation_cmd=""
+   if [ -f package.json ] && grep -Eq '"test"[[:space:]]*:' package.json; then
+     validation_cmd="npm test"
+   elif [ -f package.json ] && grep -Eq '"build"[[:space:]]*:' package.json; then
+     fallback_script="build"
+     validation_cmd="npm run $fallback_script"
+   fi
+
+   if [ -n "$validation_cmd" ]; then
+     eval "$validation_cmd" 2>&1 || echo "VALIDATION_RESULT: FAIL"
+   else
+     echo "VALIDATION_RESULT: SKIP (no test/build script found)"
+   fi
    ```
-   (Adapt build command to project — check package.json scripts)
-4. If build fails: fix or escalate to Tier 2
-5. If build passes: commit and push
+4. If validation fails: fix or escalate to Tier 2
+5. If validation passes: commit and push
    ```bash
    git add -A
    git diff --cached  # Secret check — ABORT if sensitive data
@@ -184,11 +195,26 @@ Go to Step 6.
    ```
    If claim fails, pick another idle worker and retry.
 
-3. **Create and assign the task:**
+3. **Create and assign the task** (script-aware validation):
+   - If `package.json` defines `test`, use `npm test`.
+   - Otherwise, if it defines `build`, run that script via `npm run <script>`.
+   - If neither script exists, omit `validation` so coordinator fallback applies.
    ```bash
+   validation_cmd=""
+   validation_field=""
+   if [ -f package.json ] && grep -Eq '"test"[[:space:]]*:' package.json; then
+     validation_cmd="npm test"
+   elif [ -f package.json ] && grep -Eq '"build"[[:space:]]*:' package.json; then
+     fallback_script="build"
+     validation_cmd="npm run $fallback_script"
+   fi
+   if [ -n "$validation_cmd" ]; then
+     validation_field=$(printf ',\"validation\":\"%s\"' "$validation_cmd")
+   fi
+
+   task_payload='{"request_id":"[id]","subject":"[task title]","description":"DOMAIN: [domain]\nFILES: [files]\nVALIDATION: tier2\nTIER: 2\n\n[detailed requirements]\n\n[success criteria]","domain":"[domain]","tier":2,"priority":"normal","files":["file1.js","file2.js"]'"$validation_field"'}'
    create_task_output="$(
-     echo '{"request_id":"[id]","subject":"[task title]","description":"DOMAIN: [domain]\nFILES: [files]\nVALIDATION: tier2\nTIER: 2\n\n[detailed requirements]\n\n[success criteria]","domain":"[domain]","tier":2,"priority":"normal","files":["file1.js","file2.js"],"validation":"npm run build"}' \
-       | ./.codex/scripts/codex10 create-task -
+     printf '%s\n' "$task_payload" | ./.codex/scripts/codex10 create-task -
    )"
    task_id=$(printf '%s\n' "$create_task_output" | awk '/Task created:/ {print $3}')
    [ -n "$task_id" ] || { echo "Failed to capture task_id from create-task output"; exit 1; }
@@ -197,11 +223,6 @@ Go to Step 6.
    Then assign with the captured `task_id` and normalized numeric worker id:
    ```bash
    ./.codex/scripts/codex10 assign-task "$task_id" "$worker_id"
-   ```
-
-   Record request tier/state so it does not remain pending:
-   ```bash
-   ./.codex/scripts/codex10 triage [id] 2 "Assigned Tier 2 task $task_id"
    ```
 
 4. **Release claim:**
@@ -233,11 +254,27 @@ Go to Step 6.
    ```bash
    ./.codex/scripts/codex10 triage <request_id> 3 "Decomposed into [N] tasks"
    ```
-5. Create each decomposed Tier 3 task via codex10, capturing output and task IDs as you go:
+5. Create each decomposed Tier 3 task via codex10, capturing output and task IDs as you go.
+   Use script-aware validation selection per target package:
+   - Prefer `npm test` when `test` exists.
+   - Else run `npm run <script>` for the `build` script when present.
+   - Else omit `validation` and let coordinator fallback select the command.
    ```bash
+   validation_cmd=""
+   validation_field=""
+   if [ -f package.json ] && grep -Eq '"test"[[:space:]]*:' package.json; then
+     validation_cmd="npm test"
+   elif [ -f package.json ] && grep -Eq '"build"[[:space:]]*:' package.json; then
+     fallback_script="build"
+     validation_cmd="npm run $fallback_script"
+   fi
+   if [ -n "$validation_cmd" ]; then
+     validation_field=$(printf ',\"validation\":\"%s\"' "$validation_cmd")
+   fi
+
+   task_payload='{"request_id":"[id]","subject":"[task title]","description":"REQUEST_ID: [id]\nDOMAIN: [domain]\nFILES: [specific files]\nVALIDATION: tier3\nTIER: 3\n\n[detailed requirements]\n\n[success criteria]","domain":"[domain]","tier":3,"priority":"normal","files":["file1.js","file2.js"],"depends_on":[]'"$validation_field"'}'
    create_task_output="$(
-     echo '{"request_id":"[id]","subject":"[task title]","description":"REQUEST_ID: [id]\nDOMAIN: [domain]\nFILES: [specific files]\nVALIDATION: tier3\nTIER: 3\n\n[detailed requirements]\n\n[success criteria]","domain":"[domain]","tier":3,"priority":"normal","files":["file1.js","file2.js"],"depends_on":[],"validation":"npm run build"}' \
-       | ./.codex/scripts/codex10 create-task -
+     printf '%s\n' "$task_payload" | ./.codex/scripts/codex10 create-task -
    )"
    task_id=$(printf '%s\n' "$create_task_output" | awk '/Task created:/ {print $3}')
    [ -n "$task_id" ] || { echo "Failed to capture Tier 3 task ID"; exit 1; }

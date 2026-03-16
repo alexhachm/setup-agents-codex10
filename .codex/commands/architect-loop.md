@@ -137,13 +137,24 @@ Only use this path for trivial docs/prompt/comment edits. If the request touches
 
 1. Identify the exact file(s) and change
 2. Make the change
-3. Run build check inline:
+3. Run script-aware validation inline (prefer `test`, fallback to `build` via `npm run <script>`):
    ```bash
-   npm run build 2>&1 || echo "BUILD_CHECK_RESULT: FAIL"
+   validation_cmd=""
+   if [ -f package.json ] && grep -Eq '"test"[[:space:]]*:' package.json; then
+     validation_cmd="npm test"
+   elif [ -f package.json ] && grep -Eq '"build"[[:space:]]*:' package.json; then
+     fallback_script="build"
+     validation_cmd="npm run $fallback_script"
+   fi
+
+   if [ -n "$validation_cmd" ]; then
+     eval "$validation_cmd" 2>&1 || echo "VALIDATION_RESULT: FAIL"
+   else
+     echo "VALIDATION_RESULT: SKIP (no test/build script found)"
+   fi
    ```
-   (Adapt build command to project — check package.json scripts)
-4. If build fails: fix or escalate to Tier 2
-5. If build passes: commit and push
+4. If validation fails: fix or escalate to Tier 2
+5. If validation passes: commit and push
    ```bash
    git add -A
    git diff --cached  # Secret check — ABORT if sensitive data
@@ -184,16 +195,32 @@ Go to Step 6.
    ```
    If claim fails, pick another idle worker and retry.
 
-3. **Create and assign the task:**
+3. **Create and assign the task** (script-aware validation):
+   - If `package.json` defines `test`, use `npm test`.
+   - Otherwise, if it defines `build`, run that script via `npm run <script>`.
+   - If neither script exists, omit `validation` so coordinator fallback applies.
    ```bash
-   task_id="$(
-     echo '{"request_id":"[id]","subject":"[task title]","description":"DOMAIN: [domain]\nFILES: [files]\nVALIDATION: tier2\nTIER: 2\n\n[detailed requirements]\n\n[success criteria]","domain":"[domain]","tier":2,"priority":"normal","files":["file1.js","file2.js"],"validation":"npm run build"}' \
-       | ./.codex/scripts/codex10 create-task - \
-       | awk '/Task created:/ {print $3}'
+   validation_cmd=""
+   validation_field=""
+   if [ -f package.json ] && grep -Eq '"test"[[:space:]]*:' package.json; then
+     validation_cmd="npm test"
+   elif [ -f package.json ] && grep -Eq '"build"[[:space:]]*:' package.json; then
+     fallback_script="build"
+     validation_cmd="npm run $fallback_script"
+   fi
+   if [ -n "$validation_cmd" ]; then
+     validation_field=$(printf ',\"validation\":\"%s\"' "$validation_cmd")
+   fi
+
+   task_payload='{"request_id":"[id]","subject":"[task title]","description":"DOMAIN: [domain]\nFILES: [files]\nVALIDATION: tier2\nTIER: 2\n\n[detailed requirements]\n\n[success criteria]","domain":"[domain]","tier":2,"priority":"normal","files":["file1.js","file2.js"]'"$validation_field"'}'
+   create_task_output="$(
+     printf '%s\n' "$task_payload" | ./.codex/scripts/codex10 create-task -
    )"
+   task_id=$(printf '%s\n' "$create_task_output" | awk '/Task created:/ {print $3}')
    [ -n "$task_id" ] || { echo "Failed to capture task_id from create-task output"; exit 1; }
+   printf '%s\n' "$create_task_output"
    ```
-   Then assign with the normalized numeric worker id:
+   Then assign with the captured `task_id` and normalized numeric worker id:
    ```bash
    ./.codex/scripts/codex10 assign-task "$task_id" "$worker_id"
    ```
@@ -223,39 +250,50 @@ Go to Step 6.
    ./.codex/scripts/codex10 ask-clarification <request_id> "[specific question]"
    ./.codex/scripts/codex10 inbox architect --block
    ```
-4. Create each decomposed Tier 3 task via codex10 and capture IDs:
-   ```bash
-   task_id="$(
-     echo '{"request_id":"[id]","subject":"[task title]","description":"REQUEST_ID: [id]\nDOMAIN: [domain]\nFILES: [specific files]\nVALIDATION: tier3\nTIER: 3\n\n[detailed requirements]\n\n[success criteria]","domain":"[domain]","tier":3,"priority":"normal","files":["file1.js","file2.js"],"depends_on":[],"validation":"npm run build"}' \
-       | ./.codex/scripts/codex10 create-task - \
-       | awk '/Task created:/ {print $3}'
-   )"
-   [ -n "$task_id" ] || { echo "Failed to capture Tier 3 task ID"; exit 1; }
-   ```
-   Repeat for each subtask; use `depends_on` for serial dependencies.
-5. Record tier decision in coordinator state:
+4. Record the Tier 3 decision in coordinator state:
    ```bash
    ./.codex/scripts/codex10 triage <request_id> 3 "Decomposed into [N] tasks"
    ```
-6. Signal Master-3:
+5. Create each decomposed Tier 3 task via codex10, capturing output and task IDs as you go.
+   Use script-aware validation selection per target package:
+   - Prefer `npm test` when `test` exists.
+   - Else run `npm run <script>` for the `build` script when present.
+   - Else omit `validation` and let coordinator fallback select the command.
    ```bash
-   touch .codex/signals/.codex10.task-signal
+   validation_cmd=""
+   validation_field=""
+   if [ -f package.json ] && grep -Eq '"test"[[:space:]]*:' package.json; then
+     validation_cmd="npm test"
+   elif [ -f package.json ] && grep -Eq '"build"[[:space:]]*:' package.json; then
+     fallback_script="build"
+     validation_cmd="npm run $fallback_script"
+   fi
+   if [ -n "$validation_cmd" ]; then
+     validation_field=$(printf ',\"validation\":\"%s\"' "$validation_cmd")
+   fi
+
+   task_payload='{"request_id":"[id]","subject":"[task title]","description":"REQUEST_ID: [id]\nDOMAIN: [domain]\nFILES: [specific files]\nVALIDATION: tier3\nTIER: 3\n\n[detailed requirements]\n\n[success criteria]","domain":"[domain]","tier":3,"priority":"normal","files":["file1.js","file2.js"],"depends_on":[]'"$validation_field"'}'
+   create_task_output="$(
+     printf '%s\n' "$task_payload" | ./.codex/scripts/codex10 create-task -
+   )"
+   task_id=$(printf '%s\n' "$create_task_output" | awk '/Task created:/ {print $3}')
+   [ -n "$task_id" ] || { echo "Failed to capture Tier 3 task ID"; exit 1; }
+   printf '%s\n' "$create_task_output"
    ```
-7. Log:
+   Repeat for each subtask; serialize dependencies by passing prior task IDs in `depends_on` (for example `["$task_id_a"]`).
+6. Validate decomposition overlap via coordinator:
+   ```bash
+   ./.codex/scripts/codex10 check-overlaps <request_id>
+   ```
+   For CRITICAL overlaps, adjust decomposition so conflicting tasks are serialized via `depends_on` before workers execute them.
+7. Do not write `.codex/state/codex10.task-queue.json`, `.codex/state/codex10.handoff.json`, or signal files for decomposition handoff; `create-task` updates coordinator state directly.
+8. Log:
    ```bash
    echo "[$(date -u +%Y-%m-%dT%H:%M:%SZ)] [master-2] [DECOMPOSE_DONE] id=[request_id] tasks=[N] domains=[list]" >> .codex/logs/activity.log
    ```
    `decomposition_count += 1`
    `if decomposition_count is a whole even number (2, 4, 6, ...): curation_due = true`
    `last_activity_epoch = now_epoch()`
-
-8. **Check file overlaps between tasks:**
-   ```bash
-   ./.codex/scripts/codex10 check-overlaps <request_id>
-   ```
-   - **CRITICAL** (3+ shared files): Add `depends_on` edges to serialize the overlapping tasks — they must not run in parallel
-   - **HIGH** (2 shared files): Note in task description ("⚠ OVERLAP: shares [files] with task #N — merger will validate"), let merger validate
-   - **LOW** (1 shared file): Accept as-is, merger handles it
 
 ### Step 4: Curation check
 

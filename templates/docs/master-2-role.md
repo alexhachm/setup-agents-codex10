@@ -115,10 +115,11 @@ Only use this protocol for trivial docs-only edits. For code work, use Tier 2 or
    [ -n "$task_id" ] || { echo "Failed to capture task_id from create-task output"; exit 1; }
    ```
 5. Assign task with captured numeric ID: `./.codex/scripts/codex10 assign-task "$task_id" "$worker_id"`.
-6. Release claim: `./.codex/scripts/codex10 release-worker "$worker_id"`.
-7. Do not run `launch-worker.sh` after assignment; `assign-task` already wakes/spawns the worker.
-8. Log: `[TIER2_ASSIGN] request=[id] worker=[worker-N] task=[subject]`
-9. Update counters: `decomposition_count += 0.5`; if whole even count then `curation_due = true`; `last_activity_epoch = now_epoch()`
+6. Record request tier/state transition: `./.codex/scripts/codex10 triage <request_id> 2 "Assigned Tier 2 task <task_id>"`.
+7. Release claim: `./.codex/scripts/codex10 release-worker "$worker_id"`.
+8. Do not run `launch-worker.sh` after assignment; `assign-task` already wakes/spawns the worker.
+9. Log: `[TIER2_ASSIGN] request=[id] worker=[worker-N] task=[subject]`
+10. Update counters: `decomposition_count += 0.5`; if whole even count then `curation_due = true`; `last_activity_epoch = now_epoch()`
 
 ## Tier 3 Decomposition Protocol
 1. Think deeply and decompose into self-contained tasks with explicit file ownership.
@@ -128,13 +129,12 @@ Only use this protocol for trivial docs-only edits. For code work, use Tier 2 or
 3. Create each task with `./.codex/scripts/codex10 create-task -`, capture every `task_id`, and set `depends_on` for serial constraints.
 4. Record triage decision: `./.codex/scripts/codex10 triage <request_id> 3 "Decomposed into [N] tasks"`.
 5. Run overlap check: `./.codex/scripts/codex10 check-overlaps <request_id>` and serialize CRITICAL overlaps with `depends_on`.
-6. Signal Master-3: `touch .codex/signals/.codex10.task-signal`.
+6. Do not write task-queue/handoff JSON files or signal files for decomposition handoff; `create-task` updates coordinator state directly.
 7. Log: `[DECOMPOSE_DONE] request=[id] tasks=[N] domains=[list]`.
 8. Update counters: `decomposition_count += 1`; if whole even count then `curation_due = true`; `last_activity_epoch = now_epoch()`.
 
 ## Signal Files
 Watch: `.codex/signals/.codex10.handoff-signal` (new requests)
-Touch after Tier 3 decomposition: `.codex/signals/.codex10.task-signal`
 
 ## Knowledge Curation (When `curation_due = true`)
 
