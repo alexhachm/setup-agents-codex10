@@ -50,6 +50,162 @@ const BROWSER_OFFLOAD_ALLOWED_TRANSITIONS = Object.freeze({
   failed: new Set(),
   cancelled: new Set(),
 });
+const DEFAULT_RESEARCH_PRIORITY_SCORE = 500;
+const DEFAULT_RESEARCH_BATCH_SIZE_CAP = 5;
+const DEFAULT_RESEARCH_TIMEOUT_WINDOW_MS = 120000;
+const DEFAULT_RESEARCH_CANDIDATE_LIMIT = 200;
+const RESEARCH_PRIORITY_LABEL_SCORES = Object.freeze({
+  urgent: 1000,
+  high: 800,
+  normal: 500,
+  low: 200,
+});
+const RESEARCH_INTENT_CANDIDATE_STATUSES = Object.freeze(['queued', 'partial_failed']);
+const RESEARCH_INTENT_ACTIVE_STATUSES = Object.freeze([
+  'queued',
+  'planned',
+  'running',
+  'partial_failed',
+]);
+const RESEARCH_INTENT_STAGE_ALLOWED_STATUSES = Object.freeze([
+  'planned',
+  'running',
+  'completed',
+  'partial_failed',
+  'failed',
+  'cancelled',
+]);
+const RESEARCH_INTENT_STAGE_ALLOWED_TRANSITIONS = Object.freeze({
+  planned: new Set(['running', 'completed', 'partial_failed', 'failed', 'cancelled']),
+  running: new Set(['completed', 'partial_failed', 'failed', 'cancelled']),
+  partial_failed: new Set(['planned', 'running', 'completed', 'failed', 'cancelled']),
+  completed: new Set(),
+  failed: new Set(),
+  cancelled: new Set(),
+});
+
+function currentSqlTimestamp() {
+  return new Date().toISOString().slice(0, 19).replace('T', ' ');
+}
+
+function stableStringify(value) {
+  if (value === null || value === undefined) return 'null';
+  if (typeof value === 'number') {
+    return Number.isFinite(value) ? String(value) : 'null';
+  }
+  if (typeof value === 'boolean') return value ? 'true' : 'false';
+  if (typeof value === 'string') return JSON.stringify(value);
+  if (Array.isArray(value)) return `[${value.map((item) => stableStringify(item)).join(',')}]`;
+  if (typeof value === 'object') {
+    const keys = Object.keys(value).sort();
+    return `{${keys.map((key) => `${JSON.stringify(key)}:${stableStringify(value[key])}`).join(',')}}`;
+  }
+  return JSON.stringify(String(value));
+}
+
+function normalizeResearchIntentPayload(payload) {
+  if (payload === null || payload === undefined) return '{}';
+  if (typeof payload === 'string') {
+    const trimmed = payload.trim();
+    if (!trimmed) return '{}';
+    try {
+      return stableStringify(JSON.parse(trimmed));
+    } catch {
+      return stableStringify(trimmed);
+    }
+  }
+  return stableStringify(payload);
+}
+
+function normalizeResearchPriorityScore(score) {
+  if (score === null || score === undefined || score === '') return DEFAULT_RESEARCH_PRIORITY_SCORE;
+  if (typeof score === 'string') {
+    const label = score.trim().toLowerCase();
+    if (Object.prototype.hasOwnProperty.call(RESEARCH_PRIORITY_LABEL_SCORES, label)) {
+      return RESEARCH_PRIORITY_LABEL_SCORES[label];
+    }
+  }
+  const numeric = Number(score);
+  if (!Number.isFinite(numeric)) return DEFAULT_RESEARCH_PRIORITY_SCORE;
+  return Math.max(0, numeric);
+}
+
+function normalizePositiveInt(value, fallback, { min = 1, max = Number.MAX_SAFE_INTEGER } = {}) {
+  const parsed = Number.parseInt(String(value ?? fallback), 10);
+  if (!Number.isFinite(parsed)) return fallback;
+  if (parsed < min) return min;
+  if (parsed > max) return max;
+  return parsed;
+}
+
+function normalizeResearchBatchSizeCap(value, fallback = DEFAULT_RESEARCH_BATCH_SIZE_CAP) {
+  return normalizePositiveInt(value, fallback, { min: 1, max: 1000 });
+}
+
+function normalizeResearchTimeoutWindowMs(value, fallback = DEFAULT_RESEARCH_TIMEOUT_WINDOW_MS) {
+  return normalizePositiveInt(value, fallback, { min: 1000, max: 7 * 24 * 60 * 60 * 1000 });
+}
+
+function normalizeResearchStatusList(statuses, fallback = RESEARCH_INTENT_CANDIDATE_STATUSES) {
+  const list = Array.isArray(statuses) ? statuses : fallback;
+  const normalized = [];
+  for (const status of list) {
+    const value = String(status || '').trim().toLowerCase();
+    if (!value) continue;
+    normalized.push(value);
+  }
+  return [...new Set(normalized)];
+}
+
+function normalizeResearchFanoutEntries(fanoutTargets) {
+  if (fanoutTargets === null || fanoutTargets === undefined) return [];
+  if (!Array.isArray(fanoutTargets)) {
+    throw new Error('fanout_targets must be an array when provided');
+  }
+  const normalized = [];
+  for (const target of fanoutTargets) {
+    if (typeof target === 'string') {
+      const key = target.trim();
+      if (!key) continue;
+      normalized.push({ fanout_key: key, fanout_payload: null });
+      continue;
+    }
+    if (target && typeof target === 'object') {
+      const key = String(target.fanout_key || target.key || '').trim();
+      if (!key) continue;
+      const payload = Object.prototype.hasOwnProperty.call(target, 'fanout_payload')
+        ? target.fanout_payload
+        : (Object.prototype.hasOwnProperty.call(target, 'payload') ? target.payload : null);
+      normalized.push({
+        fanout_key: key,
+        fanout_payload: payload === null || payload === undefined ? null : normalizeResearchIntentPayload(payload),
+      });
+      continue;
+    }
+    throw new Error('fanout_targets entries must be strings or objects');
+  }
+  const deduped = [];
+  const seen = new Set();
+  for (const entry of normalized) {
+    if (seen.has(entry.fanout_key)) continue;
+    seen.add(entry.fanout_key);
+    deduped.push(entry);
+  }
+  return deduped;
+}
+
+function normalizeResearchDedupeFingerprint(intentType, payloadText, providedFingerprint) {
+  const provided = String(providedFingerprint || '').trim();
+  if (provided) return provided;
+  return crypto
+    .createHash('sha256')
+    .update(`${String(intentType || 'browser_research').toLowerCase()}::${payloadText}`)
+    .digest('hex');
+}
+
+function buildSqlInClause(values) {
+  return values.map(() => '?').join(',');
+}
 
 function parseCoordinatorTimestamp(value) {
   if (value === null || value === undefined) return null;
@@ -339,6 +495,117 @@ function ensureTaskBrowserOffloadColumns(database) {
   `);
 }
 
+function ensureResearchBatchingSchema(database) {
+  database.exec(`
+    CREATE TABLE IF NOT EXISTS research_batches (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      planner_key TEXT NOT NULL DEFAULT 'default',
+      status TEXT NOT NULL DEFAULT 'planned'
+        CHECK (status IN ('planned','running','completed','partial_failed','failed','timed_out','cancelled')),
+      max_batch_size INTEGER NOT NULL CHECK (max_batch_size > 0),
+      timeout_window_ms INTEGER NOT NULL CHECK (timeout_window_ms > 0),
+      planned_intent_count INTEGER NOT NULL DEFAULT 0,
+      sequence_cursor TEXT NOT NULL,
+      last_error TEXT,
+      created_at TEXT NOT NULL DEFAULT (datetime('now')),
+      updated_at TEXT NOT NULL DEFAULT (datetime('now')),
+      started_at TEXT,
+      completed_at TEXT
+    );
+
+    CREATE TABLE IF NOT EXISTS research_intents (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      request_id TEXT REFERENCES requests(id),
+      task_id INTEGER REFERENCES tasks(id),
+      intent_type TEXT NOT NULL DEFAULT 'browser_research',
+      intent_payload TEXT NOT NULL,
+      dedupe_fingerprint TEXT NOT NULL,
+      priority_score REAL NOT NULL DEFAULT 500,
+      batch_size_cap INTEGER NOT NULL DEFAULT 5 CHECK (batch_size_cap > 0),
+      timeout_window_ms INTEGER NOT NULL DEFAULT 120000 CHECK (timeout_window_ms > 0),
+      status TEXT NOT NULL DEFAULT 'queued'
+        CHECK (status IN ('queued','planned','running','completed','partial_failed','failed','cancelled')),
+      latest_batch_id INTEGER REFERENCES research_batches(id),
+      failure_count INTEGER NOT NULL DEFAULT 0,
+      last_error TEXT,
+      created_at TEXT NOT NULL DEFAULT (datetime('now')),
+      updated_at TEXT NOT NULL DEFAULT (datetime('now')),
+      resolved_at TEXT
+    );
+
+    CREATE TABLE IF NOT EXISTS research_batch_stages (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      batch_id INTEGER NOT NULL REFERENCES research_batches(id) ON DELETE CASCADE,
+      intent_id INTEGER NOT NULL REFERENCES research_intents(id) ON DELETE CASCADE,
+      stage_name TEXT NOT NULL DEFAULT 'intent_execution',
+      stage_order INTEGER NOT NULL DEFAULT 1,
+      execution_order INTEGER NOT NULL,
+      dedupe_fingerprint TEXT NOT NULL,
+      priority_score REAL NOT NULL DEFAULT 0,
+      timeout_window_ms INTEGER NOT NULL CHECK (timeout_window_ms > 0),
+      status TEXT NOT NULL DEFAULT 'planned'
+        CHECK (status IN ('planned','running','completed','partial_failed','failed','cancelled')),
+      failure_count INTEGER NOT NULL DEFAULT 0,
+      last_error TEXT,
+      created_at TEXT NOT NULL DEFAULT (datetime('now')),
+      updated_at TEXT NOT NULL DEFAULT (datetime('now')),
+      completed_at TEXT,
+      UNIQUE(batch_id, intent_id, stage_order)
+    );
+
+    CREATE TABLE IF NOT EXISTS research_intent_fanout (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      intent_id INTEGER NOT NULL REFERENCES research_intents(id) ON DELETE CASCADE,
+      fanout_key TEXT NOT NULL,
+      fanout_payload TEXT,
+      planned_batch_id INTEGER REFERENCES research_batches(id) ON DELETE SET NULL,
+      planned_stage_id INTEGER REFERENCES research_batch_stages(id) ON DELETE SET NULL,
+      status TEXT NOT NULL DEFAULT 'pending'
+        CHECK (status IN ('pending','planned','running','completed','partial_failed','failed','cancelled')),
+      attempt_count INTEGER NOT NULL DEFAULT 0,
+      last_error TEXT,
+      created_at TEXT NOT NULL DEFAULT (datetime('now')),
+      updated_at TEXT NOT NULL DEFAULT (datetime('now')),
+      completed_at TEXT,
+      UNIQUE(intent_id, fanout_key)
+    );
+
+    CREATE INDEX IF NOT EXISTS idx_research_intents_status_score
+      ON research_intents(status, priority_score DESC, created_at ASC, id ASC);
+    CREATE INDEX IF NOT EXISTS idx_research_intents_active_dedupe
+      ON research_intents(dedupe_fingerprint, intent_type)
+      WHERE status IN ('queued','planned','running','partial_failed');
+    CREATE INDEX IF NOT EXISTS idx_research_batches_status
+      ON research_batches(status, created_at ASC, id ASC);
+    CREATE INDEX IF NOT EXISTS idx_research_batch_stages_batch_status
+      ON research_batch_stages(batch_id, status, execution_order ASC, id ASC);
+    CREATE INDEX IF NOT EXISTS idx_research_batch_stages_execution
+      ON research_batch_stages(status, execution_order ASC, id ASC);
+    CREATE INDEX IF NOT EXISTS idx_research_intent_fanout_intent_status
+      ON research_intent_fanout(intent_id, status, fanout_key);
+    CREATE INDEX IF NOT EXISTS idx_research_intent_fanout_retry
+      ON research_intent_fanout(status, updated_at ASC, id ASC)
+      WHERE status IN ('partial_failed','failed');
+  `);
+
+  database.prepare("INSERT OR IGNORE INTO config (key, value) VALUES (?, ?)").run(
+    'research_planner_interval_ms',
+    '5000'
+  );
+  database.prepare("INSERT OR IGNORE INTO config (key, value) VALUES (?, ?)").run(
+    'research_batch_max_size',
+    String(DEFAULT_RESEARCH_BATCH_SIZE_CAP)
+  );
+  database.prepare("INSERT OR IGNORE INTO config (key, value) VALUES (?, ?)").run(
+    'research_batch_timeout_ms',
+    String(DEFAULT_RESEARCH_TIMEOUT_WINDOW_MS)
+  );
+  database.prepare("INSERT OR IGNORE INTO config (key, value) VALUES (?, ?)").run(
+    'research_batch_candidate_limit',
+    String(DEFAULT_RESEARCH_CANDIDATE_LIMIT)
+  );
+}
+
 function getDbPath(projectDir) {
   const stateDir = path.join(projectDir, '.claude', 'state');
   fs.mkdirSync(stateDir, { recursive: true });
@@ -388,6 +655,7 @@ function init(projectDir) {
   ensureTaskRoutingTelemetryColumns(db);
   ensureTaskBrowserOffloadColumns(db);
   ensureTaskUsageTelemetryColumns(db);
+  ensureResearchBatchingSchema(db);
 
   // Store project dir in config
   db.prepare('UPDATE config SET value = ? WHERE key = ?').run(projectDir, 'project_dir');
@@ -542,6 +810,657 @@ function transitionTaskBrowserOffload(taskId, nextStatus, updates = {}) {
     browser_offload_updated_at: timestamp,
   });
   return getTask(taskId);
+}
+
+function getResearchIntent(id) {
+  return getDb().prepare('SELECT * FROM research_intents WHERE id = ?').get(id);
+}
+
+function getResearchBatch(id) {
+  return getDb().prepare('SELECT * FROM research_batches WHERE id = ?').get(id);
+}
+
+function listResearchBatchStages(batchId) {
+  return getDb().prepare(`
+    SELECT * FROM research_batch_stages
+    WHERE batch_id = ?
+    ORDER BY execution_order ASC, id ASC
+  `).all(batchId);
+}
+
+function listResearchIntentFanout(intentId) {
+  return getDb().prepare(`
+    SELECT * FROM research_intent_fanout
+    WHERE intent_id = ?
+    ORDER BY fanout_key ASC, id ASC
+  `).all(intentId);
+}
+
+function canTransitionResearchStageStatus(currentStatus, nextStatus) {
+  if (currentStatus === nextStatus) return true;
+  const allowed = RESEARCH_INTENT_STAGE_ALLOWED_TRANSITIONS[currentStatus];
+  return Boolean(allowed && allowed.has(nextStatus));
+}
+
+function upsertResearchIntentFanoutMappings(intentId, fanoutEntries) {
+  if (!Array.isArray(fanoutEntries) || fanoutEntries.length === 0) return;
+  const d = getDb();
+  const now = currentSqlTimestamp();
+  const upsert = d.prepare(`
+    INSERT INTO research_intent_fanout (
+      intent_id, fanout_key, fanout_payload, status, updated_at
+    ) VALUES (?, ?, ?, 'pending', ?)
+    ON CONFLICT(intent_id, fanout_key) DO UPDATE SET
+      fanout_payload = COALESCE(excluded.fanout_payload, research_intent_fanout.fanout_payload),
+      updated_at = excluded.updated_at
+  `);
+  for (const entry of fanoutEntries) {
+    upsert.run(intentId, entry.fanout_key, entry.fanout_payload, now);
+  }
+}
+
+function enqueueResearchIntent({
+  request_id = null,
+  task_id = null,
+  intent_type = 'browser_research',
+  intent_payload = null,
+  dedupe_fingerprint = null,
+  priority_score = null,
+  priority = null,
+  batch_size_cap = null,
+  timeout_window_ms = null,
+  fanout_targets = [],
+} = {}) {
+  const normalizedIntentType = String(intent_type || 'browser_research').trim().toLowerCase() || 'browser_research';
+  const normalizedPayload = normalizeResearchIntentPayload(intent_payload);
+  const normalizedPriorityScore = normalizeResearchPriorityScore(priority_score ?? priority);
+  const normalizedBatchSizeCap = normalizeResearchBatchSizeCap(batch_size_cap ?? DEFAULT_RESEARCH_BATCH_SIZE_CAP);
+  const normalizedTimeoutWindowMs = normalizeResearchTimeoutWindowMs(timeout_window_ms ?? DEFAULT_RESEARCH_TIMEOUT_WINDOW_MS);
+  const normalizedFanoutTargets = normalizeResearchFanoutEntries(fanout_targets);
+  const normalizedRequestId = request_id === null || request_id === undefined
+    ? null
+    : (String(request_id).trim() || null);
+  const parsedTaskId = Number.parseInt(task_id, 10);
+  const normalizedTaskId = Number.isInteger(parsedTaskId) && parsedTaskId > 0 ? parsedTaskId : null;
+  const dedupeFingerprint = normalizeResearchDedupeFingerprint(
+    normalizedIntentType,
+    normalizedPayload,
+    dedupe_fingerprint
+  );
+  const d = getDb();
+  const now = currentSqlTimestamp();
+  const statusPlaceholders = buildSqlInClause(RESEARCH_INTENT_ACTIVE_STATUSES);
+  const activeIntentSql = `
+    SELECT *
+    FROM research_intents
+    WHERE dedupe_fingerprint = ?
+      AND intent_type = ?
+      AND status IN (${statusPlaceholders})
+    ORDER BY created_at ASC, id ASC
+    LIMIT 1
+  `;
+
+  const result = d.transaction(() => {
+    const active = d.prepare(activeIntentSql).get(
+      dedupeFingerprint,
+      normalizedIntentType,
+      ...RESEARCH_INTENT_ACTIVE_STATUSES
+    );
+    if (active) {
+      d.prepare(`
+        UPDATE research_intents
+        SET
+          priority_score = CASE WHEN ? > priority_score THEN ? ELSE priority_score END,
+          batch_size_cap = CASE
+            WHEN batch_size_cap IS NULL OR batch_size_cap <= 0 THEN ?
+            ELSE MIN(batch_size_cap, ?)
+          END,
+          timeout_window_ms = CASE
+            WHEN timeout_window_ms IS NULL OR timeout_window_ms <= 0 THEN ?
+            ELSE MIN(timeout_window_ms, ?)
+          END,
+          request_id = COALESCE(request_id, ?),
+          task_id = COALESCE(task_id, ?),
+          updated_at = ?
+        WHERE id = ?
+      `).run(
+        normalizedPriorityScore,
+        normalizedPriorityScore,
+        normalizedBatchSizeCap,
+        normalizedBatchSizeCap,
+        normalizedTimeoutWindowMs,
+        normalizedTimeoutWindowMs,
+        normalizedRequestId,
+        normalizedTaskId,
+        now,
+        active.id
+      );
+      upsertResearchIntentFanoutMappings(active.id, normalizedFanoutTargets);
+      return {
+        created: false,
+        deduplicated: true,
+        intent: getResearchIntent(active.id),
+      };
+    }
+
+    const insertResult = d.prepare(`
+      INSERT INTO research_intents (
+        request_id,
+        task_id,
+        intent_type,
+        intent_payload,
+        dedupe_fingerprint,
+        priority_score,
+        batch_size_cap,
+        timeout_window_ms,
+        status,
+        created_at,
+        updated_at
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'queued', ?, ?)
+    `).run(
+      normalizedRequestId,
+      normalizedTaskId,
+      normalizedIntentType,
+      normalizedPayload,
+      dedupeFingerprint,
+      normalizedPriorityScore,
+      normalizedBatchSizeCap,
+      normalizedTimeoutWindowMs,
+      now,
+      now
+    );
+    const intentId = Number(insertResult.lastInsertRowid);
+    upsertResearchIntentFanoutMappings(intentId, normalizedFanoutTargets);
+    return {
+      created: true,
+      deduplicated: false,
+      intent: getResearchIntent(intentId),
+    };
+  })();
+
+  log('coordinator', result.deduplicated ? 'research_intent_deduplicated' : 'research_intent_enqueued', {
+    intent_id: result.intent.id,
+    request_id: normalizedRequestId,
+    task_id: normalizedTaskId,
+    dedupe_fingerprint: dedupeFingerprint,
+    priority_score: normalizedPriorityScore,
+    batch_size_cap: normalizedBatchSizeCap,
+    timeout_window_ms: normalizedTimeoutWindowMs,
+    fanout_count: normalizedFanoutTargets.length,
+  });
+
+  return {
+    ...result,
+    dedupe_fingerprint: dedupeFingerprint,
+    fanout_count: normalizedFanoutTargets.length,
+  };
+}
+
+function scoreResearchIntentCandidates({ statuses = RESEARCH_INTENT_CANDIDATE_STATUSES, limit = null } = {}) {
+  const normalizedStatuses = normalizeResearchStatusList(statuses, RESEARCH_INTENT_CANDIDATE_STATUSES);
+  if (!normalizedStatuses.length) return [];
+  const configuredLimit = parseIntConfig(
+    'research_batch_candidate_limit',
+    DEFAULT_RESEARCH_CANDIDATE_LIMIT,
+    { min: 1, max: 5000 }
+  );
+  const normalizedLimit = normalizePositiveInt(limit, configuredLimit, { min: 1, max: 5000 });
+  const placeholders = buildSqlInClause(normalizedStatuses);
+  const rows = getDb().prepare(`
+    SELECT
+      ri.*,
+      COALESCE((julianday('now') - julianday(ri.created_at)) * 86400.0, 0) AS age_seconds,
+      (ri.priority_score + COALESCE((julianday('now') - julianday(ri.created_at)) * 0.001, 0)) AS candidate_score
+    FROM research_intents ri
+    WHERE ri.status IN (${placeholders})
+    ORDER BY
+      candidate_score DESC,
+      ri.priority_score DESC,
+      datetime(ri.created_at) ASC,
+      ri.id ASC
+    LIMIT ?
+  `).all(...normalizedStatuses, normalizedLimit);
+  return rows.map((row, index) => ({
+    ...row,
+    execution_rank: index + 1,
+  }));
+}
+
+function buildResearchPlanBatches(candidates, globalMaxBatchSize, globalTimeoutWindowMs) {
+  const batches = [];
+  let current = [];
+  let currentBatchCap = globalMaxBatchSize;
+  let currentTimeoutWindowMs = globalTimeoutWindowMs;
+
+  const flushCurrent = () => {
+    if (!current.length) return;
+    const cursor = current.map((intent) => intent.id).join(',');
+    batches.push({
+      intents: current,
+      effective_batch_size_cap: currentBatchCap,
+      effective_timeout_window_ms: currentTimeoutWindowMs,
+      sequence_cursor: cursor,
+    });
+    current = [];
+    currentBatchCap = globalMaxBatchSize;
+    currentTimeoutWindowMs = globalTimeoutWindowMs;
+  };
+
+  for (const candidate of candidates) {
+    const intentBatchCap = normalizeResearchBatchSizeCap(candidate.batch_size_cap, globalMaxBatchSize);
+    const intentTimeoutWindowMs = normalizeResearchTimeoutWindowMs(candidate.timeout_window_ms, globalTimeoutWindowMs);
+    const nextBatchCap = Math.min(currentBatchCap, intentBatchCap, globalMaxBatchSize);
+    const nextTimeoutWindowMs = Math.min(currentTimeoutWindowMs, intentTimeoutWindowMs, globalTimeoutWindowMs);
+
+    if (current.length > 0 && (current.length + 1) > nextBatchCap) {
+      flushCurrent();
+    }
+
+    currentBatchCap = Math.min(currentBatchCap, intentBatchCap, globalMaxBatchSize);
+    currentTimeoutWindowMs = Math.min(currentTimeoutWindowMs, intentTimeoutWindowMs, globalTimeoutWindowMs);
+    current.push(candidate);
+  }
+
+  flushCurrent();
+  return batches;
+}
+
+function materializeResearchBatchPlan({
+  planner_key = 'default',
+  max_batch_size = null,
+  timeout_window_ms = null,
+  candidate_limit = null,
+  candidate_statuses = RESEARCH_INTENT_CANDIDATE_STATUSES,
+} = {}) {
+  const configuredMaxBatchSize = parseIntConfig(
+    'research_batch_max_size',
+    DEFAULT_RESEARCH_BATCH_SIZE_CAP,
+    { min: 1, max: 1000 }
+  );
+  const configuredTimeoutWindowMs = parseIntConfig(
+    'research_batch_timeout_ms',
+    DEFAULT_RESEARCH_TIMEOUT_WINDOW_MS,
+    { min: 1000, max: 7 * 24 * 60 * 60 * 1000 }
+  );
+  const normalizedMaxBatchSize = normalizeResearchBatchSizeCap(max_batch_size, configuredMaxBatchSize);
+  const normalizedTimeoutWindowMs = normalizeResearchTimeoutWindowMs(timeout_window_ms, configuredTimeoutWindowMs);
+  const candidates = scoreResearchIntentCandidates({
+    statuses: candidate_statuses,
+    limit: candidate_limit,
+  });
+  if (!candidates.length) {
+    return {
+      planner_key: String(planner_key || 'default'),
+      candidate_count: 0,
+      batch_count: 0,
+      batches: [],
+    };
+  }
+
+  const plannedBatches = buildResearchPlanBatches(
+    candidates,
+    normalizedMaxBatchSize,
+    normalizedTimeoutWindowMs
+  );
+  const normalizedPlannerKey = String(planner_key || 'default').trim() || 'default';
+  const now = currentSqlTimestamp();
+  const d = getDb();
+
+  const persisted = d.transaction(() => {
+    const batchRows = [];
+    const insertBatch = d.prepare(`
+      INSERT INTO research_batches (
+        planner_key,
+        status,
+        max_batch_size,
+        timeout_window_ms,
+        planned_intent_count,
+        sequence_cursor,
+        created_at,
+        updated_at
+      ) VALUES (?, 'planned', ?, ?, ?, ?, ?, ?)
+    `);
+    const insertStage = d.prepare(`
+      INSERT INTO research_batch_stages (
+        batch_id,
+        intent_id,
+        stage_name,
+        stage_order,
+        execution_order,
+        dedupe_fingerprint,
+        priority_score,
+        timeout_window_ms,
+        status,
+        created_at,
+        updated_at
+      ) VALUES (?, ?, 'intent_execution', 1, ?, ?, ?, ?, 'planned', ?, ?)
+    `);
+    const updateIntent = d.prepare(`
+      UPDATE research_intents
+      SET status = 'planned', latest_batch_id = ?, updated_at = ?, last_error = NULL
+      WHERE id = ?
+    `);
+    const planFanout = d.prepare(`
+      UPDATE research_intent_fanout
+      SET
+        planned_batch_id = ?,
+        planned_stage_id = ?,
+        status = CASE
+          WHEN status IN ('completed', 'cancelled') THEN status
+          ELSE 'planned'
+        END,
+        updated_at = ?
+      WHERE intent_id = ?
+    `);
+
+    for (const batch of plannedBatches) {
+      const batchInsert = insertBatch.run(
+        normalizedPlannerKey,
+        batch.effective_batch_size_cap,
+        batch.effective_timeout_window_ms,
+        batch.intents.length,
+        batch.sequence_cursor,
+        now,
+        now
+      );
+      const batchId = Number(batchInsert.lastInsertRowid);
+      const stageIds = [];
+      const intentIds = [];
+
+      for (let idx = 0; idx < batch.intents.length; idx += 1) {
+        const intent = batch.intents[idx];
+        const executionOrder = idx + 1;
+        const stageTimeoutWindowMs = Math.min(
+          batch.effective_timeout_window_ms,
+          normalizeResearchTimeoutWindowMs(intent.timeout_window_ms, batch.effective_timeout_window_ms)
+        );
+        const stageInsert = insertStage.run(
+          batchId,
+          intent.id,
+          executionOrder,
+          intent.dedupe_fingerprint,
+          intent.priority_score,
+          stageTimeoutWindowMs,
+          now,
+          now
+        );
+        const stageId = Number(stageInsert.lastInsertRowid);
+        updateIntent.run(batchId, now, intent.id);
+        planFanout.run(batchId, stageId, now, intent.id);
+        stageIds.push(stageId);
+        intentIds.push(intent.id);
+      }
+
+      batchRows.push({
+        batch_id: batchId,
+        intent_ids: intentIds,
+        stage_ids: stageIds,
+        sequence_cursor: batch.sequence_cursor,
+        max_batch_size: batch.effective_batch_size_cap,
+        timeout_window_ms: batch.effective_timeout_window_ms,
+      });
+    }
+    return batchRows;
+  })();
+
+  log('coordinator', 'research_batch_plan_materialized', {
+    planner_key: normalizedPlannerKey,
+    candidate_count: candidates.length,
+    batch_count: persisted.length,
+    batch_ids: persisted.map((batch) => batch.batch_id),
+  });
+  return {
+    planner_key: normalizedPlannerKey,
+    candidate_count: candidates.length,
+    batch_count: persisted.length,
+    batches: persisted,
+  };
+}
+
+function markResearchBatchStage({
+  stage_id = null,
+  status = null,
+  error = null,
+  completed_fanout_keys = [],
+  failed_fanout_keys = [],
+} = {}) {
+  const stageId = Number.parseInt(stage_id, 10);
+  if (!Number.isInteger(stageId) || stageId <= 0) {
+    throw new Error('stage_id must be a positive integer');
+  }
+  const normalizedStatus = String(status || '').trim().toLowerCase();
+  if (!RESEARCH_INTENT_STAGE_ALLOWED_STATUSES.includes(normalizedStatus)) {
+    throw new Error(`Invalid research stage status: ${status}`);
+  }
+  const completedFanoutEntries = normalizeResearchFanoutEntries(completed_fanout_keys);
+  const failedFanoutEntries = normalizeResearchFanoutEntries(failed_fanout_keys);
+  const completedFanoutKeys = completedFanoutEntries.map((entry) => entry.fanout_key);
+  const failedFanoutKeys = failedFanoutEntries.map((entry) => entry.fanout_key);
+  const now = currentSqlTimestamp();
+  const d = getDb();
+  const stageResult = d.transaction(() => {
+    const stage = d.prepare(`
+      SELECT * FROM research_batch_stages WHERE id = ?
+    `).get(stageId);
+    if (!stage) throw new Error(`research_batch_stage ${stageId} not found`);
+    const currentStatus = String(stage.status || '').trim().toLowerCase() || 'planned';
+    if (!canTransitionResearchStageStatus(currentStatus, normalizedStatus)) {
+      throw new Error(`Invalid research stage transition from "${currentStatus}" to "${normalizedStatus}"`);
+    }
+
+    const updateFanoutStatus = (keys, nextStatus, errorValue) => {
+      if (!keys.length) return;
+      const placeholders = buildSqlInClause(keys);
+      d.prepare(`
+        UPDATE research_intent_fanout
+        SET
+          status = ?,
+          attempt_count = attempt_count + 1,
+          last_error = ?,
+          completed_at = CASE WHEN ? = 'completed' THEN ? ELSE completed_at END,
+          updated_at = ?
+        WHERE intent_id = ?
+          AND fanout_key IN (${placeholders})
+      `).run(
+        nextStatus,
+        errorValue,
+        nextStatus,
+        now,
+        now,
+        stage.intent_id,
+        ...keys
+      );
+    };
+
+    updateFanoutStatus(completedFanoutKeys, 'completed', null);
+    updateFanoutStatus(failedFanoutKeys, 'partial_failed', error ? String(error) : null);
+
+    if (
+      !completedFanoutKeys.length &&
+      !failedFanoutKeys.length &&
+      (normalizedStatus === 'partial_failed' || normalizedStatus === 'failed')
+    ) {
+      d.prepare(`
+        UPDATE research_intent_fanout
+        SET
+          status = 'partial_failed',
+          attempt_count = attempt_count + 1,
+          last_error = ?,
+          updated_at = ?
+        WHERE intent_id = ?
+          AND status IN ('pending', 'planned', 'running')
+      `).run(error ? String(error) : null, now, stage.intent_id);
+    }
+
+    const fanoutSummary = d.prepare(`
+      SELECT
+        COUNT(*) AS total_count,
+        COALESCE(SUM(CASE WHEN status = 'completed' THEN 1 ELSE 0 END), 0) AS completed_count,
+        COALESCE(SUM(CASE WHEN status NOT IN ('completed', 'cancelled') THEN 1 ELSE 0 END), 0) AS unresolved_count
+      FROM research_intent_fanout
+      WHERE intent_id = ?
+    `).get(stage.intent_id);
+    const totalFanoutCount = Number(fanoutSummary.total_count) || 0;
+    const completedFanoutCount = Number(fanoutSummary.completed_count) || 0;
+    const unresolvedFanoutCount = Number(fanoutSummary.unresolved_count) || 0;
+
+    let resolvedStageStatus = normalizedStatus;
+    if (
+      (normalizedStatus === 'completed' || normalizedStatus === 'failed') &&
+      unresolvedFanoutCount > 0
+    ) {
+      resolvedStageStatus = 'partial_failed';
+    }
+    if (resolvedStageStatus === 'failed' && totalFanoutCount > 0) {
+      resolvedStageStatus = 'partial_failed';
+    }
+
+    const stageFailureIncrement = resolvedStageStatus === 'partial_failed' || resolvedStageStatus === 'failed'
+      ? 1
+      : 0;
+    d.prepare(`
+      UPDATE research_batch_stages
+      SET
+        status = ?,
+        last_error = ?,
+        failure_count = failure_count + ?,
+        updated_at = ?,
+        completed_at = CASE
+          WHEN ? IN ('completed', 'failed', 'cancelled', 'partial_failed') THEN ?
+          ELSE completed_at
+        END
+      WHERE id = ?
+    `).run(
+      resolvedStageStatus,
+      error ? String(error) : null,
+      stageFailureIncrement,
+      now,
+      resolvedStageStatus,
+      now,
+      stageId
+    );
+
+    let nextIntentStatus = 'planned';
+    if (resolvedStageStatus === 'running') {
+      nextIntentStatus = 'running';
+    } else if (resolvedStageStatus === 'cancelled') {
+      nextIntentStatus = 'cancelled';
+    } else if (resolvedStageStatus === 'completed') {
+      nextIntentStatus = 'completed';
+    } else if (resolvedStageStatus === 'failed' || resolvedStageStatus === 'partial_failed') {
+      nextIntentStatus = unresolvedFanoutCount > 0 ? 'partial_failed' : 'failed';
+      if (resolvedStageStatus === 'partial_failed' && unresolvedFanoutCount === 0) {
+        nextIntentStatus = 'completed';
+      }
+    }
+    if (totalFanoutCount > 0 && completedFanoutCount === totalFanoutCount) {
+      nextIntentStatus = 'completed';
+    }
+    if (totalFanoutCount > 0 && unresolvedFanoutCount > 0 && nextIntentStatus === 'completed') {
+      nextIntentStatus = 'partial_failed';
+    }
+
+    const intentFailureIncrement = nextIntentStatus === 'partial_failed' || nextIntentStatus === 'failed'
+      ? 1
+      : 0;
+    d.prepare(`
+      UPDATE research_intents
+      SET
+        status = ?,
+        failure_count = failure_count + ?,
+        last_error = ?,
+        updated_at = ?,
+        resolved_at = CASE
+          WHEN ? IN ('completed', 'cancelled') THEN ?
+          ELSE NULL
+        END
+      WHERE id = ?
+    `).run(
+      nextIntentStatus,
+      intentFailureIncrement,
+      error ? String(error) : null,
+      now,
+      nextIntentStatus,
+      now,
+      stage.intent_id
+    );
+
+    const batchSummary = d.prepare(`
+      SELECT
+        COUNT(*) AS total_count,
+        COALESCE(SUM(CASE WHEN status = 'completed' THEN 1 ELSE 0 END), 0) AS completed_count,
+        COALESCE(SUM(CASE WHEN status = 'running' THEN 1 ELSE 0 END), 0) AS running_count,
+        COALESCE(SUM(CASE WHEN status = 'planned' THEN 1 ELSE 0 END), 0) AS planned_count,
+        COALESCE(SUM(CASE WHEN status = 'partial_failed' THEN 1 ELSE 0 END), 0) AS partial_failed_count,
+        COALESCE(SUM(CASE WHEN status = 'failed' THEN 1 ELSE 0 END), 0) AS failed_count,
+        COALESCE(SUM(CASE WHEN status = 'cancelled' THEN 1 ELSE 0 END), 0) AS cancelled_count
+      FROM research_batch_stages
+      WHERE batch_id = ?
+    `).get(stage.batch_id);
+
+    let nextBatchStatus = 'planned';
+    const totalCount = Number(batchSummary.total_count) || 0;
+    const completedCount = Number(batchSummary.completed_count) || 0;
+    const runningCount = Number(batchSummary.running_count) || 0;
+    const plannedCount = Number(batchSummary.planned_count) || 0;
+    const partialFailedCount = Number(batchSummary.partial_failed_count) || 0;
+    const failedCount = Number(batchSummary.failed_count) || 0;
+    const cancelledCount = Number(batchSummary.cancelled_count) || 0;
+    if (totalCount > 0 && completedCount === totalCount) {
+      nextBatchStatus = 'completed';
+    } else if (partialFailedCount > 0 || failedCount > 0) {
+      nextBatchStatus = 'partial_failed';
+    } else if (runningCount > 0) {
+      nextBatchStatus = 'running';
+    } else if (cancelledCount === totalCount && totalCount > 0) {
+      nextBatchStatus = 'cancelled';
+    } else if (plannedCount === totalCount && totalCount > 0) {
+      nextBatchStatus = 'planned';
+    }
+
+    d.prepare(`
+      UPDATE research_batches
+      SET
+        status = ?,
+        last_error = ?,
+        started_at = CASE
+          WHEN ? = 'running' AND started_at IS NULL THEN ?
+          ELSE started_at
+        END,
+        completed_at = CASE
+          WHEN ? IN ('completed', 'failed', 'partial_failed', 'timed_out', 'cancelled') THEN ?
+          ELSE completed_at
+        END,
+        updated_at = ?
+      WHERE id = ?
+    `).run(
+      nextBatchStatus,
+      error ? String(error) : null,
+      nextBatchStatus,
+      now,
+      nextBatchStatus,
+      now,
+      now,
+      stage.batch_id
+    );
+
+    return {
+      stage: getDb().prepare('SELECT * FROM research_batch_stages WHERE id = ?').get(stageId),
+      intent: getResearchIntent(stage.intent_id),
+      batch: getResearchBatch(stage.batch_id),
+      unresolved_fanout_count: unresolvedFanoutCount,
+      total_fanout_count: totalFanoutCount,
+    };
+  })();
+
+  log('coordinator', 'research_batch_stage_marked', {
+    stage_id: stageResult.stage.id,
+    batch_id: stageResult.batch.id,
+    intent_id: stageResult.intent.id,
+    status: stageResult.stage.status,
+    unresolved_fanout_count: stageResult.unresolved_fanout_count,
+  });
+  return stageResult;
 }
 
 function listTasks(filters = {}) {
@@ -1473,7 +2392,10 @@ module.exports = {
   init, close, getDb,
   coordinatorAgeMs,
   createRequest, getRequest, updateRequest, listRequests,
-  createTask, getTask, updateTask, transitionTaskBrowserOffload, listTasks, getReadyTasks, checkAndPromoteTasks, replanTaskDependency,
+  createTask, getTask, updateTask, transitionTaskBrowserOffload,
+  enqueueResearchIntent, getResearchIntent, scoreResearchIntentCandidates, materializeResearchBatchPlan,
+  getResearchBatch, listResearchBatchStages, listResearchIntentFanout, markResearchBatchStage,
+  listTasks, getReadyTasks, checkAndPromoteTasks, replanTaskDependency,
   registerWorker, getWorker, updateWorker, getIdleWorkers, getAllWorkers, claimWorker, releaseWorker,
   checkRequestCompletion, getUsageCostBurnRate, getRequestLatestCompletedTaskCursor, hasRequestCompletedTaskProgressSince,
   sendMail, checkMail, checkMailBlocking, purgeOldMail,
