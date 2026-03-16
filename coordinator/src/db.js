@@ -14,6 +14,18 @@ const DEFAULT_LOOP_REQUEST_RETRY_AFTER_SEC = 3600;
 const DEFAULT_LOOP_REQUEST_SIMILARITY_THRESHOLD = 0.82;
 const LOOP_REQUEST_SIMILAR_RECENT_WINDOW_HOURS = 6;
 const LOOP_REQUEST_SIMILAR_CANDIDATE_LIMIT = 50;
+const AUTONOMOUS_REQUEST_SIGNATURES = Object.freeze([
+  Object.freeze({ id: 'master2_header', pattern: /You are \*\*Master-2: Architect\*\*/i }),
+  Object.freeze({ id: 'worker_header', pattern: /You are a coding worker in the (?:mac10|codex10) multi-agent system/i }),
+  Object.freeze({ id: 'protocol_exact', pattern: /Follow this protocol exactly\./i }),
+  Object.freeze({ id: 'internal_counters', pattern: /^##\s+Internal Counters\b/m }),
+  Object.freeze({ id: 'step1_startup', pattern: /^##\s+Step 1: Startup\b/m }),
+  Object.freeze({ id: 'phase_followup', pattern: /^##\s+Phase: Follow-Up Check\b/m }),
+  Object.freeze({ id: 'phase_reset_exit', pattern: /^##\s+Phase: Budget\/Reset Exit\b/m }),
+  Object.freeze({ id: 'slash_architect_loop', pattern: /\/architect-loop\b/i }),
+  Object.freeze({ id: 'slash_worker_loop', pattern: /\/worker-loop\b/i }),
+  Object.freeze({ id: 'slash_allocate_loop', pattern: /\/allocate-loop\b/i }),
+]);
 const BROWSER_OFFLOAD_STATUS_SEQUENCE = Object.freeze([
   'not_requested',
   'requested',
@@ -90,6 +102,34 @@ function computeLoopRequestRetryAfterSec(oldestCreatedAt, nowMs = Date.now()) {
   const oldestExpiryMs = oldestDate.getTime() + LOOP_REQUEST_RATE_WINDOW_MS;
   const remainingMs = oldestExpiryMs - nowMs;
   return Math.max(1, Math.ceil(remainingMs / 1000));
+}
+
+function detectAutonomousRequestPayload(description) {
+  const normalized = String(description || '').replace(/\r/g, '').trim();
+  if (!normalized) return null;
+
+  const matchedSignalIds = AUTONOMOUS_REQUEST_SIGNATURES
+    .filter((signature) => signature.pattern.test(normalized))
+    .map((signature) => signature.id);
+  const headingCount = (normalized.match(/^##\s+/gm) || []).length;
+  const codeFenceCount = (normalized.match(/```/g) || []).length;
+  const lineCount = normalized.split('\n').length;
+  const signalCount = matchedSignalIds.length;
+  const appearsAutonomousTemplate = (
+    (signalCount >= 3 && (lineCount >= 8 || normalized.length >= 700)) ||
+    (signalCount >= 2 && headingCount >= 2 && codeFenceCount >= 2) ||
+    (signalCount >= 1 && normalized.length >= 4000)
+  );
+
+  if (!appearsAutonomousTemplate) return null;
+  return {
+    reason: 'autonomous_prompt_payload',
+    matched_signal_ids: matchedSignalIds,
+    heading_count: headingCount,
+    code_fence_count: codeFenceCount,
+    line_count: lineCount,
+    length: normalized.length,
+  };
 }
 
 function buildCompletedTaskCursor(timestampValue, taskId = 0) {
@@ -366,6 +406,17 @@ function getDb() {
 // --- Request helpers ---
 
 function createRequest(description) {
+  const autonomousPayload = detectAutonomousRequestPayload(description);
+  if (autonomousPayload) {
+    log('coordinator', 'request_rejected_autonomous_payload', {
+      ...autonomousPayload,
+      description_preview: String(description || '').replace(/\s+/g, ' ').slice(0, 240),
+    });
+    throw new Error(
+      'Request description appears to be autonomous command-template payload; submit a concise issue request instead.'
+    );
+  }
+
   const id = 'req-' + crypto.randomBytes(4).toString('hex');
   const txn = getDb().transaction(() => {
     getDb().prepare(`
