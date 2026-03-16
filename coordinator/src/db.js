@@ -3157,6 +3157,10 @@ function setLoopPrompt(id, prompt, allowedStatuses = ['active', 'paused']) {
   return txn();
 }
 
+function refreshLoopPrompt(id, prompt) {
+  return setLoopPrompt(id, prompt, ['active']);
+}
+
 function listLoops(status) {
   if (status) return getDb().prepare('SELECT * FROM loops WHERE status = ? ORDER BY id DESC').all(status);
   return getDb().prepare('SELECT * FROM loops ORDER BY id DESC').all();
@@ -3461,7 +3465,7 @@ module.exports = {
   savePreset, listPresets, getPreset, deletePreset,
   findOverlappingTasks, getOverlapsForRequest, hasOverlappingMergedTasks,
   createChange, getChange, listChanges, updateChange,
-  createLoop, getLoop, updateLoop, setLoopPrompt, listLoops, stopLoop,
+  createLoop, getLoop, updateLoop, setLoopPrompt, refreshLoopPrompt, listLoops, stopLoop,
   evaluateLoopRequestQuality,
   createLoopRequest, listLoopRequests,
 };

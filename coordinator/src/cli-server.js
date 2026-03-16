@@ -455,6 +455,7 @@ const COMMAND_SCHEMAS = {
   'loop-heartbeat':    { required: ['loop_id'], types: { loop_id: 'number' } },
   'set-config':        { required: ['key', 'value'], types: { key: 'string', value: 'string' } },
   'loop-prompt':       { required: ['loop_id'], types: { loop_id: 'number' } },
+  'loop-refresh-prompt': { required: ['loop_id', 'prompt'], types: { loop_id: 'number', prompt: 'string' } },
   'loop-set-prompt':   { required: ['loop_id', 'prompt'], types: { loop_id: 'number', prompt: 'string' } },
   'loop-request':      { required: ['loop_id', 'description'], types: { loop_id: 'number', description: 'string' } },
   'loop-requests':     { required: ['loop_id'], types: { loop_id: 'number' } },
@@ -3111,6 +3112,28 @@ function handleCommand(cmd, conn, handlers) {
           status: promptLoop.status,
           last_checkpoint: promptLoop.last_checkpoint,
           iteration_count: promptLoop.iteration_count,
+        });
+        break;
+      }
+      case 'loop-refresh-prompt': {
+        const refreshed = db.refreshLoopPrompt(args.loop_id, args.prompt);
+        if (!refreshed.ok) {
+          respond(conn, { ok: false, error: refreshed.error });
+          break;
+        }
+        db.log('coordinator', 'loop_prompt_refreshed', {
+          loop_id: args.loop_id,
+          result: 'updated',
+          status: refreshed.loop.status,
+          prompt_preview: refreshed.loop.prompt.slice(0, 200),
+        });
+        respond(conn, {
+          ok: true,
+          loop_id: refreshed.loop.id,
+          prompt: refreshed.loop.prompt,
+          status: refreshed.loop.status,
+          last_checkpoint: refreshed.loop.last_checkpoint,
+          iteration_count: refreshed.loop.iteration_count,
         });
         break;
       }
