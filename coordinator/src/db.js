@@ -14,6 +14,30 @@ const DEFAULT_LOOP_REQUEST_RETRY_AFTER_SEC = 3600;
 const DEFAULT_LOOP_REQUEST_SIMILARITY_THRESHOLD = 0.82;
 const LOOP_REQUEST_SIMILAR_RECENT_WINDOW_HOURS = 6;
 const LOOP_REQUEST_SIMILAR_CANDIDATE_LIMIT = 50;
+const BROWSER_OFFLOAD_STATUS_SEQUENCE = Object.freeze([
+  'not_requested',
+  'requested',
+  'queued',
+  'launching',
+  'attached',
+  'running',
+  'awaiting_callback',
+  'completed',
+  'failed',
+  'cancelled',
+]);
+const BROWSER_OFFLOAD_ALLOWED_TRANSITIONS = Object.freeze({
+  not_requested: new Set(['requested']),
+  requested: new Set(['queued', 'failed', 'cancelled']),
+  queued: new Set(['launching', 'failed', 'cancelled']),
+  launching: new Set(['attached', 'failed', 'cancelled']),
+  attached: new Set(['running', 'failed', 'cancelled']),
+  running: new Set(['awaiting_callback', 'failed', 'cancelled']),
+  awaiting_callback: new Set(['completed', 'failed', 'cancelled']),
+  completed: new Set(),
+  failed: new Set(),
+  cancelled: new Set(),
+});
 
 function parseCoordinatorTimestamp(value) {
   if (value === null || value === undefined) return null;
@@ -111,6 +135,9 @@ const VALID_COLUMNS = Object.freeze({
     'request_id', 'subject', 'description', 'domain', 'files', 'priority', 'tier', 'depends_on',
     'assigned_to', 'status', 'pr_url', 'branch', 'validation', 'overlap_with',
     'routing_class', 'routed_model', 'model_source', 'reasoning_effort',
+    'browser_offload_status', 'browser_session_id', 'browser_channel',
+    'browser_offload_payload', 'browser_offload_result', 'browser_offload_error',
+    'browser_offload_updated_at',
     'usage_model', 'usage_payload_json', 'usage_input_tokens', 'usage_output_tokens', 'usage_input_audio_tokens', 'usage_output_audio_tokens', 'usage_reasoning_tokens',
     'usage_accepted_prediction_tokens', 'usage_rejected_prediction_tokens', 'usage_cached_tokens',
     'usage_cache_creation_tokens',
@@ -224,6 +251,54 @@ function ensureTaskUsageTelemetryColumns(database) {
   }
 }
 
+function ensureTaskBrowserOffloadColumns(database) {
+  const taskCols = database.prepare("PRAGMA table_info(tasks)").all().map((column) => column.name);
+  if (taskCols.length === 0) return;
+
+  if (!taskCols.includes('browser_offload_status')) {
+    database.exec(`
+      ALTER TABLE tasks ADD COLUMN browser_offload_status TEXT
+      CHECK (browser_offload_status IN (
+        'not_requested',
+        'requested',
+        'queued',
+        'launching',
+        'attached',
+        'running',
+        'awaiting_callback',
+        'completed',
+        'failed',
+        'cancelled'
+      ))
+      DEFAULT 'not_requested'
+    `);
+  }
+  if (!taskCols.includes('browser_session_id')) {
+    database.exec("ALTER TABLE tasks ADD COLUMN browser_session_id TEXT");
+  }
+  if (!taskCols.includes('browser_channel')) {
+    database.exec("ALTER TABLE tasks ADD COLUMN browser_channel TEXT");
+  }
+  if (!taskCols.includes('browser_offload_payload')) {
+    database.exec("ALTER TABLE tasks ADD COLUMN browser_offload_payload TEXT");
+  }
+  if (!taskCols.includes('browser_offload_result')) {
+    database.exec("ALTER TABLE tasks ADD COLUMN browser_offload_result TEXT");
+  }
+  if (!taskCols.includes('browser_offload_error')) {
+    database.exec("ALTER TABLE tasks ADD COLUMN browser_offload_error TEXT");
+  }
+  if (!taskCols.includes('browser_offload_updated_at')) {
+    database.exec("ALTER TABLE tasks ADD COLUMN browser_offload_updated_at TEXT");
+  }
+
+  database.exec(`
+    UPDATE tasks
+    SET browser_offload_status = COALESCE(browser_offload_status, 'not_requested')
+    WHERE browser_offload_status IS NULL
+  `);
+}
+
 function getDbPath(projectDir) {
   const stateDir = path.join(projectDir, '.claude', 'state');
   fs.mkdirSync(stateDir, { recursive: true });
@@ -255,6 +330,7 @@ function init(projectDir) {
       db.exec("ALTER TABLE tasks ADD COLUMN overlap_with TEXT");
     }
     ensureTaskRoutingTelemetryColumns(db);
+    ensureTaskBrowserOffloadColumns(db);
     ensureTaskUsageTelemetryColumns(db);
   }
   if (existingTables.includes('requests')) {
@@ -270,6 +346,7 @@ function init(projectDir) {
   db.exec(schema);
   ensureMergeQueueColumns(db);
   ensureTaskRoutingTelemetryColumns(db);
+  ensureTaskBrowserOffloadColumns(db);
   ensureTaskUsageTelemetryColumns(db);
 
   // Store project dir in config
@@ -358,6 +435,62 @@ function updateTask(id, fields) {
   sets.push("updated_at = datetime('now')");
   vals.push(id);
   getDb().prepare(`UPDATE tasks SET ${sets.join(', ')} WHERE id = ?`).run(...vals);
+}
+
+function normalizeBrowserOffloadStatus(value) {
+  if (value === null || value === undefined) return null;
+  const normalized = String(value).trim().toLowerCase();
+  if (!normalized) return null;
+  return BROWSER_OFFLOAD_STATUS_SEQUENCE.includes(normalized) ? normalized : null;
+}
+
+function canTransitionBrowserOffloadStatus(currentStatus, nextStatus) {
+  if (currentStatus === nextStatus) return true;
+  const allowed = BROWSER_OFFLOAD_ALLOWED_TRANSITIONS[currentStatus];
+  return Boolean(allowed && allowed.has(nextStatus));
+}
+
+function transitionTaskBrowserOffload(taskId, nextStatus, updates = {}) {
+  const normalizedNextStatus = normalizeBrowserOffloadStatus(nextStatus);
+  if (!normalizedNextStatus) {
+    throw new Error(`Invalid browser offload status: ${nextStatus}`);
+  }
+  if (updates.browser_offload_status !== undefined) {
+    throw new Error('transitionTaskBrowserOffload does not accept browser_offload_status in updates');
+  }
+
+  const allowedUpdateKeys = new Set([
+    'browser_session_id',
+    'browser_channel',
+    'browser_offload_payload',
+    'browser_offload_result',
+    'browser_offload_error',
+  ]);
+  for (const key of Object.keys(updates)) {
+    if (!allowedUpdateKeys.has(key)) {
+      throw new Error(`Invalid browser offload update field: ${key}`);
+    }
+  }
+
+  const task = getTask(taskId);
+  if (!task) {
+    throw new Error(`Task ${taskId} not found`);
+  }
+
+  const currentStatus = normalizeBrowserOffloadStatus(task.browser_offload_status) || 'not_requested';
+  if (!canTransitionBrowserOffloadStatus(currentStatus, normalizedNextStatus)) {
+    throw new Error(
+      `Invalid browser offload transition from "${currentStatus}" to "${normalizedNextStatus}"`
+    );
+  }
+
+  const timestamp = new Date().toISOString().slice(0, 19).replace('T', ' ');
+  updateTask(taskId, {
+    ...updates,
+    browser_offload_status: normalizedNextStatus,
+    browser_offload_updated_at: timestamp,
+  });
+  return getTask(taskId);
 }
 
 function listTasks(filters = {}) {
@@ -1191,7 +1324,7 @@ module.exports = {
   init, close, getDb,
   coordinatorAgeMs,
   createRequest, getRequest, updateRequest, listRequests,
-  createTask, getTask, updateTask, listTasks, getReadyTasks, checkAndPromoteTasks,
+  createTask, getTask, updateTask, transitionTaskBrowserOffload, listTasks, getReadyTasks, checkAndPromoteTasks,
   registerWorker, getWorker, updateWorker, getIdleWorkers, getAllWorkers, claimWorker, releaseWorker,
   checkRequestCompletion, getUsageCostBurnRate, getRequestLatestCompletedTaskCursor, hasRequestCompletedTaskProgressSince,
   sendMail, checkMail, checkMailBlocking, purgeOldMail,
