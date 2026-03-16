@@ -590,8 +590,8 @@ function checkRequestCompletion(requestId) {
   const allMerged = allMerges.every(m => m.status === 'merged');
   if (allMerged && allMerges.length > 0) {
     const taskCompletion = db.checkRequestCompletion(requestId);
-    const allTasksCompletedSuccessfully = taskCompletion.all_completed && taskCompletion.failed === 0;
-    if (!allTasksCompletedSuccessfully) {
+    const allTasksDone = taskCompletion.all_done === true;
+    if (!allTasksDone) {
       const request = db.getRequest(requestId);
       if (request && request.status !== 'integrating' && request.status !== 'in_progress') {
         db.updateRequest(requestId, { status: 'integrating' });
