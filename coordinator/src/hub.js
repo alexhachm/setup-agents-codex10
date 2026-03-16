@@ -21,7 +21,9 @@ db.init(HUB_DIR);
 console.log(`Hub DB initialized at ${HUB_DIR}`);
 
 // Start web server
-webServer.start(HUB_DIR, PORT, scriptDir);
+webServer.start(HUB_DIR, PORT, scriptDir, {
+  browserBridgeEnabled: false,
+});
 console.log(`Hub dashboard: http://localhost:${PORT}`);
 
 // Register in instance registry
