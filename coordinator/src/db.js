@@ -416,7 +416,7 @@ const VALID_COLUMNS = Object.freeze({
     'usage_total_tokens', 'usage_cost_usd',
     'started_at', 'completed_at', 'result',
   ]),
-  workers: new Set(['status', 'domain', 'worktree_path', 'branch', 'tmux_session', 'tmux_window', 'pid', 'current_task_id', 'claimed_by', 'last_heartbeat', 'launched_at', 'tasks_completed']),
+  workers: new Set(['status', 'domain', 'worktree_path', 'branch', 'tmux_session', 'tmux_window', 'pid', 'current_task_id', 'claimed_by', 'claimed_at', 'last_heartbeat', 'launched_at', 'tasks_completed']),
   merge_queue: new Set(['status', 'priority', 'completion_checkpoint', 'merged_at', 'error']),
   changes: new Set(['description', 'domain', 'file_path', 'function_name', 'tooltip', 'enabled', 'status']),
   loops: new Set(['prompt', 'status', 'iteration_count', 'last_checkpoint', 'tmux_session', 'tmux_window', 'pid', 'last_heartbeat', 'stopped_at']),
@@ -800,6 +800,11 @@ function init(projectDir) {
     if (!cols.includes('claimed_by')) {
       db.exec("ALTER TABLE workers ADD COLUMN claimed_by TEXT");
     }
+    if (!cols.includes('claimed_at')) {
+      db.exec("ALTER TABLE workers ADD COLUMN claimed_at TEXT");
+    }
+    db.exec("UPDATE workers SET claimed_at = NULL WHERE claimed_by IS NULL AND claimed_at IS NOT NULL");
+    db.exec("UPDATE workers SET claimed_at = COALESCE(claimed_at, datetime('now')) WHERE claimed_by IS NOT NULL");
   }
   if (existingTables.includes('tasks')) {
     const taskCols = db.prepare("PRAGMA table_info(tasks)").all().map(c => c.name);
@@ -2503,14 +2508,15 @@ function getAllWorkers() {
 }
 
 function claimWorker(workerId, claimer) {
+  const claimedAt = new Date().toISOString();
   const result = getDb().prepare(
-    "UPDATE workers SET claimed_by = ? WHERE id = ? AND status = 'idle' AND claimed_by IS NULL"
-  ).run(claimer, workerId);
+    "UPDATE workers SET claimed_by = ?, claimed_at = ? WHERE id = ? AND status = 'idle' AND claimed_by IS NULL"
+  ).run(claimer, claimedAt, workerId);
   return result.changes > 0;
 }
 
 function releaseWorker(workerId) {
-  getDb().prepare('UPDATE workers SET claimed_by = NULL WHERE id = ?').run(workerId);
+  getDb().prepare('UPDATE workers SET claimed_by = NULL, claimed_at = NULL WHERE id = ?').run(workerId);
 }
 
 function checkRequestCompletion(requestId) {
