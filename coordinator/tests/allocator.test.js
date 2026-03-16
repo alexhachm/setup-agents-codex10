@@ -93,6 +93,59 @@ describe('Allocator tick (thin notifier)', () => {
     const available = mail.filter(m => m.type === 'tasks_available');
     assert.strictEqual(available.length, 0); // no unclaimed idle workers
   });
+
+  it('should recover orphaned assignments and resume notifications', () => {
+    db.registerWorker(1, '/wt-1', 'agent-1');
+    const reqId = db.createRequest('Recover orphan assignment');
+    const taskId = db.createTask({ request_id: reqId, subject: 'Task', description: 'Desc' });
+    db.updateTask(taskId, { status: 'assigned', assigned_to: 1 });
+    db.updateWorker(1, { status: 'idle', current_task_id: null });
+
+    db.checkMail('allocator');
+    allocator.tick();
+
+    const task = db.getTask(taskId);
+    assert.strictEqual(task.status, 'ready');
+    assert.strictEqual(task.assigned_to, null);
+    assert.strictEqual(task.liveness_reassign_count, 1);
+    assert.strictEqual(task.liveness_last_reassign_reason, 'worker_idle_orphan');
+
+    const mail = db.checkMail('allocator');
+    const available = mail.filter((m) => m.type === 'tasks_available');
+    assert.strictEqual(available.length, 1);
+    assert.strictEqual(available[0].payload.ready_count, 1);
+    assert.strictEqual(available[0].payload.idle_count, 1);
+  });
+
+  it('should stop reassignment when liveness retry limit is exhausted', () => {
+    db.setConfig('watchdog_task_reassign_limit', '1');
+    db.registerWorker(1, '/wt-1', 'agent-1');
+    const reqId = db.createRequest('Bounded assignment retries');
+    const taskId = db.createTask({ request_id: reqId, subject: 'Task', description: 'Desc' });
+    db.updateTask(taskId, {
+      status: 'assigned',
+      assigned_to: 1,
+      liveness_reassign_count: 1,
+    });
+    db.updateWorker(1, {
+      status: 'idle',
+      current_task_id: null,
+    });
+
+    db.checkMail('allocator');
+    allocator.tick();
+
+    const task = db.getTask(taskId);
+    assert.strictEqual(task.status, 'failed');
+    assert.strictEqual(task.assigned_to, null);
+    assert.match(String(task.result || ''), /Liveness recovery exhausted/i);
+
+    const mail = db.checkMail('allocator');
+    const failed = mail.filter((m) => m.type === 'task_failed' && m.payload.task_id === taskId);
+    const available = mail.filter((m) => m.type === 'tasks_available');
+    assert.strictEqual(failed.length, 1);
+    assert.strictEqual(available.length, 0);
+  });
 });
 
 describe('Worker claim/release', () => {

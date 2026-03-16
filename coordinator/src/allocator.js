@@ -30,6 +30,23 @@ function tick() {
   // 1. Promote pending tasks whose dependencies are met
   db.checkAndPromoteTasks();
 
+  // 1b. Recover stalled or orphaned assignments so throughput can resume.
+  const recoveredAssignments = db.recoverStalledAssignments({
+    source: 'allocator_tick',
+    include_orphans: true,
+    include_heartbeat_stale: true,
+  });
+  if (recoveredAssignments.length > 0) {
+    const reassigned = recoveredAssignments.filter((entry) => entry.outcome === 'reassigned').length;
+    const retryExhausted = recoveredAssignments.filter((entry) => entry.outcome === 'failed_retry_exhausted').length;
+    db.log('allocator', 'stalled_assignment_recovery', {
+      source: 'allocator_tick',
+      recovered_assignments: recoveredAssignments.length,
+      reassigned,
+      retry_exhausted: retryExhausted,
+    });
+  }
+
   // 2. Check if there are ready tasks AND idle unclaimed workers
   const readyTasks = db.getReadyTasks();
   if (readyTasks.length === 0) return;

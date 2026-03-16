@@ -88,6 +88,26 @@ describe('Orphan task recovery', () => {
 
     assert.strictEqual(orphans.length, 0);
   });
+
+  it('should recover orphaned assignments during watchdog ticks', () => {
+    db.registerWorker(1, '/wt-1', 'agent-1');
+    const reqId = db.createRequest('Recover orphan');
+    const taskId = db.createTask({
+      request_id: reqId,
+      subject: 'Orphaned task',
+      description: 'Recover this assignment',
+    });
+    db.updateTask(taskId, { status: 'assigned', assigned_to: 1 });
+    db.updateWorker(1, { status: 'idle', current_task_id: null });
+
+    tick(tmpDir);
+
+    const task = db.getTask(taskId);
+    assert.strictEqual(task.status, 'ready');
+    assert.strictEqual(task.assigned_to, null);
+    assert.strictEqual(task.liveness_reassign_count, 1);
+    assert.strictEqual(task.liveness_last_reassign_reason, 'worker_idle_orphan');
+  });
 });
 
 describe('Heartbeat staleness', () => {
@@ -120,6 +140,84 @@ describe('Heartbeat staleness', () => {
     const worker = db.getWorker(1);
     const launchedAgo = (Date.now() - new Date(worker.launched_at).getTime()) / 1000;
     assert.ok(launchedAgo < THRESHOLDS.warn); // Should be skipped by watchdog
+  });
+
+  it('recovers stale assigned workers using liveness heartbeat age', () => {
+    db.registerWorker(1, '/wt-1', 'agent-1');
+    const reqId = db.createRequest('Recover stale assigned worker');
+    const taskId = db.createTask({
+      request_id: reqId,
+      subject: 'Stale assignment',
+      description: 'Assignment should recover after stale heartbeat',
+    });
+    const staleTime = new Date(Date.now() - 6 * 60 * 1000).toISOString();
+    db.updateTask(taskId, { status: 'assigned', assigned_to: 1 });
+    db.updateWorker(1, {
+      status: 'assigned',
+      current_task_id: taskId,
+      launched_at: staleTime,
+      last_heartbeat: staleTime,
+    });
+
+    const originalIsPaneAlive = tmux.isPaneAlive;
+    tmux.isPaneAlive = (windowName) => windowName === 'worker-1';
+    try {
+      tick(tmpDir);
+    } finally {
+      tmux.isPaneAlive = originalIsPaneAlive;
+    }
+
+    const task = db.getTask(taskId);
+    assert.strictEqual(task.status, 'ready');
+    assert.strictEqual(task.assigned_to, null);
+    assert.strictEqual(task.liveness_reassign_count, 1);
+    assert.strictEqual(task.liveness_last_reassign_reason, 'worker_liveness_stale');
+
+    const worker = db.getWorker(1);
+    assert.strictEqual(worker.status, 'idle');
+    assert.strictEqual(worker.current_task_id, null);
+
+    const recoveryLog = db.getLog(100, 'coordinator')
+      .filter((entry) => entry.action === 'task_liveness_recovered')
+      .map((entry) => JSON.parse(entry.details))
+      .find((entry) => entry.task_id === taskId && entry.source === 'watchdog_tick');
+    assert.ok(recoveryLog);
+    assert.strictEqual(recoveryLog.reason, 'worker_liveness_stale');
+    assert.ok(recoveryLog.stale_sec >= THRESHOLDS.terminate);
+  });
+});
+
+describe('Bounded assignment recovery', () => {
+  it('fails stale assignments once reassignment retries are exhausted', () => {
+    db.setConfig('watchdog_task_reassign_limit', '1');
+    db.registerWorker(1, '/wt-1', 'agent-1');
+    const reqId = db.createRequest('Retry exhausted assignment');
+    const taskId = db.createTask({
+      request_id: reqId,
+      subject: 'Stuck assignment',
+      description: 'Should fail after bounded liveness retries',
+    });
+    db.updateTask(taskId, {
+      status: 'assigned',
+      assigned_to: 1,
+      liveness_reassign_count: 1,
+    });
+    db.updateWorker(1, { status: 'idle', current_task_id: null });
+
+    tick(tmpDir);
+
+    const task = db.getTask(taskId);
+    assert.strictEqual(task.status, 'failed');
+    assert.strictEqual(task.assigned_to, null);
+    assert.match(String(task.result || ''), /Liveness recovery exhausted/i);
+
+    const exhaustedLog = db.getLog(100, 'coordinator')
+      .filter((entry) => entry.action === 'task_liveness_retry_exhausted')
+      .map((entry) => JSON.parse(entry.details))
+      .find((entry) => entry.task_id === taskId);
+    assert.ok(exhaustedLog);
+    assert.strictEqual(exhaustedLog.max_reassignments, 1);
+    assert.strictEqual(exhaustedLog.outcome, 'failed_retry_exhausted');
   });
 });
 
