@@ -425,6 +425,7 @@ const COMMAND_SCHEMAS = {
   'release-worker':    { required: ['worker_id'], types: { worker_id: 'number' } },
   'worker-status':     { required: [], types: {} },
   'check-completion':  { required: ['request_id'], types: { request_id: 'string' } },
+  'replan-dependency': { required: ['from_task_id', 'to_task_id'], types: { from_task_id: 'number', to_task_id: 'number', request_id: 'string' } },
   'register-worker':   { required: ['worker_id'], types: { worker_id: 'string', worktree_path: 'string', branch: 'string' } },
   'repair':            { required: [], types: {} },
   'ping':              { required: [], types: {} },
@@ -2395,6 +2396,16 @@ function handleCommand(cmd, conn, handlers) {
       case 'check-overlaps': {
         const overlapPairs = db.getOverlapsForRequest(args.request_id);
         respond(conn, { ok: true, request_id: args.request_id, overlaps: overlapPairs });
+        break;
+      }
+
+      case 'replan-dependency': {
+        const replanned = db.replanTaskDependency({
+          fromTaskId: args.from_task_id,
+          toTaskId: args.to_task_id,
+          requestId: args.request_id,
+        });
+        respond(conn, { ok: true, ...replanned });
         break;
       }
 

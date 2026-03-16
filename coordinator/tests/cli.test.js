@@ -2154,6 +2154,77 @@ describe('CLI Server', () => {
     assert.strictEqual(db.getConfig('loop_request_similarity_threshold'), '0.82');
   });
 
+  it('should replan blocked dependencies and promote newly unblocked tasks via RPC command', async () => {
+    const requestId = db.createRequest('Dependency replan request');
+    const sourceTaskId = db.createTask({
+      request_id: requestId,
+      subject: 'Failed source task',
+      description: 'Original dependency that timed out',
+    });
+    const replacementTaskId = db.createTask({
+      request_id: requestId,
+      subject: 'Replacement task',
+      description: 'Bootstrap replacement dependency',
+    });
+    const blockedTaskId = db.createTask({
+      request_id: requestId,
+      subject: 'Blocked downstream task',
+      description: 'Should unblock after replanning',
+      depends_on: [sourceTaskId],
+    });
+
+    db.updateTask(sourceTaskId, { status: 'failed' });
+    db.updateTask(replacementTaskId, { status: 'completed' });
+    db.checkAndPromoteTasks();
+    assert.strictEqual(db.getTask(blockedTaskId).status, 'pending');
+
+    const replanned = await sendCommand('replan-dependency', {
+      from_task_id: sourceTaskId,
+      to_task_id: replacementTaskId,
+    });
+    assert.strictEqual(replanned.ok, true);
+    assert.strictEqual(replanned.updated_count, 1);
+    assert.strictEqual(replanned.promoted_count, 1);
+    assert.deepStrictEqual(replanned.updated_task_ids, [blockedTaskId]);
+    assert.deepStrictEqual(replanned.promoted_task_ids, [blockedTaskId]);
+    assert.strictEqual(db.getTask(blockedTaskId).depends_on, `[${replacementTaskId}]`);
+    assert.strictEqual(db.getTask(blockedTaskId).status, 'ready');
+  });
+
+  it('should reject dependency replanning to a failed replacement task', async () => {
+    const requestId = db.createRequest('Dependency replan failure');
+    const sourceTaskId = db.createTask({
+      request_id: requestId,
+      subject: 'Failed source task',
+      description: 'Task to replace',
+    });
+    const failedReplacementTaskId = db.createTask({
+      request_id: requestId,
+      subject: 'Failed replacement task',
+      description: 'Must be rejected',
+    });
+    const blockedTaskId = db.createTask({
+      request_id: requestId,
+      subject: 'Blocked downstream task',
+      description: 'Should remain blocked',
+      depends_on: [sourceTaskId],
+    });
+
+    db.updateTask(sourceTaskId, { status: 'failed' });
+    db.updateTask(failedReplacementTaskId, { status: 'failed' });
+    db.checkAndPromoteTasks();
+    assert.strictEqual(db.getTask(blockedTaskId).status, 'pending');
+
+    const replanned = await sendCommand('replan-dependency', {
+      from_task_id: sourceTaskId,
+      to_task_id: failedReplacementTaskId,
+    });
+    assert.notStrictEqual(replanned.ok, true);
+    assert.match(replanned.error, /cannot be used as a replacement dependency/);
+    assert.strictEqual(db.getTask(blockedTaskId).depends_on, `[${sourceTaskId}]`);
+    assert.strictEqual(db.getTask(blockedTaskId).status, 'pending');
+  });
+
   it('should reject assign-task for claimed workers without mutating task or claim state', async () => {
     db.registerWorker(1, '/wt-1', 'agent-1');
     const taskId = createReadyTask({

@@ -150,6 +150,89 @@ describe('Task state machine', () => {
     assert.strictEqual(db.getTask(t2).status, 'pending');
   });
 
+  it('should replan blocked dependencies and promote newly unblocked tasks', () => {
+    const reqA = db.createRequest('Dependency source request');
+    const sourceTask = db.createTask({ request_id: reqA, subject: 'Source', description: 'Original dependency' });
+    const replacementTask = db.createTask({ request_id: reqA, subject: 'Replacement', description: 'Bootstrap replacement' });
+    const downstreamA = db.createTask({
+      request_id: reqA,
+      subject: 'Downstream A',
+      description: 'Blocked directly by source',
+      depends_on: [sourceTask],
+    });
+    const downstreamB = db.createTask({
+      request_id: reqA,
+      subject: 'Downstream B',
+      description: 'Blocked by source and downstream A',
+      depends_on: [sourceTask, downstreamA],
+    });
+    const reqB = db.createRequest('Cross-request dependency');
+    const crossRequestTask = db.createTask({
+      request_id: reqB,
+      subject: 'Cross-request blocked task',
+      description: 'Blocked directly by source from another request',
+      depends_on: [sourceTask],
+    });
+
+    db.updateTask(sourceTask, { status: 'failed' });
+    db.updateTask(replacementTask, { status: 'completed' });
+    db.checkAndPromoteTasks();
+
+    const replanned = db.replanTaskDependency({ fromTaskId: sourceTask, toTaskId: replacementTask });
+    assert.deepStrictEqual(
+      [...replanned.updated_task_ids].sort((a, b) => a - b),
+      [crossRequestTask, downstreamA, downstreamB].sort((a, b) => a - b)
+    );
+    assert.deepStrictEqual(
+      [...replanned.promoted_task_ids].sort((a, b) => a - b),
+      [crossRequestTask, downstreamA].sort((a, b) => a - b)
+    );
+
+    assert.strictEqual(db.getTask(downstreamA).depends_on, `[${replacementTask}]`);
+    assert.strictEqual(db.getTask(crossRequestTask).depends_on, `[${replacementTask}]`);
+    assert.strictEqual(db.getTask(downstreamB).depends_on, `[${replacementTask},${downstreamA}]`);
+    assert.strictEqual(db.getTask(downstreamA).status, 'ready');
+    assert.strictEqual(db.getTask(crossRequestTask).status, 'ready');
+    assert.strictEqual(db.getTask(downstreamB).status, 'pending');
+  });
+
+  it('should support request-scoped dependency replanning', () => {
+    const reqA = db.createRequest('Scoped dependency replan');
+    const sourceTask = db.createTask({ request_id: reqA, subject: 'Source', description: 'Failed source task' });
+    const replacementTask = db.createTask({ request_id: reqA, subject: 'Replacement', description: 'Completed replacement' });
+    const scopedTask = db.createTask({
+      request_id: reqA,
+      subject: 'Scoped blocked task',
+      description: 'Should be updated',
+      depends_on: [sourceTask],
+    });
+
+    const reqB = db.createRequest('Unscoped dependency');
+    const unscopedTask = db.createTask({
+      request_id: reqB,
+      subject: 'Unscoped blocked task',
+      description: 'Should remain blocked',
+      depends_on: [sourceTask],
+    });
+
+    db.updateTask(sourceTask, { status: 'failed' });
+    db.updateTask(replacementTask, { status: 'completed' });
+    db.checkAndPromoteTasks();
+
+    const replanned = db.replanTaskDependency({
+      fromTaskId: sourceTask,
+      toTaskId: replacementTask,
+      requestId: reqA,
+    });
+
+    assert.deepStrictEqual(replanned.updated_task_ids, [scopedTask]);
+    assert.deepStrictEqual(replanned.promoted_task_ids, [scopedTask]);
+    assert.strictEqual(db.getTask(scopedTask).depends_on, `[${replacementTask}]`);
+    assert.strictEqual(db.getTask(unscopedTask).depends_on, `[${sourceTask}]`);
+    assert.strictEqual(db.getTask(scopedTask).status, 'ready');
+    assert.strictEqual(db.getTask(unscopedTask).status, 'pending');
+  });
+
   it('should persist browser-offload task fields and lifecycle transitions', () => {
     const reqId = db.createRequest('Browser research offload');
     const taskId = db.createTask({
