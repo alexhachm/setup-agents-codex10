@@ -156,6 +156,78 @@ CREATE TABLE IF NOT EXISTS research_intent_fanout (
   UNIQUE(intent_id, fanout_key)
 );
 
+-- Project memory snapshots and insight artifacts
+CREATE TABLE IF NOT EXISTS project_memory_snapshots (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  project_context_key TEXT NOT NULL,
+  snapshot_version INTEGER NOT NULL CHECK (snapshot_version > 0),
+  iteration INTEGER NOT NULL DEFAULT 1 CHECK (iteration > 0),
+  parent_snapshot_id INTEGER REFERENCES project_memory_snapshots(id) ON DELETE SET NULL,
+  snapshot_payload TEXT NOT NULL,
+  dedupe_fingerprint TEXT NOT NULL,
+  relevance_score REAL NOT NULL DEFAULT 0,
+  request_id TEXT REFERENCES requests(id),
+  task_id INTEGER REFERENCES tasks(id),
+  run_id TEXT,
+  source TEXT,
+  confidence_score REAL CHECK (confidence_score IS NULL OR (confidence_score >= 0 AND confidence_score <= 1)),
+  validation_status TEXT NOT NULL DEFAULT 'unvalidated'
+    CHECK (validation_status IN ('unvalidated','pending','validated','rejected','superseded')),
+  retention_policy TEXT NOT NULL DEFAULT 'retain',
+  retention_until TEXT,
+  governance_metadata TEXT,
+  created_at TEXT NOT NULL DEFAULT (datetime('now')),
+  UNIQUE(project_context_key, snapshot_version)
+);
+
+CREATE TABLE IF NOT EXISTS project_memory_snapshot_index (
+  project_context_key TEXT PRIMARY KEY,
+  latest_snapshot_id INTEGER NOT NULL REFERENCES project_memory_snapshots(id) ON DELETE CASCADE,
+  latest_snapshot_version INTEGER NOT NULL CHECK (latest_snapshot_version > 0),
+  latest_iteration INTEGER NOT NULL DEFAULT 1 CHECK (latest_iteration > 0),
+  latest_snapshot_created_at TEXT NOT NULL,
+  updated_at TEXT NOT NULL DEFAULT (datetime('now'))
+);
+
+CREATE TABLE IF NOT EXISTS insight_artifacts (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  project_context_key TEXT NOT NULL,
+  snapshot_id INTEGER REFERENCES project_memory_snapshots(id) ON DELETE SET NULL,
+  artifact_type TEXT NOT NULL DEFAULT 'research_insight',
+  artifact_key TEXT,
+  artifact_version INTEGER NOT NULL DEFAULT 1 CHECK (artifact_version > 0),
+  artifact_payload TEXT NOT NULL,
+  dedupe_fingerprint TEXT NOT NULL,
+  relevance_score REAL NOT NULL DEFAULT 0,
+  request_id TEXT REFERENCES requests(id),
+  task_id INTEGER REFERENCES tasks(id),
+  run_id TEXT,
+  source TEXT,
+  confidence_score REAL CHECK (confidence_score IS NULL OR (confidence_score >= 0 AND confidence_score <= 1)),
+  validation_status TEXT NOT NULL DEFAULT 'unvalidated'
+    CHECK (validation_status IN ('unvalidated','pending','validated','rejected','superseded')),
+  retention_policy TEXT NOT NULL DEFAULT 'retain',
+  retention_until TEXT,
+  governance_metadata TEXT,
+  created_at TEXT NOT NULL DEFAULT (datetime('now')),
+  updated_at TEXT NOT NULL DEFAULT (datetime('now')),
+  UNIQUE(project_context_key, artifact_type, dedupe_fingerprint, artifact_version)
+);
+
+CREATE TABLE IF NOT EXISTS project_memory_lineage_links (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  snapshot_id INTEGER REFERENCES project_memory_snapshots(id) ON DELETE CASCADE,
+  insight_artifact_id INTEGER REFERENCES insight_artifacts(id) ON DELETE CASCADE,
+  request_id TEXT REFERENCES requests(id),
+  task_id INTEGER REFERENCES tasks(id),
+  run_id TEXT,
+  lineage_type TEXT NOT NULL DEFAULT 'origin'
+    CHECK (lineage_type IN ('origin','derived_from','supports','supersedes','validated_by','consumed_by')),
+  metadata TEXT,
+  created_at TEXT NOT NULL DEFAULT (datetime('now')),
+  CHECK (snapshot_id IS NOT NULL OR insight_artifact_id IS NOT NULL)
+);
+
 -- Workers (replaces worker-status.json)
 CREATE TABLE IF NOT EXISTS workers (
   id INTEGER PRIMARY KEY,  -- worker number (1-8)
@@ -280,6 +352,26 @@ CREATE INDEX IF NOT EXISTS idx_research_intent_fanout_intent_status
 CREATE INDEX IF NOT EXISTS idx_research_intent_fanout_retry
   ON research_intent_fanout(status, updated_at ASC, id ASC)
   WHERE status IN ('partial_failed','failed');
+CREATE INDEX IF NOT EXISTS idx_project_memory_snapshots_context_version
+  ON project_memory_snapshots(project_context_key, snapshot_version DESC, created_at DESC, id DESC);
+CREATE INDEX IF NOT EXISTS idx_project_memory_snapshots_dedupe
+  ON project_memory_snapshots(project_context_key, dedupe_fingerprint);
+CREATE INDEX IF NOT EXISTS idx_project_memory_snapshots_lineage
+  ON project_memory_snapshots(request_id, task_id, run_id);
+CREATE INDEX IF NOT EXISTS idx_insight_artifacts_context_relevance
+  ON insight_artifacts(project_context_key, relevance_score DESC, created_at DESC, id DESC);
+CREATE INDEX IF NOT EXISTS idx_insight_artifacts_dedupe
+  ON insight_artifacts(project_context_key, artifact_type, dedupe_fingerprint, artifact_version DESC);
+CREATE INDEX IF NOT EXISTS idx_insight_artifacts_lineage
+  ON insight_artifacts(request_id, task_id, run_id, validation_status);
+CREATE INDEX IF NOT EXISTS idx_project_memory_lineage_snapshot
+  ON project_memory_lineage_links(snapshot_id, created_at DESC, id DESC)
+  WHERE snapshot_id IS NOT NULL;
+CREATE INDEX IF NOT EXISTS idx_project_memory_lineage_insight
+  ON project_memory_lineage_links(insight_artifact_id, created_at DESC, id DESC)
+  WHERE insight_artifact_id IS NOT NULL;
+CREATE INDEX IF NOT EXISTS idx_project_memory_lineage_request_task_run
+  ON project_memory_lineage_links(request_id, task_id, run_id, lineage_type);
 CREATE INDEX IF NOT EXISTS idx_mail_recipient ON mail(recipient, consumed);
 CREATE INDEX IF NOT EXISTS idx_mail_type ON mail(type);
 CREATE INDEX IF NOT EXISTS idx_mail_created ON mail(created_at);
