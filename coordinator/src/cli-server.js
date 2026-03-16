@@ -945,6 +945,20 @@ function getWorkerActiveAssignment(workerId) {
   `).get(workerId) || null;
 }
 
+function isWorkerClaimedAssignmentError(err) {
+  if (!err) return false;
+  const fields = [
+    err.code,
+    err.error,
+    err.reason,
+    err.message,
+  ];
+  return fields.some((value) => (
+    typeof value === 'string'
+    && /\bworker[_\s-]?claimed\b/i.test(value.trim())
+  ));
+}
+
 /** Parse depends_on into an array of task ids. Accepts arrays or JSON-array strings. */
 function parseDependsOnField(dependsOn) {
   if (dependsOn === null || dependsOn === undefined) return null;
@@ -2319,7 +2333,15 @@ function handleCommand(cmd, conn, handlers) {
           try {
             handlers.onAssignTask(assignedTask, assignedWorker, routingDecision);
           } catch (spawnErr) {
+            const rollbackAsWorkerClaimed = isWorkerClaimedAssignmentError(spawnErr);
             db.getDb().transaction(() => {
+              const rollbackWorker = rollbackAsWorkerClaimed ? db.getWorker(assignWorkerId) : null;
+              const claimedBy = rollbackAsWorkerClaimed
+                ? (rollbackWorker ? rollbackWorker.claimed_by : assignResult.worker.claimed_by)
+                : assignResult.worker.claimed_by;
+              const claimedAt = rollbackAsWorkerClaimed
+                ? (rollbackWorker ? rollbackWorker.claimed_at : assignResult.worker.claimed_at)
+                : assignResult.worker.claimed_at;
               db.updateTask(assignTaskId, {
                 status: assignResult.task.status,
                 assigned_to: assignResult.task.assigned_to,
@@ -2332,12 +2354,16 @@ function handleCommand(cmd, conn, handlers) {
                 status: assignResult.worker.status,
                 current_task_id: assignResult.worker.current_task_id,
                 domain: assignResult.worker.domain,
-                claimed_by: assignResult.worker.claimed_by,
-                claimed_at: assignResult.worker.claimed_at,
+                claimed_by: claimedBy,
+                claimed_at: claimedAt,
                 launched_at: assignResult.worker.launched_at,
               });
             })();
             db.log('coordinator', 'assign_handler_failed', { task_id: assignTaskId, worker_id: assignWorkerId, error: spawnErr.message });
+            if (rollbackAsWorkerClaimed) {
+              respond(conn, { ok: false, error: 'worker_claimed' });
+              break;
+            }
             respond(conn, { ok: false, error: `Failed to spawn worker: ${spawnErr.message}` });
             break;
           }
