@@ -8,6 +8,7 @@
     workers: { title: 'Workers', render: renderWorkers },
     requests: { title: 'Requests', render: renderRequests },
     tasks: { title: 'Tasks', render: renderTasks },
+    browser: { title: 'Browser Offload', render: renderBrowserOffload },
     log: { title: 'Activity Log', render: renderLog },
   };
 
@@ -29,6 +30,9 @@
   var reconnectTimer = null;
   var reconnectDelay = 1000;
   var MAX_RECONNECT_DELAY = 30000;
+  var latestState = null;
+  var browserTimeline = [];
+  var browserTimelineKeys = new Set();
 
   function connect() {
     var protocol = location.protocol === 'https:' ? 'wss:' : 'ws:';
@@ -52,7 +56,10 @@
       try {
         var msg = JSON.parse(event.data);
         if (msg.type === 'init' || msg.type === 'state') {
+          latestState = msg.data || {};
           config.render(msg.data);
+        } else if (msg.type === 'browser_offload_event' && panel === 'browser') {
+          handleBrowserEvent(msg);
         }
       } catch (e) { console.error('WS parse error:', e); }
     };
@@ -62,6 +69,7 @@
   fetch('/api/status')
     .then(function(r) { return r.json(); })
     .then(function(data) {
+      latestState = data || {};
       config.render(data);
     })
     .catch(function(err) { console.error('Status fetch failed:', err); });
@@ -89,6 +97,170 @@
     var safe = safeUrl(prUrl);
     if (!safe) return '';
     return '<a href="' + safe + '" target="_blank" rel="noopener" style="color:#58a6ff">PR</a>';
+  }
+
+  function trimTo(text, maxLength) {
+    var normalized = String(text || '').trim();
+    if (!normalized) return '';
+    if (normalized.length <= maxLength) return normalized;
+    return normalized.slice(0, maxLength) + '...';
+  }
+
+  function summarizeBrowserResult(result) {
+    if (result === null || result === undefined) return '';
+    if (typeof result === 'string') return trimTo(result, 800);
+    if (typeof result === 'number' || typeof result === 'boolean') return String(result);
+    if (typeof result !== 'object') return trimTo(String(result), 800);
+    var preferred = [
+      result.summary,
+      result.final_summary,
+      result.finalSummary,
+      result.answer,
+      result.final,
+      result.result,
+      result.message,
+      result.content,
+      result.text
+    ].find(function(candidate) {
+      return typeof candidate === 'string' && candidate.trim();
+    });
+    if (preferred) return trimTo(preferred, 800);
+    try {
+      return trimTo(JSON.stringify(result, null, 2), 800);
+    } catch (e) {
+      return '[unserializable result]';
+    }
+  }
+
+  function summarizeBrowserPayload(payload) {
+    if (payload === null || payload === undefined) return '';
+    if (typeof payload === 'string') return trimTo(payload, 200);
+    if (typeof payload === 'number' || typeof payload === 'boolean') return String(payload);
+    try {
+      return trimTo(JSON.stringify(payload), 200);
+    } catch (e) {
+      return '[unserializable payload]';
+    }
+  }
+
+  function statusClassForBrowserSession(status) {
+    var normalized = String(status || '').trim().toLowerCase();
+    if (normalized === 'completed') return 'badge-completed_task';
+    if (normalized === 'failed' || normalized === 'cancelled') return 'badge-resetting';
+    if (normalized === 'running' || normalized === 'awaiting_callback') return 'badge-running';
+    if (normalized === 'launching' || normalized === 'requested' || normalized === 'queued' || normalized === 'attached') {
+      return 'badge-assigned';
+    }
+    return 'badge-idle';
+  }
+
+  function pushBrowserTimelineItem(item) {
+    var at = String(item && item.at ? item.at : new Date().toISOString());
+    var label = String(item && item.label ? item.label : 'event');
+    var detail = String(item && item.detail ? item.detail : '');
+    var tone = String(item && item.tone ? item.tone : 'info');
+    var key = at + '|' + label + '|' + detail;
+    if (browserTimelineKeys.has(key)) return;
+    browserTimelineKeys.add(key);
+    browserTimeline.push({ at: at, label: label, detail: detail, tone: tone });
+    if (browserTimeline.length > 120) {
+      var removed = browserTimeline.shift();
+      if (removed) {
+        browserTimelineKeys.delete(removed.at + '|' + removed.label + '|' + removed.detail);
+      }
+    }
+  }
+
+  function ingestBrowserProgressTimeline(session) {
+    if (!session || !Array.isArray(session.progress)) return;
+    session.progress.forEach(function(entry) {
+      if (!entry || typeof entry !== 'object') return;
+      pushBrowserTimelineItem({
+        at: entry.at || session.updated_at || new Date().toISOString(),
+        label: String(entry.event || 'progress').replace(/_/g, ' '),
+        detail: summarizeBrowserPayload(entry.payload),
+        tone: 'info',
+      });
+    });
+  }
+
+  function handleBrowserEvent(event) {
+    if (!latestState || typeof latestState !== 'object') latestState = {};
+    if (!Array.isArray(latestState.browser_offload_sessions)) latestState.browser_offload_sessions = [];
+    if (event.session && typeof event.session === 'object' && event.session.session_id) {
+      var sessionId = String(event.session.session_id);
+      var index = latestState.browser_offload_sessions.findIndex(function(session) {
+        return String(session && session.session_id || '') === sessionId;
+      });
+      if (index >= 0) latestState.browser_offload_sessions[index] = event.session;
+      else latestState.browser_offload_sessions.unshift(event.session);
+      latestState.browser_offload_sessions = latestState.browser_offload_sessions.slice(0, 50);
+      ingestBrowserProgressTimeline(event.session);
+    }
+    var label = String(event.event || 'event').replace(/_/g, ' ');
+    var detail = event.error
+      ? trimTo(event.error, 220)
+      : (event.progress ? summarizeBrowserPayload(event.progress.payload) : summarizeBrowserPayload(event.result));
+    var tone = /failed|rejected|timeout/i.test(label) ? 'error' : (/completed|result/i.test(label) ? 'success' : 'info');
+    pushBrowserTimelineItem({
+      at: event.timestamp || new Date().toISOString(),
+      label: label,
+      detail: detail,
+      tone: tone,
+    });
+    config.render(latestState);
+  }
+
+  function renderBrowserOffload(data) {
+    var el = document.getElementById('popout-panel');
+    var state = data && typeof data === 'object' ? data : {};
+    var sessions = Array.isArray(state.browser_offload_sessions) ? state.browser_offload_sessions : [];
+    sessions.forEach(ingestBrowserProgressTimeline);
+    var active = sessions.filter(function(session) {
+      var status = String(session && session.status || '').toLowerCase();
+      return status !== 'completed' && status !== 'failed' && status !== 'cancelled';
+    });
+    var ordered = active.length > 0 ? active : sessions;
+
+    var sessionsHtml = ordered.length === 0
+      ? '<div style="color:#8b949e;font-size:13px;margin-bottom:12px">No browser offload sessions</div>'
+      : ordered.slice(0, 20).map(function(session) {
+        var status = String(session.status || 'unknown');
+        var badgeClass = statusClassForBrowserSession(status);
+        var latestProgress = session.latest_progress && typeof session.latest_progress === 'object'
+          ? summarizeBrowserPayload(session.latest_progress.payload)
+          : '';
+        var resultSummary = summarizeBrowserResult(session.result);
+        return '' +
+          '<div class="task-item">' +
+            '<span style="color:#58a6ff">session ' + escapeHtml(session.session_id || '-') + '</span> ' +
+            '<span class="worker-status ' + badgeClass + '">' + escapeHtml(status) + '</span>' +
+            '<div class="task-meta">task ' + escapeHtml(String(session.task_id || '-')) +
+              (session.request_id ? ' | request ' + escapeHtml(String(session.request_id)) : '') +
+            '</div>' +
+            (session.channel ? '<div class="task-meta">channel: ' + escapeHtml(session.channel) + '</div>' : '') +
+            (session.last_error ? '<div class="task-meta" style="color:#f85149">error: ' + escapeHtml(session.last_error) + '</div>' : '') +
+            (latestProgress ? '<div class="task-meta">latest progress: ' + escapeHtml(latestProgress) + '</div>' : '') +
+            (resultSummary ? '<pre class="browser-result" style="margin-top:8px;max-height:120px">' + escapeHtml(resultSummary) + '</pre>' : '') +
+          '</div>';
+      }).join('');
+
+    var timelineHtml = browserTimeline.length === 0
+      ? '<div class="browser-timeline-item"><span style="color:#8b949e">No browser events yet.</span></div>'
+      : browserTimeline.slice().reverse().slice(0, 60).map(function(item) {
+        return '' +
+          '<div class="browser-timeline-item ' + escapeHtml(item.tone || '') + '">' +
+            '<time>' + escapeHtml(item.at || '') + '</time>' +
+            '<strong>' + escapeHtml(item.label || 'event') + '</strong>' +
+            '<span>' + escapeHtml(item.detail || '') + '</span>' +
+          '</div>';
+      }).join('');
+
+    el.innerHTML = '' +
+      '<div class="browser-status-head"><span class="browser-status-title">Sessions</span></div>' +
+      sessionsHtml +
+      '<div class="browser-status-head"><span class="browser-status-title">Live Timeline</span></div>' +
+      '<div class="browser-timeline">' + timelineHtml + '</div>';
   }
 
   function renderWorkers(data) {

@@ -15,6 +15,29 @@
   // The "hub" port is the one the browser loaded from
   const hubPort = parseInt(location.port) || (location.protocol === 'https:' ? 443 : 80);
 
+  function createBrowserOffloadState() {
+    return {
+      sessions: [],
+      timeline: [],
+      timelineKeys: new Set(),
+      activeTaskId: '',
+      activeSessionId: '',
+      taskIdInput: '',
+      sessionIdInput: '',
+      channelInput: '',
+      timeoutMsInput: '',
+      payloadInput: '',
+      bridgeTokenInput: '',
+      callbackToken: '',
+      callbackEndpoint: '',
+      launchUrl: '',
+      statusMessage: '',
+      statusTone: '',
+      resultSummary: '',
+      actionPending: false,
+    };
+  }
+
   function createTabState(port, name, projectDir) {
     return {
       id: ++tabIdCounter,
@@ -33,6 +56,7 @@
       gitPushing: false,
       changes: [],
       changesDomainFilter: '',
+      browserOffload: createBrowserOffloadState(),
     };
   }
 
@@ -98,6 +122,8 @@
         } else if (msg.type === 'git_push_complete') {
           tab.gitPushing = false;
           if (tab.id === activeTabId) onGitPushComplete(msg.code);
+        } else if (msg.type === 'browser_offload_event') {
+          handleBrowserOffloadEvent(tab, msg);
         }
       } catch (e) { console.error('WS parse error:', e); }
     };
@@ -190,6 +216,13 @@
   function clearPanels() {
     renderState({ requests: [], workers: [], tasks: [] });
     document.getElementById('log-list').innerHTML = '';
+    document.getElementById('browser-workflow-state').textContent = 'idle';
+    document.getElementById('browser-workflow-state').className = 'browser-state-chip browser-state-idle';
+    document.getElementById('browser-session-meta').textContent = 'No active browser offload session.';
+    document.getElementById('browser-auth-meta').textContent = 'Launch first to obtain bridge credentials.';
+    document.getElementById('browser-result').textContent = 'No result yet.';
+    document.getElementById('browser-timeline').innerHTML = '';
+    document.getElementById('browser-status-msg').textContent = '';
   }
 
   // --- Instance polling ---
@@ -229,6 +262,8 @@
     renderWorkers(Array.isArray(state.workers) ? state.workers : []);
     renderRequests(Array.isArray(state.requests) ? state.requests : []);
     renderTasks(Array.isArray(state.tasks) ? state.tasks : [], state);
+    const tab = activeTab();
+    if (tab) renderBrowserOffload(tab, state);
   }
 
   function renderWorkers(workers) {
@@ -647,6 +682,557 @@
     return merged;
   }
 
+  function ensureBrowserOffloadState(tab) {
+    if (!tab) return createBrowserOffloadState();
+    if (!tab.browserOffload || typeof tab.browserOffload !== 'object') {
+      tab.browserOffload = createBrowserOffloadState();
+    }
+    if (!(tab.browserOffload.timelineKeys instanceof Set)) {
+      const keys = Array.isArray(tab.browserOffload.timelineKeys)
+        ? tab.browserOffload.timelineKeys
+        : [];
+      tab.browserOffload.timelineKeys = new Set(keys);
+    }
+    if (!Array.isArray(tab.browserOffload.timeline)) tab.browserOffload.timeline = [];
+    if (!Array.isArray(tab.browserOffload.sessions)) tab.browserOffload.sessions = [];
+    return tab.browserOffload;
+  }
+
+  function parsePositiveIntegerInput(value) {
+    const parsed = Number.parseInt(String(value || '').trim(), 10);
+    return Number.isInteger(parsed) && parsed > 0 ? parsed : null;
+  }
+
+  function normalizeBrowserStatus(status) {
+    const normalized = String(status || '').trim().toLowerCase();
+    return normalized || 'idle';
+  }
+
+  function browserStatusChipClass(status) {
+    const normalized = normalizeBrowserStatus(status);
+    if (normalized === 'completed') return 'browser-state-chip browser-state-completed';
+    if (normalized === 'failed' || normalized === 'cancelled') return 'browser-state-chip browser-state-failed';
+    if (normalized === 'launching' || normalized === 'requested' || normalized === 'queued' || normalized === 'attached') {
+      return 'browser-state-chip browser-state-pending';
+    }
+    if (normalized === 'running' || normalized === 'awaiting_callback') return 'browser-state-chip browser-state-running';
+    return 'browser-state-chip browser-state-idle';
+  }
+
+  function trimTo(text, maxLength = 800) {
+    const normalized = String(text || '').trim();
+    if (!normalized) return '';
+    if (normalized.length <= maxLength) return normalized;
+    return `${normalized.slice(0, maxLength)}...`;
+  }
+
+  function summarizeBrowserResult(result) {
+    if (result === null || result === undefined) return '';
+    if (typeof result === 'string') return trimTo(result, 1400);
+    if (typeof result === 'number' || typeof result === 'boolean') return String(result);
+    if (typeof result !== 'object') return trimTo(String(result), 1400);
+    const preferred = [
+      result.summary,
+      result.final_summary,
+      result.finalSummary,
+      result.answer,
+      result.final,
+      result.result,
+      result.message,
+      result.content,
+      result.text,
+    ].find((candidate) => typeof candidate === 'string' && candidate.trim());
+    if (preferred) return trimTo(preferred, 1400);
+    try {
+      return trimTo(JSON.stringify(result, null, 2), 1400);
+    } catch {
+      return '[unserializable result]';
+    }
+  }
+
+  function summarizeBrowserPayload(payload) {
+    if (payload === null || payload === undefined) return '';
+    if (typeof payload === 'string') return trimTo(payload, 220);
+    if (typeof payload === 'number' || typeof payload === 'boolean') return String(payload);
+    try {
+      return trimTo(JSON.stringify(payload), 220);
+    } catch {
+      return '[unserializable payload]';
+    }
+  }
+
+  function setBrowserStatusMessage(offload, message, tone = '') {
+    offload.statusMessage = String(message || '').trim();
+    offload.statusTone = tone;
+  }
+
+  function pushBrowserTimeline(offload, entry) {
+    const at = entry && entry.at ? String(entry.at) : new Date().toISOString();
+    const label = entry && entry.label ? String(entry.label) : 'event';
+    const detail = entry && entry.detail ? String(entry.detail) : '';
+    const tone = entry && entry.tone ? String(entry.tone) : 'info';
+    const key = `${at}|${label}|${detail}`;
+    if (offload.timelineKeys.has(key)) return;
+    offload.timelineKeys.add(key);
+    offload.timeline.push({ at, label, detail, tone });
+    if (offload.timeline.length > 120) {
+      const removed = offload.timeline.shift();
+      if (removed) {
+        const removedKey = `${removed.at}|${removed.label}|${removed.detail}`;
+        offload.timelineKeys.delete(removedKey);
+      }
+    }
+  }
+
+  function upsertBrowserSession(offload, session) {
+    if (!session || typeof session !== 'object') return;
+    const sessionId = String(session.session_id || '').trim();
+    if (!sessionId) return;
+    const index = offload.sessions.findIndex((item) => String(item.session_id || '').trim() === sessionId);
+    if (index >= 0) offload.sessions[index] = session;
+    else offload.sessions.unshift(session);
+    offload.sessions = offload.sessions.slice(0, 30);
+  }
+
+  function resolveTrackedSession(offload) {
+    const targetSessionId = String(offload.activeSessionId || offload.sessionIdInput || '').trim();
+    if (targetSessionId) {
+      const bySessionId = offload.sessions.find((session) => String(session.session_id || '').trim() === targetSessionId);
+      if (bySessionId) return bySessionId;
+    }
+    const targetTaskId = parsePositiveIntegerInput(offload.activeTaskId || offload.taskIdInput);
+    if (targetTaskId) {
+      const byTaskId = offload.sessions.find((session) => parsePositiveIntegerInput(session.task_id) === targetTaskId);
+      if (byTaskId) return byTaskId;
+    }
+    return offload.sessions[0] || null;
+  }
+
+  function ingestSessionProgress(offload, session) {
+    if (!session || !Array.isArray(session.progress)) return;
+    session.progress.forEach((entry) => {
+      if (!entry || typeof entry !== 'object') return;
+      const label = String(entry.event || 'progress').replace(/_/g, ' ');
+      const detail = summarizeBrowserPayload(entry.payload);
+      pushBrowserTimeline(offload, {
+        at: entry.at || session.updated_at || new Date().toISOString(),
+        label,
+        detail,
+        tone: 'info',
+      });
+    });
+  }
+
+  function trackBrowserEvent(tab, event) {
+    const offload = ensureBrowserOffloadState(tab);
+    if (!event || typeof event !== 'object') return;
+    if (event.session && typeof event.session === 'object') {
+      upsertBrowserSession(offload, event.session);
+      ingestSessionProgress(offload, event.session);
+    }
+
+    const eventTaskId = parsePositiveIntegerInput(event.task_id);
+    const eventSessionId = String(event.session_id || '').trim();
+    const trackedTaskId = parsePositiveIntegerInput(offload.activeTaskId || offload.taskIdInput);
+    const trackedSessionId = String(offload.activeSessionId || offload.sessionIdInput || '').trim();
+    const isRelated = (!trackedTaskId && !trackedSessionId)
+      || (eventTaskId && trackedTaskId && eventTaskId === trackedTaskId)
+      || (eventSessionId && trackedSessionId && eventSessionId === trackedSessionId);
+
+    if (isRelated) {
+      if (eventTaskId) offload.activeTaskId = String(eventTaskId);
+      if (eventSessionId) offload.activeSessionId = eventSessionId;
+      if (eventSessionId && !offload.sessionIdInput) offload.sessionIdInput = eventSessionId;
+      if (eventTaskId && !offload.taskIdInput) offload.taskIdInput = String(eventTaskId);
+
+      const label = String(event.event || 'event').replace(/_/g, ' ');
+      const detail = event.error
+        ? trimTo(event.error, 220)
+        : (event.progress ? summarizeBrowserPayload(event.progress.payload) : summarizeBrowserPayload(event.result));
+      let tone = 'info';
+      if (/failed|rejected|timeout/i.test(label)) tone = 'error';
+      if (/completed|complete|result/i.test(label)) tone = 'success';
+      pushBrowserTimeline(offload, {
+        at: event.timestamp || new Date().toISOString(),
+        label,
+        detail,
+        tone,
+      });
+
+      if (event.error) setBrowserStatusMessage(offload, trimTo(event.error, 200), 'error');
+      if (event.session && event.session.result !== null && event.session.result !== undefined) {
+        offload.resultSummary = summarizeBrowserResult(event.session.result);
+      } else if (event.result !== null && event.result !== undefined) {
+        offload.resultSummary = summarizeBrowserResult(event.result);
+      }
+    }
+
+    if (tab.id === activeTabId) renderBrowserOffload(tab, tab.state || {});
+  }
+
+  function handleBrowserOffloadEvent(tab, event) {
+    trackBrowserEvent(tab, event);
+  }
+
+  function updateInputValue(input, value) {
+    if (!input) return;
+    if (document.activeElement === input) return;
+    const next = value === null || value === undefined ? '' : String(value);
+    if (input.value !== next) input.value = next;
+  }
+
+  function updateBrowserUiFromInputs(tab) {
+    const offload = ensureBrowserOffloadState(tab);
+    offload.taskIdInput = String(document.getElementById('browser-task-id').value || '').trim();
+    offload.sessionIdInput = String(document.getElementById('browser-session-id').value || '').trim();
+    offload.channelInput = String(document.getElementById('browser-channel').value || '').trim();
+    offload.timeoutMsInput = String(document.getElementById('browser-timeout-ms').value || '').trim();
+    offload.payloadInput = String(document.getElementById('browser-payload').value || '');
+    offload.bridgeTokenInput = String(document.getElementById('browser-bridge-token').value || '').trim();
+    if (!offload.activeTaskId && offload.taskIdInput) offload.activeTaskId = offload.taskIdInput;
+    if (!offload.activeSessionId && offload.sessionIdInput) offload.activeSessionId = offload.sessionIdInput;
+    return offload;
+  }
+
+  function renderBrowserOffload(tab, state) {
+    const offload = ensureBrowserOffloadState(tab);
+    const browserState = state && typeof state === 'object' ? state : {};
+    const sessions = Array.isArray(browserState.browser_offload_sessions) ? browserState.browser_offload_sessions : [];
+    if (sessions.length > 0) {
+      sessions.forEach((session) => upsertBrowserSession(offload, session));
+    } else if (!Array.isArray(offload.sessions)) {
+      offload.sessions = [];
+    }
+    const trackedSession = resolveTrackedSession(offload);
+    const trackedTaskId = parsePositiveIntegerInput(offload.activeTaskId || offload.taskIdInput);
+    const tasks = Array.isArray(browserState.tasks) ? browserState.tasks : [];
+    const trackedTask = trackedTaskId
+      ? tasks.find((task) => parsePositiveIntegerInput(task && task.id) === trackedTaskId) || null
+      : null;
+
+    if (trackedSession) {
+      offload.activeSessionId = String(trackedSession.session_id || offload.activeSessionId || '').trim();
+      offload.activeTaskId = String(trackedSession.task_id || offload.activeTaskId || '').trim();
+      if (!offload.sessionIdInput) offload.sessionIdInput = offload.activeSessionId;
+      if (!offload.taskIdInput) offload.taskIdInput = offload.activeTaskId;
+      ingestSessionProgress(offload, trackedSession);
+      if (trackedSession.result !== null && trackedSession.result !== undefined) {
+        offload.resultSummary = summarizeBrowserResult(trackedSession.result);
+      }
+    }
+
+    updateInputValue(document.getElementById('browser-task-id'), offload.taskIdInput);
+    updateInputValue(document.getElementById('browser-session-id'), offload.sessionIdInput);
+    updateInputValue(document.getElementById('browser-channel'), offload.channelInput);
+    updateInputValue(document.getElementById('browser-timeout-ms'), offload.timeoutMsInput);
+    updateInputValue(document.getElementById('browser-payload'), offload.payloadInput);
+    updateInputValue(document.getElementById('browser-bridge-token'), offload.bridgeTokenInput);
+
+    const workflowStateEl = document.getElementById('browser-workflow-state');
+    const status = normalizeBrowserStatus(
+      trackedSession && trackedSession.status
+        ? trackedSession.status
+        : (trackedTask && trackedTask.browser_offload_status ? trackedTask.browser_offload_status : 'idle')
+    );
+    workflowStateEl.textContent = status;
+    workflowStateEl.className = browserStatusChipClass(status);
+
+    const sessionMeta = document.getElementById('browser-session-meta');
+    const sessionLines = [];
+    if (trackedSession) {
+      sessionLines.push(`session_id: ${trackedSession.session_id || '-'}`);
+      sessionLines.push(`task_id: ${trackedSession.task_id || '-'}`);
+      sessionLines.push(`status: ${trackedSession.status || '-'}`);
+      sessionLines.push(`channel: ${trackedSession.channel || '-'}`);
+      sessionLines.push(`updated: ${trackedSession.updated_at || trackedSession.last_callback_at || '-'}`);
+      sessionLines.push(`progress callbacks: ${trackedSession.progress_count || 0}`);
+      if (trackedSession.last_error) sessionLines.push(`error: ${trackedSession.last_error}`);
+    } else if (trackedTask) {
+      sessionLines.push(`task_id: ${trackedTask.id}`);
+      sessionLines.push(`status: ${trackedTask.browser_offload_status || 'not_requested'}`);
+      if (trackedTask.browser_session_id) sessionLines.push(`session_id: ${trackedTask.browser_session_id}`);
+      if (trackedTask.browser_offload_error) sessionLines.push(`error: ${trackedTask.browser_offload_error}`);
+    } else {
+      sessionLines.push('No active browser offload session.');
+    }
+    sessionMeta.textContent = sessionLines.join('\n');
+
+    const authMeta = document.getElementById('browser-auth-meta');
+    const launchUrl = offload.launchUrl || (trackedSession && trackedSession.bridge && trackedSession.bridge.launch_url) || '';
+    const authLines = [
+      `bridge token: ${offload.bridgeTokenInput ? 'available' : 'missing'}`,
+      `callback token: ${offload.callbackToken ? 'available' : 'missing'}`,
+      `launch url: ${launchUrl || 'not available'}`,
+    ];
+    authMeta.textContent = authLines.join('\n');
+
+    const resultEl = document.getElementById('browser-result');
+    resultEl.textContent = offload.resultSummary || 'No result yet.';
+
+    const timelineEl = document.getElementById('browser-timeline');
+    if (offload.timeline.length === 0) {
+      timelineEl.innerHTML = '<div class="browser-timeline-item"><span style="color:#8b949e">No callbacks yet.</span></div>';
+    } else {
+      timelineEl.innerHTML = offload.timeline.slice().reverse().slice(0, 50).map((item) => `
+        <div class="browser-timeline-item ${escapeHtml(item.tone || '')}">
+          <time>${escapeHtml(item.at || '')}</time>
+          <strong>${escapeHtml(item.label || 'event')}</strong>
+          <span>${escapeHtml(item.detail || '')}</span>
+        </div>
+      `).join('');
+    }
+
+    const msgEl = document.getElementById('browser-status-msg');
+    msgEl.textContent = offload.statusMessage || '';
+    msgEl.className = `browser-status-msg${offload.statusTone ? ` ${offload.statusTone}` : ''}`;
+
+    const hasTask = parsePositiveIntegerInput(offload.taskIdInput || offload.activeTaskId);
+    const hasSession = String(offload.sessionIdInput || offload.activeSessionId || '').trim();
+    document.getElementById('browser-start-btn').disabled = offload.actionPending || !hasTask;
+    document.getElementById('browser-retry-btn').disabled = offload.actionPending || !hasTask;
+    document.getElementById('browser-refresh-btn').disabled = offload.actionPending || (!hasTask && !hasSession);
+    document.getElementById('browser-attach-btn').disabled = offload.actionPending || !hasSession || !offload.bridgeTokenInput;
+    document.getElementById('browser-cancel-btn').disabled = offload.actionPending || (!hasTask && !hasSession);
+    document.getElementById('browser-open-launch-btn').disabled = !safeUrl(launchUrl);
+  }
+
+  async function tabFetchJson(tab, path, opts) {
+    const response = await tabFetch(tab, path, opts);
+    let data = {};
+    try {
+      data = await response.json();
+    } catch {
+      data = {};
+    }
+    if (!response.ok || (data && data.ok === false)) {
+      const message = (data && data.error) ? data.error : `Request failed (${response.status})`;
+      const error = new Error(message);
+      error.status = response.status;
+      error.payload = data;
+      throw error;
+    }
+    return data || {};
+  }
+
+  async function refreshBrowserOffloadStatus(tab, { silent = false } = {}) {
+    const offload = ensureBrowserOffloadState(tab);
+    const taskId = parsePositiveIntegerInput(offload.taskIdInput || offload.activeTaskId);
+    const sessionId = String(offload.sessionIdInput || offload.activeSessionId || '').trim();
+    if (!taskId && !sessionId) {
+      if (!silent) setBrowserStatusMessage(offload, 'Enter task_id or session_id first.', 'error');
+      if (tab.id === activeTabId) renderBrowserOffload(tab, tab.state || {});
+      return null;
+    }
+
+    const params = new URLSearchParams();
+    if (sessionId) params.set('session_id', sessionId);
+    if (taskId) params.set('task_id', String(taskId));
+    const data = await tabFetchJson(tab, `/api/browser/status?${params.toString()}`);
+    if (data.session && typeof data.session === 'object') {
+      upsertBrowserSession(offload, data.session);
+      offload.activeSessionId = String(data.session.session_id || offload.activeSessionId || '').trim();
+      offload.activeTaskId = String(data.session.task_id || offload.activeTaskId || '').trim();
+      if (!offload.sessionIdInput) offload.sessionIdInput = offload.activeSessionId;
+      if (!offload.taskIdInput) offload.taskIdInput = offload.activeTaskId;
+      ingestSessionProgress(offload, data.session);
+      if (data.session.result !== null && data.session.result !== undefined) {
+        offload.resultSummary = summarizeBrowserResult(data.session.result);
+      }
+    } else if (taskId && !offload.activeTaskId) {
+      offload.activeTaskId = String(taskId);
+    }
+    if (!silent) setBrowserStatusMessage(offload, 'Browser status refreshed.', 'info');
+    if (tab.id === activeTabId) renderBrowserOffload(tab, tab.state || {});
+    return data;
+  }
+
+  async function startBrowserOffloadWorkflow(tab, { retry = false } = {}) {
+    const offload = updateBrowserUiFromInputs(tab);
+    const taskId = parsePositiveIntegerInput(offload.taskIdInput);
+    if (!taskId) {
+      setBrowserStatusMessage(offload, 'task_id must be a positive integer.', 'error');
+      if (tab.id === activeTabId) renderBrowserOffload(tab, tab.state || {});
+      return;
+    }
+    offload.actionPending = true;
+    setBrowserStatusMessage(offload, retry ? 'Retrying browser workflow...' : 'Starting browser workflow...', 'info');
+    if (tab.id === activeTabId) renderBrowserOffload(tab, tab.state || {});
+
+    const payload = { task_id: taskId };
+    if (offload.payloadInput.trim()) payload.payload = offload.payloadInput;
+    const timeoutMs = parsePositiveIntegerInput(offload.timeoutMsInput);
+    if (timeoutMs) payload.timeout_ms = timeoutMs;
+    if (offload.channelInput) payload.channel = offload.channelInput;
+
+    try {
+      const data = await tabFetchJson(tab, '/api/browser/launch', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(payload),
+      });
+
+      const session = data.session && typeof data.session === 'object' ? data.session : null;
+      if (session) {
+        upsertBrowserSession(offload, session);
+        offload.activeSessionId = String(session.session_id || '').trim();
+        offload.activeTaskId = String(session.task_id || taskId);
+        offload.sessionIdInput = offload.activeSessionId;
+      } else {
+        offload.activeTaskId = String(taskId);
+      }
+      if (data.bridge_credentials && typeof data.bridge_credentials === 'object') {
+        if (data.bridge_credentials.bridge_token) {
+          offload.bridgeTokenInput = String(data.bridge_credentials.bridge_token).trim();
+        }
+        if (data.bridge_credentials.launch_url) {
+          offload.launchUrl = String(data.bridge_credentials.launch_url).trim();
+        }
+      }
+      pushBrowserTimeline(offload, {
+        at: new Date().toISOString(),
+        label: data.reused ? 'launch reused' : 'launch requested',
+        detail: session && session.session_id ? `session ${session.session_id}` : `task ${taskId}`,
+        tone: 'info',
+      });
+      setBrowserStatusMessage(offload, data.reused ? 'Reused existing active browser session.' : 'Browser workflow launched.', 'success');
+      await refreshBrowserOffloadStatus(tab, { silent: true });
+    } catch (error) {
+      setBrowserStatusMessage(offload, trimTo(error.message || 'Launch failed', 220), 'error');
+      pushBrowserTimeline(offload, {
+        at: new Date().toISOString(),
+        label: 'launch failed',
+        detail: trimTo(error.message || 'launch failed', 220),
+        tone: 'error',
+      });
+    } finally {
+      offload.actionPending = false;
+      if (tab.id === activeTabId) renderBrowserOffload(tab, tab.state || {});
+    }
+  }
+
+  async function attachBrowserSession(tab) {
+    const offload = updateBrowserUiFromInputs(tab);
+    const taskId = parsePositiveIntegerInput(offload.taskIdInput || offload.activeTaskId);
+    const sessionId = String(offload.sessionIdInput || offload.activeSessionId || '').trim();
+    const bridgeToken = String(offload.bridgeTokenInput || '').trim();
+    if (!sessionId) {
+      setBrowserStatusMessage(offload, 'session_id is required to attach.', 'error');
+      if (tab.id === activeTabId) renderBrowserOffload(tab, tab.state || {});
+      return;
+    }
+    if (!bridgeToken) {
+      setBrowserStatusMessage(offload, 'bridge_token is required to attach.', 'error');
+      if (tab.id === activeTabId) renderBrowserOffload(tab, tab.state || {});
+      return;
+    }
+
+    offload.actionPending = true;
+    setBrowserStatusMessage(offload, 'Attaching browser session...', 'info');
+    if (tab.id === activeTabId) renderBrowserOffload(tab, tab.state || {});
+
+    const payload = {
+      session_id: sessionId,
+      bridge_token: bridgeToken,
+    };
+    if (taskId) payload.task_id = taskId;
+
+    try {
+      const data = await tabFetchJson(tab, '/api/browser/attach', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(payload),
+      });
+      if (data.session && typeof data.session === 'object') {
+        upsertBrowserSession(offload, data.session);
+        offload.activeSessionId = String(data.session.session_id || sessionId).trim();
+        offload.activeTaskId = String(data.session.task_id || taskId || '').trim();
+      }
+      if (data.callback_credentials && typeof data.callback_credentials === 'object') {
+        offload.callbackToken = String(data.callback_credentials.callback_token || '').trim();
+        offload.callbackEndpoint = String(data.callback_credentials.callback_endpoint || '').trim();
+      }
+      pushBrowserTimeline(offload, {
+        at: new Date().toISOString(),
+        label: 'attached',
+        detail: `session ${sessionId}`,
+        tone: 'success',
+      });
+      setBrowserStatusMessage(offload, 'Session attached. Waiting for callbacks.', 'success');
+      await refreshBrowserOffloadStatus(tab, { silent: true });
+    } catch (error) {
+      setBrowserStatusMessage(offload, trimTo(error.message || 'Attach failed', 220), 'error');
+      pushBrowserTimeline(offload, {
+        at: new Date().toISOString(),
+        label: 'attach failed',
+        detail: trimTo(error.message || 'attach failed', 220),
+        tone: 'error',
+      });
+    } finally {
+      offload.actionPending = false;
+      if (tab.id === activeTabId) renderBrowserOffload(tab, tab.state || {});
+    }
+  }
+
+  async function cancelBrowserWorkflow(tab) {
+    const offload = updateBrowserUiFromInputs(tab);
+    const sessionId = String(offload.sessionIdInput || offload.activeSessionId || '').trim();
+    const taskId = parsePositiveIntegerInput(offload.taskIdInput || offload.activeTaskId);
+    if (!sessionId && !taskId) {
+      setBrowserStatusMessage(offload, 'No active browser workflow to cancel.', 'error');
+      if (tab.id === activeTabId) renderBrowserOffload(tab, tab.state || {});
+      return;
+    }
+
+    offload.actionPending = true;
+    if (tab.id === activeTabId) renderBrowserOffload(tab, tab.state || {});
+
+    if (sessionId && offload.callbackToken) {
+      try {
+        const endpoint = `/api/browser/callback/${encodeURIComponent(sessionId)}`;
+        await tabFetchJson(tab, endpoint, {
+          method: 'POST',
+          headers: {
+            'Content-Type': 'application/json',
+            Authorization: `Bearer ${offload.callbackToken}`,
+          },
+          body: JSON.stringify({
+            session_id: sessionId,
+            task_id: taskId || undefined,
+            event: 'failed',
+            error: 'Cancelled from dashboard',
+          }),
+        });
+        pushBrowserTimeline(offload, {
+          at: new Date().toISOString(),
+          label: 'cancelled',
+          detail: `session ${sessionId}`,
+          tone: 'error',
+        });
+        setBrowserStatusMessage(offload, 'Cancellation callback sent.', 'success');
+      } catch (error) {
+        setBrowserStatusMessage(offload, `Cancel callback failed: ${trimTo(error.message || 'unknown error', 180)}`, 'error');
+      }
+    } else {
+      pushBrowserTimeline(offload, {
+        at: new Date().toISOString(),
+        label: 'cancelled locally',
+        detail: sessionId ? `session ${sessionId}` : `task ${taskId}`,
+        tone: 'info',
+      });
+      setBrowserStatusMessage(offload, 'Monitoring cancelled locally (remote session may continue).', 'info');
+    }
+
+    offload.activeSessionId = '';
+    offload.sessionIdInput = '';
+    offload.callbackToken = '';
+    offload.callbackEndpoint = '';
+    offload.resultSummary = '';
+    offload.launchUrl = '';
+    offload.bridgeTokenInput = '';
+    offload.actionPending = false;
+    if (tab.id === activeTabId) renderBrowserOffload(tab, tab.state || {});
+  }
+
   function fetchTabConfig(tab) {
     tabFetch(tab, '/api/config')
       .then(r => r.json())
@@ -973,6 +1559,57 @@
       });
   });
 
+  // --- Browser offload workflow ---
+
+  ['browser-task-id', 'browser-session-id', 'browser-channel', 'browser-timeout-ms', 'browser-payload', 'browser-bridge-token'].forEach((id) => {
+    document.getElementById(id).addEventListener('input', () => {
+      const tab = activeTab();
+      if (!tab) return;
+      updateBrowserUiFromInputs(tab);
+      renderBrowserOffload(tab, tab.state || {});
+    });
+  });
+
+  document.getElementById('browser-start-btn').addEventListener('click', () => {
+    const tab = activeTab();
+    if (!tab) return;
+    startBrowserOffloadWorkflow(tab);
+  });
+
+  document.getElementById('browser-attach-btn').addEventListener('click', () => {
+    const tab = activeTab();
+    if (!tab) return;
+    attachBrowserSession(tab);
+  });
+
+  document.getElementById('browser-refresh-btn').addEventListener('click', () => {
+    const tab = activeTab();
+    if (!tab) return;
+    updateBrowserUiFromInputs(tab);
+    refreshBrowserOffloadStatus(tab);
+  });
+
+  document.getElementById('browser-retry-btn').addEventListener('click', () => {
+    const tab = activeTab();
+    if (!tab) return;
+    startBrowserOffloadWorkflow(tab, { retry: true });
+  });
+
+  document.getElementById('browser-cancel-btn').addEventListener('click', () => {
+    const tab = activeTab();
+    if (!tab) return;
+    cancelBrowserWorkflow(tab);
+  });
+
+  document.getElementById('browser-open-launch-btn').addEventListener('click', () => {
+    const tab = activeTab();
+    if (!tab) return;
+    const offload = ensureBrowserOffloadState(tab);
+    const launchUrl = safeUrl(offload.launchUrl);
+    if (!launchUrl) return;
+    window.open(launchUrl, '_blank', 'noopener');
+  });
+
   // --- Submit request ---
 
   document.getElementById('request-btn').addEventListener('click', () => {
@@ -1003,7 +1640,7 @@
   function openSettingsPanel(panelName, x, y) {
     const titleEl = settingsPanel.querySelector('.settings-panel-title');
     const itemsEl = settingsPanel.querySelector('.settings-panel-items');
-    const titles = { workers: 'Workers', requests: 'Requests', tasks: 'Tasks', log: 'Activity Log' };
+    const titles = { workers: 'Workers', requests: 'Requests', tasks: 'Tasks', log: 'Activity Log', browser: 'Browser Offload' };
     titleEl.textContent = titles[panelName] || panelName;
     itemsEl.innerHTML = '';
 
