@@ -2275,6 +2275,7 @@ function handleCommand(cmd, conn, handlers) {
             current_task_id: assignTaskId,
             domain: freshTask.domain || freshWorker.domain,
             claimed_by: null,
+            claimed_at: null,
             launched_at: new Date().toISOString(),
           });
           return { ok: true, task: freshTask, worker: freshWorker };
@@ -2323,6 +2324,7 @@ function handleCommand(cmd, conn, handlers) {
                 current_task_id: assignResult.worker.current_task_id,
                 domain: assignResult.worker.domain,
                 claimed_by: assignResult.worker.claimed_by,
+                claimed_at: assignResult.worker.claimed_at,
                 launched_at: assignResult.worker.launched_at,
               });
             })();
@@ -2618,7 +2620,8 @@ function handleCommand(cmd, conn, handlers) {
             UPDATE workers
             SET status = 'idle',
                 current_task_id = NULL,
-                claimed_by = NULL
+                claimed_by = NULL,
+                claimed_at = NULL
             WHERE id IN (${placeholders})
           `);
           const tx = dbConn.transaction((ids) => {
@@ -2848,6 +2851,8 @@ function handleCommand(cmd, conn, handlers) {
           db.updateWorker(resetWid, {
             status: 'idle',
             current_task_id: null,
+            claimed_by: null,
+            claimed_at: null,
             last_heartbeat: new Date().toISOString(),
           });
           db.log(`worker-${resetWid}`, 'sentinel_reset', {
