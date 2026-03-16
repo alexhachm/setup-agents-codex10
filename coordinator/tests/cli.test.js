@@ -2171,6 +2171,44 @@ describe('CLI Server', () => {
     assert.strictEqual(promptResult.last_checkpoint, 'checkpoint-before-update');
   });
 
+  it('should refresh active loop prompt and return refreshed prompt via loop-prompt', async () => {
+    const created = await sendCommand('loop', { prompt: 'Refresh prompt baseline' });
+    assert.strictEqual(created.ok, true);
+
+    db.updateLoop(created.loop_id, {
+      status: 'active',
+      iteration_count: 6,
+      last_checkpoint: 'checkpoint-before-refresh',
+    });
+
+    const cliRefresh = await runMac10Cli(['loop-refresh-prompt', String(created.loop_id), 'Refreshed prompt via refresh command']);
+    assert.strictEqual(cliRefresh.status, 0, cliRefresh.stderr);
+    assert.strictEqual(cliRefresh.stderr, '');
+    assert.match(cliRefresh.stdout, new RegExp(`Loop ${created.loop_id} prompt refreshed\\.`));
+
+    const refreshed = await sendCommand('loop-prompt', { loop_id: created.loop_id });
+    assert.strictEqual(refreshed.ok, true);
+    assert.strictEqual(refreshed.prompt, 'Refreshed prompt via refresh command');
+    assert.strictEqual(refreshed.status, 'active');
+    assert.strictEqual(refreshed.iteration_count, 6);
+    assert.strictEqual(refreshed.last_checkpoint, 'checkpoint-before-refresh');
+  });
+
+  it('should reject loop-refresh-prompt for missing loop and invalid loop_id input', async () => {
+    const missing = await sendCommand('loop-refresh-prompt', {
+      loop_id: 999999,
+      prompt: 'refresh missing loop',
+    });
+    assert.strictEqual(missing.ok, false);
+    assert.strictEqual(missing.error, 'Loop not found');
+
+    const invalid = await sendCommand('loop-refresh-prompt', {
+      loop_id: 'not-a-number',
+      prompt: 'invalid loop id',
+    });
+    assert.strictEqual(invalid.error, 'Field "loop_id" must be of type number');
+  });
+
   it('should reject loop-set-prompt for non-active loops without mutating prompt/checkpoint state', async () => {
     for (const status of ['stopped', 'failed']) {
       const created = await sendCommand('loop', { prompt: `Prompt update guard ${status}` });
