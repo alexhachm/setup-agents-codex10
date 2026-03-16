@@ -17,7 +17,10 @@ const THRESHOLDS = Object.freeze({
   triage: 120,
   terminate: 180,
 });
-const LOOP_STALE_HEARTBEAT_SEC = 300;
+const LOOP_SENTINEL_HEARTBEAT_CADENCE_SEC = 30;
+const LOOP_STALE_HEARTBEAT_MISSED_BEATS = 12;
+const LOOP_STALE_HEARTBEAT_SEC =
+  LOOP_SENTINEL_HEARTBEAT_CADENCE_SEC * LOOP_STALE_HEARTBEAT_MISSED_BEATS;
 const MERGE_TIMEOUT_SEC = 300;
 const MERGE_CONFLICT_GRACE_SEC = 600;
 const MERGE_TIMEOUT_ERROR = `Merge timed out after ${MERGE_TIMEOUT_SEC / 60} minutes`;
@@ -32,6 +35,14 @@ function getThresholds() {
     triage:    parseInt(db.getConfig('watchdog_triage_sec'))    || THRESHOLDS.triage,
     terminate: parseInt(db.getConfig('watchdog_terminate_sec')) || THRESHOLDS.terminate,
   };
+}
+
+function getLoopHeartbeatStaleThresholdSec() {
+  const configured = Number.parseInt(db.getConfig('loop_stale_heartbeat_sec'), 10);
+  if (Number.isFinite(configured) && configured > 0) {
+    return configured;
+  }
+  return LOOP_STALE_HEARTBEAT_SEC;
 }
 
 function parseTimestampMs(timestamp) {
@@ -647,6 +658,7 @@ function respawnLoopSentinel(loop, projectDir, options = {}) {
 function monitorLoops(projectDir) {
   const loops = db.listLoops('active');
   const now = Date.now();
+  const loopStaleThresholdSec = getLoopHeartbeatStaleThresholdSec();
 
   for (const loop of loops) {
     if (!loop.tmux_window) continue;
@@ -667,10 +679,11 @@ function monitorLoops(projectDir) {
         scope: 'loop_heartbeat_age',
       });
       if (staleSec === null) continue;
-      if (staleSec > LOOP_STALE_HEARTBEAT_SEC) {
+      if (staleSec > loopStaleThresholdSec) {
         db.log('coordinator', 'loop_heartbeat_stale', {
           loop_id: loop.id,
           stale_sec: Math.round(staleSec),
+          threshold_sec: loopStaleThresholdSec,
         });
         respawnLoopSentinel(loop, projectDir, { reason: 'stale_heartbeat', forceRestart: true });
       }
@@ -678,4 +691,11 @@ function monitorLoops(projectDir) {
   }
 }
 
-module.exports = { start, stop, tick, getThresholds, THRESHOLDS };
+module.exports = {
+  start,
+  stop,
+  tick,
+  getThresholds,
+  THRESHOLDS,
+  LOOP_STALE_HEARTBEAT_SEC,
+};
