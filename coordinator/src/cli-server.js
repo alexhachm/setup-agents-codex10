@@ -926,6 +926,18 @@ function parseResetOwnership(args) {
   return { worker_id, expected_task_id, expected_assignment_token };
 }
 
+function getWorkerActiveAssignment(workerId) {
+  if (!workerId) return null;
+  return db.getDb().prepare(`
+    SELECT id, status
+    FROM tasks
+    WHERE assigned_to = ?
+      AND status IN ('assigned', 'in_progress')
+    ORDER BY datetime(updated_at) DESC, id DESC
+    LIMIT 1
+  `).get(workerId) || null;
+}
+
 /** Parse depends_on into an array of task ids. Accepts arrays or JSON-array strings. */
 function parseDependsOnField(dependsOn) {
   if (dependsOn === null || dependsOn === undefined) return null;
@@ -1899,7 +1911,15 @@ function handleCommand(cmd, conn, handlers) {
           break;
         }
         const task = db.getTask(worker.current_task_id);
-        respond(conn, { ok: true, task });
+        respond(conn, {
+          ok: true,
+          task: task
+            ? {
+              ...task,
+              assignment_token: worker.launched_at || null,
+            }
+            : null,
+        });
         break;
       }
       case 'start-task': {
@@ -2778,16 +2798,32 @@ function handleCommand(cmd, conn, handlers) {
           respond(conn, { ok: false, error: 'Worker not found' });
           break;
         }
+        const activeAssignment = getWorkerActiveAssignment(resetWid);
+        const observedTaskId = resetWorker.current_task_id || (activeAssignment ? activeAssignment.id : null);
+        const hasOwnershipContext = expectedTaskId !== null || Boolean(expectedToken);
+
+        if (!hasOwnershipContext && (observedTaskId !== null || resetWorker.status !== 'idle')) {
+          db.log(`worker-${resetWid}`, 'sentinel_reset_skipped', {
+            reason: 'missing_ownership_context',
+            worker_status: resetWorker.status,
+            current_task_id: resetWorker.current_task_id,
+            active_task_id: activeAssignment ? activeAssignment.id : null,
+          });
+          respond(conn, { ok: true, skipped: true, reason: 'missing_ownership_context' });
+          break;
+        }
 
         if (
           expectedTaskId !== null &&
-          resetWorker.current_task_id !== null &&
-          resetWorker.current_task_id !== expectedTaskId
+          observedTaskId !== null &&
+          observedTaskId !== expectedTaskId
         ) {
           db.log(`worker-${resetWid}`, 'sentinel_reset_skipped', {
             reason: 'task_mismatch',
             expected_task_id: expectedTaskId,
             current_task_id: resetWorker.current_task_id,
+            active_task_id: activeAssignment ? activeAssignment.id : null,
+            observed_task_id: observedTaskId,
           });
           respond(conn, { ok: true, skipped: true, reason: 'task_mismatch' });
           break;

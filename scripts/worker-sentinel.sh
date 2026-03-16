@@ -46,9 +46,80 @@ else
   MAC10_CMD="mac10"
 fi
 
+RESET_EXPECTED_TASK_ID=""
+RESET_EXPECTED_ASSIGNMENT_TOKEN=""
+HEARTBEAT_PID=""
+
+read_reset_context() {
+  RESET_EXPECTED_TASK_ID=""
+  RESET_EXPECTED_ASSIGNMENT_TOKEN=""
+
+  local task_payload parsed
+  task_payload=$("$MAC10_CMD" my-task "$WORKER_ID" 2>/dev/null || echo "")
+  parsed=$(printf '%s' "$task_payload" | node -e '
+const fs = require("fs");
+let raw = "";
+try { raw = fs.readFileSync(0, "utf8"); } catch {}
+let task = null;
+try {
+  const parsed = JSON.parse(raw);
+  if (parsed && typeof parsed === "object") {
+    if (parsed.task && typeof parsed.task === "object") task = parsed.task;
+    else if (Object.prototype.hasOwnProperty.call(parsed, "id")) task = parsed;
+  }
+} catch {}
+const taskId = task && Number.isInteger(task.id) ? String(task.id) : "";
+const token = task && typeof task.assignment_token === "string"
+  ? task.assignment_token.trim()
+  : "";
+process.stdout.write(`${taskId}|${token}`);
+' 2>/dev/null || echo "|")
+
+  if [[ "$parsed" != *"|"* ]]; then
+    parsed="|"
+  fi
+  RESET_EXPECTED_TASK_ID="${parsed%%|*}"
+  RESET_EXPECTED_ASSIGNMENT_TOKEN="${parsed#*|}"
+}
+
+build_reset_worker_arg() {
+  if [ -n "$RESET_EXPECTED_TASK_ID" ] || [ -n "$RESET_EXPECTED_ASSIGNMENT_TOKEN" ]; then
+    printf '%s|%s|%s' "$WORKER_ID" "$RESET_EXPECTED_TASK_ID" "$RESET_EXPECTED_ASSIGNMENT_TOKEN"
+    return 0
+  fi
+  printf '%s' "$WORKER_ID"
+}
+
+reset_worker_with_context() {
+  local reset_arg
+  reset_arg="$(build_reset_worker_arg)"
+  "$MAC10_CMD" reset-worker "$reset_arg" 2>/dev/null || true
+}
+
+stop_heartbeat_loop() {
+  if [ -n "${HEARTBEAT_PID:-}" ]; then
+    kill "$HEARTBEAT_PID" 2>/dev/null || true
+    wait "$HEARTBEAT_PID" 2>/dev/null || true
+    HEARTBEAT_PID=""
+  fi
+}
+
+start_heartbeat_loop() {
+  stop_heartbeat_loop
+  "$MAC10_CMD" heartbeat "$WORKER_ID" >/dev/null 2>&1 || true
+  (
+    while true; do
+      sleep 25
+      "$MAC10_CMD" heartbeat "$WORKER_ID" >/dev/null 2>&1 || true
+    done
+  ) &
+  HEARTBEAT_PID=$!
+}
+
 cleanup() {
+  stop_heartbeat_loop
   echo "[sentinel-$WORKER_ID] Cleaning up..."
-  "$MAC10_CMD" reset-worker "$WORKER_ID" 2>/dev/null || true
+  reset_worker_with_context
 }
 trap cleanup EXIT INT TERM
 
@@ -67,12 +138,17 @@ launch_codex() {
   if [ -f "$PROJECT_DIR/.claude/commands-codex10/worker-loop.md" ]; then
     PROMPT_FILE="$PROJECT_DIR/.claude/commands-codex10/worker-loop.md"
   fi
+  read_reset_context
+  start_heartbeat_loop
   echo "[sentinel-$WORKER_ID] Launching codex..."
   codex exec --dangerously-bypass-approvals-and-sandbox -m gpt-5.3-codex -C "$WORKTREE" - < "$PROMPT_FILE" 2>&1 || true
+  stop_heartbeat_loop
 
   # Reset worker status to idle after Codex exits
   echo "[sentinel-$WORKER_ID] Codex exited, resetting to idle..."
-  "$MAC10_CMD" reset-worker "$WORKER_ID" 2>/dev/null || true
+  reset_worker_with_context
+  RESET_EXPECTED_TASK_ID=""
+  RESET_EXPECTED_ASSIGNMENT_TOKEN=""
 }
 
 # On startup: check if we already have an assigned task (inbox message may have been missed)
