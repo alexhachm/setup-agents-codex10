@@ -5,8 +5,10 @@ const assert = require('node:assert');
 const path = require('path');
 const fs = require('fs');
 const os = require('os');
+const childProcess = require('child_process');
 
 const db = require('../src/db');
+const tmux = require('../src/tmux');
 const { THRESHOLDS, tick } = require('../src/watchdog');
 
 let tmpDir;
@@ -407,5 +409,97 @@ describe('Stale integration recovery', () => {
       tier: 3,
       assigned_to: 1,
     });
+  });
+});
+
+describe('Loop monitoring', () => {
+  it('recycles stale active non-tmux loops and emits stale heartbeat telemetry', () => {
+    const originalExecFile = childProcess.execFile;
+    const execCalls = [];
+    childProcess.execFile = (file, args, options, callback) => {
+      execCalls.push({ file, args, options });
+      if (typeof callback === 'function') callback(null, '', '');
+      return { unref() {} };
+    };
+
+    try {
+      const loopId = db.createLoop('/allocate-loop');
+      db.updateLoop(loopId, {
+        tmux_session: null,
+        tmux_window: null,
+        last_heartbeat: null,
+      });
+      db.getDb().prepare(
+        "UPDATE loops SET updated_at = datetime('now', '-6 minutes'), created_at = datetime('now', '-6 minutes') WHERE id = ?"
+      ).run(loopId);
+
+      tick(tmpDir);
+
+      assert.strictEqual(execCalls.length, 1);
+      const spawn = execCalls[0];
+      assert.strictEqual(spawn.file, 'bash');
+      assert.match(spawn.args[0], /scripts[\/\\]loop-sentinel\.sh$/);
+      assert.strictEqual(spawn.args[1], String(loopId));
+      assert.strictEqual(spawn.args[2], tmpDir);
+      assert.strictEqual(spawn.options.cwd, tmpDir);
+      assert.strictEqual(spawn.options.detached, true);
+      assert.strictEqual(spawn.options.stdio, 'ignore');
+
+      const loop = db.getLoop(loopId);
+      assert.ok(loop.last_heartbeat);
+
+      const logs = db.getLog(200, 'coordinator').map((entry) => ({
+        action: entry.action,
+        details: JSON.parse(entry.details),
+      }));
+      const staleLog = logs.find(
+        (entry) => entry.action === 'loop_heartbeat_stale' && entry.details.loop_id === loopId
+      );
+      assert.ok(staleLog);
+      assert.ok(staleLog.details.stale_sec >= 300);
+      assert.ok(
+        logs.some(
+          (entry) => entry.action === 'loop_sentinel_dead' && entry.details.loop_id === loopId
+        )
+      );
+      assert.ok(
+        logs.some(
+          (entry) => entry.action === 'loop_sentinel_respawned' && entry.details.loop_id === loopId
+        )
+      );
+    } finally {
+      childProcess.execFile = originalExecFile;
+    }
+  });
+
+  it('preserves tmux stale-heartbeat monitoring behavior', () => {
+    const originalIsPaneAlive = tmux.isPaneAlive;
+    const originalCreateWindow = tmux.createWindow;
+    let createWindowCalls = 0;
+    tmux.isPaneAlive = () => true;
+    tmux.createWindow = () => {
+      createWindowCalls += 1;
+    };
+
+    try {
+      const loopId = db.createLoop('/architect-loop');
+      db.updateLoop(loopId, {
+        tmux_window: `loop-${loopId}`,
+        last_heartbeat: new Date(Date.now() - 6 * 60 * 1000).toISOString(),
+      });
+
+      tick(tmpDir);
+
+      assert.strictEqual(createWindowCalls, 0);
+      const staleLog = db.getLog(200, 'coordinator')
+        .filter((entry) => entry.action === 'loop_heartbeat_stale')
+        .map((entry) => JSON.parse(entry.details))
+        .find((entry) => entry.loop_id === loopId);
+      assert.ok(staleLog);
+      assert.ok(staleLog.stale_sec >= 300);
+    } finally {
+      tmux.isPaneAlive = originalIsPaneAlive;
+      tmux.createWindow = originalCreateWindow;
+    }
   });
 });
