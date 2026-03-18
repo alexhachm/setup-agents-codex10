@@ -6,6 +6,7 @@ const path = require('path');
 const crypto = require('crypto');
 const { execFileSync } = require('child_process');
 const db = require('./db');
+const researchQueue = require('./research-queue');
 let modelRouter = null;
 try {
   modelRouter = require('./model-router');
@@ -533,6 +534,14 @@ const COMMAND_SCHEMAS = {
   'research-batch-collect': {
     required: ['stage_id', 'status'],
     types: { stage_id: 'number', status: 'string', error: 'string' },
+  },
+  'research-complete': {
+    required: ['intent_id'],
+    types: { intent_id: 'number' },
+  },
+  'research-fail': {
+    required: ['intent_id', 'error'],
+    types: { intent_id: 'number', error: 'string' },
   },
   'memory-snapshots': {
     required: [],
@@ -4216,6 +4225,28 @@ function handleCommand(cmd, conn, handlers) {
           status: args.status,
         });
         respond(conn, { ok: true, ...collectResult });
+        break;
+      }
+
+      case 'research-complete': {
+        const completeOk = researchQueue.markComplete(args.intent_id);
+        if (!completeOk) {
+          respond(conn, { ok: false, error: 'research item not in_progress' });
+          break;
+        }
+        db.log('coordinator', 'research_intent_completed', { intent_id: args.intent_id });
+        respond(conn, { ok: true });
+        break;
+      }
+
+      case 'research-fail': {
+        const failOk = researchQueue.markFailed(args.intent_id, args.error);
+        if (!failOk) {
+          respond(conn, { ok: false, error: 'research item not in_progress' });
+          break;
+        }
+        db.log('coordinator', 'research_intent_failed', { intent_id: args.intent_id, error: args.error });
+        respond(conn, { ok: true });
         break;
       }
 
