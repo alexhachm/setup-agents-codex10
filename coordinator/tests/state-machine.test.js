@@ -543,6 +543,223 @@ describe('Task state machine', () => {
   });
 });
 
+describe('Browser session state machine', () => {
+  it('should create a session with default safety policy and initializing status', () => {
+    const session = db.createBrowserSession({ id: 'sess-001', owner: 'worker-4' });
+    assert.strictEqual(session.status, 'initializing');
+    assert.strictEqual(session.safety_policy, 'standard');
+    assert.strictEqual(session.owner, 'worker-4');
+    assert.strictEqual(session.auth_token, null);
+    assert.strictEqual(session.terminated_at, null);
+  });
+
+  it('should transition browser session through full lifecycle', () => {
+    db.createBrowserSession({ id: 'sess-002', owner: 'worker-4' });
+    const active = db.transitionBrowserSession('sess-002', 'active');
+    assert.strictEqual(active.status, 'active');
+
+    const idle = db.transitionBrowserSession('sess-002', 'idle');
+    assert.strictEqual(idle.status, 'idle');
+
+    const expiring = db.transitionBrowserSession('sess-002', 'expiring');
+    assert.strictEqual(expiring.status, 'expiring');
+
+    const expired = db.transitionBrowserSession('sess-002', 'expired');
+    assert.strictEqual(expired.status, 'expired');
+  });
+
+  it('should set terminated_at automatically when transitioning to terminated', () => {
+    db.createBrowserSession({ id: 'sess-003', owner: 'worker-4' });
+    db.transitionBrowserSession('sess-003', 'active');
+    const terminated = db.transitionBrowserSession('sess-003', 'terminated');
+    assert.strictEqual(terminated.status, 'terminated');
+    assert.ok(terminated.terminated_at, 'terminated_at should be set automatically');
+  });
+
+  it('should persist auth/expiry metadata and safety policy state', () => {
+    db.createBrowserSession({
+      id: 'sess-004',
+      owner: 'worker-4',
+      auth_token: 'tok-abc',
+      session_token: 'stok-xyz',
+      auth_expires_at: '2026-04-01 00:00:00',
+      session_expires_at: '2026-04-01 01:00:00',
+      safety_policy: 'restricted',
+      safety_policy_state: { evaluated: true, violations: [] },
+    });
+    const session = db.getBrowserSession('sess-004');
+    assert.strictEqual(session.auth_token, 'tok-abc');
+    assert.strictEqual(session.session_token, 'stok-xyz');
+    assert.strictEqual(session.auth_expires_at, '2026-04-01 00:00:00');
+    assert.strictEqual(session.safety_policy, 'restricted');
+    assert.ok(session.safety_policy_state.includes('"evaluated":true'));
+  });
+
+  it('should reject invalid browser session transitions', () => {
+    db.createBrowserSession({ id: 'sess-005', owner: 'worker-4' });
+    assert.throws(() => {
+      db.transitionBrowserSession('sess-005', 'expired');
+    }, /Invalid browser session transition/);
+
+    db.transitionBrowserSession('sess-005', 'active');
+    assert.throws(() => {
+      db.transitionBrowserSession('sess-005', 'initializing');
+    }, /Invalid browser session transition/);
+  });
+
+  it('should reject invalid safety_policy on create', () => {
+    assert.throws(() => {
+      db.createBrowserSession({ id: 'sess-bad', owner: 'worker-4', safety_policy: 'unsafe' });
+    }, /Invalid safety_policy/);
+  });
+});
+
+describe('Browser research job state machine', () => {
+  let reqId;
+
+  beforeEach(() => {
+    reqId = db.createRequest('Browser research job test');
+    db.createBrowserSession({ id: 'sess-job', owner: 'worker-4' });
+  });
+
+  it('should create a research job with default pending status', () => {
+    const job = db.createBrowserResearchJob({
+      session_id: 'sess-job',
+      request_id: reqId,
+      query: 'weekly market summary',
+    });
+    assert.strictEqual(job.status, 'pending');
+    assert.strictEqual(job.job_type, 'research');
+    assert.strictEqual(job.query, 'weekly market summary');
+    assert.strictEqual(job.attempt_count, 0);
+    assert.strictEqual(job.result_payload, null);
+    assert.strictEqual(job.started_at, null);
+    assert.strictEqual(job.completed_at, null);
+  });
+
+  it('should transition research job through full lifecycle', () => {
+    const job = db.createBrowserResearchJob({ session_id: 'sess-job', query: 'test query' });
+    const jobId = job.id;
+
+    const queued = db.transitionBrowserResearchJob(jobId, 'queued');
+    assert.strictEqual(queued.status, 'queued');
+
+    const running = db.transitionBrowserResearchJob(jobId, 'running');
+    assert.strictEqual(running.status, 'running');
+    assert.ok(running.started_at, 'started_at should be auto-set when running');
+
+    const awaiting = db.transitionBrowserResearchJob(jobId, 'awaiting_callback');
+    assert.strictEqual(awaiting.status, 'awaiting_callback');
+
+    const completed = db.transitionBrowserResearchJob(jobId, 'completed', {
+      result_payload: JSON.stringify({ sources: 5, summary: 'done' }),
+    });
+    assert.strictEqual(completed.status, 'completed');
+    assert.ok(completed.completed_at, 'completed_at should be auto-set');
+    assert.ok(completed.result_payload.includes('"sources":5'));
+  });
+
+  it('should set completed_at when failing or cancelling', () => {
+    const job = db.createBrowserResearchJob({ session_id: 'sess-job', query: 'cancel test' });
+    db.transitionBrowserResearchJob(job.id, 'queued');
+    const cancelled = db.transitionBrowserResearchJob(job.id, 'cancelled');
+    assert.strictEqual(cancelled.status, 'cancelled');
+    assert.ok(cancelled.completed_at, 'completed_at should be set on cancel');
+
+    const job2 = db.createBrowserResearchJob({ session_id: 'sess-job', query: 'fail test' });
+    db.transitionBrowserResearchJob(job2.id, 'queued');
+    const failed = db.transitionBrowserResearchJob(job2.id, 'failed', { error: 'network error' });
+    assert.strictEqual(failed.status, 'failed');
+    assert.ok(failed.completed_at, 'completed_at should be set on fail');
+    assert.strictEqual(failed.error, 'network error');
+  });
+
+  it('should reject invalid job transitions', () => {
+    const job = db.createBrowserResearchJob({ session_id: 'sess-job', query: 'invalid test' });
+    assert.throws(() => {
+      db.transitionBrowserResearchJob(job.id, 'completed');
+    }, /Invalid browser research job transition/);
+
+    db.transitionBrowserResearchJob(job.id, 'queued');
+    db.transitionBrowserResearchJob(job.id, 'failed');
+    assert.throws(() => {
+      db.transitionBrowserResearchJob(job.id, 'running');
+    }, /Invalid browser research job transition/);
+  });
+
+  it('should reject invalid job_type on create', () => {
+    assert.throws(() => {
+      db.createBrowserResearchJob({ session_id: 'sess-job', query: 'test', job_type: 'scrape' });
+    }, /Invalid job_type/);
+  });
+});
+
+describe('Browser callback events cursor retrieval', () => {
+  it('should append events and retrieve them with cursor pagination', () => {
+    db.createBrowserSession({ id: 'sess-ev', owner: 'worker-4' });
+    const job = db.createBrowserResearchJob({ session_id: 'sess-ev', query: 'cursor test' });
+    const jobId = job.id;
+
+    const e1 = db.appendBrowserCallbackEvent({ job_id: jobId, session_id: 'sess-ev', event_type: 'progress', event_payload: { pct: 10 } });
+    const e2 = db.appendBrowserCallbackEvent({ job_id: jobId, event_type: 'progress', event_payload: { pct: 50 } });
+    const e3 = db.appendBrowserCallbackEvent({ job_id: jobId, event_type: 'result', event_payload: { sources: 7 } });
+
+    // Full retrieval from start
+    const all = db.getBrowserCallbackEvents(jobId);
+    assert.strictEqual(all.length, 3);
+    assert.strictEqual(all[0].event_type, 'progress');
+    assert.strictEqual(all[2].event_type, 'result');
+
+    // Cursor-based: after first event
+    const afterFirst = db.getBrowserCallbackEvents(jobId, { after_id: e1.id });
+    assert.strictEqual(afterFirst.length, 2);
+    assert.strictEqual(afterFirst[0].id, e2.id);
+
+    // Cursor-based: after second event
+    const afterSecond = db.getBrowserCallbackEvents(jobId, { after_id: e2.id });
+    assert.strictEqual(afterSecond.length, 1);
+    assert.strictEqual(afterSecond[0].id, e3.id);
+
+    // Cursor at end: empty
+    const afterLast = db.getBrowserCallbackEvents(jobId, { after_id: e3.id });
+    assert.strictEqual(afterLast.length, 0);
+  });
+
+  it('should respect the limit parameter', () => {
+    db.createBrowserSession({ id: 'sess-lim', owner: 'worker-4' });
+    const job = db.createBrowserResearchJob({ session_id: 'sess-lim', query: 'limit test' });
+    for (let i = 0; i < 10; i++) {
+      db.appendBrowserCallbackEvent({ job_id: job.id, event_type: 'heartbeat', event_payload: { seq: i } });
+    }
+    const limited = db.getBrowserCallbackEvents(job.id, { limit: 3 });
+    assert.strictEqual(limited.length, 3);
+  });
+
+  it('should reject invalid event_type', () => {
+    db.createBrowserSession({ id: 'sess-bad-ev', owner: 'worker-4' });
+    const job = db.createBrowserResearchJob({ session_id: 'sess-bad-ev', query: 'bad event' });
+    assert.throws(() => {
+      db.appendBrowserCallbackEvent({ job_id: job.id, event_type: 'unknown' });
+    }, /Invalid event_type/);
+  });
+
+  it('should scope events to the correct job', () => {
+    db.createBrowserSession({ id: 'sess-scope', owner: 'worker-4' });
+    const job1 = db.createBrowserResearchJob({ session_id: 'sess-scope', query: 'job 1' });
+    const job2 = db.createBrowserResearchJob({ session_id: 'sess-scope', query: 'job 2' });
+
+    db.appendBrowserCallbackEvent({ job_id: job1.id, event_type: 'progress', event_payload: {} });
+    db.appendBrowserCallbackEvent({ job_id: job2.id, event_type: 'result', event_payload: {} });
+
+    const job1Events = db.getBrowserCallbackEvents(job1.id);
+    const job2Events = db.getBrowserCallbackEvents(job2.id);
+    assert.strictEqual(job1Events.length, 1);
+    assert.strictEqual(job2Events.length, 1);
+    assert.strictEqual(job1Events[0].event_type, 'progress');
+    assert.strictEqual(job2Events[0].event_type, 'result');
+  });
+});
+
 describe('Usage cost burn rate', () => {
   it('should include completed and failed task spend while requiring completed_at', () => {
     const requestId = db.createRequest('Burn-rate aggregation');

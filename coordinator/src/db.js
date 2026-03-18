@@ -816,6 +816,108 @@ function ensureProjectMemoryPersistenceSchema(database) {
   `);
 }
 
+// --- Browser offload persistence schema and constants ---
+
+const BROWSER_SESSION_STATUS_SEQUENCE = Object.freeze([
+  'initializing', 'active', 'idle', 'expiring', 'expired', 'terminated',
+]);
+const BROWSER_SESSION_ALLOWED_TRANSITIONS = Object.freeze({
+  initializing: new Set(['active', 'terminated']),
+  active: new Set(['idle', 'expiring', 'terminated']),
+  idle: new Set(['active', 'expiring', 'terminated']),
+  expiring: new Set(['expired', 'terminated']),
+  expired: new Set(),
+  terminated: new Set(),
+});
+const BROWSER_SESSION_SAFE_UPDATE_KEYS = new Set([
+  'auth_token', 'session_token', 'auth_expires_at', 'session_expires_at',
+  'safety_policy', 'safety_policy_state', 'metadata', 'terminated_at',
+]);
+
+const BROWSER_RESEARCH_JOB_STATUS_SEQUENCE = Object.freeze([
+  'pending', 'queued', 'running', 'awaiting_callback', 'completed', 'failed', 'cancelled',
+]);
+const BROWSER_RESEARCH_JOB_ALLOWED_TRANSITIONS = Object.freeze({
+  pending: new Set(['queued', 'cancelled']),
+  queued: new Set(['running', 'failed', 'cancelled']),
+  running: new Set(['awaiting_callback', 'completed', 'failed', 'cancelled']),
+  awaiting_callback: new Set(['completed', 'failed', 'cancelled']),
+  completed: new Set(),
+  failed: new Set(),
+  cancelled: new Set(),
+});
+const BROWSER_RESEARCH_JOB_SAFE_UPDATE_KEYS = new Set([
+  'result_payload', 'error', 'attempt_count', 'started_at', 'completed_at',
+]);
+
+function ensureBrowserOffloadPersistenceSchema(database) {
+  database.exec(`
+    CREATE TABLE IF NOT EXISTS browser_sessions (
+      id TEXT PRIMARY KEY,
+      owner TEXT NOT NULL,
+      status TEXT NOT NULL DEFAULT 'initializing'
+        CHECK (status IN ('initializing','active','idle','expiring','expired','terminated')),
+      auth_token TEXT,
+      session_token TEXT,
+      auth_expires_at TEXT,
+      session_expires_at TEXT,
+      safety_policy TEXT NOT NULL DEFAULT 'standard'
+        CHECK (safety_policy IN ('standard','restricted','permissive')),
+      safety_policy_state TEXT,
+      task_id INTEGER REFERENCES tasks(id),
+      request_id TEXT REFERENCES requests(id),
+      metadata TEXT,
+      created_at TEXT NOT NULL DEFAULT (datetime('now')),
+      updated_at TEXT NOT NULL DEFAULT (datetime('now')),
+      terminated_at TEXT
+    );
+
+    CREATE TABLE IF NOT EXISTS browser_research_jobs (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      session_id TEXT REFERENCES browser_sessions(id),
+      task_id INTEGER REFERENCES tasks(id),
+      request_id TEXT REFERENCES requests(id),
+      job_type TEXT NOT NULL DEFAULT 'research'
+        CHECK (job_type IN ('research','navigation','extraction')),
+      query TEXT NOT NULL,
+      status TEXT NOT NULL DEFAULT 'pending'
+        CHECK (status IN ('pending','queued','running','awaiting_callback','completed','failed','cancelled')),
+      result_payload TEXT,
+      error TEXT,
+      attempt_count INTEGER NOT NULL DEFAULT 0,
+      created_at TEXT NOT NULL DEFAULT (datetime('now')),
+      updated_at TEXT NOT NULL DEFAULT (datetime('now')),
+      started_at TEXT,
+      completed_at TEXT
+    );
+
+    CREATE TABLE IF NOT EXISTS browser_callback_events (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      job_id INTEGER NOT NULL REFERENCES browser_research_jobs(id),
+      session_id TEXT REFERENCES browser_sessions(id),
+      event_type TEXT NOT NULL
+        CHECK (event_type IN ('result','progress','error','heartbeat')),
+      event_payload TEXT NOT NULL DEFAULT '{}',
+      created_at TEXT NOT NULL DEFAULT (datetime('now'))
+    );
+
+    CREATE INDEX IF NOT EXISTS idx_browser_sessions_owner
+      ON browser_sessions(owner, status);
+    CREATE INDEX IF NOT EXISTS idx_browser_sessions_task
+      ON browser_sessions(task_id) WHERE task_id IS NOT NULL;
+    CREATE INDEX IF NOT EXISTS idx_browser_research_jobs_session
+      ON browser_research_jobs(session_id, status);
+    CREATE INDEX IF NOT EXISTS idx_browser_research_jobs_task
+      ON browser_research_jobs(task_id) WHERE task_id IS NOT NULL;
+    CREATE INDEX IF NOT EXISTS idx_browser_research_jobs_status
+      ON browser_research_jobs(status, created_at ASC, id ASC);
+    CREATE INDEX IF NOT EXISTS idx_browser_callback_events_job
+      ON browser_callback_events(job_id, id ASC);
+    CREATE INDEX IF NOT EXISTS idx_browser_callback_events_cursor
+      ON browser_callback_events(job_id, id ASC, event_type);
+  `);
+}
+
 function getDbPath(projectDir) {
   const stateDir = path.join(projectDir, '.claude', 'state');
   fs.mkdirSync(stateDir, { recursive: true });
@@ -880,6 +982,7 @@ function init(projectDir) {
   ensureTaskUsageTelemetryColumns(db);
   ensureResearchBatchingSchema(db);
   ensureProjectMemoryPersistenceSchema(db);
+  ensureBrowserOffloadPersistenceSchema(db);
 
   // Store project dir in config
   db.prepare('UPDATE config SET value = ? WHERE key = ?').run(projectDir, 'project_dir');
@@ -1042,6 +1145,207 @@ function transitionTaskBrowserOffload(taskId, nextStatus, updates = {}) {
     browser_offload_updated_at: timestamp,
   });
   return getTask(taskId);
+}
+
+// --- Browser session helpers ---
+
+function createBrowserSession({
+  id,
+  owner,
+  task_id = null,
+  request_id = null,
+  auth_token = null,
+  session_token = null,
+  auth_expires_at = null,
+  session_expires_at = null,
+  safety_policy = 'standard',
+  safety_policy_state = null,
+  metadata = null,
+} = {}) {
+  if (!id || !String(id).trim()) throw new Error('browser_sessions.id is required');
+  if (!owner || !String(owner).trim()) throw new Error('browser_sessions.owner is required');
+  const sessionId = String(id).trim();
+  const normalizedOwner = String(owner).trim();
+  const normalizedPolicy = String(safety_policy || 'standard').trim().toLowerCase();
+  if (!['standard', 'restricted', 'permissive'].includes(normalizedPolicy)) {
+    throw new Error(`Invalid safety_policy: ${safety_policy}`);
+  }
+  getDb().prepare(`
+    INSERT INTO browser_sessions (
+      id, owner, status, auth_token, session_token,
+      auth_expires_at, session_expires_at,
+      safety_policy, safety_policy_state,
+      task_id, request_id, metadata
+    ) VALUES (?, ?, 'initializing', ?, ?, ?, ?, ?, ?, ?, ?, ?)
+  `).run(
+    sessionId, normalizedOwner,
+    auth_token ?? null, session_token ?? null,
+    auth_expires_at ?? null, session_expires_at ?? null,
+    normalizedPolicy,
+    safety_policy_state != null ? JSON.stringify(safety_policy_state) : null,
+    task_id ?? null, request_id ?? null,
+    metadata != null ? JSON.stringify(metadata) : null,
+  );
+  return getBrowserSession(sessionId);
+}
+
+function getBrowserSession(id) {
+  return getDb().prepare('SELECT * FROM browser_sessions WHERE id = ?').get(id) ?? null;
+}
+
+function updateBrowserSession(id, fields = {}) {
+  const allowedKeys = new Set([...BROWSER_SESSION_SAFE_UPDATE_KEYS, 'status']);
+  for (const key of Object.keys(fields)) {
+    if (!allowedKeys.has(key)) throw new Error(`Invalid browser_sessions update field: ${key}`);
+  }
+  const sets = [];
+  const vals = [];
+  for (const [k, v] of Object.entries(fields)) {
+    sets.push(`${k} = ?`);
+    vals.push(v);
+  }
+  if (sets.length === 0) return getBrowserSession(id);
+  sets.push("updated_at = datetime('now')");
+  vals.push(id);
+  getDb().prepare(`UPDATE browser_sessions SET ${sets.join(', ')} WHERE id = ?`).run(...vals);
+  return getBrowserSession(id);
+}
+
+function transitionBrowserSession(sessionId, nextStatus, updates = {}) {
+  const normalizedNext = String(nextStatus || '').trim().toLowerCase();
+  if (!BROWSER_SESSION_STATUS_SEQUENCE.includes(normalizedNext)) {
+    throw new Error(`Invalid browser session status: ${nextStatus}`);
+  }
+  for (const key of Object.keys(updates)) {
+    if (!BROWSER_SESSION_SAFE_UPDATE_KEYS.has(key)) {
+      throw new Error(`Invalid browser session update field: ${key}`);
+    }
+  }
+  const session = getBrowserSession(sessionId);
+  if (!session) throw new Error(`Browser session ${sessionId} not found`);
+  const currentStatus = String(session.status || 'initializing').trim().toLowerCase();
+  const allowed = BROWSER_SESSION_ALLOWED_TRANSITIONS[currentStatus];
+  if (currentStatus !== normalizedNext && !(allowed && allowed.has(normalizedNext))) {
+    throw new Error(
+      `Invalid browser session transition from "${currentStatus}" to "${normalizedNext}"`
+    );
+  }
+  const extraFields = { ...updates };
+  if (normalizedNext === 'terminated' && !extraFields.terminated_at) {
+    extraFields.terminated_at = currentSqlTimestamp();
+  }
+  return updateBrowserSession(sessionId, { ...extraFields, status: normalizedNext });
+}
+
+// --- Browser research job helpers ---
+
+function createBrowserResearchJob({
+  session_id = null,
+  task_id = null,
+  request_id = null,
+  job_type = 'research',
+  query,
+} = {}) {
+  if (!query || !String(query).trim()) throw new Error('browser_research_jobs.query is required');
+  const normalizedType = String(job_type || 'research').trim().toLowerCase();
+  if (!['research', 'navigation', 'extraction'].includes(normalizedType)) {
+    throw new Error(`Invalid job_type: ${job_type}`);
+  }
+  const result = getDb().prepare(`
+    INSERT INTO browser_research_jobs (session_id, task_id, request_id, job_type, query)
+    VALUES (?, ?, ?, ?, ?)
+  `).run(session_id ?? null, task_id ?? null, request_id ?? null, normalizedType, String(query).trim());
+  return getBrowserResearchJob(result.lastInsertRowid);
+}
+
+function getBrowserResearchJob(id) {
+  return getDb().prepare('SELECT * FROM browser_research_jobs WHERE id = ?').get(id) ?? null;
+}
+
+function updateBrowserResearchJob(id, fields = {}) {
+  const allowedKeys = new Set([...BROWSER_RESEARCH_JOB_SAFE_UPDATE_KEYS, 'status']);
+  for (const key of Object.keys(fields)) {
+    if (!allowedKeys.has(key)) throw new Error(`Invalid browser_research_jobs update field: ${key}`);
+  }
+  const sets = [];
+  const vals = [];
+  for (const [k, v] of Object.entries(fields)) {
+    sets.push(`${k} = ?`);
+    vals.push(v);
+  }
+  if (sets.length === 0) return getBrowserResearchJob(id);
+  sets.push("updated_at = datetime('now')");
+  vals.push(id);
+  getDb().prepare(`UPDATE browser_research_jobs SET ${sets.join(', ')} WHERE id = ?`).run(...vals);
+  return getBrowserResearchJob(id);
+}
+
+function transitionBrowserResearchJob(jobId, nextStatus, updates = {}) {
+  const normalizedNext = String(nextStatus || '').trim().toLowerCase();
+  if (!BROWSER_RESEARCH_JOB_STATUS_SEQUENCE.includes(normalizedNext)) {
+    throw new Error(`Invalid browser research job status: ${nextStatus}`);
+  }
+  for (const key of Object.keys(updates)) {
+    if (!BROWSER_RESEARCH_JOB_SAFE_UPDATE_KEYS.has(key)) {
+      throw new Error(`Invalid browser research job update field: ${key}`);
+    }
+  }
+  const job = getBrowserResearchJob(jobId);
+  if (!job) throw new Error(`Browser research job ${jobId} not found`);
+  const currentStatus = String(job.status || 'pending').trim().toLowerCase();
+  const allowed = BROWSER_RESEARCH_JOB_ALLOWED_TRANSITIONS[currentStatus];
+  if (currentStatus !== normalizedNext && !(allowed && allowed.has(normalizedNext))) {
+    throw new Error(
+      `Invalid browser research job transition from "${currentStatus}" to "${normalizedNext}"`
+    );
+  }
+  const extraFields = { ...updates };
+  if ((normalizedNext === 'running') && !extraFields.started_at) {
+    extraFields.started_at = currentSqlTimestamp();
+  }
+  if (
+    (normalizedNext === 'completed' || normalizedNext === 'failed' || normalizedNext === 'cancelled')
+    && !extraFields.completed_at
+  ) {
+    extraFields.completed_at = currentSqlTimestamp();
+  }
+  return updateBrowserResearchJob(jobId, { ...extraFields, status: normalizedNext });
+}
+
+// --- Browser callback event helpers ---
+
+function appendBrowserCallbackEvent({
+  job_id,
+  session_id = null,
+  event_type,
+  event_payload = {},
+} = {}) {
+  if (!job_id) throw new Error('browser_callback_events.job_id is required');
+  const validEventTypes = new Set(['result', 'progress', 'error', 'heartbeat']);
+  const normalizedType = String(event_type || '').trim().toLowerCase();
+  if (!validEventTypes.has(normalizedType)) {
+    throw new Error(`Invalid event_type: ${event_type}`);
+  }
+  const payloadStr = typeof event_payload === 'string'
+    ? event_payload
+    : JSON.stringify(event_payload ?? {});
+  const result = getDb().prepare(`
+    INSERT INTO browser_callback_events (job_id, session_id, event_type, event_payload)
+    VALUES (?, ?, ?, ?)
+  `).run(job_id, session_id ?? null, normalizedType, payloadStr);
+  return getDb()
+    .prepare('SELECT * FROM browser_callback_events WHERE id = ?')
+    .get(result.lastInsertRowid);
+}
+
+function getBrowserCallbackEvents(jobId, { after_id = 0, limit = 100 } = {}) {
+  const safeLimit = Math.max(1, Math.min(Number.isFinite(limit) ? limit : 100, 1000));
+  return getDb().prepare(`
+    SELECT * FROM browser_callback_events
+    WHERE job_id = ? AND id > ?
+    ORDER BY id ASC
+    LIMIT ?
+  `).all(jobId, after_id ?? 0, safeLimit);
 }
 
 function normalizeProjectContextKey(projectContextKey) {
@@ -3794,4 +4098,7 @@ module.exports = {
   createLoop, getLoop, updateLoop, setLoopPrompt, refreshLoopPrompt, listLoops, stopLoop,
   evaluateLoopRequestQuality,
   createLoopRequest, listLoopRequests,
+  createBrowserSession, getBrowserSession, updateBrowserSession, transitionBrowserSession,
+  createBrowserResearchJob, getBrowserResearchJob, updateBrowserResearchJob, transitionBrowserResearchJob,
+  appendBrowserCallbackEvent, getBrowserCallbackEvents,
 };
