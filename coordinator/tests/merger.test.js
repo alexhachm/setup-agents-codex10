@@ -778,10 +778,10 @@ describe('Overlap validation command selection', () => {
   });
 });
 
-describe('tryRebase stash guard', () => {
-  function setupStashTestCli(statusOutput) {
+describe('tryRebase dirty-worktree reset', () => {
+  function setupDirtyWorktreeTestCli(statusOutput) {
     const binDir = path.join(tmpDir, 'mock-bin');
-    const commandLog = path.join(tmpDir, 'stash-cli.log');
+    const commandLog = path.join(tmpDir, 'dirty-wt-cli.log');
     fs.mkdirSync(binDir, { recursive: true });
 
     const gitScript = [
@@ -800,13 +800,13 @@ describe('tryRebase stash guard', () => {
     return { commandLog };
   }
 
-  function seedStashTestEntry() {
+  function seedDirtyWorktreeTestEntry() {
     const fakeWtPath = path.join(tmpDir, '.worktrees', 'wt-1');
     fs.mkdirSync(fakeWtPath, { recursive: true });
     db.registerWorker(1, fakeWtPath, 'agent-1');
 
-    const reqId = db.createRequest('Stash test feature');
-    const taskId = db.createTask({ request_id: reqId, subject: 'Stash task', description: 'Test stash guard' });
+    const reqId = db.createRequest('Dirty worktree test feature');
+    const taskId = db.createTask({ request_id: reqId, subject: 'Dirty worktree task', description: 'Test dirty worktree reset' });
     db.updateTask(taskId, { assigned_to: 1 });
 
     return {
@@ -819,50 +819,49 @@ describe('tryRebase stash guard', () => {
     };
   }
 
-  it('should stash unstaged tracked changes before rebase and pop after', () => {
-    const { commandLog } = setupStashTestCli(' M tracked-file.js');
-    const entry = seedStashTestEntry();
+  it('should hard-reset dirty worktree (tracked changes) before rebase', () => {
+    const { commandLog } = setupDirtyWorktreeTestCli(' M tracked-file.js');
+    const entry = seedDirtyWorktreeTestEntry();
 
     const result = merger.tryRebase(entry, tmpDir);
 
     assert.strictEqual(result.success, true);
     const lines = fs.readFileSync(commandLog, 'utf8').split('\n');
-    const stashPushIdx = lines.findIndex((l) => l.includes('stash push') && l.includes('--include-untracked'));
+    const checkoutDotIdx = lines.findIndex((l) => l.includes('checkout .'));
+    const cleanIdx = lines.findIndex((l) => l.includes('clean -fd'));
     const rebaseIdx = lines.findIndex((l) => l.includes('rebase origin/main'));
-    const stashPopIdx = lines.findIndex((l) => l.includes('stash pop'));
 
-    assert.ok(stashPushIdx >= 0, 'stash push --include-untracked should be called');
+    assert.ok(checkoutDotIdx >= 0, 'git checkout . should be called to reset tracked files');
+    assert.ok(cleanIdx >= 0, 'git clean -fd should be called to remove untracked files');
     assert.ok(rebaseIdx >= 0, 'git rebase should be called');
-    assert.ok(stashPopIdx >= 0, 'stash pop should be called');
-    assert.ok(stashPushIdx < rebaseIdx, 'stash push should occur before rebase');
-    assert.ok(stashPopIdx > rebaseIdx, 'stash pop should occur after rebase');
+    assert.ok(checkoutDotIdx < rebaseIdx, 'git checkout . should occur before rebase');
+    assert.ok(cleanIdx < rebaseIdx, 'git clean -fd should occur before rebase');
 
-    const stashLogs = readCoordinatorLogEntries('stash_recovery');
-    assert.ok(stashLogs.length > 0, 'stash_recovery log should be emitted');
-    assert.strictEqual(stashLogs[0].reason_code, 'stash_recovery');
-    assert.strictEqual(stashLogs[0].branch, 'agent-1');
-    assert.strictEqual(stashLogs[0].reason, 'dirty_worktree_before_rebase');
+    const resetLogs = readCoordinatorLogEntries('dirty_worktree_reset');
+    assert.ok(resetLogs.length > 0, 'dirty_worktree_reset log should be emitted');
+    assert.strictEqual(resetLogs[0].branch, 'agent-1');
+    assert.strictEqual(resetLogs[0].reason, 'dirty_worktree_before_rebase');
   });
 
-  it('should stash untracked files before rebase and pop after', () => {
-    const { commandLog } = setupStashTestCli('?? newfile.txt');
-    const entry = seedStashTestEntry();
+  it('should hard-reset dirty worktree (untracked files) before rebase', () => {
+    const { commandLog } = setupDirtyWorktreeTestCli('?? newfile.txt');
+    const entry = seedDirtyWorktreeTestEntry();
 
     const result = merger.tryRebase(entry, tmpDir);
 
     assert.strictEqual(result.success, true);
     const lines = fs.readFileSync(commandLog, 'utf8').split('\n');
-    const stashPushIdx = lines.findIndex((l) => l.includes('stash push') && l.includes('--include-untracked'));
+    const checkoutDotIdx = lines.findIndex((l) => l.includes('checkout .'));
+    const cleanIdx = lines.findIndex((l) => l.includes('clean -fd'));
     const rebaseIdx = lines.findIndex((l) => l.includes('rebase origin/main'));
-    const stashPopIdx = lines.findIndex((l) => l.includes('stash pop'));
 
-    assert.ok(stashPushIdx >= 0, 'stash push --include-untracked should be called for untracked files');
-    assert.ok(stashPushIdx < rebaseIdx, 'stash push should occur before rebase');
-    assert.ok(stashPopIdx > rebaseIdx, 'stash pop should occur after rebase');
+    assert.ok(checkoutDotIdx >= 0, 'git checkout . should be called for untracked files');
+    assert.ok(cleanIdx >= 0, 'git clean -fd should be called for untracked files');
+    assert.ok(checkoutDotIdx < rebaseIdx, 'git checkout . should occur before rebase');
+    assert.ok(cleanIdx < rebaseIdx, 'git clean -fd should occur before rebase');
 
-    const stashLogs = readCoordinatorLogEntries('stash_recovery');
-    assert.ok(stashLogs.length > 0, 'stash_recovery log should be emitted for untracked files');
-    assert.strictEqual(stashLogs[0].reason_code, 'stash_recovery');
+    const resetLogs = readCoordinatorLogEntries('dirty_worktree_reset');
+    assert.ok(resetLogs.length > 0, 'dirty_worktree_reset log should be emitted for untracked files');
   });
 });
 
