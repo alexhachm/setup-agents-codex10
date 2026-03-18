@@ -130,7 +130,7 @@ launch_codex() {
   git fetch origin 2>/dev/null || true
   git rebase origin/main 2>/dev/null || {
     git rebase --abort 2>/dev/null || true
-    git reset --hard origin/main 2>/dev/null || true
+    echo "[sentinel-$WORKER_ID] skipping hard reset to preserve worktree state"
   }
 
   # Launch Codex worker for one non-interactive worker-loop cycle.

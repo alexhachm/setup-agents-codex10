@@ -18,7 +18,7 @@ Budget: ~1000 tokens max.
 
 ## Known Stale Corrections (as of 2026-03-18)
 - `coordinator/src/watchdog.js` respawn now includes `MAC10_NAMESPACE` — do not resubmit namespace-drop gap
-- Both sentinel scripts now abort failed rebases (no hard reset) — do not resubmit hard-reset gap
+- Both worker-sentinel.sh copies and loop-sentinel.sh now abort failed rebases without hard reset — worker-sentinel alignment completed by task-125; do not resubmit hard-reset gap
 - `scripts/loop-sentinel.sh` now parses `loop-requests --json` — parity gaps tracked under req-67cf6813
 - assign-task `worker_claimed` guard is present in current source — do not resubmit bypass gap without fresh repro
 - All 7 loop-31 requests completed (req-8d19bead, req-d2b4ff57, req-63682edb, req-c5313699, req-f011ae9d, req-810dc70a, req-f4d4ce34) — ghost instance, non-tmux liveness, lock-ownership, overlay, depends_on parsing, functional_conflict recovery, merge_queue purge all fixed

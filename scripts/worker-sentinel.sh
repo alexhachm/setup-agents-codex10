@@ -134,7 +134,7 @@ launch_worker_agent() {
   git fetch origin 2>/dev/null || true
   git rebase origin/main 2>/dev/null || {
     git rebase --abort 2>/dev/null || true
-    git reset --hard origin/main 2>/dev/null || true
+    echo "[sentinel-$WORKER_ID] skipping hard reset to preserve worktree state"
   }
 
   # Reload provider config so provider/model changes in agent-launcher.env
