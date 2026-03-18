@@ -228,6 +228,65 @@ CREATE TABLE IF NOT EXISTS project_memory_lineage_links (
   CHECK (snapshot_id IS NOT NULL OR insight_artifact_id IS NOT NULL)
 );
 
+-- Browser research offload: sessions, jobs, and callback events
+CREATE TABLE IF NOT EXISTS browser_sessions (
+  id TEXT PRIMARY KEY,  -- opaque session identifier
+  owner TEXT NOT NULL,  -- 'worker-N', 'architect', 'coordinator', etc.
+  status TEXT NOT NULL DEFAULT 'initializing'
+    CHECK (status IN ('initializing','active','idle','expiring','expired','terminated')),
+  auth_token TEXT,
+  session_token TEXT,
+  auth_expires_at TEXT,
+  session_expires_at TEXT,
+  safety_policy TEXT NOT NULL DEFAULT 'standard'
+    CHECK (safety_policy IN ('standard','restricted','permissive')),
+  safety_policy_state TEXT,  -- JSON: policy evaluation results
+  task_id INTEGER REFERENCES tasks(id),
+  request_id TEXT REFERENCES requests(id),
+  metadata TEXT,  -- JSON: extra session metadata
+  created_at TEXT NOT NULL DEFAULT (datetime('now')),
+  updated_at TEXT NOT NULL DEFAULT (datetime('now')),
+  terminated_at TEXT
+);
+
+CREATE TABLE IF NOT EXISTS browser_research_jobs (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  session_id TEXT REFERENCES browser_sessions(id),
+  task_id INTEGER REFERENCES tasks(id),
+  request_id TEXT REFERENCES requests(id),
+  job_type TEXT NOT NULL DEFAULT 'research'
+    CHECK (job_type IN ('research','navigation','extraction')),
+  query TEXT NOT NULL,
+  status TEXT NOT NULL DEFAULT 'pending'
+    CHECK (status IN ('pending','queued','running','awaiting_callback','completed','failed','cancelled')),
+  result_payload TEXT,  -- JSON: normalized result storage
+  error TEXT,
+  attempt_count INTEGER NOT NULL DEFAULT 0,
+  created_at TEXT NOT NULL DEFAULT (datetime('now')),
+  updated_at TEXT NOT NULL DEFAULT (datetime('now')),
+  started_at TEXT,
+  completed_at TEXT
+);
+
+CREATE TABLE IF NOT EXISTS browser_callback_events (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,  -- id doubles as cursor position
+  job_id INTEGER NOT NULL REFERENCES browser_research_jobs(id),
+  session_id TEXT REFERENCES browser_sessions(id),
+  event_type TEXT NOT NULL
+    CHECK (event_type IN ('result','progress','error','heartbeat')),
+  event_payload TEXT NOT NULL DEFAULT '{}',  -- JSON
+  created_at TEXT NOT NULL DEFAULT (datetime('now'))
+);
+
+-- Indexes for browser offload tables
+CREATE INDEX IF NOT EXISTS idx_browser_sessions_owner ON browser_sessions(owner, status);
+CREATE INDEX IF NOT EXISTS idx_browser_sessions_task ON browser_sessions(task_id) WHERE task_id IS NOT NULL;
+CREATE INDEX IF NOT EXISTS idx_browser_research_jobs_session ON browser_research_jobs(session_id, status);
+CREATE INDEX IF NOT EXISTS idx_browser_research_jobs_task ON browser_research_jobs(task_id) WHERE task_id IS NOT NULL;
+CREATE INDEX IF NOT EXISTS idx_browser_research_jobs_status ON browser_research_jobs(status, created_at ASC, id ASC);
+CREATE INDEX IF NOT EXISTS idx_browser_callback_events_job ON browser_callback_events(job_id, id ASC);
+CREATE INDEX IF NOT EXISTS idx_browser_callback_events_cursor ON browser_callback_events(job_id, id ASC, event_type);
+
 -- Workers (replaces worker-status.json)
 CREATE TABLE IF NOT EXISTS workers (
   id INTEGER PRIMARY KEY,  -- worker number (1-8)
