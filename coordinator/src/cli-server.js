@@ -514,6 +514,26 @@ const COMMAND_SCHEMAS = {
   'loop-set-prompt':   { required: ['loop_id', 'prompt'], types: { loop_id: 'number', prompt: 'string' } },
   'loop-request':      { required: ['loop_id', 'description'], types: { loop_id: 'number', description: 'string' } },
   'loop-requests':     { required: ['loop_id'], types: { loop_id: 'number' } },
+  'research-intent-enqueue': {
+    required: ['intent_payload'],
+    types: { intent_payload: 'string', request_id: 'string', task_id: 'number', intent_type: 'string', priority: 'string', batch_size_cap: 'number', timeout_window_ms: 'number' },
+  },
+  'research-batch-plan': {
+    required: [],
+    types: { max_batch_size: 'number', timeout_window_ms: 'number', planner_key: 'string' },
+  },
+  'research-batch-status': {
+    required: ['batch_id'],
+    types: { batch_id: 'number' },
+  },
+  'research-batch-dispatch': {
+    required: ['stage_id'],
+    types: { stage_id: 'number' },
+  },
+  'research-batch-collect': {
+    required: ['stage_id', 'status'],
+    types: { stage_id: 'number', status: 'string', error: 'string' },
+  },
 };
 
 const COMPLETE_TASK_USAGE_FIELD_TYPES = Object.freeze({
@@ -4078,6 +4098,79 @@ function handleCommand(cmd, conn, handlers) {
         }
         const loopReqs = db.listLoopRequests(args.loop_id);
         respond(conn, { ok: true, requests: loopReqs });
+        break;
+      }
+
+      case 'research-intent-enqueue': {
+        const enqueuedIntent = db.enqueueResearchIntent({
+          request_id: args.request_id || null,
+          task_id: args.task_id || null,
+          intent_type: args.intent_type || 'browser_research',
+          intent_payload: args.intent_payload,
+          priority: args.priority || null,
+          batch_size_cap: args.batch_size_cap || null,
+          timeout_window_ms: args.timeout_window_ms || null,
+        });
+        db.log('coordinator', 'research_intent_enqueued', {
+          intent_id: enqueuedIntent && enqueuedIntent.intent && enqueuedIntent.intent.id,
+          dedupe: enqueuedIntent && enqueuedIntent.deduped,
+        });
+        respond(conn, { ok: true, ...enqueuedIntent });
+        break;
+      }
+
+      case 'research-batch-plan': {
+        const batchPlan = db.materializeResearchBatchPlan({
+          planner_key: args.planner_key || 'default',
+          max_batch_size: args.max_batch_size || null,
+          timeout_window_ms: args.timeout_window_ms || null,
+        });
+        db.log('coordinator', 'research_batch_planned', {
+          batch_count: batchPlan.batch_count,
+          candidate_count: batchPlan.candidate_count,
+        });
+        respond(conn, { ok: true, ...batchPlan });
+        break;
+      }
+
+      case 'research-batch-status': {
+        const statusBatch = db.getResearchBatch(args.batch_id);
+        if (!statusBatch) {
+          respond(conn, { ok: false, error: `Batch ${args.batch_id} not found` });
+          break;
+        }
+        const batchStages = db.listResearchBatchStages(args.batch_id);
+        const stageFanouts = {};
+        for (const stage of batchStages) {
+          stageFanouts[stage.id] = db.listResearchIntentFanout(stage.intent_id);
+        }
+        respond(conn, { ok: true, batch: statusBatch, stages: batchStages, fanouts: stageFanouts });
+        break;
+      }
+
+      case 'research-batch-dispatch': {
+        const dispatchResult = db.markResearchBatchStage({
+          stage_id: args.stage_id,
+          status: 'running',
+        });
+        db.log('coordinator', 'research_batch_stage_dispatched', { stage_id: args.stage_id });
+        respond(conn, { ok: true, ...dispatchResult });
+        break;
+      }
+
+      case 'research-batch-collect': {
+        const collectResult = db.markResearchBatchStage({
+          stage_id: args.stage_id,
+          status: args.status,
+          error: args.error || null,
+          completed_fanout_keys: args.completed_fanout_keys || [],
+          failed_fanout_keys: args.failed_fanout_keys || [],
+        });
+        db.log('coordinator', 'research_batch_stage_collected', {
+          stage_id: args.stage_id,
+          status: args.status,
+        });
+        respond(conn, { ok: true, ...collectResult });
         break;
       }
 
