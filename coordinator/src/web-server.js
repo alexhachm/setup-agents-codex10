@@ -603,6 +603,15 @@ function normalizeRoutingField(value) {
   return trimmed ? trimmed : null;
 }
 
+const MODEL_STRING_RE = /^[a-zA-Z0-9_.:/\-]{1,128}$/;
+
+function normalizeModelString(value) {
+  if (value === undefined || value === null) return null;
+  const trimmed = String(value).trim();
+  if (!trimmed) return null;
+  return MODEL_STRING_RE.test(trimmed) ? trimmed : null;
+}
+
 function parseUsagePayloadJson(value) {
   if (value === undefined || value === null) return null;
   if (typeof value === 'object') {
@@ -1021,6 +1030,10 @@ function start(projectDir, port = 3100, scriptDir = null, handlers = {}) {
         githubRepo: storedRepo || '',
         setupComplete: setupDone === '1',
         scriptDir: resolvedScriptDir,
+        provider: db.getConfig('provider') || null,
+        fast_model: db.getConfig('fast_model') || null,
+        deep_model: db.getConfig('deep_model') || null,
+        economy_model: db.getConfig('economy_model') || null,
       });
     } catch (e) {
       res.status(500).json({ error: e.message });
@@ -1030,7 +1043,7 @@ function start(projectDir, port = 3100, scriptDir = null, handlers = {}) {
   // Save config without running full setup
   app.post('/api/config', (req, res) => {
     try {
-      const { projectDir: newDir, githubRepo, numWorkers } = req.body;
+      const { projectDir: newDir, githubRepo, numWorkers, provider, fast_model, deep_model, economy_model } = req.body;
       if (newDir) {
         if (!SAFE_PATH_RE.test(newDir)) {
           return res.status(400).json({ ok: false, error: 'Invalid project directory path' });
@@ -1046,13 +1059,46 @@ function start(projectDir, port = 3100, scriptDir = null, handlers = {}) {
       if (numWorkers !== undefined) {
         db.setConfig('num_workers', String(Math.min(Math.max(parseInt(numWorkers) || 4, 1), 8)));
       }
+      const normalizedProvider = normalizeModelString(provider);
+      const normalizedFastModel = normalizeModelString(fast_model);
+      const normalizedDeepModel = normalizeModelString(deep_model);
+      const normalizedEconomyModel = normalizeModelString(economy_model);
+      if (provider !== undefined) {
+        if (provider && normalizedProvider === null) {
+          return res.status(400).json({ ok: false, error: 'Invalid provider value' });
+        }
+        db.setConfig('provider', normalizedProvider || '');
+      }
+      if (fast_model !== undefined) {
+        if (fast_model && normalizedFastModel === null) {
+          return res.status(400).json({ ok: false, error: 'Invalid fast_model value' });
+        }
+        db.setConfig('fast_model', normalizedFastModel || '');
+      }
+      if (deep_model !== undefined) {
+        if (deep_model && normalizedDeepModel === null) {
+          return res.status(400).json({ ok: false, error: 'Invalid deep_model value' });
+        }
+        db.setConfig('deep_model', normalizedDeepModel || '');
+      }
+      if (economy_model !== undefined) {
+        if (economy_model && normalizedEconomyModel === null) {
+          return res.status(400).json({ ok: false, error: 'Invalid economy_model value' });
+        }
+        db.setConfig('economy_model', normalizedEconomyModel || '');
+      }
       // Auto-save as preset when both project dir and repo are set
       const dir = newDir || db.getConfig('project_dir');
       const repo = githubRepo !== undefined ? githubRepo : db.getConfig('github_repo');
       const workers = numWorkers !== undefined ? Math.min(Math.max(parseInt(numWorkers) || 4, 1), 8) : parseInt(db.getConfig('num_workers') || '4');
       if (dir && repo) {
         const presetName = repo || path.basename(dir);
-        db.savePreset(presetName, dir, repo, workers);
+        db.savePreset(presetName, dir, repo, workers, {
+          provider: normalizedProvider !== undefined ? normalizedProvider : (normalizeModelString(db.getConfig('provider')) || null),
+          fast_model: normalizedFastModel !== undefined ? normalizedFastModel : (normalizeModelString(db.getConfig('fast_model')) || null),
+          deep_model: normalizedDeepModel !== undefined ? normalizedDeepModel : (normalizeModelString(db.getConfig('deep_model')) || null),
+          economy_model: normalizedEconomyModel !== undefined ? normalizedEconomyModel : (normalizeModelString(db.getConfig('economy_model')) || null),
+        });
       }
       db.log('gui', 'config_updated', { projectDir: newDir, githubRepo, numWorkers });
       res.json({ ok: true, message: 'Config saved. Relaunch masters to apply.' });
@@ -1073,7 +1119,7 @@ function start(projectDir, port = 3100, scriptDir = null, handlers = {}) {
 
   app.post('/api/presets', (req, res) => {
     try {
-      const { name, projectDir: dir, githubRepo, numWorkers } = req.body;
+      const { name, projectDir: dir, githubRepo, numWorkers, provider, fast_model, deep_model, economy_model } = req.body;
       if (!name || !dir) {
         return res.status(400).json({ ok: false, error: 'name and projectDir are required' });
       }
@@ -1083,7 +1129,28 @@ function start(projectDir, port = 3100, scriptDir = null, handlers = {}) {
       if (githubRepo && !REPO_RE.test(githubRepo)) {
         return res.status(400).json({ ok: false, error: 'Invalid GitHub repo format' });
       }
-      db.savePreset(name, dir, githubRepo || '', parseInt(numWorkers) || 4);
+      const normalizedProvider = normalizeModelString(provider);
+      const normalizedFastModel = normalizeModelString(fast_model);
+      const normalizedDeepModel = normalizeModelString(deep_model);
+      const normalizedEconomyModel = normalizeModelString(economy_model);
+      if (provider && normalizedProvider === null) {
+        return res.status(400).json({ ok: false, error: 'Invalid provider value' });
+      }
+      if (fast_model && normalizedFastModel === null) {
+        return res.status(400).json({ ok: false, error: 'Invalid fast_model value' });
+      }
+      if (deep_model && normalizedDeepModel === null) {
+        return res.status(400).json({ ok: false, error: 'Invalid deep_model value' });
+      }
+      if (economy_model && normalizedEconomyModel === null) {
+        return res.status(400).json({ ok: false, error: 'Invalid economy_model value' });
+      }
+      db.savePreset(name, dir, githubRepo || '', parseInt(numWorkers) || 4, {
+        provider: normalizedProvider,
+        fast_model: normalizedFastModel,
+        deep_model: normalizedDeepModel,
+        economy_model: normalizedEconomyModel,
+      });
       db.log('gui', 'preset_saved', { name, projectDir: dir, githubRepo });
       res.json({ ok: true });
     } catch (e) {
@@ -1105,7 +1172,7 @@ function start(projectDir, port = 3100, scriptDir = null, handlers = {}) {
   });
 
   app.post('/api/setup', (req, res) => {
-    const { projectDir: reqProjectDir, githubRepo, numWorkers } = req.body;
+    const { projectDir: reqProjectDir, githubRepo, numWorkers, provider, fast_model, deep_model, economy_model } = req.body;
     if (!reqProjectDir) {
       return res.status(400).json({ ok: false, error: 'projectDir is required' });
     }
@@ -1119,6 +1186,23 @@ function start(projectDir, port = 3100, scriptDir = null, handlers = {}) {
       return res.status(409).json({ ok: false, error: 'Setup is already running' });
     }
 
+    const normalizedProvider = normalizeModelString(provider);
+    const normalizedFastModel = normalizeModelString(fast_model);
+    const normalizedDeepModel = normalizeModelString(deep_model);
+    const normalizedEconomyModel = normalizeModelString(economy_model);
+    if (provider && normalizedProvider === null) {
+      return res.status(400).json({ ok: false, error: 'Invalid provider value' });
+    }
+    if (fast_model && normalizedFastModel === null) {
+      return res.status(400).json({ ok: false, error: 'Invalid fast_model value' });
+    }
+    if (deep_model && normalizedDeepModel === null) {
+      return res.status(400).json({ ok: false, error: 'Invalid deep_model value' });
+    }
+    if (economy_model && normalizedEconomyModel === null) {
+      return res.status(400).json({ ok: false, error: 'Invalid economy_model value' });
+    }
+
     const workers = Math.min(Math.max(parseInt(numWorkers) || 4, 1), 8);
     const setupScript = path.join(resolvedScriptDir, 'setup.sh');
 
@@ -1130,12 +1214,23 @@ function start(projectDir, port = 3100, scriptDir = null, handlers = {}) {
       if (githubRepo) {
         db.setConfig('github_repo', githubRepo);
       }
+      if (normalizedProvider !== null) db.setConfig('provider', normalizedProvider);
+      if (normalizedFastModel !== null) db.setConfig('fast_model', normalizedFastModel);
+      if (normalizedDeepModel !== null) db.setConfig('deep_model', normalizedDeepModel);
+      if (normalizedEconomyModel !== null) db.setConfig('economy_model', normalizedEconomyModel);
     } catch (e) {
       return res.status(500).json({ ok: false, error: 'Failed to save config: ' + e.message });
     }
 
     db.log('gui', 'setup_started', { projectDir: reqProjectDir, numWorkers: workers });
     broadcast({ type: 'setup_log', line: `Starting setup: ${setupScript} ${reqProjectDir} ${workers}` });
+
+    // Build setup.sh args with optional provider/model flags
+    const setupArgs = [setupScript, reqProjectDir, String(workers)];
+    if (normalizedProvider) { setupArgs.push('--provider', normalizedProvider); }
+    if (normalizedFastModel) { setupArgs.push('--fast-model', normalizedFastModel); }
+    if (normalizedDeepModel) { setupArgs.push('--deep-model', normalizedDeepModel); }
+    if (normalizedEconomyModel) { setupArgs.push('--economy-model', normalizedEconomyModel); }
 
     // Spawn setup.sh
     const env = Object.assign({}, process.env, {
@@ -1144,13 +1239,13 @@ function start(projectDir, port = 3100, scriptDir = null, handlers = {}) {
 
     if (isWSL) {
       const distro = process.env.WSL_DISTRO_NAME || 'Ubuntu';
-      setupProcess = spawn('wsl.exe', ['-d', distro, '--', 'bash', setupScript, reqProjectDir, String(workers)], {
+      setupProcess = spawn('wsl.exe', ['-d', distro, '--', 'bash', ...setupArgs], {
         cwd: resolvedScriptDir,
         env,
         stdio: ['ignore', 'pipe', 'pipe'],
       });
     } else {
-      setupProcess = spawn('bash', [setupScript, reqProjectDir, String(workers)], {
+      setupProcess = spawn('bash', setupArgs, {
         cwd: resolvedScriptDir,
         env,
         stdio: ['ignore', 'pipe', 'pipe'],
@@ -1192,7 +1287,12 @@ function start(projectDir, port = 3100, scriptDir = null, handlers = {}) {
           const repo = db.getConfig('github_repo');
           const w = parseInt(db.getConfig('num_workers') || '4');
           if (dir && repo) {
-            db.savePreset(repo || path.basename(dir), dir, repo, w);
+            db.savePreset(repo || path.basename(dir), dir, repo, w, {
+              provider: normalizeModelString(db.getConfig('provider')),
+              fast_model: normalizeModelString(db.getConfig('fast_model')),
+              deep_model: normalizeModelString(db.getConfig('deep_model')),
+              economy_model: normalizeModelString(db.getConfig('economy_model')),
+            });
           }
         } catch {}
       }
@@ -1387,12 +1487,28 @@ function start(projectDir, port = 3100, scriptDir = null, handlers = {}) {
   });
 
   app.post('/api/instances/launch', async (req, res) => {
-    const { projectDir: reqDir, githubRepo, numWorkers } = req.body;
+    const { projectDir: reqDir, githubRepo, numWorkers, provider, fast_model, deep_model, economy_model } = req.body;
     if (!reqDir) {
       return res.status(400).json({ ok: false, error: 'projectDir is required' });
     }
     if (!SAFE_PATH_RE.test(reqDir)) {
       return res.status(400).json({ ok: false, error: 'Invalid project directory path' });
+    }
+    const normalizedProvider = normalizeModelString(provider);
+    const normalizedFastModel = normalizeModelString(fast_model);
+    const normalizedDeepModel = normalizeModelString(deep_model);
+    const normalizedEconomyModel = normalizeModelString(economy_model);
+    if (provider && normalizedProvider === null) {
+      return res.status(400).json({ ok: false, error: 'Invalid provider value' });
+    }
+    if (fast_model && normalizedFastModel === null) {
+      return res.status(400).json({ ok: false, error: 'Invalid fast_model value' });
+    }
+    if (deep_model && normalizedDeepModel === null) {
+      return res.status(400).json({ ok: false, error: 'Invalid deep_model value' });
+    }
+    if (economy_model && normalizedEconomyModel === null) {
+      return res.status(400).json({ ok: false, error: 'Invalid economy_model value' });
     }
 
     // Check for duplicate
@@ -1449,6 +1565,10 @@ function start(projectDir, port = 3100, scriptDir = null, handlers = {}) {
         projectDir: reqDir,
         githubRepo: githubRepo || '',
         numWorkers: parseInt(numWorkers) || 4,
+        ...(normalizedProvider !== null ? { provider: normalizedProvider } : {}),
+        ...(normalizedFastModel !== null ? { fast_model: normalizedFastModel } : {}),
+        ...(normalizedDeepModel !== null ? { deep_model: normalizedDeepModel } : {}),
+        ...(normalizedEconomyModel !== null ? { economy_model: normalizedEconomyModel } : {}),
       });
       if (!seedConfig.ok) {
         cleanupFailedLaunch(childPid, newPort);
