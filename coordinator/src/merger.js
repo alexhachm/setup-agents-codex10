@@ -317,6 +317,18 @@ function processQueue(projectDir, mergeExecutor = attemptMerge) {
       });
     }
 
+    // Purge stale terminal entries (failed/conflict) older than 600 minutes
+    const stalePurgeResult = db.getDb().prepare(`
+      DELETE FROM merge_queue
+       WHERE status IN ('failed', 'conflict')
+         AND updated_at <= datetime('now', '-600 minutes')
+    `).run();
+    if (stalePurgeResult.changes > 0) {
+      db.log('coordinator', 'stale_merge_entries_purged', {
+        count: stalePurgeResult.changes,
+      });
+    }
+
     const entry = db.getNextMerge();
     if (!entry) { processing = false; return; }
     if (shouldDeferMergeForAssignmentPriority(entry)) { processing = false; return; }
@@ -449,18 +461,16 @@ function isWorktreeDirty(dir) {
 function tryRebase(entry, projectDir) {
   const wtPath = findWorktreePath(entry, projectDir);
   const rebaseDir = wtPath || projectDir;
-  let stashed = false;
 
   try {
     safeExec('git', ['fetch', 'origin'], rebaseDir);
 
     if (wtPath) {
-      // Preflight: stash dirty worktree to avoid "cannot rebase: You have unstaged changes"
+      // Preflight: hard-reset dirty worktree to avoid "cannot rebase: You have unstaged changes"
       if (isWorktreeDirty(wtPath)) {
-        safeExec('git', ['stash', 'push', '--include-untracked', '-m', 'mac10-stash-guard'], wtPath);
-        stashed = true;
-        db.log('coordinator', 'stash_recovery', {
-          reason_code: 'stash_recovery',
+        safeExec('git', ['checkout', '.'], wtPath);
+        safeExec('git', ['clean', '-fd'], wtPath);
+        db.log('coordinator', 'dirty_worktree_reset', {
           branch: entry.branch,
           reason: 'dirty_worktree_before_rebase',
           path: 'worktree',
@@ -479,31 +489,15 @@ function tryRebase(entry, projectDir) {
         });
         throw pushErr;
       }
-
-      // Restore stash after successful push
-      if (stashed) {
-        try {
-          safeExec('git', ['stash', 'pop'], wtPath);
-          stashed = false;
-        } catch (popErr) {
-          db.log('coordinator', 'stash_pop_failed', {
-            reason_code: 'stash_recovery',
-            branch: entry.branch,
-            error: popErr.message,
-          });
-          // Non-fatal: rebase+push succeeded; stash restoration failure is logged
-        }
-      }
     } else {
       // Fallback: old behavior (will fail if worktree holds the branch)
       safeExec('git', ['checkout', entry.branch], projectDir);
 
-      // Preflight: stash dirty projectDir to avoid "cannot rebase: You have unstaged changes"
+      // Preflight: hard-reset dirty projectDir to avoid "cannot rebase: You have unstaged changes"
       if (isWorktreeDirty(projectDir)) {
-        safeExec('git', ['stash', 'push', '--include-untracked', '-m', 'mac10-stash-guard'], projectDir);
-        stashed = true;
-        db.log('coordinator', 'stash_recovery', {
-          reason_code: 'stash_recovery',
+        safeExec('git', ['checkout', '.'], projectDir);
+        safeExec('git', ['clean', '-fd'], projectDir);
+        db.log('coordinator', 'dirty_worktree_reset', {
           branch: entry.branch,
           reason: 'dirty_worktree_before_rebase',
           path: 'projectDir',
@@ -512,34 +506,11 @@ function tryRebase(entry, projectDir) {
 
       safeExec('git', ['rebase', 'origin/main'], projectDir);
       safeExec('git', ['push', '--force-with-lease', 'origin', entry.branch], projectDir);
-
-      // Restore stash after successful push
-      if (stashed) {
-        try {
-          safeExec('git', ['stash', 'pop'], projectDir);
-          stashed = false;
-        } catch (popErr) {
-          db.log('coordinator', 'stash_pop_failed', {
-            reason_code: 'stash_recovery',
-            branch: entry.branch,
-            error: popErr.message,
-          });
-        }
-      }
-
       safeExec('git', ['checkout', 'main'], projectDir);
     }
     return { success: true };
   } catch (e) {
     try { safeExec('git', ['rebase', '--abort'], rebaseDir); } catch {}
-    // Clean up stash on failure to avoid leaving worktree state dangling
-    if (stashed) {
-      try {
-        safeExec('git', ['stash', 'pop'], rebaseDir);
-      } catch {
-        try { safeExec('git', ['stash', 'drop'], rebaseDir); } catch {}
-      }
-    }
     if (!wtPath) {
       try { safeExec('git', ['checkout', 'main'], projectDir); } catch {}
     }
