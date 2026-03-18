@@ -1256,6 +1256,10 @@
 
         if (cfg.projectDir) dirInput.value = cfg.projectDir;
         if (cfg.numWorkers) countInput.value = cfg.numWorkers;
+        if (cfg.provider) document.getElementById('provider-select').value = cfg.provider;
+        if (cfg.modelFast !== undefined) document.getElementById('model-fast').value = cfg.modelFast || '';
+        if (cfg.modelDeep !== undefined) document.getElementById('model-deep').value = cfg.modelDeep || '';
+        if (cfg.modelEconomy !== undefined) document.getElementById('model-economy').value = cfg.modelEconomy || '';
         if (cfg.githubRepo) {
           repoInput.value = cfg.githubRepo;
           document.getElementById('git-repo-label').textContent = cfg.githubRepo;
@@ -1320,6 +1324,10 @@
     document.getElementById('project-dir').value = preset.project_dir;
     document.getElementById('github-repo').value = preset.github_repo;
     document.getElementById('worker-count').value = preset.num_workers;
+    if (preset.provider) document.getElementById('provider-select').value = preset.provider;
+    if (preset.model_fast !== undefined) document.getElementById('model-fast').value = preset.model_fast || '';
+    if (preset.model_deep !== undefined) document.getElementById('model-deep').value = preset.model_deep || '';
+    if (preset.model_economy !== undefined) document.getElementById('model-economy').value = preset.model_economy || '';
   });
 
   document.getElementById('preset-delete-btn').addEventListener('click', () => {
@@ -1381,6 +1389,10 @@
     const projectDir = document.getElementById('project-dir').value.trim();
     const githubRepo = document.getElementById('github-repo').value.trim();
     const numWorkers = parseInt(document.getElementById('worker-count').value) || 4;
+    const provider = document.getElementById('provider-select').value;
+    const modelFast = document.getElementById('model-fast').value.trim();
+    const modelDeep = document.getElementById('model-deep').value.trim();
+    const modelEconomy = document.getElementById('model-economy').value.trim();
     if (!projectDir) {
       document.getElementById('project-dir').focus();
       return;
@@ -1393,7 +1405,7 @@
     tabFetch(tab, '/api/config', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ projectDir, githubRepo, numWorkers }),
+      body: JSON.stringify({ projectDir, githubRepo, numWorkers, provider, modelFast, modelDeep, modelEconomy }),
     }).then(r => r.json()).then(data => {
       btn.disabled = false;
       btn.textContent = 'Save Config';
@@ -1424,6 +1436,10 @@
     const projectDir = document.getElementById('project-dir').value.trim();
     const githubRepo = document.getElementById('github-repo').value.trim();
     const numWorkers = parseInt(document.getElementById('worker-count').value) || 4;
+    const provider = document.getElementById('provider-select').value;
+    const modelFast = document.getElementById('model-fast').value.trim();
+    const modelDeep = document.getElementById('model-deep').value.trim();
+    const modelEconomy = document.getElementById('model-economy').value.trim();
     if (!projectDir) {
       document.getElementById('project-dir').focus();
       return;
@@ -1443,7 +1459,7 @@
     tabFetch(tab, '/api/setup', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ projectDir, githubRepo, numWorkers }),
+      body: JSON.stringify({ projectDir, githubRepo, numWorkers, provider, modelFast, modelDeep, modelEconomy }),
     }).then(r => r.json()).then(data => {
       if (!data.ok) {
         appendSetupLog('Error: ' + (data.error || 'Unknown error'));
@@ -1727,6 +1743,10 @@
     document.getElementById('modal-project-dir').value = preset.project_dir;
     document.getElementById('modal-github-repo').value = preset.github_repo || '';
     document.getElementById('modal-worker-count').value = preset.num_workers || 4;
+    if (preset.provider) document.getElementById('modal-provider-select').value = preset.provider;
+    if (preset.model_fast !== undefined) document.getElementById('modal-model-fast').value = preset.model_fast || '';
+    if (preset.model_deep !== undefined) document.getElementById('modal-model-deep').value = preset.model_deep || '';
+    if (preset.model_economy !== undefined) document.getElementById('modal-model-economy').value = preset.model_economy || '';
   });
 
   document.getElementById('add-tab-btn').addEventListener('click', () => {
@@ -1735,6 +1755,10 @@
     document.getElementById('modal-project-dir').value = '';
     document.getElementById('modal-github-repo').value = '';
     document.getElementById('modal-worker-count').value = '4';
+    document.getElementById('modal-provider-select').value = 'codex';
+    document.getElementById('modal-model-fast').value = '';
+    document.getElementById('modal-model-deep').value = '';
+    document.getElementById('modal-model-economy').value = '';
     document.getElementById('modal-save-preset').checked = true;
     document.getElementById('modal-error').style.display = 'none';
     document.getElementById('modal-launch-btn').disabled = false;
@@ -1755,6 +1779,10 @@
     const dir = document.getElementById('modal-project-dir').value.trim();
     const repo = document.getElementById('modal-github-repo').value.trim();
     const workers = parseInt(document.getElementById('modal-worker-count').value) || 4;
+    const modalProvider = document.getElementById('modal-provider-select').value;
+    const modalModelFast = document.getElementById('modal-model-fast').value.trim();
+    const modalModelDeep = document.getElementById('modal-model-deep').value.trim();
+    const modalModelEconomy = document.getElementById('modal-model-economy').value.trim();
     const savePreset = document.getElementById('modal-save-preset').checked;
     const errEl = document.getElementById('modal-error');
     const btn = document.getElementById('modal-launch-btn');
@@ -1780,6 +1808,10 @@
             projectDir: dir,
             githubRepo: repo,
             numWorkers: workers,
+            provider: modalProvider,
+            modelFast: modalModelFast,
+            modelDeep: modalModelDeep,
+            modelEconomy: modalModelEconomy,
           }),
         }).catch(() => {}) // non-fatal
       : Promise.resolve();
@@ -1788,7 +1820,7 @@
       return fetch(hubBase + '/api/instances/launch', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ projectDir: dir, githubRepo: repo, numWorkers: workers }),
+        body: JSON.stringify({ projectDir: dir, githubRepo: repo, numWorkers: workers, provider: modalProvider, modelFast: modalModelFast, modelDeep: modalModelDeep, modelEconomy: modalModelEconomy }),
       });
     }).then(r => r.json()).then(data => {
       btn.disabled = false;

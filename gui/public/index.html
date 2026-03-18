@@ -48,6 +48,25 @@
             <label for="worker-count">Workers</label>
             <input type="number" id="worker-count" min="1" max="8" value="4" />
           </div>
+          <div class="setup-field">
+            <label for="provider-select">Provider</label>
+            <select id="provider-select">
+              <option value="codex">codex</option>
+              <option value="claude">claude</option>
+            </select>
+          </div>
+          <div class="setup-field">
+            <label for="model-fast">Model Fast</label>
+            <input type="text" id="model-fast" placeholder="e.g. gpt-4o-mini" />
+          </div>
+          <div class="setup-field">
+            <label for="model-deep">Model Deep</label>
+            <input type="text" id="model-deep" placeholder="e.g. o3" />
+          </div>
+          <div class="setup-field">
+            <label for="model-economy">Model Economy</label>
+            <input type="text" id="model-economy" placeholder="e.g. gpt-4o-mini" />
+          </div>
           <div class="setup-buttons">
             <button id="save-config-btn">Save Config</button>
             <button id="launch-btn">Launch Full Setup</button>
@@ -246,6 +265,25 @@
         <div class="modal-field">
           <label for="modal-worker-count">Workers</label>
           <input type="number" id="modal-worker-count" min="1" max="8" value="4" />
+        </div>
+        <div class="modal-field">
+          <label for="modal-provider-select">Provider</label>
+          <select id="modal-provider-select">
+            <option value="codex">codex</option>
+            <option value="claude">claude</option>
+          </select>
+        </div>
+        <div class="modal-field">
+          <label for="modal-model-fast">Model Fast</label>
+          <input type="text" id="modal-model-fast" placeholder="e.g. gpt-4o-mini" />
+        </div>
+        <div class="modal-field">
+          <label for="modal-model-deep">Model Deep</label>
+          <input type="text" id="modal-model-deep" placeholder="e.g. o3" />
+        </div>
+        <div class="modal-field">
+          <label for="modal-model-economy">Model Economy</label>
+          <input type="text" id="modal-model-economy" placeholder="e.g. gpt-4o-mini" />
         </div>
         <div class="modal-field modal-save-preset-row">
           <label><input type="checkbox" id="modal-save-preset" checked /> Save as preset</label>
