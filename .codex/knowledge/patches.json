@@ -1,0 +1,61 @@
+{
+  "patches": [
+    {
+      "id": "PATCH-001",
+      "target": "patterns.md",
+      "summary": "Add anti-pattern for merge queue race condition",
+      "pattern": "Workers calling complete-task before verifying PR is merged causes merge queue loops",
+      "suggestion": "Before calling complete-task, verify the PR status is 'merged' not just 'ready'",
+      "rationale": "Prevents the infinite merge loop pitfall observed multiple times",
+      "status": "approved",
+      "observations": [
+        {
+          "date": "2026-03-18T09:16:02.003Z",
+          "text": "T-11 2026-03-16: worker completed task before PR was actually merged, triggering re-queue loop"
+        }
+      ],
+      "proposed_by": "master-2",
+      "proposed_at": "2026-03-18T09:16:02.003Z",
+      "reviewed_by": "alex",
+      "reviewed_at": "2026-03-18T09:16:26.874Z",
+      "applied_at": null
+    },
+    {
+      "id": "PATCH-002",
+      "target": "master-2-role.md",
+      "summary": "Require observation count check before staging instruction patches",
+      "pattern": "Role doc patches staged without evidence backing can cause instruction drift",
+      "suggestion": "Always check observation count meets threshold before calling approve-patch on role doc patches",
+      "rationale": "",
+      "status": "proposed",
+      "observations": [
+        {
+          "date": "2026-03-18T09:16:13.824Z",
+          "text": "2026-03-16: patch was staged with only 1 observation, leading to premature role doc change"
+        }
+      ],
+      "proposed_by": "master-2",
+      "proposed_at": "2026-03-18T09:16:13.824Z",
+      "reviewed_by": null,
+      "reviewed_at": null,
+      "applied_at": null
+    },
+    {
+      "id": "PATCH-003",
+      "target": "patterns.md",
+      "summary": "Duplicate test",
+      "pattern": "Workers calling complete-task before PR merged",
+      "suggestion": "Check PR status before complete-task",
+      "rationale": "",
+      "status": "rejected",
+      "observations": [],
+      "proposed_by": "master-2",
+      "proposed_at": "2026-03-18T09:16:41.781Z",
+      "reviewed_by": "alex",
+      "reviewed_at": "2026-03-18T09:16:53.415Z",
+      "applied_at": null,
+      "rejection_reason": "test entry — duplicate of PATCH-001"
+    }
+  ],
+  "next_id": 4
+}
