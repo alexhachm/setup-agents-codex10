@@ -47,6 +47,16 @@ fi
 BACKOFF=5
 PRECHECK_BACKOFF=10
 
+_EXEC_HEARTBEAT_PID=""
+_stop_exec_heartbeat() {
+  if [ -n "$_EXEC_HEARTBEAT_PID" ]; then
+    kill "$_EXEC_HEARTBEAT_PID" 2>/dev/null || true
+    wait "$_EXEC_HEARTBEAT_PID" 2>/dev/null || true
+    _EXEC_HEARTBEAT_PID=""
+  fi
+}
+trap '_stop_exec_heartbeat' EXIT INT TERM
+
 echo "[loop-sentinel-$LOOP_ID] Starting in $PROJECT_DIR"
 
 while true; do
@@ -95,7 +105,15 @@ while true; do
   fi
   echo "[loop-sentinel-$LOOP_ID] Launching codex (iteration backoff=${BACKOFF}s)..."
   START_TIME=$(date +%s)
+  (
+    while true; do
+      sleep 30
+      "$MAC10_CMD" loop-heartbeat "$LOOP_ID" 2>/dev/null || true
+    done
+  ) &
+  _EXEC_HEARTBEAT_PID=$!
   codex exec --dangerously-bypass-approvals-and-sandbox -m gpt-5.3-codex -C "$PROJECT_DIR" - < "$PROMPT_FILE" 2>&1 || true
+  _stop_exec_heartbeat
   END_TIME=$(date +%s)
   DURATION=$((END_TIME - START_TIME))
 

@@ -426,6 +426,46 @@ describe('Loop heartbeat recovery', () => {
     assert.strictEqual(respawnLog.forced_restart, true);
   });
 
+  it('does not emit stale events for loops actively heartbeating during long exec runs', () => {
+    // Regression test: background heartbeat ticker keeps last_heartbeat fresh during a long
+    // codex/agent exec. Watchdog must NOT fire loop_heartbeat_stale while heartbeats arrive.
+    const loopId = db.createLoop('Long-running loop with active background ticker');
+    // Heartbeat was updated 15s ago — simulating the 30s background ticker just fired.
+    const recentHeartbeat = new Date(Date.now() - 15 * 1000).toISOString();
+    db.updateLoop(loopId, {
+      tmux_window: 'loop-exec-hb',
+      tmux_session: 'test-session',
+      last_heartbeat: recentHeartbeat,
+    });
+
+    const originalIsPaneAlive = tmux.isPaneAlive;
+    const originalKillWindow = tmux.killWindow;
+    const originalCreateWindow = tmux.createWindow;
+    const killCalls = [];
+    const createCalls = [];
+
+    tmux.isPaneAlive = (windowName) => windowName === 'loop-exec-hb';
+    tmux.killWindow = (windowName) => killCalls.push(windowName);
+    tmux.createWindow = (windowName, command, cwd) => createCalls.push({ windowName, command, cwd });
+
+    try {
+      tick(tmpDir);
+    } finally {
+      tmux.isPaneAlive = originalIsPaneAlive;
+      tmux.killWindow = originalKillWindow;
+      tmux.createWindow = originalCreateWindow;
+    }
+
+    assert.deepStrictEqual(killCalls, [], 'No kill calls for actively heartbeating loop');
+    assert.deepStrictEqual(createCalls, [], 'No respawn for actively heartbeating loop');
+
+    const staleLog = db.getLog(100, 'coordinator')
+      .filter((entry) => entry.action === 'loop_heartbeat_stale')
+      .map((entry) => JSON.parse(entry.details))
+      .find((entry) => entry.loop_id === loopId);
+    assert.strictEqual(staleLog, undefined, 'No stale heartbeat event emitted while ticker is active');
+  });
+
   it('keeps pane-death recovery to a single respawn action', () => {
     const loopId = db.createLoop('Recover dead loop pane');
     const staleHeartbeat = new Date(Date.now() - 301 * 1000).toISOString();
