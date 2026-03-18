@@ -484,9 +484,12 @@ class BrowserManager:
         else:
             log.info(f"Using Linux Chrome with profile: {profile_path}")
 
+        # Use headless mode for normal operation; keep GUI for --setup (manual login)
+        _use_headless = "--setup" not in sys.argv
         start_kwargs = {
             "user_data_dir": profile_path,
             "sandbox": False,
+            "headless": _use_headless,
         }
         if CHROME_BINARY:
             start_kwargs["browser_executable_path"] = CHROME_BINARY
@@ -1444,6 +1447,7 @@ class TabPool:
         self._next_slot_id = 0
         self._focus_lock = asyncio.Lock()   # safety net for follow-ups
         self._shutdown = False
+        self._lifecycle_tasks = set()       # track per-item async tasks
         # Session state
         self._session_n = 0
         self._session_dispatched = 0
@@ -1487,11 +1491,24 @@ class TabPool:
             asyncio.create_task(self._health_loop(), name="health"),
         ]
         try:
-            await asyncio.gather(*tasks)
+            # return_exceptions=True: individual task crashes don't kill the pool
+            results = await asyncio.gather(*tasks, return_exceptions=True)
+            for result in results:
+                if isinstance(result, Exception) and not isinstance(
+                    result, (asyncio.CancelledError, KeyboardInterrupt)
+                ):
+                    log.error(f"Pool task raised unhandled exception: {result}")
         except (KeyboardInterrupt, asyncio.CancelledError):
             self._shutdown = True
             for t in tasks:
                 t.cancel()
+
+        # Wait for any in-flight lifecycle tasks so items aren't left in_progress
+        if self._lifecycle_tasks:
+            log.info(
+                f"Waiting for {len(self._lifecycle_tasks)} in-flight lifecycle task(s) to finish..."
+            )
+            await asyncio.gather(*list(self._lifecycle_tasks), return_exceptions=True)
 
     # --- Tab Helpers ---
 
@@ -1593,10 +1610,12 @@ class TabPool:
                 continue
 
             # Message sent — hand off to async collector for wait/ingest
-            asyncio.create_task(
+            t = asyncio.create_task(
                 self._collect_lifecycle(slot),
                 name=f"collect-{slot.slot_id}-item-{item_id}",
             )
+            self._lifecycle_tasks.add(t)
+            t.add_done_callback(self._lifecycle_tasks.discard)
 
             # Human-like pause before dispatching next item
             await asyncio.sleep(random.uniform(3, 8))
