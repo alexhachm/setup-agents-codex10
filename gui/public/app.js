@@ -58,6 +58,7 @@
       changesDomainFilter: '',
       browserOffload: createBrowserOffloadState(),
       batchConfig: null,
+      memoryFilter: { iteration: '', run: '' },
     };
   }
 
@@ -229,6 +230,7 @@
     document.getElementById('browser-result').textContent = 'No result yet.';
     document.getElementById('browser-timeline').innerHTML = '';
     document.getElementById('browser-status-msg').textContent = '';
+    document.getElementById('memory-snapshots-list').innerHTML = '';
   }
 
   // --- Instance polling ---
@@ -271,6 +273,7 @@
     const tab = activeTab();
     if (tab) renderBrowserOffload(tab, state);
     if (tab) renderBatchPanel(tab, state);
+    if (tab) renderMemoryPanel(tab, state);
   }
 
   function renderWorkers(workers) {
@@ -1663,7 +1666,7 @@
   function openSettingsPanel(panelName, x, y) {
     const titleEl = settingsPanel.querySelector('.settings-panel-title');
     const itemsEl = settingsPanel.querySelector('.settings-panel-items');
-    const titles = { workers: 'Workers', requests: 'Requests', tasks: 'Tasks', log: 'Activity Log', browser: 'Browser Offload' };
+    const titles = { workers: 'Workers', requests: 'Requests', tasks: 'Tasks', log: 'Activity Log', browser: 'Browser Offload', memory: 'Memory Snapshots' };
     titleEl.textContent = titles[panelName] || panelName;
     itemsEl.innerHTML = '';
 
@@ -2033,6 +2036,109 @@
       setTimeout(() => { msg.style.display = 'none'; }, 3000);
     }
   }
+
+  // --- Memory snapshots ---
+
+  function renderMemoryPanel(tab, state) {
+    const snapshots = Array.isArray(state && state.memory_snapshots) ? state.memory_snapshots : [];
+    const filter = tab && tab.memoryFilter ? tab.memoryFilter : { iteration: '', run: '' };
+
+    const iterSelect = document.getElementById('memory-iteration-select');
+    const runSelect = document.getElementById('memory-run-select');
+
+    const iterations = [...new Set(snapshots.map(s => s.iteration).filter(v => v != null))].sort((a, b) => a - b);
+    const runs = [...new Set(snapshots.map(s => s.research_run).filter(Boolean))].sort();
+
+    const curIter = filter.iteration;
+    iterSelect.innerHTML = '<option value="">All Iterations</option>';
+    iterations.forEach(i => {
+      const opt = document.createElement('option');
+      opt.value = String(i);
+      opt.textContent = `Iter #${i}`;
+      iterSelect.appendChild(opt);
+    });
+    iterSelect.value = curIter;
+
+    const curRun = filter.run;
+    runSelect.innerHTML = '<option value="">All Runs</option>';
+    runs.forEach(r => {
+      const opt = document.createElement('option');
+      opt.value = r;
+      opt.textContent = r;
+      runSelect.appendChild(opt);
+    });
+    runSelect.value = curRun;
+
+    let filtered = snapshots;
+    if (filter.iteration) filtered = filtered.filter(s => String(s.iteration) === filter.iteration);
+    if (filter.run) filtered = filtered.filter(s => s.research_run === filter.run);
+
+    const listEl = document.getElementById('memory-snapshots-list');
+    if (filtered.length === 0) {
+      listEl.innerHTML = '<div style="color:#8b949e;font-size:13px">No memory snapshots</div>';
+      return;
+    }
+    listEl.innerHTML = filtered.slice(0, 20).map(snap => renderMemorySnapshotCard(snap)).join('');
+  }
+
+  function renderMemorySnapshotCard(snap) {
+    const insights = Array.isArray(snap.insights) ? snap.insights : [];
+    const insightsHtml = insights.length === 0
+      ? '<div class="memory-no-insights">No insights in this snapshot</div>'
+      : insights.slice(0, 10).map(ins => renderMemoryInsightRow(ins)).join('');
+    return `
+      <div class="memory-snapshot-card">
+        <div class="memory-snapshot-header">
+          <span class="memory-snap-id">${escapeHtml(String(snap.id || '-'))}</span>
+          ${snap.iteration != null ? `<span class="task-chip"><span class="task-chip-label">iter</span>${escapeHtml(String(snap.iteration))}</span>` : ''}
+          ${snap.research_run ? `<span class="task-chip"><span class="task-chip-label">run</span>${escapeHtml(String(snap.research_run))}</span>` : ''}
+          ${snap.created_at ? `<span class="memory-snap-date">${escapeHtml(String(snap.created_at))}</span>` : ''}
+        </div>
+        ${snap.description ? `<div class="memory-snap-desc">${escapeHtml(String(snap.description))}</div>` : ''}
+        <div class="memory-insights-list">${insightsHtml}</div>
+        ${insights.length > 10 ? `<div style="color:#8b949e;font-size:11px;margin-top:4px">+${insights.length - 10} more insights</div>` : ''}
+      </div>
+    `;
+  }
+
+  function renderMemoryInsightRow(ins) {
+    const valFlags = Array.isArray(ins.validation_flags) ? ins.validation_flags : [];
+    const govFlags = Array.isArray(ins.gov_flags) ? ins.gov_flags : [];
+    const score = ins.relevance_score != null ? Number(ins.relevance_score) : null;
+    const scoreStr = Number.isFinite(score) ? (score * 100).toFixed(0) + '%' : null;
+    const dedupeClass = ins.dedupe_status === 'duplicate' ? 'memory-dedupe-dup'
+      : (ins.dedupe_status === 'near_duplicate' ? 'memory-dedupe-near' : 'memory-dedupe-unique');
+    return `
+      <div class="memory-insight-row${ins.reuse_recommended ? ' memory-reuse-recommended' : ''}">
+        <div class="memory-insight-text">${escapeHtml(String(ins.text || ''))}</div>
+        <div class="memory-insight-meta">
+          ${scoreStr ? `<span class="task-chip"><span class="task-chip-label">rel</span>${escapeHtml(scoreStr)}</span>` : ''}
+          ${ins.dedupe_status ? `<span class="memory-dedupe-chip ${escapeHtml(dedupeClass)}">${escapeHtml(String(ins.dedupe_status))}</span>` : ''}
+          ${valFlags.map(f => `<span class="memory-flag-chip memory-flag-val">${escapeHtml(String(f))}</span>`).join('')}
+          ${govFlags.map(f => `<span class="memory-flag-chip memory-flag-gov">${escapeHtml(String(f))}</span>`).join('')}
+          ${ins.reuse_recommended ? '<span class="memory-reuse-badge">reuse</span>' : ''}
+          ${ins.provenance ? `<span class="task-chip"><span class="task-chip-label">from</span>${escapeHtml(String(ins.provenance))}</span>` : ''}
+          ${ins.last_used_by ? `<span class="task-chip"><span class="task-chip-label">last</span>${escapeHtml(String(ins.last_used_by))}</span>` : ''}
+        </div>
+      </div>
+    `;
+  }
+
+  document.getElementById('memory-iteration-select').addEventListener('change', function() {
+    const tab = activeTab();
+    if (!tab) return;
+    if (!tab.memoryFilter) tab.memoryFilter = { iteration: '', run: '' };
+    tab.memoryFilter.iteration = this.value;
+    renderMemoryPanel(tab, tab.state || {});
+  });
+
+  document.getElementById('memory-run-select').addEventListener('change', function() {
+    const tab = activeTab();
+    if (!tab) return;
+    if (!tab.memoryFilter) tab.memoryFilter = { iteration: '', run: '' };
+    tab.memoryFilter.run = this.value;
+    renderMemoryPanel(tab, tab.state || {});
+  });
 
   document.getElementById('batch-save-btn').addEventListener('click', () => {
     const tab = activeTab();
