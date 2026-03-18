@@ -1316,3 +1316,101 @@ describe('Stale integration recovery', () => {
     });
   });
 });
+
+describe('functional_conflict merge recovery', () => {
+  it('should not fail integrating request with functional_conflict merge when active fix task exists', () => {
+    const reqId = db.createRequest('Feature with functional conflict');
+    const mainTaskId = db.createTask({
+      request_id: reqId,
+      subject: 'Main task',
+      description: 'Task that triggered functional conflict',
+    });
+    db.updateTask(mainTaskId, { status: 'completed' });
+    db.updateRequest(reqId, { status: 'integrating' });
+
+    // Merge with functional_conflict status (after fix: status=conflict, not failed)
+    const mergeRow = db.enqueueMerge({
+      request_id: reqId,
+      task_id: mainTaskId,
+      pr_url: 'https://github.com/org/repo/pull/300',
+      branch: 'agent-3',
+    });
+    db.updateMerge(mergeRow.lastInsertRowid, {
+      status: 'conflict',
+      error: 'functional_conflict: post-merge validation failed',
+    });
+    // Expire the conflict grace window so only the active-task guard can save us
+    db.getDb().prepare(
+      "UPDATE merge_queue SET updated_at = datetime('now', '-700 seconds') WHERE id = ?"
+    ).run(mergeRow.lastInsertRowid);
+
+    // Active fix task (non-terminal) — conflict-remediation in progress
+    const fixTaskId = db.createTask({
+      request_id: reqId,
+      subject: 'Fix functional conflict',
+      description: 'Resolve post-merge validation failure',
+    });
+    db.updateTask(fixTaskId, { status: 'ready' });
+
+    // Disable tmux so the watchdog tick doesn't try to manage workers
+    tmux.isTmuxAvailable = () => false;
+    tmux.isPaneAlive = () => false;
+
+    tick(tmpDir);
+
+    const requestAfter = db.getRequest(reqId);
+    assert.strictEqual(
+      requestAfter.status,
+      'integrating',
+      'Request should remain integrating while active fix task exists for functional_conflict merge'
+    );
+  });
+
+  it('should not fail integrating request when legacy failed merge has functional_conflict prefix and active fix task exists', () => {
+    // Guard: failed merges with functional_conflict: prefix are treated as conflict-type
+    // so active fix tasks prevent premature request failure (backward compat for legacy state)
+    const reqId = db.createRequest('Feature with legacy functional conflict');
+    const mainTaskId = db.createTask({
+      request_id: reqId,
+      subject: 'Main task',
+      description: 'Legacy functional conflict task',
+    });
+    db.updateTask(mainTaskId, { status: 'completed' });
+    db.updateRequest(reqId, { status: 'integrating' });
+
+    const mergeRow = db.enqueueMerge({
+      request_id: reqId,
+      task_id: mainTaskId,
+      pr_url: 'https://github.com/org/repo/pull/301',
+      branch: 'agent-3',
+    });
+    // Legacy state: functional_conflict stored as 'failed' (before the status fix)
+    db.updateMerge(mergeRow.lastInsertRowid, {
+      status: 'failed',
+      error: 'functional_conflict: build validation did not pass',
+    });
+    db.getDb().prepare(
+      "UPDATE merge_queue SET updated_at = datetime('now', '-700 seconds') WHERE id = ?"
+    ).run(mergeRow.lastInsertRowid);
+
+    // Active fix task
+    const fixTaskId = db.createTask({
+      request_id: reqId,
+      subject: 'Fix legacy conflict',
+      description: 'Resolve legacy functional_conflict',
+    });
+    db.updateTask(fixTaskId, { status: 'ready' });
+
+    tmux.isTmuxAvailable = () => false;
+    tmux.isPaneAlive = () => false;
+
+    tick(tmpDir);
+
+    const requestAfter = db.getRequest(reqId);
+    assert.strictEqual(
+      requestAfter.status,
+      'integrating',
+      'Request should remain integrating when legacy functional_conflict failed merge has active fix task'
+    );
+  });
+});
