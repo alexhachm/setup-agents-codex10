@@ -4513,3 +4513,149 @@ describe('memory-retrieval CLI commands', () => {
     assert.ok(result.links.every(l => l.lineage_type === 'origin'));
   });
 });
+
+describe('memory CLI — quota-pressure and iterative-run scenarios', () => {
+  it('memory-snapshots returns all snapshots under quota-pressure (30 snapshots)', async () => {
+    const contextKey = 'ctx-cli-quota';
+    for (let i = 1; i <= 30; i++) {
+      db.createProjectMemorySnapshot({
+        project_context_key: contextKey,
+        snapshot_payload: { iteration: i },
+      });
+    }
+    const result = await sendCommand('memory-snapshots', { project_context_key: contextKey, limit: 100 });
+    assert.strictEqual(result.ok, true);
+    assert.strictEqual(result.snapshots.length, 30);
+    assert.ok(result.snapshots.every(s => s.project_context_key === contextKey));
+  });
+
+  it('memory-snapshots pagination under quota-pressure has no overlap', async () => {
+    const contextKey = 'ctx-cli-quota-page';
+    for (let i = 1; i <= 25; i++) {
+      db.createProjectMemorySnapshot({
+        project_context_key: contextKey,
+        snapshot_payload: { i },
+      });
+    }
+    const page1 = await sendCommand('memory-snapshots', { project_context_key: contextKey, limit: 10, offset: 0 });
+    const page2 = await sendCommand('memory-snapshots', { project_context_key: contextKey, limit: 10, offset: 10 });
+    const page3 = await sendCommand('memory-snapshots', { project_context_key: contextKey, limit: 10, offset: 20 });
+    assert.strictEqual(page1.ok, true);
+    assert.strictEqual(page2.ok, true);
+    assert.strictEqual(page3.ok, true);
+    assert.strictEqual(page1.snapshots.length, 10);
+    assert.strictEqual(page2.snapshots.length, 10);
+    assert.strictEqual(page3.snapshots.length, 5);
+    const allIds = [
+      ...page1.snapshots.map(s => s.id),
+      ...page2.snapshots.map(s => s.id),
+      ...page3.snapshots.map(s => s.id),
+    ];
+    assert.strictEqual(new Set(allIds).size, 25, 'No overlapping snapshot ids across pages');
+  });
+
+  it('memory-snapshots filters validated snapshots under quota-pressure', async () => {
+    const contextKey = 'ctx-cli-quota-valid';
+    for (let i = 1; i <= 20; i++) {
+      db.createProjectMemorySnapshot({
+        project_context_key: contextKey,
+        snapshot_payload: { i },
+        validation_status: i % 4 === 0 ? 'validated' : 'unvalidated',
+      });
+    }
+    const result = await sendCommand('memory-snapshots', { project_context_key: contextKey, validation_status: 'validated' });
+    assert.strictEqual(result.ok, true);
+    assert.strictEqual(result.snapshots.length, 5); // i=4,8,12,16,20
+    assert.ok(result.snapshots.every(s => s.validation_status === 'validated'));
+  });
+
+  it('iterative-run: artifacts from earlier runs remain retrievable via memory-lineage by run_id', async () => {
+    const contextKey = 'ctx-cli-iter-run';
+    const run1 = 'iter-cli-run-1';
+    const run2 = 'iter-cli-run-2';
+
+    const reqId1 = db.createRequest('iter run 1 request');
+    const snap1 = db.createProjectMemorySnapshot({
+      project_context_key: contextKey,
+      snapshot_payload: { run: 1, output: 'first-result' },
+      run_id: run1,
+      request_id: reqId1,
+    });
+
+    const reqId2 = db.createRequest('iter run 2 request');
+    const snap2 = db.createProjectMemorySnapshot({
+      project_context_key: contextKey,
+      snapshot_payload: { run: 2, output: 'derived-result' },
+      run_id: run2,
+      request_id: reqId2,
+    });
+    db.createProjectMemoryLineageLink({
+      snapshot_id: snap2.id,
+      run_id: run2,
+      lineage_type: 'derived_from',
+      metadata: { parent_snapshot_id: snap1.id },
+    });
+
+    const run1Links = await sendCommand('memory-lineage', { request_id: reqId1 });
+    assert.strictEqual(run1Links.ok, true);
+    assert.ok(run1Links.links.length >= 1);
+    assert.ok(run1Links.links.every(l => l.request_id === reqId1));
+
+    const derivedLinks = await sendCommand('memory-lineage', { snapshot_id: snap2.id, lineage_type: 'derived_from' });
+    assert.strictEqual(derivedLinks.ok, true);
+    assert.ok(derivedLinks.links.length >= 1);
+    assert.strictEqual(derivedLinks.links[0].lineage_type, 'derived_from');
+  });
+
+  it('iterative-run: memory-snapshot retrieves correct version across multiple runs', async () => {
+    const contextKey = 'ctx-cli-iter-version';
+    const snaps = [];
+    for (let i = 1; i <= 5; i++) {
+      snaps.push(db.createProjectMemorySnapshot({
+        project_context_key: contextKey,
+        snapshot_payload: { run: i, result: `output-${i}` },
+        run_id: `iter-ver-run-${i}`,
+      }));
+    }
+    for (const snap of snaps) {
+      const result = await sendCommand('memory-snapshot', { id: snap.id });
+      assert.strictEqual(result.ok, true);
+      assert.strictEqual(result.snapshot.id, snap.id);
+      assert.strictEqual(result.snapshot.project_context_key, contextKey);
+    }
+    const allSnaps = await sendCommand('memory-snapshots', { project_context_key: contextKey, limit: 10 });
+    assert.strictEqual(allSnaps.ok, true);
+    assert.strictEqual(allSnaps.snapshots.length, 5);
+    assert.strictEqual(allSnaps.snapshots[0].snapshot_version, 5);
+  });
+
+  it('high-relevance innovation artifacts survive amid many low-relevance artifacts', async () => {
+    const contextKey = 'ctx-cli-innovation';
+    const keyArtifact = db.createInsightArtifact({
+      project_context_key: contextKey,
+      artifact_type: 'code_pattern',
+      artifact_payload: { pattern: 'important-reusable-pattern', reuse_count: 10 },
+      relevance_score: 990,
+      validation_status: 'validated',
+    });
+    for (let i = 0; i < 20; i++) {
+      db.createInsightArtifact({
+        project_context_key: contextKey,
+        artifact_payload: { noise: i },
+        relevance_score: 5,
+      });
+    }
+    const byId = await sendCommand('memory-insight', { id: keyArtifact.id });
+    assert.strictEqual(byId.ok, true);
+    assert.strictEqual(byId.artifact.id, keyArtifact.id);
+    assert.strictEqual(byId.artifact.validation_status, 'validated');
+
+    const highRel = await sendCommand('memory-insights', {
+      project_context_key: contextKey,
+      min_relevance_score: 900,
+    });
+    assert.strictEqual(highRel.ok, true);
+    assert.ok(highRel.artifacts.some(a => a.id === keyArtifact.id));
+    assert.ok(highRel.artifacts.every(a => a.relevance_score >= 900));
+  });
+});
