@@ -318,6 +318,96 @@ describe('Web status telemetry contract', () => {
   });
 });
 
+describe('Provider/model config endpoints', () => {
+  it('GET /api/config returns null provider/model fields by default', async () => {
+    const result = await requestJson('/api/config');
+    assert.strictEqual(result.status, 200);
+    assert.strictEqual(result.body.provider, null);
+    assert.strictEqual(result.body.fast_model, null);
+    assert.strictEqual(result.body.deep_model, null);
+    assert.strictEqual(result.body.economy_model, null);
+  });
+
+  it('POST /api/config accepts and stores provider/model fields', async () => {
+    const postResult = await postJson('/api/config', {
+      provider: 'anthropic',
+      fast_model: 'claude-haiku-4-5',
+      deep_model: 'claude-opus-4-6',
+      economy_model: 'claude-haiku-4-5',
+    });
+    assert.strictEqual(postResult.status, 200);
+    assert.strictEqual(postResult.body.ok, true);
+
+    const getResult = await requestJson('/api/config');
+    assert.strictEqual(getResult.status, 200);
+    assert.strictEqual(getResult.body.provider, 'anthropic');
+    assert.strictEqual(getResult.body.fast_model, 'claude-haiku-4-5');
+    assert.strictEqual(getResult.body.deep_model, 'claude-opus-4-6');
+    assert.strictEqual(getResult.body.economy_model, 'claude-haiku-4-5');
+  });
+
+  it('POST /api/config rejects invalid provider value', async () => {
+    const result = await postJson('/api/config', { provider: 'bad provider!@#' });
+    assert.strictEqual(result.status, 400);
+    assert.strictEqual(result.body.ok, false);
+    assert.match(String(result.body.error || ''), /invalid provider/i);
+  });
+
+  it('POST /api/config rejects invalid fast_model value', async () => {
+    const result = await postJson('/api/config', { fast_model: 'bad model name with spaces' });
+    assert.strictEqual(result.status, 400);
+    assert.strictEqual(result.body.ok, false);
+    assert.match(String(result.body.error || ''), /invalid fast_model/i);
+  });
+
+  it('POST /api/presets accepts and stores provider/model fields', async () => {
+    const postResult = await postJson('/api/presets', {
+      name: 'test-preset',
+      projectDir: tmpDir,
+      githubRepo: 'owner/repo',
+      numWorkers: 2,
+      provider: 'anthropic',
+      fast_model: 'claude-haiku-4-5',
+      deep_model: 'claude-opus-4-6',
+      economy_model: 'claude-haiku-4-5',
+    });
+    assert.strictEqual(postResult.status, 200);
+    assert.strictEqual(postResult.body.ok, true);
+
+    const getResult = await requestJson('/api/presets');
+    assert.strictEqual(getResult.status, 200);
+    assert.ok(Array.isArray(getResult.body));
+    const preset = getResult.body.find((p) => p.name === 'test-preset');
+    assert.ok(preset);
+    assert.strictEqual(preset.provider, 'anthropic');
+    assert.strictEqual(preset.fast_model, 'claude-haiku-4-5');
+    assert.strictEqual(preset.deep_model, 'claude-opus-4-6');
+    assert.strictEqual(preset.economy_model, 'claude-haiku-4-5');
+  });
+
+  it('POST /api/presets rejects invalid provider value', async () => {
+    const result = await postJson('/api/presets', {
+      name: 'bad-preset',
+      projectDir: tmpDir,
+      provider: 'bad provider!@#',
+    });
+    assert.strictEqual(result.status, 400);
+    assert.strictEqual(result.body.ok, false);
+    assert.match(String(result.body.error || ''), /invalid provider/i);
+  });
+
+  it('POST /api/presets rejects invalid deep_model value', async () => {
+    const result = await postJson('/api/presets', {
+      name: 'bad-preset',
+      projectDir: tmpDir,
+      deep_model: 'model with spaces',
+    });
+    assert.strictEqual(result.status, 400);
+    assert.strictEqual(result.body.ok, false);
+    assert.match(String(result.body.error || ''), /invalid deep_model/i);
+  });
+});
+
 describe('Batch orchestration endpoints', () => {
   it('GET /api/batch/config returns default batch config', async () => {
     const result = await requestJson('/api/batch/config');
