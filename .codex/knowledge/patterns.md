@@ -21,3 +21,37 @@ Learnings from past task decompositions. Updated by the Architect after completi
 - **Skipping triage call for Tier 2**: leaves requests as pending, confuses backlog drain metrics.
 - **Using codex10 status for stagger check**: status output has no agent reset fields. Use agent-health.json directly.
 - **Uncurated knowledge files**: loop-findings.md at 52K tokens wastes context budget and slows agent reads. Enforce token budgets aggressively.
+
+## Research-Distilled Patterns (2026-03-18)
+
+### Loop Progress Gating
+- Add a hard-stop at iteration 25: require checkpoint diff + net failing tests; stop if no improvement
+- Circuit breaker: if iteration grows but diff stays tiny (same files, same edits), fail fast rather than loop
+- Workers already emit heartbeats; watchdog should also check `net_change_size` to detect non-progress loops
+
+### Merger Patterns
+- **Validate speculative integrated commit**, not PR head alone: two individually-green PRs can break main when combined (merge skew)
+- Model merger as a state machine: `queued → checks_running → checks_passed → ready → merged` with explicit failure states
+- Queue invalidation: when a PR is removed or updated, invalidate downstream speculative builds and rebuild
+- Serialized file writes: for any file-mutating agent task, ensure only one writer per path at a time (write temp → rename)
+- Use small batches for agent-authored PRs (failure-prone); single-entry integration is safer than large batch
+
+### Conflict Remediation Convergence
+- Convergent pattern: conflict detected → rebase/update branch → rerun tests → if still failing, generate dedicated fix-PR
+- Never auto-resolve conflicts blindly; mark as CONFLICT_UNRESOLVED and create fix task
+- `git rerere`: consider enabling for repeated rebase cycles on a fast-moving mainline
+
+### Dual-Provider Worker Patterns
+- Parse CLI output as NDJSON/JSONL event streams (`--output-format stream-json` for Claude, `--json` for Codex); never parse formatted text
+- Set `cwd` explicitly on every subprocess spawn and scope `CLAUDE_CONFIG_DIR` per worktree
+- Encode safety tiers explicitly in CLI flags per task: plan-only → workspace-write → danger-only-in-isolated-env
+- On task retry after non-deterministic failure: use `--fork-session` to branch from last good state, not `--continue`
+
+### Routing and Registry
+- Route by typed task envelope + capability registry; hard rules first (capability match, concurrency limit), then scoring, LLM routing last
+- Never let agents call each other directly; all hops go through coordinator (prevents circular routing, fan-out storms)
+- Include `deadlineAt` + `idempotencyKey` in every task to enable safe retries and duplicate detection
+
+### Quality Gating Beyond Tests
+- "Tests pass" is insufficient for mergeability; add: lint/format/typing gates + patch-size limit per task
+- Consider "review notes" artifacts from worker explaining rationale and risks — improves human review at scale

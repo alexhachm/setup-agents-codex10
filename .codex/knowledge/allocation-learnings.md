@@ -25,5 +25,18 @@ Budget: ~500 tokens max.
 - functional_conflict events from broken overlap validation produce unresolvable conflicts — mark CONFLICT_UNRESOLVED and fail, don't loop.
 - task_failed echoes from intentional fail-task calls: skip fix-task creation.
 
+## Worker Isolation (from dual-provider research, 2026-03-18)
+- Scope `CLAUDE_CONFIG_DIR` per worktree (`.worktrees/wt-N/.claude`) to prevent cross-worker session collisions
+- Each worker subprocess must have explicit `cwd` set at spawn time — session lookup is keyed by encoded cwd
+- Run workers with minimal explicit env; avoid inheriting broad shell env that may leak secrets into prompts
+- Prefer `ANTHROPIC_API_KEY` / `CODEX_API_KEY` for automation over long-lived session caches
+
+## Budget + Rate-Limit Patterns
+- Claude rate limits enforce at sub-minute granularity: bursts can trip limits even at "per minute" capacity
+- Add budget caps per task: `--max-turns` + `--max-budget-usd` (Claude) to prevent runaway autonomous loops
+- Scheduler should implement admission control (max N active sessions per provider), not just react to 429s
+- Record in run ledger: CLI version, model, sandbox/permission mode, cwd, provider home dirs, session IDs
+
 ## Changelog (last 5)
+- 2026-03-18: Added worker isolation patterns and budget/rate-limit insights from dual-provider research.
 - 2026-03-18: Documented functional_conflict deadlock pattern; domain-worker pairings confirmed; completed_task wait behavior.
