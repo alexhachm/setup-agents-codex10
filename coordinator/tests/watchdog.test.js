@@ -8,7 +8,7 @@ const os = require('os');
 
 const db = require('../src/db');
 const tmux = require('../src/tmux');
-const { THRESHOLDS, LOOP_STALE_HEARTBEAT_SEC, tick } = require('../src/watchdog');
+const { THRESHOLDS, LOOP_STALE_HEARTBEAT_SEC, tick, stop: watchdogStop } = require('../src/watchdog');
 
 let tmpDir;
 
@@ -19,6 +19,8 @@ beforeEach(() => {
 });
 
 afterEach(() => {
+  // Clear watchdog module-level state (lastEscalationLevel, etc.) between tests
+  watchdogStop();
   db.close();
   fs.rmSync(tmpDir, { recursive: true, force: true });
 });
@@ -803,6 +805,155 @@ describe('Stale integration completion gating', () => {
       (mail) => mail.type === 'request_completed' && mail.payload.request_id === requestId
     );
     assert.ok(completionMail.length >= 1, 'Should send request_completed mail after all tasks done');
+  });
+});
+
+describe('Stale assigned worker escalation', () => {
+  it('escalates stale assigned worker with live pane through triage', () => {
+    db.registerWorker(1, '/wt-1', 'agent-1');
+    const reqId = db.createRequest('Stale assigned escalation');
+    const taskId = db.createTask({
+      request_id: reqId,
+      subject: 'Stale assigned task',
+      description: 'Should escalate through warn/nudge/triage when heartbeat is stale',
+    });
+    // Heartbeat between triage (120s) and terminate (180s)
+    const staleTime = new Date(Date.now() - 150 * 1000).toISOString();
+    const launchedTime = new Date(Date.now() - 300 * 1000).toISOString();
+    db.updateTask(taskId, { status: 'assigned', assigned_to: 1 });
+    db.updateWorker(1, {
+      status: 'assigned',
+      current_task_id: taskId,
+      launched_at: launchedTime,
+      last_heartbeat: staleTime,
+    });
+
+    const originalIsTmuxAvailable = tmux.isTmuxAvailable;
+    const originalIsPaneAlive = tmux.isPaneAlive;
+    tmux.isTmuxAvailable = () => true;
+    tmux.isPaneAlive = (windowName) => windowName === 'worker-1'; // pane alive
+    try {
+      tick(tmpDir);
+    } finally {
+      tmux.isTmuxAvailable = originalIsTmuxAvailable;
+      tmux.isPaneAlive = originalIsPaneAlive;
+    }
+
+    // Worker should NOT be reset by the escalation path — only warn/nudge/triage fires
+    const worker = db.getWorker(1);
+    assert.strictEqual(worker.status, 'assigned');
+    assert.strictEqual(worker.current_task_id, taskId);
+
+    // Triage-level escalation log should exist for this assigned worker
+    const triageLog = db.getLog(100, 'coordinator')
+      .filter((entry) => entry.action === 'watchdog_triage')
+      .map((entry) => JSON.parse(entry.details))
+      .find((entry) => entry.worker_id === 1);
+    assert.ok(triageLog, 'assigned worker with stale heartbeat and live pane should reach triage escalation');
+    assert.ok(triageLog.stale_sec >= THRESHOLDS.triage);
+  });
+
+  it('does not escalate freshly assigned workers within launch grace period', () => {
+    db.registerWorker(1, '/wt-1', 'agent-1');
+    const reqId = db.createRequest('Fresh assigned no-escalation');
+    const taskId = db.createTask({
+      request_id: reqId,
+      subject: 'Fresh assignment',
+      description: 'Just assigned — must not be escalated',
+    });
+    db.updateTask(taskId, { status: 'assigned', assigned_to: 1 });
+    db.updateWorker(1, {
+      status: 'assigned',
+      current_task_id: taskId,
+      launched_at: new Date(Date.now() - 10 * 1000).toISOString(),
+      last_heartbeat: new Date(Date.now() - 10 * 1000).toISOString(),
+    });
+
+    const originalIsTmuxAvailable = tmux.isTmuxAvailable;
+    tmux.isTmuxAvailable = () => false;
+    try {
+      tick(tmpDir);
+    } finally {
+      tmux.isTmuxAvailable = originalIsTmuxAvailable;
+    }
+
+    const escalationLog = db.getLog(100, 'coordinator')
+      .filter((entry) => ['watchdog_warn', 'watchdog_nudge', 'watchdog_triage', 'watchdog_terminate'].includes(entry.action))
+      .map((entry) => JSON.parse(entry.details))
+      .find((entry) => entry.worker_id === 1);
+    assert.strictEqual(escalationLog, undefined, 'freshly assigned worker must not be escalated');
+
+    const worker = db.getWorker(1);
+    assert.strictEqual(worker.status, 'assigned');
+    assert.strictEqual(worker.current_task_id, taskId);
+  });
+
+  it('uses launched_at as staleness fallback when last_heartbeat is absent', () => {
+    db.registerWorker(1, '/wt-1', 'agent-1');
+    const reqId = db.createRequest('Assigned worker no heartbeat');
+    const taskId = db.createTask({
+      request_id: reqId,
+      subject: 'Assigned no heartbeat',
+      description: 'Should use launched_at for staleness when last_heartbeat is absent',
+    });
+    // No last_heartbeat — launched_at used as fallback; between nudge (90s) and triage (120s)
+    const launchTime = new Date(Date.now() - 95 * 1000).toISOString();
+    db.updateTask(taskId, { status: 'assigned', assigned_to: 1 });
+    db.updateWorker(1, {
+      status: 'assigned',
+      current_task_id: taskId,
+      launched_at: launchTime,
+      last_heartbeat: null,
+    });
+
+    const originalIsTmuxAvailable = tmux.isTmuxAvailable;
+    tmux.isTmuxAvailable = () => false;
+    try {
+      tick(tmpDir);
+    } finally {
+      tmux.isTmuxAvailable = originalIsTmuxAvailable;
+    }
+
+    // Nudge-level escalation should fire based on launched_at fallback
+    const nudgeLog = db.getLog(100, 'coordinator')
+      .filter((entry) => entry.action === 'watchdog_nudge')
+      .map((entry) => JSON.parse(entry.details))
+      .find((entry) => entry.worker_id === 1);
+    assert.ok(nudgeLog, 'assigned worker should escalate via launched_at when last_heartbeat is absent');
+    assert.ok(nudgeLog.stale_sec >= THRESHOLDS.nudge);
+  });
+
+  it('running and busy workers escalate the same way as before the assigned change', () => {
+    db.registerWorker(1, '/wt-1', 'agent-1');
+    const reqId = db.createRequest('Running worker escalation unchanged');
+    const taskId = db.createTask({
+      request_id: reqId,
+      subject: 'Running task',
+      description: 'Running worker should still escalate via heartbeat',
+    });
+    const staleTime = new Date(Date.now() - 150 * 1000).toISOString();
+    db.updateTask(taskId, { status: 'in_progress', assigned_to: 1 });
+    db.updateWorker(1, {
+      status: 'running',
+      current_task_id: taskId,
+      launched_at: new Date(Date.now() - 300 * 1000).toISOString(),
+      last_heartbeat: staleTime,
+    });
+
+    const originalIsTmuxAvailable = tmux.isTmuxAvailable;
+    tmux.isTmuxAvailable = () => false;
+    try {
+      tick(tmpDir);
+    } finally {
+      tmux.isTmuxAvailable = originalIsTmuxAvailable;
+    }
+
+    const triageLog = db.getLog(100, 'coordinator')
+      .filter((entry) => entry.action === 'watchdog_triage')
+      .map((entry) => JSON.parse(entry.details))
+      .find((entry) => entry.worker_id === 1);
+    assert.ok(triageLog, 'running worker should still get triage escalation (behavior unchanged)');
+    assert.ok(triageLog.stale_sec >= THRESHOLDS.triage);
   });
 });
 
