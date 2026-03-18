@@ -4,8 +4,10 @@ const db = require('./db');
 
 let intervalId = null;
 let lastNotifyTs = 0;
+let lastResearchNotifyTs = 0;
 
 const NOTIFY_DEDUP_MS = 10000; // Only notify allocator agent once per 10s
+const RESEARCH_NOTIFY_DEDUP_MS = 30000; // Notify research-batch planner at most once per 30s
 
 function start(projectDir) {
   const intervalMs = parseInt(db.getConfig('allocator_interval_ms')) || 2000;
@@ -24,11 +26,15 @@ function start(projectDir) {
 function stop() {
   if (intervalId) { clearInterval(intervalId); intervalId = null; }
   lastNotifyTs = 0;
+  lastResearchNotifyTs = 0;
 }
 
 function tick() {
   // 1. Promote pending tasks whose dependencies are met
   db.checkAndPromoteTasks();
+
+  // 1c. Signal allocator when queued research intents need batch planning
+  signalResearchBatchAvailability();
 
   // 1b. Recover stalled or orphaned assignments so throughput can resume.
   const recoveredAssignments = db.recoverStalledAssignments({
@@ -69,4 +75,41 @@ function tick() {
   });
 }
 
-module.exports = { start, stop, tick };
+function signalResearchBatchAvailability() {
+  // Check for queued research intents that have no active batch run
+  let queuedIntentCount = 0;
+  try {
+    const row = db.getDb().prepare(
+      "SELECT COUNT(*) AS count FROM research_intents WHERE status IN ('queued', 'partial_failed')"
+    ).get();
+    queuedIntentCount = Number(row && row.count) || 0;
+  } catch {
+    return; // research_intents table may not exist yet
+  }
+  if (queuedIntentCount === 0) return;
+
+  // Only signal if no batch is currently running
+  let runningBatchCount = 0;
+  try {
+    const row = db.getDb().prepare(
+      "SELECT COUNT(*) AS count FROM research_batches WHERE status = 'running'"
+    ).get();
+    runningBatchCount = Number(row && row.count) || 0;
+  } catch {
+    return;
+  }
+  if (runningBatchCount > 0) return;
+
+  const now = Date.now();
+  if (now - lastResearchNotifyTs < RESEARCH_NOTIFY_DEDUP_MS) return;
+
+  lastResearchNotifyTs = now;
+  db.sendMail('allocator', 'research_batch_available', {
+    queued_intent_count: queuedIntentCount,
+  });
+  db.log('allocator', 'research_batch_signaled', {
+    queued_intent_count: queuedIntentCount,
+  });
+}
+
+module.exports = { start, stop, tick, signalResearchBatchAvailability };

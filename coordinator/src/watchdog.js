@@ -220,6 +220,9 @@ function tick(projectDir) {
   // Monitor persistent loops
   monitorLoops(projectDir);
 
+  // Monitor research batches for timeout recovery
+  monitorResearchBatches(now);
+
   // Periodic mail + log purge (once per hour)
   if (now - lastMailPurge > 3600000) {
     lastMailPurge = now;
@@ -659,6 +662,63 @@ function respawnLoopSentinel(loop, projectDir, options = {}) {
       reason,
       forced_restart: forceRestart,
       error: e.message,
+    });
+  }
+}
+
+function monitorResearchBatches(now) {
+  let runningBatches;
+  try {
+    runningBatches = db.getDb().prepare(
+      "SELECT * FROM research_batches WHERE status = 'running'"
+    ).all();
+  } catch {
+    return; // research_batches table may not exist yet
+  }
+
+  for (const batch of runningBatches) {
+    const startedAt = batch.started_at || batch.updated_at;
+    if (!startedAt) continue;
+    const ageSec = getAgeSeconds(now, startedAt, {
+      batch_id: batch.id,
+      scope: 'research_batch_timeout',
+    });
+    if (ageSec === null) continue;
+    const timeoutSec = (Number(batch.timeout_window_ms) || 120000) / 1000;
+    if (ageSec <= timeoutSec) continue;
+
+    // Batch has exceeded its timeout — fail running/planned stages so intents can retry
+    let stages;
+    try {
+      stages = db.listResearchBatchStages(batch.id);
+    } catch {
+      continue;
+    }
+    const timeoutMsg = `Research batch timed out after ${Math.round(ageSec)}s (limit: ${timeoutSec}s)`;
+    for (const stage of stages) {
+      if (stage.status === 'running' || stage.status === 'planned') {
+        try {
+          db.markResearchBatchStage({
+            stage_id: stage.id,
+            status: 'partial_failed',
+            error: timeoutMsg,
+          });
+        } catch {
+          // Stage may already be in a terminal state
+        }
+      }
+    }
+    try {
+      db.getDb().prepare(
+        "UPDATE research_batches SET status = 'timed_out', last_error = ?, updated_at = strftime('%Y-%m-%d %H:%M:%f','now') WHERE id = ?"
+      ).run(timeoutMsg, batch.id);
+    } catch {
+      // Best-effort update
+    }
+    db.log('coordinator', 'research_batch_timeout', {
+      batch_id: batch.id,
+      age_sec: Math.round(ageSec),
+      timeout_sec: timeoutSec,
     });
   }
 }
