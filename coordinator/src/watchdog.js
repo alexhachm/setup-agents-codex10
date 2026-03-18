@@ -657,7 +657,8 @@ function respawnLoopSentinel(loop, projectDir, options = {}) {
     if (forceRestart) {
       tmux.killWindow(loop.tmux_window);
     }
-    tmux.createWindow(loop.tmux_window, `bash "${sentinelPath}" ${loop.id} "${projectDir}"`, projectDir);
+    const ns = loop.namespace || process.env.MAC10_NAMESPACE || 'mac10';
+    tmux.createWindow(loop.tmux_window, `MAC10_NAMESPACE="${ns}" bash "${sentinelPath}" ${loop.id} "${projectDir}"`, projectDir);
     db.updateLoop(loop.id, {
       tmux_session: tmux.SESSION,
       last_heartbeat: new Date().toISOString(),

@@ -220,6 +220,7 @@ const handlers = {
         projectDir
       );
       db.updateLoop(loopId, {
+        namespace,
         tmux_session: tmux.SESSION,
         tmux_window: windowName,
       });

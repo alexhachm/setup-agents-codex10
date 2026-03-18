@@ -511,6 +511,145 @@ describe('Loop heartbeat recovery', () => {
   });
 });
 
+describe('Loop respawn namespace preservation', () => {
+  it('includes loop.namespace in the respawn command when namespace is stored on loop record', () => {
+    const loopId = db.createLoop('Namespace respawn test');
+    const staleHeartbeat = new Date(Date.now() - (LOOP_STALE_HEARTBEAT_SEC + 60) * 1000).toISOString();
+    db.updateLoop(loopId, {
+      namespace: 'myproject',
+      tmux_window: 'loop-ns-1',
+      tmux_session: 'test-session',
+      last_heartbeat: staleHeartbeat,
+    });
+
+    const originalIsPaneAlive = tmux.isPaneAlive;
+    const originalKillWindow = tmux.killWindow;
+    const originalCreateWindow = tmux.createWindow;
+    const createCalls = [];
+
+    tmux.isPaneAlive = (windowName) => windowName === 'loop-ns-1';
+    tmux.killWindow = () => {};
+    tmux.createWindow = (windowName, command, cwd) => createCalls.push({ windowName, command, cwd });
+
+    try {
+      tick(tmpDir);
+    } finally {
+      tmux.isPaneAlive = originalIsPaneAlive;
+      tmux.killWindow = originalKillWindow;
+      tmux.createWindow = originalCreateWindow;
+    }
+
+    assert.strictEqual(createCalls.length, 1);
+    assert.match(createCalls[0].command, /MAC10_NAMESPACE="myproject"/);
+    assert.match(createCalls[0].command, new RegExp(`\\s${loopId}\\s`));
+  });
+
+  it('falls back to process.env.MAC10_NAMESPACE when loop.namespace is null', () => {
+    const loopId = db.createLoop('Namespace fallback test');
+    const staleHeartbeat = new Date(Date.now() - (LOOP_STALE_HEARTBEAT_SEC + 60) * 1000).toISOString();
+    db.updateLoop(loopId, {
+      tmux_window: 'loop-ns-2',
+      tmux_session: 'test-session',
+      last_heartbeat: staleHeartbeat,
+    });
+
+    const originalIsPaneAlive = tmux.isPaneAlive;
+    const originalKillWindow = tmux.killWindow;
+    const originalCreateWindow = tmux.createWindow;
+    const createCalls = [];
+
+    const prevEnv = process.env.MAC10_NAMESPACE;
+    process.env.MAC10_NAMESPACE = 'env-namespace';
+
+    tmux.isPaneAlive = (windowName) => windowName === 'loop-ns-2';
+    tmux.killWindow = () => {};
+    tmux.createWindow = (windowName, command, cwd) => createCalls.push({ windowName, command, cwd });
+
+    try {
+      tick(tmpDir);
+    } finally {
+      tmux.isPaneAlive = originalIsPaneAlive;
+      tmux.killWindow = originalKillWindow;
+      tmux.createWindow = originalCreateWindow;
+      if (prevEnv === undefined) {
+        delete process.env.MAC10_NAMESPACE;
+      } else {
+        process.env.MAC10_NAMESPACE = prevEnv;
+      }
+    }
+
+    assert.strictEqual(createCalls.length, 1);
+    assert.match(createCalls[0].command, /MAC10_NAMESPACE="env-namespace"/);
+  });
+
+  it('falls back to mac10 default when loop.namespace is null and env is unset', () => {
+    const loopId = db.createLoop('Namespace default fallback test');
+    const staleHeartbeat = new Date(Date.now() - (LOOP_STALE_HEARTBEAT_SEC + 60) * 1000).toISOString();
+    db.updateLoop(loopId, {
+      tmux_window: 'loop-ns-3',
+      tmux_session: 'test-session',
+      last_heartbeat: staleHeartbeat,
+    });
+
+    const originalIsPaneAlive = tmux.isPaneAlive;
+    const originalKillWindow = tmux.killWindow;
+    const originalCreateWindow = tmux.createWindow;
+    const createCalls = [];
+
+    const prevEnv = process.env.MAC10_NAMESPACE;
+    delete process.env.MAC10_NAMESPACE;
+
+    tmux.isPaneAlive = (windowName) => windowName === 'loop-ns-3';
+    tmux.killWindow = () => {};
+    tmux.createWindow = (windowName, command, cwd) => createCalls.push({ windowName, command, cwd });
+
+    try {
+      tick(tmpDir);
+    } finally {
+      tmux.isPaneAlive = originalIsPaneAlive;
+      tmux.killWindow = originalKillWindow;
+      tmux.createWindow = originalCreateWindow;
+      if (prevEnv !== undefined) {
+        process.env.MAC10_NAMESPACE = prevEnv;
+      }
+    }
+
+    assert.strictEqual(createCalls.length, 1);
+    assert.match(createCalls[0].command, /MAC10_NAMESPACE="mac10"/);
+  });
+
+  it('includes namespace in pane-death respawn command', () => {
+    const loopId = db.createLoop('Namespace pane-death respawn test');
+    const staleHeartbeat = new Date(Date.now() - 301 * 1000).toISOString();
+    db.updateLoop(loopId, {
+      namespace: 'prod-ns',
+      tmux_window: 'loop-ns-4',
+      tmux_session: 'test-session',
+      last_heartbeat: staleHeartbeat,
+    });
+
+    const originalIsPaneAlive = tmux.isPaneAlive;
+    const originalKillWindow = tmux.killWindow;
+    const originalCreateWindow = tmux.createWindow;
+    const createCalls = [];
+
+    tmux.isPaneAlive = (windowName) => windowName !== 'loop-ns-4';
+    tmux.killWindow = () => {};
+    tmux.createWindow = (windowName, command, cwd) => createCalls.push({ windowName, command, cwd });
+
+    try {
+      tick(tmpDir);
+    } finally {
+      tmux.isPaneAlive = originalIsPaneAlive;
+      tmux.killWindow = originalKillWindow;
+      tmux.createWindow = originalCreateWindow;
+    }
+
+    assert.strictEqual(createCalls.length, 1);
+    assert.match(createCalls[0].command, /MAC10_NAMESPACE="prod-ns"/);
+  });
+});
+
 describe('Stale decomposed request recovery', () => {
   it('recovers stale decomposed tier-3 requests with zero tasks', () => {
     const requestId = db.createRequest('Tier-3 decomposition stalled before task creation');
