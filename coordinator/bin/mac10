@@ -1221,6 +1221,163 @@ async function main() {
         break;
       }
 
+      // === RESEARCH commands ===
+      case 'queue-research': {
+        if (!argv[1] || !argv[2]) {
+          console.error('Usage: mac10 queue-research <topic> <question> [--mode standard|thinking|deep_research] [--priority urgent|normal|low] [--links \'["url"]\'] [--context "..."]');
+          process.exit(1);
+        }
+        const qrArgs = { topic: argv[1], question: argv[2] };
+        for (let i = 3; i < argv.length; i++) {
+          if (argv[i] === '--mode' && argv[i + 1]) { qrArgs.mode = argv[++i]; }
+          else if (argv[i] === '--priority' && argv[i + 1]) { qrArgs.priority = argv[++i]; }
+          else if (argv[i] === '--links' && argv[i + 1]) { qrArgs.links = argv[++i]; }
+          else if (argv[i] === '--context' && argv[i + 1]) { qrArgs.context = argv[++i]; }
+          else if (argv[i] === '--source-task' && argv[i + 1]) { qrArgs.source_task_id = argv[++i]; }
+          else if (argv[i] === '--source-agent' && argv[i + 1]) { qrArgs.source_agent = argv[++i]; }
+        }
+        result = await send(socketPath, 'queue-research', qrArgs);
+        if (result.ok) {
+          console.log(`Research queued: #${result.id}${result.deduplicated ? ' (deduplicated)' : ''}`);
+        } else {
+          console.error(result.error);
+          process.exit(1);
+        }
+        break;
+      }
+      case 'research-status': {
+        const rsArgs = {};
+        for (let i = 1; i < argv.length; i++) {
+          if (argv[i] === '--topic' && argv[i + 1]) { rsArgs.topic = argv[++i]; }
+          else if (argv[i] === '--status' && argv[i + 1]) { rsArgs.status = argv[++i]; }
+        }
+        result = await send(socketPath, 'research-status', rsArgs);
+        if (result.ok) {
+          if (result.items.length === 0) {
+            console.log('No research items found.');
+          } else {
+            for (const item of result.items) {
+              const attempts = Number.isFinite(Number(item.attempts)) ? Number(item.attempts) : 0;
+              console.log(`  #${item.id} [${item.status}] a${attempts} ${item.mode} ${item.priority} "${item.topic}" — ${item.question.slice(0, 60)}`);
+            }
+            console.log(`\n${result.count} item(s)`);
+          }
+        } else {
+          console.error(result.error);
+        }
+        break;
+      }
+      case 'research-gaps': {
+        result = await send(socketPath, 'research-gaps', {});
+        if (result.ok) {
+          console.log(`Gaps found: ${result.gaps_found}`);
+          if (result.queued.length > 0) {
+            console.log('Auto-queued:');
+            for (const q of result.queued) {
+              console.log(`  #${q.queue_id} [${q.gap_type}] "${q.topic}" — ${q.suggested_question.slice(0, 60)}${q.deduplicated ? ' (dedup)' : ''}`);
+            }
+          }
+          if (result.skipped && result.skipped.length > 0) {
+            console.log('Skipped (internal-only):');
+            for (const s of result.skipped) {
+              console.log(`  [${s.gap_type}] "${s.topic}" — ${String(s.reason || '').slice(0, 80)}`);
+            }
+          }
+        } else {
+          console.error(result.error);
+          process.exit(1);
+        }
+        break;
+      }
+      case 'research-next': {
+        result = await send(socketPath, 'research-next', {});
+        if (result.ok) {
+          if (result.item) {
+            console.log(JSON.stringify(result.item, null, 2));
+          } else {
+            console.log('No queued research items.');
+          }
+        } else {
+          console.error(result.error);
+        }
+        break;
+      }
+      case 'research-requeue-stale': {
+        const maxAge = argv[1] ? parseInt(argv[1], 10) : 120;
+        result = await send(socketPath, 'research-requeue-stale', {
+          max_age_minutes: Number.isFinite(maxAge) && maxAge > 0 ? maxAge : 120,
+        });
+        if (result.ok) {
+          if ((result.requeued || 0) === 0) {
+            if ((result.failed || 0) > 0) {
+              console.log(`No stale in_progress items requeued. Marked failed: ${result.failed} (${(result.failed_ids || []).join(', ')})`);
+            } else {
+              console.log('No stale in_progress research items to requeue.');
+            }
+          } else {
+            let msg = `Requeued ${result.requeued} stale research item(s): ${result.ids.join(', ')}`;
+            if ((result.failed || 0) > 0) {
+              msg += ` | Marked failed: ${result.failed} (${(result.failed_ids || []).join(', ')})`;
+            }
+            console.log(msg);
+          }
+        } else {
+          console.error(result.error);
+          process.exit(1);
+        }
+        break;
+      }
+      case 'research-start': {
+        if (!argv[1]) {
+          console.error('Usage: mac10 research-start <id>');
+          process.exit(1);
+        }
+        result = await send(socketPath, 'research-start', {
+          id: parseInt(argv[1], 10),
+        });
+        if (result.ok) {
+          console.log('Research marked in_progress.');
+        } else {
+          console.error(result.error);
+          process.exit(1);
+        }
+        break;
+      }
+      case 'research-complete': {
+        if (!argv[1] || !argv[2]) {
+          console.error('Usage: mac10 research-complete <id> <note_path>');
+          process.exit(1);
+        }
+        result = await send(socketPath, 'research-complete', {
+          id: parseInt(argv[1], 10),
+          note_path: argv[2],
+        });
+        if (result.ok) {
+          console.log('Research marked complete.');
+        } else {
+          console.error(result.error);
+          process.exit(1);
+        }
+        break;
+      }
+      case 'research-fail': {
+        if (!argv[1]) {
+          console.error('Usage: mac10 research-fail <id> [error]');
+          process.exit(1);
+        }
+        result = await send(socketPath, 'research-fail', {
+          id: parseInt(argv[1], 10),
+          error: argv.slice(2).join(' ') || 'Unknown error',
+        });
+        if (result.ok) {
+          console.log('Research marked failed.');
+        } else {
+          console.error(result.error);
+          process.exit(1);
+        }
+        break;
+      }
+
       default:
         console.error(`Unknown command: ${cmd}`);
         printUsage();
@@ -1255,6 +1412,8 @@ ARCHITECT:
 ALLOCATOR:
   ready-tasks                    List tasks ready for assignment
   assign-task <task_id> <worker_id>  Assign task to worker (atomic)
+  claim-worker <worker_id>       Claim worker for exclusive assignment
+  release-worker <worker_id>     Release worker claim
   worker-status                  Show all workers
   check-completion <request_id>  Check if all tasks for request are done
   check-overlaps <request_id>   Show file overlaps between tasks
@@ -1284,6 +1443,16 @@ LOOPS:
 CHANGES:
   log-change <desc> [--domain X] [--file Y] [--fn Z] [--tooltip T]
   list-changes [domain]          List all changes (optionally filter by domain)
+
+RESEARCH:
+  queue-research <topic> <question> [--mode standard|thinking|deep_research] [--priority urgent|normal|low] [--links '["url"]'] [--context "..."]
+  research-status [--topic T] [--status S]  Show research queue
+  research-gaps                  Run gap analysis and auto-queue findings
+  research-next                  Get next queued research item (JSON)
+  research-requeue-stale [mins]  Requeue stale in_progress research items (default 120m)
+  research-start <id>            Mark queued research item in_progress
+  research-complete <id> <note_path>  Mark research complete
+  research-fail <id> [error]     Mark research failed
 
 SYSTEM:
   start [project_dir]            Start coordinator
