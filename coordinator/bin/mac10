@@ -1853,6 +1853,126 @@ async function main() {
         break;
       }
 
+      case 'memory-snapshots': {
+        // Parse optional flags: --context --request-id --task-id --run-id --validation --min-relevance --limit --offset
+        const msArgs = {};
+        for (let i = 1; i < argv.length; i++) {
+          const a = argv[i];
+          if (a.startsWith('--context=')) msArgs.project_context_key = a.slice('--context='.length);
+          else if (a === '--context' && argv[i + 1]) { msArgs.project_context_key = argv[++i]; }
+          else if (a.startsWith('--request-id=')) msArgs.request_id = a.slice('--request-id='.length);
+          else if (a === '--request-id' && argv[i + 1]) { msArgs.request_id = argv[++i]; }
+          else if (a.startsWith('--task-id=')) msArgs.task_id = parseInt(a.slice('--task-id='.length), 10);
+          else if (a === '--task-id' && argv[i + 1]) { msArgs.task_id = parseInt(argv[++i], 10); }
+          else if (a.startsWith('--run-id=')) msArgs.run_id = a.slice('--run-id='.length);
+          else if (a === '--run-id' && argv[i + 1]) { msArgs.run_id = argv[++i]; }
+          else if (a.startsWith('--validation=')) msArgs.validation_status = a.slice('--validation='.length);
+          else if (a === '--validation' && argv[i + 1]) { msArgs.validation_status = argv[++i]; }
+          else if (a.startsWith('--min-relevance=')) msArgs.min_relevance_score = parseFloat(a.slice('--min-relevance='.length));
+          else if (a === '--min-relevance' && argv[i + 1]) { msArgs.min_relevance_score = parseFloat(argv[++i]); }
+          else if (a.startsWith('--limit=')) msArgs.limit = parseInt(a.slice('--limit='.length), 10);
+          else if (a === '--limit' && argv[i + 1]) { msArgs.limit = parseInt(argv[++i], 10); }
+          else if (a.startsWith('--offset=')) msArgs.offset = parseInt(a.slice('--offset='.length), 10);
+          else if (a === '--offset' && argv[i + 1]) { msArgs.offset = parseInt(argv[++i], 10); }
+        }
+        result = await send(socketPath, 'memory-snapshots', msArgs);
+        if (result.ok) console.log(JSON.stringify(result, null, 2));
+        else { console.error(result.error); process.exit(1); }
+        break;
+      }
+
+      case 'memory-snapshot': {
+        if (!argv[1]) {
+          console.error('Usage: mac10 memory-snapshot <id> [--lineage]');
+          process.exit(1);
+        }
+        const snapId = parseInt(argv[1], 10);
+        if (!Number.isInteger(snapId) || snapId <= 0) {
+          console.error('Error: id must be a positive integer');
+          process.exit(1);
+        }
+        const snapIncludeLineage = argv.includes('--lineage');
+        result = await send(socketPath, 'memory-snapshot', { id: snapId, include_lineage: snapIncludeLineage });
+        if (result.ok) console.log(JSON.stringify(result, null, 2));
+        else { console.error(result.error); process.exit(1); }
+        break;
+      }
+
+      case 'memory-insights': {
+        const miArgs = {};
+        for (let i = 1; i < argv.length; i++) {
+          const a = argv[i];
+          if (a.startsWith('--context=')) miArgs.project_context_key = a.slice('--context='.length);
+          else if (a === '--context' && argv[i + 1]) { miArgs.project_context_key = argv[++i]; }
+          else if (a.startsWith('--snapshot-id=')) miArgs.snapshot_id = parseInt(a.slice('--snapshot-id='.length), 10);
+          else if (a === '--snapshot-id' && argv[i + 1]) { miArgs.snapshot_id = parseInt(argv[++i], 10); }
+          else if (a.startsWith('--type=')) miArgs.artifact_type = a.slice('--type='.length);
+          else if (a === '--type' && argv[i + 1]) { miArgs.artifact_type = argv[++i]; }
+          else if (a.startsWith('--request-id=')) miArgs.request_id = a.slice('--request-id='.length);
+          else if (a === '--request-id' && argv[i + 1]) { miArgs.request_id = argv[++i]; }
+          else if (a.startsWith('--task-id=')) miArgs.task_id = parseInt(a.slice('--task-id='.length), 10);
+          else if (a === '--task-id' && argv[i + 1]) { miArgs.task_id = parseInt(argv[++i], 10); }
+          else if (a.startsWith('--run-id=')) miArgs.run_id = a.slice('--run-id='.length);
+          else if (a === '--run-id' && argv[i + 1]) { miArgs.run_id = argv[++i]; }
+          else if (a.startsWith('--validation=')) miArgs.validation_status = a.slice('--validation='.length);
+          else if (a === '--validation' && argv[i + 1]) { miArgs.validation_status = argv[++i]; }
+          else if (a.startsWith('--min-relevance=')) miArgs.min_relevance_score = parseFloat(a.slice('--min-relevance='.length));
+          else if (a === '--min-relevance' && argv[i + 1]) { miArgs.min_relevance_score = parseFloat(argv[++i]); }
+          else if (a.startsWith('--limit=')) miArgs.limit = parseInt(a.slice('--limit='.length), 10);
+          else if (a === '--limit' && argv[i + 1]) { miArgs.limit = parseInt(argv[++i], 10); }
+          else if (a.startsWith('--offset=')) miArgs.offset = parseInt(a.slice('--offset='.length), 10);
+          else if (a === '--offset' && argv[i + 1]) { miArgs.offset = parseInt(argv[++i], 10); }
+        }
+        result = await send(socketPath, 'memory-insights', miArgs);
+        if (result.ok) console.log(JSON.stringify(result, null, 2));
+        else { console.error(result.error); process.exit(1); }
+        break;
+      }
+
+      case 'memory-insight': {
+        if (!argv[1]) {
+          console.error('Usage: mac10 memory-insight <id> [--lineage]');
+          process.exit(1);
+        }
+        const insightId = parseInt(argv[1], 10);
+        if (!Number.isInteger(insightId) || insightId <= 0) {
+          console.error('Error: id must be a positive integer');
+          process.exit(1);
+        }
+        const insightIncludeLineage = argv.includes('--lineage');
+        result = await send(socketPath, 'memory-insight', { id: insightId, include_lineage: insightIncludeLineage });
+        if (result.ok) console.log(JSON.stringify(result, null, 2));
+        else { console.error(result.error); process.exit(1); }
+        break;
+      }
+
+      case 'memory-lineage': {
+        const mlArgs = {};
+        for (let i = 1; i < argv.length; i++) {
+          const a = argv[i];
+          if (a.startsWith('--snapshot-id=')) mlArgs.snapshot_id = parseInt(a.slice('--snapshot-id='.length), 10);
+          else if (a === '--snapshot-id' && argv[i + 1]) { mlArgs.snapshot_id = parseInt(argv[++i], 10); }
+          else if (a.startsWith('--insight-id=')) mlArgs.insight_artifact_id = parseInt(a.slice('--insight-id='.length), 10);
+          else if (a === '--insight-id' && argv[i + 1]) { mlArgs.insight_artifact_id = parseInt(argv[++i], 10); }
+          else if (a.startsWith('--request-id=')) mlArgs.request_id = a.slice('--request-id='.length);
+          else if (a === '--request-id' && argv[i + 1]) { mlArgs.request_id = argv[++i]; }
+          else if (a.startsWith('--task-id=')) mlArgs.task_id = parseInt(a.slice('--task-id='.length), 10);
+          else if (a === '--task-id' && argv[i + 1]) { mlArgs.task_id = parseInt(argv[++i], 10); }
+          else if (a.startsWith('--run-id=')) mlArgs.run_id = a.slice('--run-id='.length);
+          else if (a === '--run-id' && argv[i + 1]) { mlArgs.run_id = argv[++i]; }
+          else if (a.startsWith('--lineage-type=')) mlArgs.lineage_type = a.slice('--lineage-type='.length);
+          else if (a === '--lineage-type' && argv[i + 1]) { mlArgs.lineage_type = argv[++i]; }
+          else if (a.startsWith('--limit=')) mlArgs.limit = parseInt(a.slice('--limit='.length), 10);
+          else if (a === '--limit' && argv[i + 1]) { mlArgs.limit = parseInt(argv[++i], 10); }
+          else if (a.startsWith('--offset=')) mlArgs.offset = parseInt(a.slice('--offset='.length), 10);
+          else if (a === '--offset' && argv[i + 1]) { mlArgs.offset = parseInt(argv[++i], 10); }
+        }
+        result = await send(socketPath, 'memory-lineage', mlArgs);
+        if (result.ok) console.log(JSON.stringify(result, null, 2));
+        else { console.error(result.error); process.exit(1); }
+        break;
+      }
+
       default:
         console.error(`Unknown command: ${cmd}`);
         printUsage();
@@ -1926,6 +2046,18 @@ LOOPS:
   loop-set-prompt <id> <prompt>  Update existing loop prompt for active/paused loops
   loop-request <id> <desc>       Submit request from loop (dedup + supersession-aware)
   loop-requests <id> [--json]    List all requests for a loop
+
+MEMORY:
+  memory-snapshots [--context K] [--request-id R] [--task-id N] [--run-id R] [--validation V] [--min-relevance F] [--limit N] [--offset N]
+                                 List project memory snapshots with optional filters
+  memory-snapshot <id> [--lineage]
+                                 Get a single memory snapshot (optionally with lineage links)
+  memory-insights [--context K] [--snapshot-id N] [--type T] [--request-id R] [--task-id N] [--run-id R] [--validation V] [--min-relevance F] [--limit N] [--offset N]
+                                 List insight artifacts with optional filters
+  memory-insight <id> [--lineage]
+                                 Get a single insight artifact (optionally with lineage links)
+  memory-lineage [--snapshot-id N] [--insight-id N] [--request-id R] [--task-id N] [--run-id R] [--lineage-type T] [--limit N] [--offset N]
+                                 Query lineage links for traceability
 
 CHANGES:
   log-change <desc> [--domain X] [--file Y] [--fn Z] [--tooltip T]

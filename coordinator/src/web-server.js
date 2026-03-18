@@ -2065,6 +2065,137 @@ function start(projectDir, port = 3100, scriptDir = null, handlers = {}) {
     }
   });
 
+  app.get('/api/memory/snapshots', (req, res) => {
+    try {
+      const taskId = req.query.task_id ? parseStrictPositiveIntegerParam(req.query.task_id) : null;
+      if (req.query.task_id && !taskId) {
+        return res.status(400).json({ ok: false, error: 'task_id must be a positive integer' });
+      }
+      const limit = req.query.limit ? parseStrictPositiveIntegerParam(req.query.limit) : null;
+      if (req.query.limit && !limit) {
+        return res.status(400).json({ ok: false, error: 'limit must be a positive integer' });
+      }
+      const offset = req.query.offset ? Number(req.query.offset) : 0;
+      const minRelevance = req.query.min_relevance_score != null && req.query.min_relevance_score !== ''
+        ? Number(req.query.min_relevance_score)
+        : null;
+      const snapshots = db.listProjectMemorySnapshots({
+        project_context_key: req.query.project_context_key || null,
+        request_id: req.query.request_id || null,
+        task_id: taskId,
+        run_id: req.query.run_id || null,
+        validation_status: req.query.validation_status || null,
+        min_relevance_score: minRelevance,
+        limit: limit || 100,
+        offset,
+      });
+      res.json({ ok: true, snapshots });
+    } catch (e) {
+      res.status(500).json({ ok: false, error: e.message });
+    }
+  });
+
+  app.get('/api/memory/snapshots/:id', (req, res) => {
+    try {
+      const id = parseStrictPositiveIntegerParam(req.params.id);
+      if (!id) return res.status(400).json({ ok: false, error: 'id must be a positive integer' });
+      const snapshot = db.getProjectMemorySnapshot(id);
+      if (!snapshot) return res.status(404).json({ ok: false, error: `Snapshot ${id} not found` });
+      const includeLineage = req.query.include_lineage === 'true' || req.query.include_lineage === '1';
+      const lineage = includeLineage ? db.listProjectMemoryLineageLinks({ snapshot_id: id }) : null;
+      res.json({ ok: true, snapshot, lineage });
+    } catch (e) {
+      res.status(500).json({ ok: false, error: e.message });
+    }
+  });
+
+  app.get('/api/memory/insights', (req, res) => {
+    try {
+      const snapshotId = req.query.snapshot_id ? parseStrictPositiveIntegerParam(req.query.snapshot_id) : null;
+      if (req.query.snapshot_id && !snapshotId) {
+        return res.status(400).json({ ok: false, error: 'snapshot_id must be a positive integer' });
+      }
+      const taskId = req.query.task_id ? parseStrictPositiveIntegerParam(req.query.task_id) : null;
+      if (req.query.task_id && !taskId) {
+        return res.status(400).json({ ok: false, error: 'task_id must be a positive integer' });
+      }
+      const limit = req.query.limit ? parseStrictPositiveIntegerParam(req.query.limit) : null;
+      if (req.query.limit && !limit) {
+        return res.status(400).json({ ok: false, error: 'limit must be a positive integer' });
+      }
+      const offset = req.query.offset ? Number(req.query.offset) : 0;
+      const minRelevance = req.query.min_relevance_score != null && req.query.min_relevance_score !== ''
+        ? Number(req.query.min_relevance_score)
+        : null;
+      const artifacts = db.listInsightArtifacts({
+        project_context_key: req.query.project_context_key || null,
+        snapshot_id: snapshotId,
+        artifact_type: req.query.artifact_type || null,
+        request_id: req.query.request_id || null,
+        task_id: taskId,
+        run_id: req.query.run_id || null,
+        validation_status: req.query.validation_status || null,
+        min_relevance_score: minRelevance,
+        limit: limit || 100,
+        offset,
+      });
+      res.json({ ok: true, artifacts });
+    } catch (e) {
+      res.status(500).json({ ok: false, error: e.message });
+    }
+  });
+
+  app.get('/api/memory/insights/:id', (req, res) => {
+    try {
+      const id = parseStrictPositiveIntegerParam(req.params.id);
+      if (!id) return res.status(400).json({ ok: false, error: 'id must be a positive integer' });
+      const artifact = db.getInsightArtifact(id);
+      if (!artifact) return res.status(404).json({ ok: false, error: `Insight artifact ${id} not found` });
+      const includeLineage = req.query.include_lineage === 'true' || req.query.include_lineage === '1';
+      const lineage = includeLineage ? db.listProjectMemoryLineageLinks({ insight_artifact_id: id }) : null;
+      res.json({ ok: true, artifact, lineage });
+    } catch (e) {
+      res.status(500).json({ ok: false, error: e.message });
+    }
+  });
+
+  app.get('/api/memory/lineage', (req, res) => {
+    try {
+      const snapshotId = req.query.snapshot_id ? parseStrictPositiveIntegerParam(req.query.snapshot_id) : null;
+      if (req.query.snapshot_id && !snapshotId) {
+        return res.status(400).json({ ok: false, error: 'snapshot_id must be a positive integer' });
+      }
+      const insightArtifactId = req.query.insight_artifact_id
+        ? parseStrictPositiveIntegerParam(req.query.insight_artifact_id)
+        : null;
+      if (req.query.insight_artifact_id && !insightArtifactId) {
+        return res.status(400).json({ ok: false, error: 'insight_artifact_id must be a positive integer' });
+      }
+      const taskId = req.query.task_id ? parseStrictPositiveIntegerParam(req.query.task_id) : null;
+      if (req.query.task_id && !taskId) {
+        return res.status(400).json({ ok: false, error: 'task_id must be a positive integer' });
+      }
+      const limit = req.query.limit ? parseStrictPositiveIntegerParam(req.query.limit) : null;
+      if (req.query.limit && !limit) {
+        return res.status(400).json({ ok: false, error: 'limit must be a positive integer' });
+      }
+      const offset = req.query.offset ? Number(req.query.offset) : 0;
+      const links = db.listProjectMemoryLineageLinks({
+        snapshot_id: snapshotId,
+        insight_artifact_id: insightArtifactId,
+        request_id: req.query.request_id || null,
+        task_id: taskId,
+        run_id: req.query.run_id || null,
+        lineage_type: req.query.lineage_type || null,
+        limit: limit || 200,
+        offset,
+      });
+      res.json({ ok: true, links });
+    } catch (e) {
+      res.status(500).json({ ok: false, error: e.message });
+    }
+  });
+
   // WebSocket for live updates
   wss.on('connection', (ws) => {
     ws.isAlive = true;

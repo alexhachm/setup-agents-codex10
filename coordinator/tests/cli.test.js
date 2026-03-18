@@ -4391,3 +4391,125 @@ describe('CLI Server', () => {
     assert.strictEqual(secondMiniAssignment.routing.reasoning_effort, 'mini-effort-v2');
   });
 });
+
+describe('memory-retrieval CLI commands', () => {
+  it('memory-snapshots returns ok with empty list when no snapshots', async () => {
+    const result = await sendCommand('memory-snapshots', {});
+    assert.strictEqual(result.ok, true);
+    assert.ok(Array.isArray(result.snapshots));
+    assert.strictEqual(result.snapshots.length, 0);
+  });
+
+  it('memory-snapshots filters by project_context_key', async () => {
+    db.createProjectMemorySnapshot({
+      project_context_key: 'ctx-cli-alpha',
+      snapshot_payload: { d: 1 },
+    });
+    db.createProjectMemorySnapshot({
+      project_context_key: 'ctx-cli-beta',
+      snapshot_payload: { d: 2 },
+    });
+    const result = await sendCommand('memory-snapshots', { project_context_key: 'ctx-cli-alpha' });
+    assert.strictEqual(result.ok, true);
+    assert.strictEqual(result.snapshots.length, 1);
+    assert.strictEqual(result.snapshots[0].project_context_key, 'ctx-cli-alpha');
+  });
+
+  it('memory-snapshots filters by validation_status', async () => {
+    db.createProjectMemorySnapshot({
+      project_context_key: 'ctx-cli-valid',
+      snapshot_payload: { d: 1 },
+      validation_status: 'validated',
+    });
+    db.createProjectMemorySnapshot({
+      project_context_key: 'ctx-cli-valid',
+      snapshot_payload: { d: 2 },
+    });
+    const result = await sendCommand('memory-snapshots', { project_context_key: 'ctx-cli-valid', validation_status: 'validated' });
+    assert.strictEqual(result.ok, true);
+    assert.strictEqual(result.snapshots.length, 1);
+    assert.strictEqual(result.snapshots[0].validation_status, 'validated');
+  });
+
+  it('memory-snapshot returns error for missing id', async () => {
+    const result = await sendCommand('memory-snapshot', { id: 99999 });
+    assert.strictEqual(result.ok, false);
+  });
+
+  it('memory-snapshot retrieves snapshot with lineage', async () => {
+    const reqId = db.createRequest('memory snapshot CLI test request');
+    const snap = db.createProjectMemorySnapshot({
+      project_context_key: 'ctx-cli-lineage',
+      snapshot_payload: { data: 'lineage' },
+      request_id: reqId,
+    });
+    const result = await sendCommand('memory-snapshot', { id: snap.id, include_lineage: true });
+    assert.strictEqual(result.ok, true);
+    assert.strictEqual(result.snapshot.id, snap.id);
+    assert.ok(Array.isArray(result.lineage));
+    assert.ok(result.lineage.length >= 1);
+    assert.ok(result.lineage.every(l => l.snapshot_id === snap.id));
+  });
+
+  it('memory-insights returns ok with empty list when no artifacts', async () => {
+    const result = await sendCommand('memory-insights', {});
+    assert.strictEqual(result.ok, true);
+    assert.ok(Array.isArray(result.artifacts));
+    assert.strictEqual(result.artifacts.length, 0);
+  });
+
+  it('memory-insights filters by min_relevance_score', async () => {
+    db.createInsightArtifact({
+      project_context_key: 'ctx-cli-rel',
+      artifact_payload: { c: 'high' },
+      relevance_score: 0.9,
+    });
+    db.createInsightArtifact({
+      project_context_key: 'ctx-cli-rel',
+      artifact_payload: { c: 'low' },
+      relevance_score: 0.2,
+    });
+    const result = await sendCommand('memory-insights', { project_context_key: 'ctx-cli-rel', min_relevance_score: 0.5 });
+    assert.strictEqual(result.ok, true);
+    assert.strictEqual(result.artifacts.length, 1);
+    assert.ok(result.artifacts[0].relevance_score >= 0.5);
+  });
+
+  it('memory-insight returns artifact with lineage links', async () => {
+    const snap = db.createProjectMemorySnapshot({
+      project_context_key: 'ctx-cli-ia-lineage',
+      snapshot_payload: { d: 'snap' },
+    });
+    const artifact = db.createInsightArtifact({
+      project_context_key: 'ctx-cli-ia-lineage',
+      snapshot_id: snap.id,
+      artifact_payload: { insight: 'test' },
+    });
+    const result = await sendCommand('memory-insight', { id: artifact.id, include_lineage: true });
+    assert.strictEqual(result.ok, true);
+    assert.strictEqual(result.artifact.id, artifact.id);
+    assert.ok(Array.isArray(result.lineage));
+    assert.ok(result.lineage.some(l => l.insight_artifact_id === artifact.id));
+  });
+
+  it('memory-lineage returns empty list when no links', async () => {
+    const result = await sendCommand('memory-lineage', {});
+    assert.strictEqual(result.ok, true);
+    assert.ok(Array.isArray(result.links));
+    assert.strictEqual(result.links.length, 0);
+  });
+
+  it('memory-lineage filters by lineage_type', async () => {
+    const reqId = db.createRequest('lineage type filter test');
+    db.createProjectMemorySnapshot({
+      project_context_key: 'ctx-cli-ltype',
+      snapshot_payload: { d: 'ltype' },
+      request_id: reqId,
+      lineage_type: 'origin',
+    });
+    const result = await sendCommand('memory-lineage', { request_id: reqId, lineage_type: 'origin' });
+    assert.strictEqual(result.ok, true);
+    assert.ok(result.links.length >= 1);
+    assert.ok(result.links.every(l => l.lineage_type === 'origin'));
+  });
+});
