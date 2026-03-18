@@ -255,6 +255,9 @@ chmod +x "$MAC10_BIN"
 MAC10_CLI="$CLAUDE_DIR/scripts/mac10-codex10"
 CODEX10_CLI="$CLAUDE_DIR/scripts/codex10"
 MAC10_COMPAT="$CLAUDE_DIR/scripts/mac10"
+CLAUDE_COMPAT="$CLAUDE_DIR/scripts/mac10"
+CLAUDE_CODEX10="$CLAUDE_DIR/scripts/codex10"
+CLAUDE_NAMESPACED="$CLAUDE_DIR/scripts/mac10-codex10"
 
 # Create a namespaced wrapper script in the project
 cat > "$MAC10_CLI" << 'WRAPPER'
@@ -277,16 +280,115 @@ chmod +x "$MAC10_CLI"
 cp "$MAC10_CLI" "$CODEX10_CLI"
 chmod +x "$CODEX10_CLI"
 
-# Compatibility shim: many prompts still invoke `mac10` directly.
-# Keep that command namespaced to codex10 inside this project.
-cp "$MAC10_CLI" "$MAC10_COMPAT"
+# Compatibility compat shim: mac10 command — always uses codex10 namespace, never defaults to mac10
+cat > "$MAC10_COMPAT" <<'WRAPPER'
+#!/usr/bin/env bash
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+MAC10_BIN="PLACEHOLDER_MAC10_BIN"
+if [ ! -f "$MAC10_BIN" ]; then
+  echo "ERROR: mac10 CLI not found at $MAC10_BIN" >&2
+  echo "  Has the setup-agents repo moved? Re-run setup.sh to fix." >&2
+  exit 1
+fi
+export MAC10_NAMESPACE="codex10"
+exec node "$MAC10_BIN" "$@"
+WRAPPER
+sed -i "s|PLACEHOLDER_MAC10_BIN|$MAC10_BIN|" "$MAC10_COMPAT"
 chmod +x "$MAC10_COMPAT"
+
+# Claude-side wrappers: use the namespaced mac10-codex10 path (enforces codex10 namespace)
+# CLAUDE_COMPAT uses MAC10_CLI (hardcoded codex10), not the plain compat shim
+cp "$MAC10_CLI" "$CLAUDE_COMPAT"
+cp "$CODEX10_CLI" "$CLAUDE_CODEX10"
+cp "$MAC10_CLI" "$CLAUDE_NAMESPACED"
+chmod +x "$CLAUDE_COMPAT" "$CLAUDE_CODEX10" "$CLAUDE_NAMESPACED"
 
 # Add to PATH for this project's agents
 export PATH="$SCRIPT_DIR/coordinator/bin:$CLAUDE_DIR/scripts:$PATH"
 export MAC10_NAMESPACE="$NAMESPACE"
 
 echo "  codex10 wrapper ready: $CODEX10_CLI"
+
+# Global wrappers in ~/.local/bin for shell-wide access
+LOCAL_BIN_DIR="$HOME/.local/bin"
+mkdir -p "$LOCAL_BIN_DIR"
+
+cat > "$LOCAL_BIN_DIR/mac10-codex10" <<'WRAPPER'
+#!/usr/bin/env bash
+set -euo pipefail
+TARGET="PLACEHOLDER_CODEX10_WRAPPER"
+if [ ! -x "$TARGET" ]; then
+  echo "ERROR: codex10 wrapper missing at $TARGET" >&2
+  echo "  Re-run setup.sh to refresh wrappers." >&2
+  exit 1
+fi
+exec "$TARGET" "$@"
+WRAPPER
+sed -i "s|PLACEHOLDER_CODEX10_WRAPPER|$CODEX10_CLI|" "$LOCAL_BIN_DIR/mac10-codex10"
+chmod +x "$LOCAL_BIN_DIR/mac10-codex10"
+
+cat > "$LOCAL_BIN_DIR/mac10-claude10" <<'WRAPPER'
+#!/usr/bin/env bash
+set -euo pipefail
+TARGET="PLACEHOLDER_CLAUDE10_WRAPPER"
+if [ ! -x "$TARGET" ]; then
+  echo "ERROR: claude10 wrapper missing at $TARGET" >&2
+  echo "  Re-run setup.sh to refresh wrappers." >&2
+  exit 1
+fi
+exec "$TARGET" "$@"
+WRAPPER
+# Point mac10-claude10 to the namespaced codex10 wrapper — enforces codex10 namespace
+sed -i "s|PLACEHOLDER_CLAUDE10_WRAPPER|$CLAUDE_NAMESPACED|" "$LOCAL_BIN_DIR/mac10-claude10"
+chmod +x "$LOCAL_BIN_DIR/mac10-claude10"
+
+cat > "$LOCAL_BIN_DIR/mac10" <<'WRAPPER'
+#!/usr/bin/env bash
+set -euo pipefail
+
+pick_by_cwd() {
+  local dir="$PWD"
+  while [ "$dir" != "/" ]; do
+    if [ -x "$dir/.claude/scripts/mac10-codex10" ]; then
+      echo "$dir/.claude/scripts/mac10-codex10"
+      return 0
+    fi
+    if [ -x "$dir/.claude/scripts/mac10" ]; then
+      echo "$dir/.claude/scripts/mac10"
+      return 0
+    fi
+    dir="$(dirname "$dir")"
+  done
+  return 1
+}
+
+if [ "${MAC10_TARGET:-}" = "codex10" ]; then
+  exec mac10-codex10 "$@"
+fi
+if [ "${MAC10_TARGET:-}" = "claude10" ]; then
+  exec mac10-claude10 "$@"
+fi
+
+if target="$(pick_by_cwd)"; then
+  exec "$target" "$@"
+fi
+
+if command -v mac10-codex10 >/dev/null 2>&1 && ! command -v mac10-claude10 >/dev/null 2>&1; then
+  exec mac10-codex10 "$@"
+fi
+if command -v mac10-claude10 >/dev/null 2>&1 && ! command -v mac10-codex10 >/dev/null 2>&1; then
+  exec mac10-claude10 "$@"
+fi
+
+echo "ERROR: mac10 target is ambiguous outside a project directory." >&2
+echo "  Use one of:" >&2
+echo "    mac10-codex10 <command>" >&2
+echo "    mac10-claude10 <command>" >&2
+echo "  Or set MAC10_TARGET=codex10|claude10." >&2
+exit 1
+WRAPPER
+chmod +x "$LOCAL_BIN_DIR/mac10"
+echo "  Global wrappers ready: $LOCAL_BIN_DIR/mac10, $LOCAL_BIN_DIR/mac10-codex10, $LOCAL_BIN_DIR/mac10-claude10"
 
 # --- Create worktrees ---
 
