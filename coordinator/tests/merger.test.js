@@ -640,3 +640,91 @@ describe('Overlap validation command selection', () => {
     assert.ok(commands.includes('npm run lint:task'));
   });
 });
+
+describe('tryRebase stash guard', () => {
+  function setupStashTestCli(statusOutput) {
+    const binDir = path.join(tmpDir, 'mock-bin');
+    const commandLog = path.join(tmpDir, 'stash-cli.log');
+    fs.mkdirSync(binDir, { recursive: true });
+
+    const gitScript = [
+      '#!/usr/bin/env bash',
+      'set -eu',
+      `echo "git $*" >> "${commandLog}"`,
+      'if [ "$1" = "status" ] && [ "${2:-}" = "--porcelain" ]; then',
+      `  printf '%s' '${statusOutput}'`,
+      '  exit 0',
+      'fi',
+      'exit 0',
+    ].join('\n');
+    fs.writeFileSync(path.join(binDir, 'git'), gitScript, { mode: 0o755 });
+
+    process.env.PATH = `${binDir}${path.delimiter}${originalPath}`;
+    return { commandLog };
+  }
+
+  function seedStashTestEntry() {
+    const fakeWtPath = path.join(tmpDir, '.worktrees', 'wt-1');
+    fs.mkdirSync(fakeWtPath, { recursive: true });
+    db.registerWorker(1, fakeWtPath, 'agent-1');
+
+    const reqId = db.createRequest('Stash test feature');
+    const taskId = db.createTask({ request_id: reqId, subject: 'Stash task', description: 'Test stash guard' });
+    db.updateTask(taskId, { assigned_to: 1 });
+
+    return {
+      id: 999,
+      request_id: reqId,
+      task_id: taskId,
+      pr_url: 'https://github.com/org/repo/pull/99',
+      branch: 'agent-1',
+      created_at: new Date().toISOString(),
+    };
+  }
+
+  it('should stash unstaged tracked changes before rebase and pop after', () => {
+    const { commandLog } = setupStashTestCli(' M tracked-file.js');
+    const entry = seedStashTestEntry();
+
+    const result = merger.tryRebase(entry, tmpDir);
+
+    assert.strictEqual(result.success, true);
+    const lines = fs.readFileSync(commandLog, 'utf8').split('\n');
+    const stashPushIdx = lines.findIndex((l) => l.includes('stash push') && l.includes('--include-untracked'));
+    const rebaseIdx = lines.findIndex((l) => l.includes('rebase origin/main'));
+    const stashPopIdx = lines.findIndex((l) => l.includes('stash pop'));
+
+    assert.ok(stashPushIdx >= 0, 'stash push --include-untracked should be called');
+    assert.ok(rebaseIdx >= 0, 'git rebase should be called');
+    assert.ok(stashPopIdx >= 0, 'stash pop should be called');
+    assert.ok(stashPushIdx < rebaseIdx, 'stash push should occur before rebase');
+    assert.ok(stashPopIdx > rebaseIdx, 'stash pop should occur after rebase');
+
+    const stashLogs = readCoordinatorLogEntries('stash_recovery');
+    assert.ok(stashLogs.length > 0, 'stash_recovery log should be emitted');
+    assert.strictEqual(stashLogs[0].reason_code, 'stash_recovery');
+    assert.strictEqual(stashLogs[0].branch, 'agent-1');
+    assert.strictEqual(stashLogs[0].reason, 'dirty_worktree_before_rebase');
+  });
+
+  it('should stash untracked files before rebase and pop after', () => {
+    const { commandLog } = setupStashTestCli('?? newfile.txt');
+    const entry = seedStashTestEntry();
+
+    const result = merger.tryRebase(entry, tmpDir);
+
+    assert.strictEqual(result.success, true);
+    const lines = fs.readFileSync(commandLog, 'utf8').split('\n');
+    const stashPushIdx = lines.findIndex((l) => l.includes('stash push') && l.includes('--include-untracked'));
+    const rebaseIdx = lines.findIndex((l) => l.includes('rebase origin/main'));
+    const stashPopIdx = lines.findIndex((l) => l.includes('stash pop'));
+
+    assert.ok(stashPushIdx >= 0, 'stash push --include-untracked should be called for untracked files');
+    assert.ok(stashPushIdx < rebaseIdx, 'stash push should occur before rebase');
+    assert.ok(stashPopIdx > rebaseIdx, 'stash pop should occur after rebase');
+
+    const stashLogs = readCoordinatorLogEntries('stash_recovery');
+    assert.ok(stashLogs.length > 0, 'stash_recovery log should be emitted for untracked files');
+    assert.strictEqual(stashLogs[0].reason_code, 'stash_recovery');
+  });
+});
