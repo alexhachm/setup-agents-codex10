@@ -171,9 +171,26 @@ function tick(projectDir) {
     }
 
     // Heartbeat freshness check
-    if (worker.last_heartbeat && (worker.status === 'running' || worker.status === 'busy')) {
-      const staleSec = (now - new Date(worker.last_heartbeat).getTime()) / 1000;
-      escalate(worker, staleSec, projectDir);
+    if (worker.status === 'running' || worker.status === 'busy') {
+      if (worker.last_heartbeat) {
+        const staleSec = (now - new Date(worker.last_heartbeat).getTime()) / 1000;
+        escalate(worker, staleSec, projectDir);
+      }
+    } else if (worker.status === 'assigned') {
+      // Escalate assigned workers through warn/nudge/triage using the freshest
+      // available timestamp (last_heartbeat → launched_at → created_at).
+      // Recovery at the terminate threshold is handled by recoverOrphanTasks
+      // below, preserving existing recovery semantics.
+      const freshestTs = worker.last_heartbeat || worker.launched_at || worker.created_at;
+      if (freshestTs) {
+        const staleSec = getAgeSeconds(now, freshestTs, {
+          worker_id: worker.id,
+          scope: 'assigned_heartbeat_freshness',
+        });
+        if (staleSec !== null && staleSec < getThresholds().terminate) {
+          escalate(worker, staleSec, projectDir);
+        }
+      }
     }
 
     // Check completed_task workers that haven't been reset
