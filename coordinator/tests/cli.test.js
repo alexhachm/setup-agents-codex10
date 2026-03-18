@@ -3918,11 +3918,7 @@ describe('CLI Server', () => {
     db.setConfig('flagship_budget_remaining', ' 35 ');
     db.setConfig('flagship_budget_threshold', '20');
 
-    const web = webServer.start(tmpDir, 0);
-    await new Promise((resolve, reject) => {
-      web.once('listening', resolve);
-      web.once('error', reject);
-    });
+    const web = await webServer.start(tmpDir, 0);
     const webPort = web.address().port;
 
     try {
@@ -3952,11 +3948,7 @@ describe('CLI Server', () => {
     db.setConfig('routing_budget_flagship_remaining', '8');
     db.setConfig('routing_budget_flagship_threshold', '10');
 
-    const web = webServer.start(tmpDir, 0);
-    await new Promise((resolve, reject) => {
-      web.once('listening', resolve);
-      web.once('error', reject);
-    });
+    const web = await webServer.start(tmpDir, 0);
     const webPort = web.address().port;
 
     try {
@@ -3981,11 +3973,7 @@ describe('CLI Server', () => {
     db.setConfig('routing_budget_flagship_remaining', '50');
     db.setConfig('routing_budget_flagship_threshold', '10');
 
-    const web = webServer.start(tmpDir, 0);
-    await new Promise((resolve, reject) => {
-      web.once('listening', resolve);
-      web.once('error', reject);
-    });
+    const web = await webServer.start(tmpDir, 0);
     const webPort = web.address().port;
 
     try {
@@ -4030,11 +4018,7 @@ describe('CLI Server', () => {
       };
     };
 
-    const web = webServer.start(tmpDir, 0);
-    await new Promise((resolve, reject) => {
-      web.once('listening', resolve);
-      web.once('error', reject);
-    });
+    const web = await webServer.start(tmpDir, 0);
     const webPort = web.address().port;
 
     try {
@@ -4066,11 +4050,7 @@ describe('CLI Server', () => {
     const originalBurnRateHelper = db.getUsageCostBurnRate;
     delete db.getUsageCostBurnRate;
 
-    const web = webServer.start(tmpDir, 0);
-    await new Promise((resolve, reject) => {
-      web.once('listening', resolve);
-      web.once('error', reject);
-    });
+    const web = await webServer.start(tmpDir, 0);
     const webPort = web.address().port;
 
     try {

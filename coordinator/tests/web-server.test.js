@@ -19,11 +19,7 @@ beforeEach(async () => {
   fs.mkdirSync(path.join(tmpDir, '.claude', 'state'), { recursive: true });
   db.init(tmpDir);
 
-  server = webServer.start(tmpDir, 0);
-  await new Promise((resolve, reject) => {
-    server.once('listening', resolve);
-    server.once('error', reject);
-  });
+  server = await webServer.start(tmpDir, 0);
   port = server.address().port;
 });
 

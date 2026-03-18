@@ -1946,20 +1946,25 @@ function start(projectDir, port = 3100, scriptDir = null, handlers = {}) {
     });
   }, 30000);
 
-  server.on('error', (err) => {
-    if (err.code === 'EADDRINUSE') {
-      console.error(`WARNING: Port ${port} already in use — web dashboard not started. Coordinator continues without GUI.`);
-      db.log('coordinator', 'web_server_port_conflict', { port, error: err.message });
-    } else {
-      console.error(`Web server error: ${err.message}`);
-    }
-  });
+  return new Promise((resolve, reject) => {
+    server.once('error', (err) => {
+      // Bind failed — clean up so the module is reusable and callers can skip registration
+      if (broadcastIntervalId) { clearInterval(broadcastIntervalId); broadcastIntervalId = null; }
+      if (pingIntervalId) { clearInterval(pingIntervalId); pingIntervalId = null; }
+      if (wss) { wss.close(); wss = null; }
+      if (server) { server.close(); server = null; }
+      reject(err);
+    });
 
-  server.listen(port, '127.0.0.1', () => {
-    db.log('coordinator', 'web_server_started', { port, host: '127.0.0.1' });
+    server.listen(port, '127.0.0.1', () => {
+      // Successful bind — swap in a general post-startup error handler
+      server.on('error', (err) => {
+        console.error(`Web server error: ${err.message}`);
+      });
+      db.log('coordinator', 'web_server_started', { port, host: '127.0.0.1' });
+      resolve(server);
+    });
   });
-
-  return server;
 }
 
 function broadcast(data) {

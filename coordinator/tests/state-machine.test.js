@@ -2,12 +2,15 @@
 
 const { describe, it, beforeEach, afterEach } = require('node:test');
 const assert = require('node:assert');
+const net = require('net');
 const path = require('path');
 const fs = require('fs');
 const os = require('os');
 
 const db = require('../src/db');
 const merger = require('../src/merger');
+const webServer = require('../src/web-server');
+const instanceRegistry = require('../src/instance-registry');
 
 let tmpDir;
 
@@ -771,5 +774,38 @@ describe('Config', () => {
   it('should have default config values', () => {
     assert.strictEqual(db.getConfig('max_workers'), '8');
     assert.strictEqual(db.getConfig('heartbeat_timeout_s'), '60');
+  });
+});
+
+describe('Web server port-collision startup', () => {
+  afterEach(() => {
+    webServer.stop();
+  });
+
+  it('should reject on EADDRINUSE and not create a registry entry', async () => {
+    // Pre-bind a random port so it is unavailable
+    const blockingServer = net.createServer();
+    await new Promise((resolve) => blockingServer.listen(0, '127.0.0.1', resolve));
+    const { port } = blockingServer.address();
+
+    let startErr = null;
+    try {
+      await webServer.start(tmpDir, port, null, {});
+    } catch (err) {
+      startErr = err;
+    } finally {
+      await new Promise((resolve) => blockingServer.close(resolve));
+    }
+
+    assert.ok(startErr, 'start() should reject when port is already in use');
+    assert.strictEqual(startErr.code, 'EADDRINUSE');
+
+    // Verify no registry entry was created for this port
+    const instances = instanceRegistry.list();
+    assert.strictEqual(
+      instances.filter((i) => i.port === port).length,
+      0,
+      'port-collision startup must not create a registry entry'
+    );
   });
 });

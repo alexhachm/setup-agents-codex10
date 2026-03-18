@@ -285,24 +285,41 @@ startResearchPlanner();
 // dashboard at /api/instances can manage them all from one place.
 (async () => {
   const port = parseInt(process.env.MAC10_PORT) || await instanceRegistry.acquirePort(3100);
-  webServer.start(projectDir, port, scriptDir, handlers);
-  console.log(`Web dashboard: http://localhost:${port}`);
 
-  instanceRegistry.register({
-    projectDir,
-    port,
-    pid: process.pid,
-    name: path.basename(projectDir),
-    namespace,
-    tmuxSession: tmux.SESSION,
-    startedAt: new Date().toISOString(),
-  });
-  console.log('Instance registered in shared registry.');
+  // Gate registration on successful port bind — a failed bind must not create a ghost entry.
+  let webServerBound = false;
+  try {
+    await webServer.start(projectDir, port, scriptDir, handlers);
+    webServerBound = true;
+    console.log(`Web dashboard: http://localhost:${port}`);
+  } catch (err) {
+    if (err.code === 'EADDRINUSE') {
+      console.error(`WARNING: Port ${port} already in use — web dashboard not started. Coordinator continues without GUI.`);
+    } else {
+      console.error(`Web server error: ${err.message}`);
+    }
+    db.log('coordinator', 'web_server_port_conflict', { port, error: err.message });
+  }
+
+  if (webServerBound) {
+    instanceRegistry.register({
+      projectDir,
+      port,
+      pid: process.pid,
+      name: path.basename(projectDir),
+      namespace,
+      tmuxSession: tmux.SESSION,
+      startedAt: new Date().toISOString(),
+    });
+    console.log('Instance registered in shared registry.');
+  }
 
   // Re-wire shutdown to know the port
   function shutdown() {
     console.log('Shutting down...');
-    instanceRegistry.deregister(port);
+    if (webServerBound) {
+      instanceRegistry.deregister(port);
+    }
     stopResearchPlanner();
     allocator.stop();
     watchdog.stop();
