@@ -45,7 +45,10 @@ const ASSIGNMENT_PRIORITY_ENABLED_CONFIG_KEY = 'prioritize_assignment_over_merge
 const ASSIGNMENT_PRIORITY_MAX_CONSECUTIVE_DEFERRALS_CONFIG_KEY = 'assignment_priority_merge_max_deferrals';
 const ASSIGNMENT_PRIORITY_MAX_DEFER_AGE_MS_CONFIG_KEY = 'assignment_priority_merge_max_age_ms';
 const ASSIGNMENT_PRIORITY_ALLOCATOR_LOOP_STALE_MS_CONFIG_KEY = 'assignment_priority_allocator_loop_stale_ms';
-const ALLOCATOR_LOOP_PROMPT_RE = /\/allocate-loop\b/i;
+// Matches allocator loops regardless of whether the prompt is the short slash-command
+// form ("/allocate-loop") or the full expanded skill content (which contains role
+// markers like "Master-3", "Allocator agent", and mailbox cues like "mac10 inbox allocator").
+const ALLOCATOR_LOOP_PROMPT_RE = /\/allocate-loop\b|\bMaster-3\b|\bAllocator\s+agent\b|\bmac10\s+inbox\s+allocator\b/i;
 
 function parseBooleanConfig(value) {
   if (typeof value === 'boolean') return value;

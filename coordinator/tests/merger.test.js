@@ -398,6 +398,57 @@ describe('Assignment-priority merge deferral', () => {
     assert.strictEqual(starvationEscapeLogs.length, 0);
   });
 
+  it('should detect allocator loop from real expanded prompt shape and bypass deferral on stale heartbeat', () => {
+    // Regression: when the loop prompt is the full expanded allocate-loop skill content
+    // (not the short "/allocate-loop" command), stale-heartbeat detection must still fire.
+    const { readyTaskId, mergeId } = seedAssignmentPriorityMergeTask();
+
+    db.setConfig('prioritize_assignment_over_merge', 'true');
+    db.setConfig('assignment_priority_merge_max_deferrals', '50');
+    db.setConfig('assignment_priority_merge_max_age_ms', '86400000');
+    db.setConfig('assignment_priority_allocator_loop_stale_ms', '120000');
+
+    // Simulate the real prompt shape: full expanded skill content that contains
+    // role markers but NOT the "/allocate-loop" slash-command literal.
+    const realPromptShape = [
+      '# Master-3 Allocator Loop (mac10)',
+      '',
+      'You are the Allocator agent (Master-3) in the mac10 multi-agent system.',
+      'You match ready tasks to idle workers using domain-affinity rules.',
+      '',
+      '## Signaling',
+      'Use `mac10 inbox allocator --block` for ALL inter-agent communication.',
+    ].join('\n');
+
+    const staleHeartbeat = new Date(Date.now() - 10 * 60 * 1000).toISOString();
+    const allocatorLoopId = db.createLoop(realPromptShape);
+    db.updateLoop(allocatorLoopId, { last_heartbeat: staleHeartbeat });
+
+    let mergeAttempts = 0;
+    merger.processQueue(tmpDir, () => {
+      mergeAttempts += 1;
+      return { success: true };
+    });
+
+    const mergeAfterPass = db.getDb().prepare('SELECT status FROM merge_queue WHERE id = ?').get(mergeId);
+    assert.strictEqual(mergeAttempts, 1, 'merge should proceed (stale allocator loop should not block)');
+    assert.strictEqual(mergeAfterPass.status, 'merged');
+
+    const deferredLogs = readCoordinatorLogEntries('merge_deferred_assignment_priority');
+    assert.strictEqual(deferredLogs.length, 0);
+
+    const starvationEscapeLogs = readCoordinatorLogEntries('merge_assignment_priority_starvation_escape');
+    assert.strictEqual(starvationEscapeLogs.length, 1);
+    assert.strictEqual(starvationEscapeLogs[0].merge_id, mergeId);
+    assert.strictEqual(starvationEscapeLogs[0].breached_by_allocator_loop_stale, true);
+    assert.strictEqual(starvationEscapeLogs[0].allocator_loop_present, true);
+    assert.strictEqual(starvationEscapeLogs[0].allocator_loop_id, allocatorLoopId);
+    assert.ok(starvationEscapeLogs[0].allocator_loop_heartbeat_age_ms >= 120000);
+
+    const readyTaskAfterMerge = db.getTask(readyTaskId);
+    assert.strictEqual(readyTaskAfterMerge.status, 'ready');
+  });
+
   it('should bypass deferral when allocator loop heartbeat is stale and ready tasks exist', () => {
     const { readyTaskId, mergeId } = seedAssignmentPriorityMergeTask();
 
