@@ -317,3 +317,59 @@ describe('Web status telemetry contract', () => {
     assert.deepStrictEqual(requestTask.usage, usagePayload);
   });
 });
+
+describe('Batch orchestration endpoints', () => {
+  it('GET /api/batch/config returns default batch config', async () => {
+    const result = await requestJson('/api/batch/config');
+    assert.strictEqual(result.status, 200);
+    assert.ok(typeof result.body.max_size === 'number' && result.body.max_size > 0);
+    assert.ok(typeof result.body.timeout_ms === 'number' && result.body.timeout_ms > 0);
+    assert.ok(typeof result.body.candidate_limit === 'number' && result.body.candidate_limit > 0);
+    assert.ok(typeof result.body.planner_interval_ms === 'number' && result.body.planner_interval_ms > 0);
+  });
+
+  it('POST /api/batch/config saves and reflects new values', async () => {
+    const postResult = await postJson('/api/batch/config', { max_size: 8, timeout_ms: 60000, candidate_limit: 50 });
+    assert.strictEqual(postResult.status, 200);
+    assert.strictEqual(postResult.body.ok, true);
+
+    const getResult = await requestJson('/api/batch/config');
+    assert.strictEqual(getResult.status, 200);
+    assert.strictEqual(getResult.body.max_size, 8);
+    assert.strictEqual(getResult.body.timeout_ms, 60000);
+    assert.strictEqual(getResult.body.candidate_limit, 50);
+  });
+
+  it('POST /api/batch/config rejects invalid max_size', async () => {
+    const result = await postJson('/api/batch/config', { max_size: 0 });
+    assert.strictEqual(result.status, 400);
+    assert.strictEqual(result.body.ok, false);
+    assert.ok(typeof result.body.error === 'string');
+  });
+
+  it('POST /api/batch/config rejects invalid timeout_ms', async () => {
+    const result = await postJson('/api/batch/config', { timeout_ms: 999 });
+    assert.strictEqual(result.status, 400);
+    assert.strictEqual(result.body.ok, false);
+  });
+
+  it('GET /api/batch/status returns observability fields', async () => {
+    const result = await requestJson('/api/batch/status');
+    assert.strictEqual(result.status, 200);
+    assert.ok(typeof result.body.queue_depth === 'number');
+    assert.ok(typeof result.body.in_flight_batches === 'number');
+    assert.ok(typeof result.body.in_flight_stages === 'number');
+    assert.ok(typeof result.body.partial_failure_count === 'number');
+    assert.ok(typeof result.body.completed_count === 'number');
+    assert.ok(typeof result.body.dedupe_hit_rate_pct === 'number');
+    assert.ok(Array.isArray(result.body.recent_batches));
+    assert.ok(Array.isArray(result.body.fanout_by_request));
+  });
+
+  it('GET /api/status includes batch_status in state payload', async () => {
+    const result = await requestJson('/api/status');
+    assert.strictEqual(result.status, 200);
+    assert.ok(result.body.batch_status && typeof result.body.batch_status === 'object');
+    assert.ok(typeof result.body.batch_status.queue_depth === 'number');
+  });
+});
