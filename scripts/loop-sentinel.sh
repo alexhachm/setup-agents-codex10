@@ -120,43 +120,70 @@ while true; do
     exit 0
   fi
 
-  # Pre-check: skip Codex spawn if requests are still in-flight
-  ACTIVE_COUNT=$(
-    "$MAC10_CMD" loop-requests "$LOOP_ID" --json 2>/dev/null | \
-      node -e '
-        const fs = require("fs");
-        const active = new Set(["pending", "triaging", "executing_tier1", "decomposed", "in_progress", "integrating"]);
-        try {
-          const payload = JSON.parse(fs.readFileSync(0, "utf8") || "{}");
-          const requests = Array.isArray(payload?.requests)
-            ? payload.requests
-            : Array.isArray(payload?.data?.requests)
-              ? payload.data.requests
-              : Array.isArray(payload?.data?.rows)
-                ? payload.data.rows
-                : Array.isArray(payload?.rows)
-                  ? payload.rows
-                  : Array.isArray(payload?.data)
-                  ? payload.data
-                  : Array.isArray(payload)
-                    ? payload
-                    : [];
-          const count = requests.filter((r) => {
-            const status = typeof r?.status === "string" ? r.status : "";
-            return active.has(status.trim().toLowerCase());
-          }).length;
-          process.stdout.write(String(count));
-        } catch (_) {
-          process.stdout.write("0");
+  # Pre-check: skip Codex spawn if requests are still in-flight (fail-closed)
+  LOOP_REQUESTS_STATUS=0
+  LOOP_REQUESTS_JSON=$("$MAC10_CMD" loop-requests "$LOOP_ID" --json 2>/dev/null) || LOOP_REQUESTS_STATUS=$?
+  if [ "$LOOP_REQUESTS_STATUS" -ne 0 ]; then
+    ACTIVE_COUNT="error:request_count_unavailable"
+  elif [ -z "${LOOP_REQUESTS_JSON//[[:space:]]/}" ]; then
+    ACTIVE_COUNT="error:empty_response"
+  elif ACTIVE_COUNT=$(
+    printf '%s' "$LOOP_REQUESTS_JSON" | node -e '
+      const fs = require("fs");
+      const active = new Set(["pending", "triaging", "executing_tier1", "decomposed", "assigned", "in_progress", "integrating"]);
+      const raw = fs.readFileSync(0, "utf8");
+      if (!raw.trim()) process.exit(2);
+      try {
+        const payload = JSON.parse(raw);
+        const candidates = [
+          payload?.requests,
+          payload?.data?.requests,
+          payload?.data?.rows,
+          payload?.rows,
+          Array.isArray(payload?.data) ? payload.data : null,
+          Array.isArray(payload) ? payload : null,
+        ];
+        const hasArrayCandidate = candidates.some((candidate) => Array.isArray(candidate));
+        if (!hasArrayCandidate) process.exit(3);
+        let requests = [];
+        for (const candidate of candidates) {
+          if (Array.isArray(candidate) && candidate.length > 0) {
+            requests = candidate;
+            break;
+          }
         }
-      ' || true
-  )
-  ACTIVE_COUNT="${ACTIVE_COUNT:-0}"
+        if (requests.length === 0) {
+          const fallback = candidates.find((candidate) => Array.isArray(candidate));
+          requests = Array.isArray(fallback) ? fallback : [];
+        }
+        const count = requests.filter((request) => {
+          const status = typeof request?.status === "string" ? request.status : "";
+          return active.has(status.trim().toLowerCase());
+        }).length;
+        process.stdout.write(String(count));
+      } catch (_) {
+        process.exit(1);
+      }
+    '
+  ); then
+    if [[ ! "$ACTIVE_COUNT" =~ ^[0-9]+$ ]]; then
+      ACTIVE_COUNT="error:invalid_count"
+    fi
+  else
+    ACTIVE_COUNT="error:json_parse_failed"
+  fi
+  if [[ "$ACTIVE_COUNT" == error:* ]]; then
+    echo "[loop-sentinel-$LOOP_ID] Active-request precheck failed ($ACTIVE_COUNT); assuming requests are active and backing off (${PRECHECK_BACKOFF}s)."
+    sleep_with_loop_heartbeats "$PRECHECK_BACKOFF"
+    PRECHECK_BACKOFF=$((PRECHECK_BACKOFF * 2))
+    [ "$PRECHECK_BACKOFF" -gt 600 ] && PRECHECK_BACKOFF=600
+    continue
+  fi
   if [ "$ACTIVE_COUNT" -gt 0 ]; then
     echo "[loop-sentinel-$LOOP_ID] $ACTIVE_COUNT request(s) still active, skipping spawn (backoff=${PRECHECK_BACKOFF}s)"
     sleep_with_loop_heartbeats "$PRECHECK_BACKOFF"
     PRECHECK_BACKOFF=$((PRECHECK_BACKOFF * 2))
-    [ "$PRECHECK_BACKOFF" -gt 120 ] && PRECHECK_BACKOFF=120
+    [ "$PRECHECK_BACKOFF" -gt 600 ] && PRECHECK_BACKOFF=600
     continue
   fi
 
