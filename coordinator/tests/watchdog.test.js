@@ -653,6 +653,119 @@ describe('Non-tmux worker liveness', () => {
   });
 });
 
+describe('Stale integration completion gating', () => {
+  it('does not complete request when all merges are merged but a sibling task is still assigned', () => {
+    const requestId = db.createRequest('Gated integration — sibling in progress');
+    db.updateRequest(requestId, { status: 'integrating' });
+
+    const mergeTaskId = db.createTask({
+      request_id: requestId,
+      subject: 'Merge task',
+      description: 'PR submitted and merged',
+      domain: 'coordinator-routing',
+      tier: 2,
+    });
+    db.updateTask(mergeTaskId, { status: 'completed' });
+
+    const siblingTaskId = db.createTask({
+      request_id: requestId,
+      subject: 'Sibling task',
+      description: 'Still running — should gate completion',
+      domain: 'coordinator-routing',
+      tier: 2,
+    });
+    db.updateTask(siblingTaskId, { status: 'assigned' });
+
+    const enqueueResult = db.enqueueMerge({
+      request_id: requestId,
+      task_id: mergeTaskId,
+      pr_url: 'https://example.com/pr/gated',
+      branch: 'agent-3/gated-test',
+      priority: 0,
+    });
+    db.updateMerge(enqueueResult.lastInsertRowid, {
+      status: 'merged',
+      merged_at: new Date().toISOString(),
+    });
+
+    tick(tmpDir);
+
+    const request = db.getRequest(requestId);
+    assert.ok(
+      ['integrating', 'in_progress'].includes(request.status),
+      `Expected integrating/in_progress but got: ${request.status}`
+    );
+
+    const completionMail = db.checkMail('master-1', false).filter(
+      (mail) => mail.type === 'request_completed' && mail.payload.request_id === requestId
+    );
+    assert.strictEqual(completionMail.length, 0, 'Should not send request_completed mail while sibling task is non-terminal');
+
+    const gatedLog = db.getLog(50, 'coordinator')
+      .filter((entry) => entry.action === 'stale_integration_gated')
+      .map((entry) => JSON.parse(entry.details))
+      .find((entry) => entry.request_id === requestId);
+    assert.ok(gatedLog, 'Should log stale_integration_gated');
+    assert.strictEqual(gatedLog.reason, 'non_terminal_tasks');
+  });
+
+  it('completes request only after the final sibling task reaches terminal success', () => {
+    const requestId = db.createRequest('Gated integration — completes after sibling done');
+    db.updateRequest(requestId, { status: 'integrating' });
+
+    const mergeTaskId = db.createTask({
+      request_id: requestId,
+      subject: 'Merge task',
+      description: 'PR submitted and merged',
+      domain: 'coordinator-routing',
+      tier: 2,
+    });
+    db.updateTask(mergeTaskId, { status: 'completed' });
+
+    const siblingTaskId = db.createTask({
+      request_id: requestId,
+      subject: 'Sibling task',
+      description: 'In progress — gates completion',
+      domain: 'coordinator-routing',
+      tier: 2,
+    });
+    db.updateTask(siblingTaskId, { status: 'in_progress' });
+
+    const enqueueResult = db.enqueueMerge({
+      request_id: requestId,
+      task_id: mergeTaskId,
+      pr_url: 'https://example.com/pr/gated-sibling',
+      branch: 'agent-3/gated-sibling-test',
+      priority: 0,
+    });
+    db.updateMerge(enqueueResult.lastInsertRowid, {
+      status: 'merged',
+      merged_at: new Date().toISOString(),
+    });
+
+    // First tick: sibling still in_progress → should not complete
+    tick(tmpDir);
+    let request = db.getRequest(requestId);
+    assert.ok(
+      ['integrating', 'in_progress'].includes(request.status),
+      `Expected integrating/in_progress on first tick but got: ${request.status}`
+    );
+
+    // Sibling task completes
+    db.updateTask(siblingTaskId, { status: 'completed' });
+
+    // Second tick: all tasks terminal → should now complete
+    tick(tmpDir);
+    request = db.getRequest(requestId);
+    assert.strictEqual(request.status, 'completed');
+
+    const completionMail = db.checkMail('master-1', false).filter(
+      (mail) => mail.type === 'request_completed' && mail.payload.request_id === requestId
+    );
+    assert.ok(completionMail.length >= 1, 'Should send request_completed mail after all tasks done');
+  });
+});
+
 describe('Stale integration recovery', () => {
   it('keeps failed merge requests recoverable while remediation is active or just queued', () => {
     const requestId = db.createRequest('Failed merge remediation');
