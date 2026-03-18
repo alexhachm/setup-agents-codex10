@@ -3,6 +3,7 @@
 const db = require('./db');
 const tmux = require('./tmux');
 const recovery = require('./recovery');
+const insightIngestion = require('./insight-ingestion');
 
 let intervalId = null;
 let lastMailPurge = 0;
@@ -320,6 +321,11 @@ function handleDeath(worker, reason) {
     reason,
     task_id: worker.current_task_id,
   });
+  insightIngestion.ingestWatchdogEvent('worker_death', {
+    worker_id: worker.id,
+    task_id: worker.current_task_id,
+    reason,
+  });
 
   // Reset worker
   db.updateWorker(worker.id, {
@@ -587,6 +593,10 @@ function recoverStaleIntegrations(now, options = {}) {
         request_id: req.id,
         reason: 'all_merged',
       });
+      insightIngestion.ingestWatchdogEvent('stale_integration_recovered', {
+        request_id: req.id,
+        reason: 'all_merged',
+      });
     } else if (hasConflicts) {
       // Case 3: Merge conflicts — wait for allocator to create fix tasks
       // Check if there are active tasks that could be fix tasks from the allocator
@@ -701,6 +711,11 @@ function respawnLoopSentinel(loop, projectDir, options = {}) {
         reason,
         forced_restart: false,
       });
+      insightIngestion.ingestWatchdogEvent('loop_respawn', {
+        loop_id: loop.id,
+        reason,
+        forced_restart: false,
+      });
       return;
     }
 
@@ -713,6 +728,11 @@ function respawnLoopSentinel(loop, projectDir, options = {}) {
       last_heartbeat: new Date().toISOString(),
     });
     db.log('coordinator', 'loop_sentinel_respawned', {
+      loop_id: loop.id,
+      reason,
+      forced_restart: forceRestart,
+    });
+    insightIngestion.ingestWatchdogEvent('loop_respawn', {
       loop_id: loop.id,
       reason,
       forced_restart: forceRestart,
