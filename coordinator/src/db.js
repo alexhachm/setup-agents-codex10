@@ -3516,6 +3516,16 @@ function purgeOldMail(days) {
   return result.changes;
 }
 
+function purgeTerminalMerges(days) {
+  const result = getDb().prepare(
+    `DELETE FROM merge_queue
+     WHERE status IN ('failed', 'conflict')
+       AND request_id IN (SELECT id FROM requests WHERE status IN ('completed', 'failed'))
+       AND updated_at < datetime('now', '-' || ? || ' days')`
+  ).run(days);
+  return result.changes;
+}
+
 function checkMailBlocking(recipient, timeoutMs = 300000, pollMs = 1000, consume = true, filters = {}) {
   const deadline = Date.now() + timeoutMs;
   while (Date.now() < deadline) {
@@ -4231,7 +4241,7 @@ module.exports = {
   recoverStaleDecomposedZeroTaskRequests, checkRequestCompletion,
   reconcileRequestLifecycle, reconcileAllActiveRequests,
   getUsageCostBurnRate, getRequestLatestCompletedTaskCursor, hasRequestCompletedTaskProgressSince,
-  sendMail, checkMail, checkMailBlocking, purgeOldMail,
+  sendMail, checkMail, checkMailBlocking, purgeOldMail, purgeTerminalMerges,
   enqueueMerge, getNextMerge, updateMerge,
   log, getLog,
   getConfig, setConfig,

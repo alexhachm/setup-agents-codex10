@@ -253,6 +253,10 @@ function tick(projectDir) {
     if (purged > 0) {
       db.log('coordinator', 'mail_purged', { count: purged });
     }
+    const mergesPurged = db.purgeTerminalMerges(7);
+    if (mergesPurged > 0) {
+      db.log('coordinator', 'terminal_merges_purged', { count: mergesPurged });
+    }
     // Purge old activity log entries (>30 days)
     const logPurged = db.getDb().prepare(
       "DELETE FROM activity_log WHERE created_at < datetime('now', '-30 days')"
