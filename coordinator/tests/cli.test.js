@@ -658,6 +658,7 @@ describe('CLI Server', () => {
     assert.match(task.result, /Malformed depends_on/i);
   });
 
+
   it('should handle worker task lifecycle', async () => {
     db.registerWorker(1, '/wt-1', 'agent-1');
     const reqId = db.createRequest('Feature');
@@ -2276,7 +2277,6 @@ describe('CLI Server', () => {
     const result = await sendCommand('inbox', {
       recipient: 'architect',
       request_id: 'req-filter-match',
-      'payload.request_id': 'req-filter-match',
     });
     assert.strictEqual(result.ok, true);
     assert.strictEqual(result.messages.length, 2);
@@ -2300,6 +2300,36 @@ describe('CLI Server', () => {
     );
   });
 
+  it('should filter inbox by both type and request_id, consuming only the intersection', async () => {
+    db.sendMail('architect', 'task_completed', { marker: 'both-match', request_id: 'req-combo' });
+    db.sendMail('architect', 'task_failed', { marker: 'type-mismatch', request_id: 'req-combo' });
+    db.sendMail('architect', 'task_completed', { marker: 'rid-mismatch', request_id: 'req-other' });
+    db.sendMail('architect', 'task_update', { marker: 'neither-match', request_id: 'req-other' });
+
+    const result = await sendCommand('inbox', {
+      recipient: 'architect',
+      type: 'task_completed',
+      request_id: 'req-combo',
+    });
+    assert.strictEqual(result.ok, true);
+    assert.strictEqual(result.messages.length, 1);
+    assert.strictEqual(result.messages[0].payload.marker, 'both-match');
+
+    assert.deepStrictEqual(getConsumedByMarker('architect'), {
+      'both-match': 1,
+      'type-mismatch': 0,
+      'rid-mismatch': 0,
+      'neither-match': 0,
+    });
+
+    const remaining = await sendCommand('inbox', { recipient: 'architect', peek: true });
+    assert.strictEqual(remaining.ok, true);
+    assert.deepStrictEqual(
+      remaining.messages.map((message) => message.payload.marker).sort(),
+      ['neither-match', 'rid-mismatch', 'type-mismatch']
+    );
+  });
+
   it('should keep inbox-block waiting for a filtered match and leave unrelated mail unconsumed', async () => {
     let blockedError = null;
     let blockedSettled = false;
@@ -2308,7 +2338,6 @@ describe('CLI Server', () => {
       timeout: 3000,
       type: 'task_completed',
       request_id: 'req-block-match',
-      'payload.request_id': 'req-block-match',
     }).then((result) => {
       blockedSettled = true;
       return result;
