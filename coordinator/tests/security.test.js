@@ -700,6 +700,7 @@ describe('Atomic task assignment via CLI', () => {
     const assignment = await sendCommand('assign-task', { task_id: taskId, worker_id: 1 });
     assert.strictEqual(assignment.ok, false);
     assert.strictEqual(assignment.error, 'worker_claimed');
+    assert.strictEqual(assignment.claimed_by, 'architect');
 
     const worker = db.getWorker(1);
     assert.strictEqual(worker.status, 'idle');
@@ -708,6 +709,30 @@ describe('Atomic task assignment via CLI', () => {
     assert.strictEqual(worker.claimed_at, claimedAt);
     assert.strictEqual(db.getTask(taskId).status, 'ready');
     assert.strictEqual(db.getTask(taskId).assigned_to, null);
+  });
+
+  it('should allow assign-task after release-worker clears the claim', async () => {
+    db.registerWorker(1, '/wt-1', 'agent-1');
+    const reqId = db.createRequest('Release then assign');
+    const taskId = db.createTask({ request_id: reqId, subject: 'Release task', description: 'D' });
+    db.updateTask(taskId, { status: 'ready' });
+
+    const claim = await sendCommand('claim-worker', { worker_id: 1, claimer: 'architect' });
+    assert.strictEqual(claim.ok, true);
+
+    const blocked = await sendCommand('assign-task', { task_id: taskId, worker_id: 1 });
+    assert.strictEqual(blocked.ok, false);
+    assert.strictEqual(blocked.error, 'worker_claimed');
+    assert.strictEqual(blocked.claimed_by, 'architect');
+
+    const release = await sendCommand('release-worker', { worker_id: 1 });
+    assert.strictEqual(release.ok, true);
+    assert.strictEqual(db.getWorker(1).claimed_by, null);
+
+    const assignment = await sendCommand('assign-task', { task_id: taskId, worker_id: 1 });
+    assert.strictEqual(assignment.ok, true);
+    assert.strictEqual(db.getTask(taskId).assigned_to, 1);
+    assert.strictEqual(db.getTask(taskId).status, 'assigned');
   });
 
   it('should persist non-null routing telemetry on task rows after assign-task', async () => {

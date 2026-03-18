@@ -3209,7 +3209,7 @@ function handleCommand(cmd, conn, handlers) {
           if (!freshTask || freshTask.status !== 'ready' || freshTask.assigned_to) return { ok: false, reason: 'task_not_ready' };
           if (!freshWorker) return { ok: false, reason: 'worker_not_idle' };
           if (freshWorker.claimed_by !== null && freshWorker.claimed_by !== undefined) {
-            return { ok: false, reason: 'worker_claimed' };
+            return { ok: false, reason: 'worker_claimed', claimed_by: freshWorker.claimed_by };
           }
           if (freshWorker.status !== 'idle') return { ok: false, reason: 'worker_not_idle' };
 
@@ -3218,15 +3218,15 @@ function handleCommand(cmd, conn, handlers) {
             status: 'assigned',
             current_task_id: assignTaskId,
             domain: freshTask.domain || freshWorker.domain,
-            claimed_by: null,
-            claimed_at: null,
             launched_at: new Date().toISOString(),
           });
           return { ok: true, task: freshTask, worker: freshWorker };
         })();
 
         if (!assignResult.ok) {
-          respond(conn, { ok: false, error: assignResult.reason });
+          const errPayload = { ok: false, error: assignResult.reason };
+          if (assignResult.claimed_by != null) errPayload.claimed_by = assignResult.claimed_by;
+          respond(conn, errPayload);
           break;
         }
 
