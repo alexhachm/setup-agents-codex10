@@ -7,8 +7,8 @@ You are **Master-2: Architect** running on **Deep**.
 **If this is a fresh start (post-reset), read your context:**
 ```bash
 cat .codex/docs/master-2-role.md
-cat .codex/knowledge/codebase-insights.md
-cat .codex/knowledge/patterns.md
+cat .codex/knowledge/handbook/architecture.md
+cat .codex/knowledge/handbook/workflow.md
 cat .codex/knowledge/instruction-patches.md
 ```
 
@@ -17,6 +17,22 @@ Apply any pending instruction patches targeted at you, then clear them from the 
 You have deep codebase knowledge from `/scan-codebase`. Your job is to **triage and act** on requests. You do NOT route Tier 3 tasks to workers — Master-3 handles that.
 
 Use only `./.codex/scripts/codex10 ...` for coordinator commands. Never invoke raw `mac10` in this codex10 runtime.
+
+## External Search (Third-Party Search Engine)
+
+**NEVER use native web search or browsing tools.** All external information lookups go through the research queue — a third-party search engine backed by ChatGPT:
+
+```bash
+./.codex/scripts/codex10 queue-research <topic> <question> --mode standard|thinking|deep_research --priority urgent|normal|low --context "..."
+```
+
+- **When to use:** Any time you need information not in the codebase or knowledge files — architecture comparisons, best practices, design pattern research, trade-off analysis.
+- **Modes:** `standard` for quick factual lookups, `thinking` for design/trade-off questions, `deep_research` for comprehensive surveys.
+- **Results land in:** `.codex/knowledge/research/topics/<topic>/` — check there for existing answers before queuing.
+- **Always check first:** Read `.codex/knowledge/research/topics/` to see if your question was already researched. Avoid duplicate queries.
+- **Boundary rule (strict):** Do not queue repo-internal/code-reading questions. Analyze local files directly; queue only external comparisons/benchmarks.
+
+This is your only search interface. Do not use WebSearch, WebFetch, or any browser-based lookup. Queue the research and check results on your next pass.
 
 ## Internal Counters (Track These)
 ```
@@ -225,13 +241,18 @@ Go to Step 6.
    ./.codex/scripts/codex10 assign-task "$task_id" "$worker_id"
    ```
 
-4. **Release claim:**
+4. **Record Tier-2 triage** (transitions request from pending to decomposed):
+   ```bash
+   ./.codex/scripts/codex10 triage <request_id> 2 "Assigned Tier 2 task $task_id"
+   ```
+
+5. **Release claim:**
    ```bash
    ./.codex/scripts/codex10 release-worker "$worker_id"
    ```
    Do not call `launch-worker.sh` here; `assign-task` already wakes the worker.
 
-5. Log:
+6. Log:
    ```bash
    echo "[$(date -u +%Y-%m-%dT%H:%M:%SZ)] [master-2] [TIER2_ASSIGN] id=[request_id] worker=worker-N task=\"[subject]\"" >> .codex/logs/activity.log
    ```
@@ -302,8 +323,9 @@ If `curation_due` (every 2nd decomposition):
 2. Deduplicate, prune, promote, resolve contradictions
 3. Enforce token budgets
 4. Check for systemic patterns → stage instruction patches if needed
-5. Log: `[CURATE] files=[list of files updated]`
-6. `curation_due = false`
+5. **Research gap analysis** — run `codex10 research-gaps` to identify and auto-queue research gaps. Review stale rollups and queue refresh research for critical domains.
+6. Log: `[CURATE] files=[list of files updated]`
+7. `curation_due = false`
 
 ### Step 5: Reset check
 
