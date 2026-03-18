@@ -221,6 +221,47 @@ describe('Bounded assignment recovery', () => {
   });
 });
 
+describe('Claim atomicity', () => {
+  it('claimWorker sets claimed_at atomically with claimed_by', () => {
+    db.registerWorker(1, '/wt-1', 'agent-1');
+
+    const before = Date.now();
+    const claimed = db.claimWorker(1, 'architect');
+    const after = Date.now();
+
+    assert.strictEqual(claimed, true);
+    const worker = db.getWorker(1);
+    assert.strictEqual(worker.claimed_by, 'architect');
+    assert.ok(worker.claimed_at, 'claimed_at must be set');
+    const claimedAtMs = new Date(worker.claimed_at).getTime();
+    assert.ok(claimedAtMs >= before && claimedAtMs <= after, 'claimed_at must be within claim window');
+  });
+
+  it('releaseWorker clears both claimed_by and claimed_at', () => {
+    db.registerWorker(1, '/wt-1', 'agent-1');
+    db.claimWorker(1, 'architect');
+
+    db.releaseWorker(1);
+
+    const worker = db.getWorker(1);
+    assert.strictEqual(worker.claimed_by, null);
+    assert.strictEqual(worker.claimed_at, null);
+  });
+
+  it('claimWorker is idempotent — second claim by different claimer fails and does not overwrite claimed_at', () => {
+    db.registerWorker(1, '/wt-1', 'agent-1');
+    db.claimWorker(1, 'architect');
+    const workerAfterFirst = db.getWorker(1);
+
+    const secondClaim = db.claimWorker(1, 'allocator');
+    assert.strictEqual(secondClaim, false);
+
+    const workerAfterSecond = db.getWorker(1);
+    assert.strictEqual(workerAfterSecond.claimed_by, 'architect');
+    assert.strictEqual(workerAfterSecond.claimed_at, workerAfterFirst.claimed_at);
+  });
+});
+
 describe('Stale claim release', () => {
   it('releases stale claims using claimed_at age instead of heartbeat age', () => {
     db.registerWorker(1, '/wt-1', 'agent-1');
