@@ -248,6 +248,40 @@ describe('Request completion tracking', () => {
     assert.strictEqual(getRequestCompletionLogCount(reqId), 0);
   });
 
+  it('should keep request integrating when merges are done but a sibling task is ready, then complete after sibling reaches terminal success', () => {
+    const reqId = db.createRequest('Feature');
+    const mergedTaskId = db.createTask({ request_id: reqId, subject: 'Merged task', description: 'Already done' });
+    const readyTaskId = db.createTask({ request_id: reqId, subject: 'Ready task', description: 'Not yet started' });
+
+    db.updateTask(mergedTaskId, { status: 'completed' });
+    db.updateTask(readyTaskId, { status: 'ready' });
+    db.updateRequest(reqId, { status: 'integrating' });
+
+    db.enqueueMerge({
+      request_id: reqId,
+      task_id: mergedTaskId,
+      pr_url: 'https://github.com/org/repo/pull/105',
+      branch: 'agent-1',
+    });
+
+    // Merge succeeds but sibling is still ready — request must NOT complete
+    merger.processQueue(tmpDir, () => ({ success: true }));
+
+    const requestAfterMerge = db.getRequest(reqId);
+    assert.strictEqual(requestAfterMerge.status, 'integrating');
+    assert.strictEqual(getRequestCompletionMailCount(reqId), 0);
+    assert.strictEqual(getRequestCompletionLogCount(reqId), 0);
+
+    // Sibling reaches terminal success — request must now complete
+    db.updateTask(readyTaskId, { status: 'completed' });
+    merger.onTaskCompleted(readyTaskId);
+
+    const requestAfterSiblingDone = db.getRequest(reqId);
+    assert.strictEqual(requestAfterSiblingDone.status, 'completed');
+    assert.strictEqual(getRequestCompletionMailCount(reqId), 1);
+    assert.strictEqual(getRequestCompletionLogCount(reqId), 1);
+  });
+
   it('should clear stale completion metadata when onTaskCompleted moves request back to integrating', () => {
     const reqId = db.createRequest('Retry merge for completed request');
     const completedTaskId = db.createTask({ request_id: reqId, subject: 'Completed task', description: 'Done' });
