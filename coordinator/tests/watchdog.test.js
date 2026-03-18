@@ -511,6 +511,57 @@ describe('Loop heartbeat recovery', () => {
       .find((entry) => entry.loop_id === loopId);
     assert.strictEqual(staleLog, undefined);
   });
+
+  it('detects stale heartbeat and triggers recovery for active non-tmux loop (tmux_window=null)', () => {
+    const loopId = db.createLoop('Non-tmux stale loop');
+    const staleHeartbeat = new Date(Date.now() - (LOOP_STALE_HEARTBEAT_SEC + 60) * 1000).toISOString();
+    db.updateLoop(loopId, {
+      last_heartbeat: staleHeartbeat,
+      // tmux_window intentionally left null (non-tmux environment)
+    });
+
+    const childProcess = require('child_process');
+    const originalExecFile = childProcess.execFile;
+    const execFileCalls = [];
+    childProcess.execFile = (cmd, args, opts, callback) => {
+      execFileCalls.push({ cmd, args, opts });
+      if (callback) callback(null);
+      return { unref: () => {} };
+    };
+
+    try {
+      tick(tmpDir);
+    } finally {
+      childProcess.execFile = originalExecFile;
+    }
+
+    // Should have called execFile to relaunch the sentinel
+    assert.strictEqual(execFileCalls.length, 1);
+    assert.strictEqual(execFileCalls[0].cmd, 'bash');
+    assert.ok(execFileCalls[0].args.includes(String(loopId)), 'Loop ID should be passed to execFile');
+
+    // Loop's heartbeat should be refreshed
+    const updatedLoop = db.getLoop(loopId);
+    assert.ok(updatedLoop.last_heartbeat);
+    assert.ok(Date.parse(updatedLoop.last_heartbeat) > Date.parse(staleHeartbeat));
+
+    // Should emit loop_heartbeat_stale
+    const staleLog = db.getLog(100, 'coordinator')
+      .filter((entry) => entry.action === 'loop_heartbeat_stale')
+      .map((entry) => JSON.parse(entry.details))
+      .find((entry) => entry.loop_id === loopId);
+    assert.ok(staleLog, 'Should emit loop_heartbeat_stale for non-tmux loop');
+    assert.ok(staleLog.stale_sec > LOOP_STALE_HEARTBEAT_SEC);
+
+    // Should emit loop_sentinel_respawned
+    const respawnLog = db.getLog(100, 'coordinator')
+      .filter((entry) => entry.action === 'loop_sentinel_respawned')
+      .map((entry) => JSON.parse(entry.details))
+      .find((entry) => entry.loop_id === loopId);
+    assert.ok(respawnLog, 'Should emit loop_sentinel_respawned for non-tmux loop');
+    assert.strictEqual(respawnLog.reason, 'stale_heartbeat');
+    assert.strictEqual(respawnLog.forced_restart, false);
+  });
 });
 
 describe('Loop respawn namespace preservation', () => {

@@ -671,10 +671,36 @@ function respawnLoopSentinel(loop, projectDir, options = {}) {
   const sentinelPath = path.join(scriptDir, 'scripts', 'loop-sentinel.sh');
 
   try {
+    const ns = loop.namespace || process.env.MAC10_NAMESPACE || 'mac10';
+    if (!loop.tmux_window) {
+      // Non-tmux: spawn via execFile (matches index.js non-tmux launch strategy)
+      const { execFile } = require('child_process');
+      const child = execFile('bash', [sentinelPath, String(loop.id), projectDir], {
+        cwd: projectDir,
+        detached: true,
+        stdio: 'ignore',
+        env: { ...process.env, MAC10_NAMESPACE: ns },
+      }, (err) => {
+        if (err) db.log('coordinator', 'loop_respawn_error', {
+          loop_id: loop.id,
+          reason,
+          forced_restart: false,
+          error: err.message,
+        });
+      });
+      if (child && typeof child.unref === 'function') child.unref();
+      db.updateLoop(loop.id, { last_heartbeat: new Date().toISOString() });
+      db.log('coordinator', 'loop_sentinel_respawned', {
+        loop_id: loop.id,
+        reason,
+        forced_restart: false,
+      });
+      return;
+    }
+
     if (forceRestart) {
       tmux.killWindow(loop.tmux_window);
     }
-    const ns = loop.namespace || process.env.MAC10_NAMESPACE || 'mac10';
     tmux.createWindow(loop.tmux_window, `MAC10_NAMESPACE="${ns}" bash "${sentinelPath}" ${loop.id} "${projectDir}"`, projectDir);
     db.updateLoop(loop.id, {
       tmux_session: tmux.SESSION,
@@ -758,7 +784,24 @@ function monitorLoops(projectDir) {
   const loopStaleThresholdSec = getLoopHeartbeatStaleThresholdSec();
 
   for (const loop of loops) {
-    if (!loop.tmux_window) continue;
+    if (!loop.tmux_window) {
+      // Non-tmux loop: evaluate heartbeat age and relaunch if stale
+      if (loop.last_heartbeat) {
+        const staleSec = getAgeSeconds(now, loop.last_heartbeat, {
+          loop_id: loop.id,
+          scope: 'loop_heartbeat_age',
+        });
+        if (staleSec !== null && staleSec > loopStaleThresholdSec) {
+          db.log('coordinator', 'loop_heartbeat_stale', {
+            loop_id: loop.id,
+            stale_sec: Math.round(staleSec),
+            threshold_sec: loopStaleThresholdSec,
+          });
+          respawnLoopSentinel(loop, projectDir, { reason: 'stale_heartbeat', forceRestart: false });
+        }
+      }
+      continue;
+    }
 
     const paneAlive = tmux.isPaneAlive(loop.tmux_window);
 
