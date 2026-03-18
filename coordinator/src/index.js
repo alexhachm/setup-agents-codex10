@@ -158,11 +158,28 @@ const handlers = {
           fs.copyFileSync(srcFile, path.join(dstKnowledge, f));
         }
       }
-      // Sync domain subdirectory
+      // Sync domain subdirectory (legacy layout)
       const domainDir = path.join(srcKnowledge, 'domain');
       if (fs.existsSync(domainDir)) {
         for (const f of fs.readdirSync(domainDir)) {
           fs.copyFileSync(path.join(domainDir, f), path.join(dstKnowledge, 'domain', f));
+        }
+      }
+      // Sync domains/ subdirectory (new layout: domains/<domain>/README.md)
+      const domainsDir = path.join(srcKnowledge, 'domains');
+      if (fs.existsSync(domainsDir)) {
+        for (const domainName of fs.readdirSync(domainsDir)) {
+          const srcDomainDir = path.join(domainsDir, domainName);
+          if (fs.statSync(srcDomainDir).isDirectory()) {
+            const dstDomainDir = path.join(dstKnowledge, 'domains', domainName);
+            fs.mkdirSync(dstDomainDir, { recursive: true });
+            for (const f of fs.readdirSync(srcDomainDir)) {
+              const srcFile = path.join(srcDomainDir, f);
+              if (fs.statSync(srcFile).isFile()) {
+                fs.copyFileSync(srcFile, path.join(dstDomainDir, f));
+              }
+            }
+          }
         }
       }
     } catch (e) {

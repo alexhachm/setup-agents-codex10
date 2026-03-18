@@ -39,6 +39,15 @@ function isSafeDomainSlug(domain) {
 
 function resolveDomainKnowledgePath(domain, knowledgeDir) {
   if (!isSafeDomainSlug(domain)) return null;
+  const domainsDir = path.resolve(knowledgeDir, 'domains');
+  const filePath = path.resolve(domainsDir, domain.trim(), 'README.md');
+  const rel = path.relative(domainsDir, filePath);
+  if (!rel || rel.startsWith('..') || path.isAbsolute(rel)) return null;
+  return filePath;
+}
+
+function resolveLegacyDomainKnowledgePath(domain, knowledgeDir) {
+  if (!isSafeDomainSlug(domain)) return null;
   const domainDir = path.resolve(knowledgeDir, 'domain');
   const filePath = path.resolve(domainDir, `${domain.trim()}.md`);
   const rel = path.relative(domainDir, filePath);
@@ -167,7 +176,10 @@ function buildTaskOverlay(task, worker, projectDir) {
 
   // Add knowledge context if available
   const knowledgeDir = path.join(projectDir, '.claude', 'knowledge');
-  const domainKnowledgePath = resolveDomainKnowledgePath(task.domain, knowledgeDir);
+  let domainKnowledgePath = resolveDomainKnowledgePath(task.domain, knowledgeDir);
+  if (!domainKnowledgePath || !fs.existsSync(domainKnowledgePath)) {
+    domainKnowledgePath = resolveLegacyDomainKnowledgePath(task.domain, knowledgeDir);
+  }
   if (domainKnowledgePath && fs.existsSync(domainKnowledgePath)) {
     try {
       const domainKnowledge = fs.readFileSync(domainKnowledgePath, 'utf8');
