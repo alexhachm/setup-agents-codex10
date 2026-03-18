@@ -9,6 +9,7 @@ const os = require('os');
 
 const db = require('../src/db');
 const merger = require('../src/merger');
+const watchdog = require('../src/watchdog');
 const webServer = require('../src/web-server');
 const instanceRegistry = require('../src/instance-registry');
 
@@ -1156,6 +1157,144 @@ describe('Web server port-collision startup', () => {
       instances.filter((i) => i.port === port).length,
       0,
       'port-collision startup must not create a registry entry'
+    );
+  });
+});
+
+describe('Watchdog stall recovery regression', () => {
+  it('should recover a stalled assigned task to ready via recoverStalledAssignments', () => {
+    const reqId = db.createRequest('Feature');
+    const taskId = db.createTask({
+      request_id: reqId,
+      subject: 'Stalled task',
+      description: 'Worker stopped heartbeating',
+    });
+    db.registerWorker(1, path.join(tmpDir, 'wt-1'), 'agent-1');
+    db.updateWorker(1, {
+      status: 'running',
+      current_task_id: taskId,
+      last_heartbeat: new Date(Date.now() - 300 * 1000).toISOString(),
+    });
+    db.updateTask(taskId, { status: 'assigned', assigned_to: 1 });
+
+    const recovered = db.recoverStalledAssignments({
+      source: 'test_stall_recovery',
+      include_heartbeat_stale: true,
+      include_orphans: true,
+      stale_threshold_sec: 180,
+    });
+
+    assert.ok(recovered.length > 0, 'should recover at least one stalled assignment');
+    const task = db.getTask(taskId);
+    assert.ok(
+      task.status === 'ready' || task.status === 'failed',
+      `stalled task should be recovered to ready or failed, got: ${task.status}`
+    );
+  });
+
+  it('should not recover a task that is within the stale threshold (no false recovery)', () => {
+    const reqId = db.createRequest('Feature');
+    const taskId = db.createTask({
+      request_id: reqId,
+      subject: 'Active task',
+      description: 'Worker recently heartbeated',
+    });
+    db.registerWorker(2, path.join(tmpDir, 'wt-2'), 'agent-2');
+    db.updateWorker(2, {
+      status: 'running',
+      current_task_id: taskId,
+      last_heartbeat: new Date(Date.now() - 30 * 1000).toISOString(), // only 30s stale
+    });
+    db.updateTask(taskId, { status: 'assigned', assigned_to: 2 });
+
+    const recovered = db.recoverStalledAssignments({
+      source: 'test_no_false_recovery',
+      include_heartbeat_stale: true,
+      include_orphans: true,
+      stale_threshold_sec: 180,
+    });
+
+    const taskRecovered = recovered.find((r) => r.task_id === taskId);
+    assert.strictEqual(taskRecovered, undefined, 'recently active task must not be falsely recovered');
+    assert.strictEqual(db.getTask(taskId).status, 'assigned', 'task should remain assigned');
+  });
+});
+
+describe('Stale integration watchdog recovery regression', () => {
+  it('merge stuck in merging for longer than MERGE_TIMEOUT_SEC should be promoted to conflict', () => {
+    const reqId = db.createRequest('Feature');
+    const taskId = db.createTask({ request_id: reqId, subject: 'T1', description: 'D1' });
+    db.updateTask(taskId, { status: 'completed' });
+    db.updateRequest(reqId, { status: 'integrating' });
+
+    db.enqueueMerge({
+      request_id: reqId,
+      task_id: taskId,
+      pr_url: 'https://github.com/org/repo/pull/400',
+      branch: 'agent-1',
+    });
+
+    const entry = db.getNextMerge();
+    assert.ok(entry, 'merge entry should exist');
+
+    // Force updated_at to > 5 minutes ago (MERGE_TIMEOUT_SEC = 300)
+    const staleTs = new Date(Date.now() - 400 * 1000).toISOString();
+    db.updateMerge(entry.id, { status: 'merging' });
+    db.getDb().prepare("UPDATE merge_queue SET updated_at = ? WHERE id = ?").run(staleTs, entry.id);
+
+    watchdog.tick(tmpDir);
+
+    const entryAfter = db.getDb().prepare('SELECT status FROM merge_queue WHERE id = ?').get(entry.id);
+    assert.strictEqual(entryAfter.status, 'conflict', 'merge stuck in merging > 300s must be promoted to conflict');
+
+    const timeoutLogs = db.getLog(20, 'coordinator').filter((e) => e.action === 'merge_timeout');
+    assert.ok(timeoutLogs.length > 0, 'merge_timeout log entry must be emitted for operator visibility');
+  });
+
+  it('merge recently in merging state must NOT be promoted to conflict (false-conflict prevention)', () => {
+    const reqId = db.createRequest('Feature');
+    const taskId = db.createTask({ request_id: reqId, subject: 'T2', description: 'D2' });
+    db.updateTask(taskId, { status: 'completed' });
+    db.updateRequest(reqId, { status: 'integrating' });
+
+    db.enqueueMerge({
+      request_id: reqId,
+      task_id: taskId,
+      pr_url: 'https://github.com/org/repo/pull/401',
+      branch: 'agent-1',
+    });
+
+    const entry = db.getNextMerge();
+    assert.ok(entry, 'merge entry should exist');
+
+    // Put it in 'merging' with a recent updated_at (only 30s ago — well within the 300s window)
+    const recentTs = new Date(Date.now() - 30 * 1000).toISOString();
+    db.updateMerge(entry.id, { status: 'merging' });
+    db.getDb().prepare("UPDATE merge_queue SET updated_at = ? WHERE id = ?").run(recentTs, entry.id);
+
+    watchdog.tick(tmpDir);
+
+    const entryAfter = db.getDb().prepare('SELECT status FROM merge_queue WHERE id = ?').get(entry.id);
+    assert.strictEqual(entryAfter.status, 'merging', 'recently started merge must NOT be falsely promoted to conflict');
+  });
+
+  it('stale integrating request with no merges and old updated_at should be auto-completed (stale status drift recovery)', () => {
+    const reqId = db.createRequest('Feature');
+    const taskId = db.createTask({ request_id: reqId, subject: 'T3', description: 'D3' });
+    db.updateTask(taskId, { status: 'completed' });
+    db.updateRequest(reqId, { status: 'integrating' });
+
+    // Manually backdate request updated_at to > 15 minutes ago (900s threshold for no-merge case)
+    const staleTs = new Date(Date.now() - 1000 * 1000).toISOString();
+    db.getDb().prepare("UPDATE requests SET updated_at = ? WHERE id = ?").run(staleTs, reqId);
+
+    watchdog.tick(tmpDir);
+
+    const reqAfter = db.getRequest(reqId);
+    assert.strictEqual(
+      reqAfter.status,
+      'completed',
+      'integrating request with no merge entries and stale updated_at must be auto-completed'
     );
   });
 });

@@ -1022,3 +1022,79 @@ describe('functional_conflict merge status', () => {
     assert.strictEqual(logs[0].merge_id, entry.id);
   });
 });
+
+describe('Merge cleanup regression: dedup and idempotency', () => {
+  it('should not enqueue the same PR URL+branch twice for the same request (prevents false-conflict infinite loop)', () => {
+    const reqId = db.createRequest('Feature');
+    const taskId1 = db.createTask({ request_id: reqId, subject: 'T1', description: 'D1' });
+    const taskId2 = db.createTask({ request_id: reqId, subject: 'T2', description: 'D2' });
+
+    const result1 = db.enqueueMerge({
+      request_id: reqId,
+      task_id: taskId1,
+      pr_url: 'https://github.com/org/repo/pull/300',
+      branch: 'agent-1',
+    });
+    assert.strictEqual(result1.inserted, true, 'first enqueue should succeed');
+
+    // Same PR URL + branch for the same request → dedup blocks second insert
+    const result2 = db.enqueueMerge({
+      request_id: reqId,
+      task_id: taskId2,
+      pr_url: 'https://github.com/org/repo/pull/300',
+      branch: 'agent-1',
+    });
+    assert.strictEqual(result2.inserted, false, 'duplicate PR URL+branch enqueue must be blocked');
+
+    const entries = db.getDb().prepare('SELECT * FROM merge_queue WHERE request_id = ?').all(reqId);
+    assert.strictEqual(entries.length, 1, 'only one merge entry should exist for the same PR URL+branch');
+  });
+
+  it('should allow re-enqueue for a different branch on the same PR URL (different logical merge)', () => {
+    const reqId = db.createRequest('Feature');
+    const taskId1 = db.createTask({ request_id: reqId, subject: 'T1', description: 'D1' });
+    const taskId2 = db.createTask({ request_id: reqId, subject: 'T2', description: 'D2' });
+
+    db.enqueueMerge({
+      request_id: reqId,
+      task_id: taskId1,
+      pr_url: 'https://github.com/org/repo/pull/301',
+      branch: 'agent-1',
+    });
+
+    // Different branch → should be allowed
+    const result2 = db.enqueueMerge({
+      request_id: reqId,
+      task_id: taskId2,
+      pr_url: 'https://github.com/org/repo/pull/302',
+      branch: 'agent-2',
+    });
+    assert.strictEqual(result2.inserted, true, 'different PR URL should be allowed');
+
+    const entries = db.getDb().prepare('SELECT * FROM merge_queue WHERE request_id = ?').all(reqId);
+    assert.strictEqual(entries.length, 2, 'two different PR URL+branch pairs should each create an entry');
+  });
+
+  it('should not emit duplicate request_completed mail when processQueue is called multiple times after completion', () => {
+    const reqId = db.createRequest('Feature');
+    const taskId = db.createTask({ request_id: reqId, subject: 'T1', description: 'D1' });
+    db.updateTask(taskId, { status: 'completed' });
+    db.updateRequest(reqId, { status: 'integrating' });
+
+    db.enqueueMerge({
+      request_id: reqId,
+      task_id: taskId,
+      pr_url: 'https://github.com/org/repo/pull/303',
+      branch: 'agent-1',
+    });
+
+    merger.processQueue(tmpDir, () => ({ success: true }));
+    // Spurious second processQueue call should not emit duplicate mail
+    merger.processQueue(tmpDir, () => ({ success: true }));
+
+    const mails = db.checkMail('master-1', false)
+      .filter((m) => m.type === 'request_completed' && m.payload.request_id === reqId);
+    assert.strictEqual(mails.length, 1, 'request_completed must be emitted exactly once');
+    assert.strictEqual(getRequestCompletionLogCount(reqId), 1, 'request_completed log entry must appear exactly once');
+  });
+});

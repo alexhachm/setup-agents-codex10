@@ -72,6 +72,75 @@ Runtime path is:
 6. Coordinator merges PRs (4-tier: clean → rebase → AI-resolve → redo)
 7. Watchdog monitors health (heartbeats, ZFC death detection, tiered escalation)
 
+## Operator Runbook
+
+### Diagnostics API
+
+The coordinator exposes operator-facing health counters at:
+
+```bash
+curl http://localhost:3100/api/diagnostics
+```
+
+Response shape (rolling 24-hour window):
+
+```json
+{
+  "window_hours": 24,
+  "failure_counts": {
+    "merge_timeouts": 0,
+    "merge_conflicts_unresolved": 0,
+    "stall_recoveries": 0,
+    "worker_deaths": 0,
+    "loop_restarts": 0,
+    "stale_integrations_recovered": 0
+  },
+  "merge_queue_snapshot": { "pending": 0, "merging": 0, "conflict": 0, "merged": 0, "failed": 0 },
+  "request_status_snapshot": { "failed": 0, "integrating": 0 }
+}
+```
+
+The same `operator_diagnostics` block is embedded in the `/api/status` response.
+
+### Failure Taxonomy
+
+| Category | Root cause | Retry/circuit-breaker |
+|---|---|---|
+| `merge_timeouts` | PR merge step hung > 5 min | Promoted to `conflict` after timeout; allocator creates a fix task |
+| `merge_conflicts_unresolved` | Allocator could not resolve conflicts within grace window (10 min) | Request marked `failed`; submit a `mac10 fix` to retry |
+| `stall_recoveries` | Worker heartbeat stale > `watchdog_terminate_sec` (default 180 s) | Task reset to `ready` and reassigned; liveness counter tracks retry count |
+| `worker_deaths` | Worker process died (tmux pane dead or heartbeat timeout) | Worker reset to `idle`; task auto-reassigned with bounded retry limit |
+| `loop_restarts` | Sentinel process died or heartbeat stale | Sentinel respawned automatically |
+| `stale_integrations_recovered` | Request stuck in `integrating` after all merges complete | Auto-completed or auto-failed by watchdog recovery sweep |
+
+### Triage Steps
+
+**Merge stuck in `merging`**
+1. Check `merge_queue_snapshot.merging > 0` — confirms a PR is mid-merge.
+2. After 5 min the watchdog promotes it to `conflict` and logs `merge_timeout`.
+3. Allocator will create a fix task. Monitor `failure_counts.merge_timeouts`.
+4. If count keeps climbing: check coordinator logs (`mac10 log`) for the failing branch and inspect the PR manually.
+
+**Unresolved merge conflicts**
+1. `failure_counts.merge_conflicts_unresolved > 0` — a conflict fix task was not created in time.
+2. Check request status: `mac10 status`. If `failed`, resubmit: `mac10 fix "resolve conflict for <branch>"`.
+3. If the same branch conflicts repeatedly, resolve the conflict manually and close the PR; then `mac10 fix "retry merge for <branch>"`.
+
+**Worker stalls**
+1. `failure_counts.stall_recoveries > 0` — tasks were auto-recovered.
+2. A task with high `liveness_reassign_count` (visible in `mac10 status`) may indicate a systemic failure.
+3. If a worker keeps dying: check the tmux window (`tmux attach`), look for OOM or nested-session errors.
+4. Known fix for nested-session crashes: ensure `unset CLAUDECODE` is in `worker-sentinel.sh`.
+
+**Loop restarts**
+1. `failure_counts.loop_restarts > 0` — the architect or allocator loop died and was respawned.
+2. Check `mac10 loop-status` for restart counts. If looping rapidly, stop the loop and inspect output.
+
+**Request stuck in `integrating`**
+1. `request_status_snapshot.integrating > N` for an extended period indicates stale status drift.
+2. Watchdog auto-resolves after 15 min (no-merge case) or after all merges settle.
+3. Force recovery: `mac10 repair` (restarts coordinator with startup sweep).
+
 ## Key Design Decisions
 
 - **SQLite WAL** replaces 7 JSON files + jq — concurrent reads, serialized writes, no race conditions

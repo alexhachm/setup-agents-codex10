@@ -860,6 +860,88 @@ function buildBatchStatus() {
   }
 }
 
+function buildOperatorDiagnostics() {
+  const cutoffMs = Date.now() - 24 * 60 * 60 * 1000; // 24-hour rolling window
+
+  const failureCounts = {
+    merge_timeouts: 0,
+    merge_conflicts_unresolved: 0,
+    stall_recoveries: 0,
+    worker_deaths: 0,
+    loop_restarts: 0,
+    stale_integrations_recovered: 0,
+  };
+
+  try {
+    const recentLogs = db.getDb().prepare(
+      "SELECT action, details, created_at FROM activity_log WHERE actor = 'coordinator' ORDER BY id DESC LIMIT 2000"
+    ).all();
+
+    for (const entry of recentLogs) {
+      const entryMs = Date.parse(entry.created_at || '');
+      if (!Number.isFinite(entryMs) || entryMs < cutoffMs) continue;
+
+      switch (entry.action) {
+        case 'merge_timeout':
+          failureCounts.merge_timeouts += 1;
+          break;
+        case 'stalled_assignment_recovery': {
+          const d = parseJsonObject(entry.details);
+          failureCounts.stall_recoveries += Number(d && d.recovered_assignments) || 1;
+          break;
+        }
+        case 'worker_death':
+          failureCounts.worker_deaths += 1;
+          break;
+        case 'loop_sentinel_respawned':
+          failureCounts.loop_restarts += 1;
+          break;
+        case 'stale_integration_recovered': {
+          failureCounts.stale_integrations_recovered += 1;
+          const d = parseJsonObject(entry.details);
+          if (d && d.reason === 'merge_conflict_unresolved') {
+            failureCounts.merge_conflicts_unresolved += 1;
+          }
+          break;
+        }
+        default:
+          break;
+      }
+    }
+  } catch {}
+
+  const mergeQueueSnapshot = { pending: 0, merging: 0, conflict: 0, merged: 0, failed: 0 };
+  try {
+    const rows = db.getDb().prepare(
+      "SELECT status, COUNT(*) as cnt FROM merge_queue GROUP BY status"
+    ).all();
+    for (const row of rows) {
+      if (Object.prototype.hasOwnProperty.call(mergeQueueSnapshot, row.status)) {
+        mergeQueueSnapshot[row.status] = Number(row.cnt) || 0;
+      }
+    }
+  } catch {}
+
+  const requestStatusSnapshot = { failed: 0, integrating: 0 };
+  try {
+    const rows = db.getDb().prepare(
+      "SELECT status, COUNT(*) as cnt FROM requests WHERE status IN ('failed','integrating') GROUP BY status"
+    ).all();
+    for (const row of rows) {
+      if (Object.prototype.hasOwnProperty.call(requestStatusSnapshot, row.status)) {
+        requestStatusSnapshot[row.status] = Number(row.cnt) || 0;
+      }
+    }
+  } catch {}
+
+  return {
+    window_hours: 24,
+    failure_counts: failureCounts,
+    merge_queue_snapshot: mergeQueueSnapshot,
+    request_status_snapshot: requestStatusSnapshot,
+  };
+}
+
 function buildStatePayload({ includeLogs = false, includeLoops = false } = {}) {
   const requests = db.listRequests();
   const workers = db.getAllWorkers();
@@ -896,6 +978,7 @@ function buildStatePayload({ includeLogs = false, includeLoops = false } = {}) {
     usage_cost_request_id: usageCostBurnRate.request_id,
     usage_cost_request_total_usd: usageCostBurnRate.request_total_usd,
     batch_status: buildBatchStatus(),
+    operator_diagnostics: buildOperatorDiagnostics(),
   };
   if (includeLogs) payload.logs = db.getLog(20);
   if (includeLoops) payload.loops = db.listLoops();
@@ -952,6 +1035,14 @@ function start(projectDir, port = 3100, scriptDir = null, handlers = {}) {
   app.get('/api/status', (req, res) => {
     try {
       res.json(buildStatePayload({ includeLogs: true }));
+    } catch (e) {
+      res.status(500).json({ error: e.message });
+    }
+  });
+
+  app.get('/api/diagnostics', (req, res) => {
+    try {
+      res.json(buildOperatorDiagnostics());
     } catch (e) {
       res.status(500).json({ error: e.message });
     }
