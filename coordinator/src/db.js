@@ -2425,11 +2425,14 @@ function getActivePriorityOverrideTargetRequestIds() {
 }
 
 function getReadyTasks() {
-  // Tasks that are ready and have no unfinished dependencies
+  // Tasks that are ready and have no unfinished dependencies,
+  // excluding tasks whose parent request has reached a terminal state.
   const readyTasks = getDb().prepare(`
-    SELECT * FROM tasks
-    WHERE status = 'ready' AND assigned_to IS NULL
-    ORDER BY CASE priority WHEN 'urgent' THEN 0 WHEN 'high' THEN 1 WHEN 'normal' THEN 2 WHEN 'low' THEN 3 END, id
+    SELECT t.* FROM tasks t
+    JOIN requests r ON t.request_id = r.id
+    WHERE t.status = 'ready' AND t.assigned_to IS NULL
+      AND r.status NOT IN ('completed', 'failed')
+    ORDER BY CASE t.priority WHEN 'urgent' THEN 0 WHEN 'high' THEN 1 WHEN 'normal' THEN 2 WHEN 'low' THEN 3 END, t.id
   `).all();
 
   const priorityOverrideTargetIds = getActivePriorityOverrideTargetRequestIds();
@@ -2454,15 +2457,19 @@ function getReadyTasks() {
 
 function checkAndPromoteTasks() {
   const d = getDb();
-  // Batch promote pending tasks with no dependencies in a single SQL statement
+  // Batch promote pending tasks with no dependencies in a single SQL statement,
+  // but only for tasks whose parent request is still active (not completed or failed).
   d.prepare(`
     UPDATE tasks SET status = 'ready', updated_at = datetime('now')
     WHERE status = 'pending' AND (depends_on IS NULL OR depends_on = '[]')
+      AND request_id IN (SELECT id FROM requests WHERE status NOT IN ('completed', 'failed'))
   `).run();
 
-  // For tasks with dependencies, check each one
+  // For tasks with dependencies, check each one (also excluding terminal-request tasks).
   const pending = d.prepare(
-    "SELECT id, depends_on FROM tasks WHERE status = 'pending' AND depends_on IS NOT NULL AND depends_on != '[]'"
+    `SELECT id, depends_on FROM tasks
+     WHERE status = 'pending' AND depends_on IS NOT NULL AND depends_on != '[]'
+       AND request_id IN (SELECT id FROM requests WHERE status NOT IN ('completed', 'failed'))`
   ).all();
   for (const task of pending) {
     let deps;

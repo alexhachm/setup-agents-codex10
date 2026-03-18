@@ -148,6 +148,53 @@ describe('Allocator tick (thin notifier)', () => {
   });
 });
 
+describe('getReadyTasks request-status filtering', () => {
+  it('should not return ready tasks whose request is completed', () => {
+    const reqId = db.createRequest('Completed request');
+    const taskId = db.createTask({ request_id: reqId, subject: 'Task', description: 'Desc' });
+    db.updateTask(taskId, { status: 'ready' });
+    db.updateRequest(reqId, { status: 'completed' });
+
+    const ready = db.getReadyTasks();
+    assert.strictEqual(ready.find(t => t.id === taskId), undefined);
+  });
+
+  it('should not return ready tasks whose request is failed', () => {
+    const reqId = db.createRequest('Failed request');
+    const taskId = db.createTask({ request_id: reqId, subject: 'Task', description: 'Desc' });
+    db.updateTask(taskId, { status: 'ready' });
+    db.updateRequest(reqId, { status: 'failed' });
+
+    const ready = db.getReadyTasks();
+    assert.strictEqual(ready.find(t => t.id === taskId), undefined);
+  });
+
+  it('should still return ready tasks whose request is active', () => {
+    const reqId = db.createRequest('Active request');
+    const taskId = db.createTask({ request_id: reqId, subject: 'Task', description: 'Desc' });
+    db.updateTask(taskId, { status: 'ready' });
+    // Request stays in 'pending' (default active state)
+
+    const ready = db.getReadyTasks();
+    assert.ok(ready.find(t => t.id === taskId), 'active-request task should appear in ready list');
+  });
+
+  it('should filter terminal-request tasks while returning active-request tasks', () => {
+    const activeReqId = db.createRequest('Active request');
+    const activeTaskId = db.createTask({ request_id: activeReqId, subject: 'Active task', description: 'Should appear' });
+    db.updateTask(activeTaskId, { status: 'ready' });
+
+    const completedReqId = db.createRequest('Completed request');
+    const completedTaskId = db.createTask({ request_id: completedReqId, subject: 'Stale task', description: 'Should be hidden' });
+    db.updateTask(completedTaskId, { status: 'ready' });
+    db.updateRequest(completedReqId, { status: 'completed' });
+
+    const ready = db.getReadyTasks();
+    assert.ok(ready.find(t => t.id === activeTaskId), 'active-request task should appear');
+    assert.strictEqual(ready.find(t => t.id === completedTaskId), undefined, 'completed-request task should be hidden');
+  });
+});
+
 describe('Worker claim/release', () => {
   it('should claim and release workers', () => {
     db.registerWorker(1, '/wt-1', 'agent-1');
