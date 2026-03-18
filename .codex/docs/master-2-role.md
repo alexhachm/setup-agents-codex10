@@ -173,19 +173,44 @@ You are responsible for keeping the knowledge system accurate and within budget:
 ## Instruction Patching
 
 During curation, look for **systemic patterns** that indicate instructions need updating:
-- Workers keep making the same category of mistake → stage patch targeting `worker`
+- Workers keep making the same category of mistake → propose patch targeting `worker`
 - Decompositions in a domain keep producing fix cycles → update domain knowledge directly
-- A task type consistently takes 3x longer than expected → stage estimation update
+- A task type consistently takes 3x longer than expected → propose estimation update
 
-**Write patches to `knowledge/instruction-patches.md`:**
-```markdown
-## Patch: [target agent/doc]
-**Pattern observed:** [what you noticed, observed N times]
-**Suggested change:** [specific instruction modification]
-**Rationale:** [why this would help]
+Use the **governed instruction-refinement pipeline** (not ad-hoc edits to role docs):
+
+```bash
+# 1. Propose a patch when you observe a pattern
+./.codex/scripts/codex10 propose-patch <target> "<summary>" "<pattern>" "<suggestion>" \
+  --by master-2 --evidence "<what you observed, with task ID and date>"
+
+# 2. Add observations each time you see the same pattern recur
+./.codex/scripts/codex10 observe-patch PATCH-NNN "<new observation with task/date>"
+
+# 3. List patches ready for human review (score meets threshold)
+./.codex/scripts/codex10 list-patches --status proposed
+
+# 4. Human reviewer approves (governance gate — auto reviewer is rejected)
+./.codex/scripts/codex10 approve-patch PATCH-NNN <reviewer-name>
+
+# 5. Apply the approved patch to the target doc
+./.codex/scripts/codex10 apply-patch PATCH-NNN
 ```
 
-Domain knowledge files are lower risk — update those directly. Role doc patches require the pattern to be observed 3+ times before staging.
+**Governance gates (enforced by the pipeline, not bypassed):**
+| Target | Observation threshold | Notes |
+|--------|----------------------|-------|
+| `*-role.md`, `worker`, `architect` | ≥3 observations | Prevents role drift from isolated incidents |
+| Knowledge/domain files | ≥1 observation | Direct evidence sufficient for lower-risk patches |
+| All patches | Named human reviewer | `auto` is rejected — human sign-off is mandatory |
+
+**Distill hook:** When `codex10 distill` runs, the pipeline scans the content for instruction signals and prints candidates to stderr. Review these and call `propose-patch` if the pattern is genuine.
+
+**Deduplication:** The pipeline checks for existing proposals covering the same target+pattern. If a match is found it returns the existing patch ID and prompts you to add an observation rather than create a duplicate.
+
+**Audit trail:** All proposals, approvals, and applications are immutably recorded in `.codex/knowledge/patches.json` and rendered to `.codex/knowledge/instruction-patches.md`.
+
+Log after staging: `[PATCH_STAGED] id=PATCH-NNN target=<target> obs=<N>/<threshold>`
 
 ## Pre-Reset Distillation
 Before resetting:
