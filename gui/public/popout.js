@@ -11,6 +11,7 @@
     browser: { title: 'Browser Offload', render: renderBrowserOffload },
     log: { title: 'Activity Log', render: renderLog },
     batch: { title: 'Batch Orchestration', render: renderBatch },
+    memory: { title: 'Memory Snapshots', render: renderMemory },
   };
 
   const config = PANELS[panel];
@@ -647,6 +648,55 @@
     el.innerHTML = metricsHtml +
       '<div class="batch-list-header" style="font-weight:600;margin-top:12px;margin-bottom:4px">Recent Batches</div>' +
       batchesHtml + fanoutHtml;
+  }
+
+  function renderMemory(data) {
+    var el = document.getElementById('popout-panel');
+    var state = data && typeof data === 'object' ? data : {};
+    var snapshots = Array.isArray(state.memory_snapshots) ? state.memory_snapshots : [];
+
+    if (snapshots.length === 0) {
+      el.innerHTML = '<div style="color:#8b949e;font-size:13px">No memory snapshots</div>';
+      return;
+    }
+
+    el.innerHTML = snapshots.slice(0, 20).map(function(snap) {
+      var insights = Array.isArray(snap.insights) ? snap.insights : [];
+      var insightsHtml = insights.length === 0
+        ? '<div class="memory-no-insights">No insights in this snapshot</div>'
+        : insights.slice(0, 10).map(function(ins) {
+            var valFlags = Array.isArray(ins.validation_flags) ? ins.validation_flags : [];
+            var govFlags = Array.isArray(ins.gov_flags) ? ins.gov_flags : [];
+            var score = ins.relevance_score != null ? Number(ins.relevance_score) : null;
+            var scoreStr = Number.isFinite(score) ? (score * 100).toFixed(0) + '%' : null;
+            var dedupeClass = ins.dedupe_status === 'duplicate' ? 'memory-dedupe-dup'
+              : (ins.dedupe_status === 'near_duplicate' ? 'memory-dedupe-near' : 'memory-dedupe-unique');
+            return '<div class="memory-insight-row' + (ins.reuse_recommended ? ' memory-reuse-recommended' : '') + '">' +
+              '<div class="memory-insight-text">' + escapeHtml(String(ins.text || '')) + '</div>' +
+              '<div class="memory-insight-meta">' +
+                (scoreStr ? '<span class="task-chip"><span class="task-chip-label">rel</span>' + escapeHtml(scoreStr) + '</span>' : '') +
+                (ins.dedupe_status ? '<span class="memory-dedupe-chip ' + escapeHtml(dedupeClass) + '">' + escapeHtml(String(ins.dedupe_status)) + '</span>' : '') +
+                valFlags.map(function(f) { return '<span class="memory-flag-chip memory-flag-val">' + escapeHtml(String(f)) + '</span>'; }).join('') +
+                govFlags.map(function(f) { return '<span class="memory-flag-chip memory-flag-gov">' + escapeHtml(String(f)) + '</span>'; }).join('') +
+                (ins.reuse_recommended ? '<span class="memory-reuse-badge">reuse</span>' : '') +
+                (ins.provenance ? '<span class="task-chip"><span class="task-chip-label">from</span>' + escapeHtml(String(ins.provenance)) + '</span>' : '') +
+                (ins.last_used_by ? '<span class="task-chip"><span class="task-chip-label">last</span>' + escapeHtml(String(ins.last_used_by)) + '</span>' : '') +
+              '</div>' +
+            '</div>';
+          }).join('');
+
+      return '<div class="memory-snapshot-card">' +
+        '<div class="memory-snapshot-header">' +
+          '<span class="memory-snap-id">' + escapeHtml(String(snap.id || '-')) + '</span>' +
+          (snap.iteration != null ? ' <span class="task-chip"><span class="task-chip-label">iter</span>' + escapeHtml(String(snap.iteration)) + '</span>' : '') +
+          (snap.research_run ? ' <span class="task-chip"><span class="task-chip-label">run</span>' + escapeHtml(String(snap.research_run)) + '</span>' : '') +
+          (snap.created_at ? ' <span class="memory-snap-date">' + escapeHtml(String(snap.created_at)) + '</span>' : '') +
+        '</div>' +
+        (snap.description ? '<div class="memory-snap-desc">' + escapeHtml(String(snap.description)) + '</div>' : '') +
+        '<div class="memory-insights-list">' + insightsHtml + '</div>' +
+        (insights.length > 10 ? '<div style="color:#8b949e;font-size:11px;margin-top:4px">+' + (insights.length - 10) + ' more insights</div>' : '') +
+      '</div>';
+    }).join('');
   }
 
   function renderLog(data) {

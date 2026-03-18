@@ -1090,6 +1090,119 @@ h2 {
   display: block;
 }
 
+/* Memory snapshots panel */
+.memory-filter-row {
+  display: flex;
+  gap: 8px;
+  margin-left: auto;
+}
+
+.memory-filter-row select {
+  background: #161b22;
+  border: 1px solid #30363d;
+  color: #c9d1d9;
+  border-radius: 6px;
+  padding: 2px 6px;
+  font-size: 12px;
+}
+
+.memory-snapshot-card {
+  background: #161b22;
+  border: 1px solid #21262d;
+  border-radius: 8px;
+  padding: 10px 12px;
+  margin-bottom: 10px;
+}
+
+.memory-snapshot-header {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  margin-bottom: 4px;
+  flex-wrap: wrap;
+}
+
+.memory-snap-id {
+  color: #58a6ff;
+  font-size: 12px;
+  font-weight: 600;
+}
+
+.memory-snap-date {
+  color: #8b949e;
+  font-size: 11px;
+  margin-left: auto;
+}
+
+.memory-snap-desc {
+  font-size: 12px;
+  color: #8b949e;
+  margin-bottom: 8px;
+}
+
+.memory-insights-list {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.memory-no-insights {
+  color: #8b949e;
+  font-size: 12px;
+}
+
+.memory-insight-row {
+  background: #0d1117;
+  border: 1px solid #21262d;
+  border-radius: 6px;
+  padding: 6px 8px;
+}
+
+.memory-insight-row.memory-reuse-recommended {
+  border-color: #388bfd40;
+}
+
+.memory-insight-text {
+  font-size: 12px;
+  color: #c9d1d9;
+  margin-bottom: 4px;
+}
+
+.memory-insight-meta {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  flex-wrap: wrap;
+}
+
+.memory-dedupe-chip {
+  font-size: 10px;
+  padding: 1px 5px;
+  border-radius: 4px;
+}
+
+.memory-dedupe-unique { background: #1c3a2a; color: #3fb950; }
+.memory-dedupe-dup { background: #3d1f24; color: #f85149; }
+.memory-dedupe-near { background: #2a2516; color: #d29922; }
+
+.memory-flag-chip {
+  font-size: 10px;
+  padding: 1px 5px;
+  border-radius: 4px;
+}
+
+.memory-flag-val { background: #1c2d3f; color: #58a6ff; }
+.memory-flag-gov { background: #2d2315; color: #e3b341; }
+
+.memory-reuse-badge {
+  font-size: 10px;
+  padding: 1px 6px;
+  border-radius: 10px;
+  background: #1f3544;
+  color: #79c0ff;
+  font-weight: 600;
+}
+
 /* Custom scrollbars for dark theme */
 ::-webkit-scrollbar { width: 8px; height: 8px; }
 ::-webkit-scrollbar-track { background: #0d1117; }
