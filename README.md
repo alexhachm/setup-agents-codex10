@@ -79,3 +79,89 @@ Runtime path is:
 - **mac10 CLI** is the only interface between agents and coordinator — no file manipulation
 - **tmux** replaces platform-specific terminals — works everywhere including WSL
 - **Web dashboard** replaces Electron GUI — simpler, no build step
+
+## Project Memory
+
+mac10 maintains a persistent memory layer so insights and patterns discovered by workers are retained and reusable across sessions and requests.
+
+### Core Concepts
+
+| Concept | Description |
+|---------|-------------|
+| **Snapshot** | A versioned checkpoint of a project's learned state (`project_memory_snapshots`). Each snapshot carries a `project_context_key`, an auto-incrementing `snapshot_version`, and an optional `parent_snapshot_id` for lineage. |
+| **Insight Artifact** | A reusable finding attached to a context key (`insight_artifacts`). Artifacts are typed (`research_insight`, `code_pattern`, etc.) and scored by `relevance_score`. |
+| **Lineage Link** | A directed edge in the provenance graph (`project_memory_lineage_links`). Links connect snapshots and artifacts to requests, tasks, and run IDs. |
+| **Snapshot Index** | A fast lookup table (`project_memory_snapshot_index`) that always points to the latest snapshot version per context key. |
+
+### Retrieval CLI Commands
+
+```bash
+mac10 memory-snapshots [--project_context_key KEY] [--validation_status STATUS] [--limit N] [--offset N]
+mac10 memory-snapshot --id ID [--include_lineage true]
+mac10 memory-insights [--project_context_key KEY] [--artifact_type TYPE] [--min_relevance_score N]
+mac10 memory-insight --id ID [--include_lineage true]
+mac10 memory-lineage [--snapshot_id ID] [--request_id REQ] [--lineage_type TYPE]
+```
+
+### Governance Policy
+
+#### Retention
+
+| Policy | Behaviour |
+|--------|-----------|
+| `retain` (default) | Snapshot or artifact is kept indefinitely. |
+| `expiry` | Combined with `retention_until` (ISO date). Expired entries may be pruned. |
+
+Pruning is never automatic — a human operator or a governed curation cycle must initiate it. High-relevance validated artifacts (`relevance_score ≥ 900`, `validation_status = 'validated'`) should never be pruned.
+
+#### Confidence Thresholds
+
+`confidence_score` is a float in `[0, 1]` stored on every snapshot and artifact.
+
+| Score | Suggested meaning |
+|-------|-------------------|
+| `null` | Not assessed |
+| `< 0.5` | Low confidence — treat as hypothesis |
+| `0.5 – 0.8` | Moderate confidence — usable but verify |
+| `> 0.8` | High confidence — suitable for automated reuse |
+
+Workers should set `confidence_score` when they have evidence; the Architect may update it during review.
+
+#### Validation Status Lifecycle
+
+```
+unvalidated  →  pending  →  validated
+                         →  rejected
+validated    →  superseded
+```
+
+- **unvalidated**: Default for newly ingested insights.
+- **pending**: Flagged for human or Architect review (e.g. partial insights, contested patterns).
+- **validated**: Approved — safe for automated reuse and instruction-refinement proposals.
+- **rejected**: Discarded — do not reuse or surface.
+- **superseded**: Replaced by a newer version; kept for audit trail only.
+
+#### Instruction-Refinement Approval Workflow
+
+The governed pipeline in `.codex/scripts/patch-pipeline.js` converts validated memory insights into instruction patches:
+
+1. **Proposal**: A worker or distill cycle emits a `codex10 queue-patch` signal with the suggested change and target doc.
+2. **Observation accumulation**: Patches accumulate observations from distill summaries and vote signals.
+3. **Threshold gate**:
+   - Role/agent doc patches (`*-role.md`, `worker`, `architect`): **≥ 3 observations** required.
+   - Knowledge/domain patches: **≥ 1 observation** required.
+4. **Human approval**: A named reviewer (non-anonymous) must approve via `codex10 approve-patch <id> --reviewer <name>`.
+5. **Application**: Only approved patches may be applied. No bypassing.
+
+All state transitions are recorded in `.codex/knowledge/patches.json` (audit trail).
+
+#### Lineage Types
+
+| Type | Meaning |
+|------|---------|
+| `origin` | This snapshot/artifact was created fresh in this request/run. |
+| `derived_from` | Built on top of a prior snapshot from an earlier run. |
+| `supports` | Provides evidence for another snapshot or artifact. |
+| `supersedes` | Replaces an older snapshot or artifact. |
+| `validated_by` | Validated by the referenced request or run. |
+| `consumed_by` | The insight was consumed (e.g. applied) in this request/run. |
