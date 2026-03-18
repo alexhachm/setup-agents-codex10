@@ -11,6 +11,10 @@ PROJECT_DIR="${2:?Usage: loop-sentinel.sh <loop_id> <project_dir>}"
 
 cd "$PROJECT_DIR"
 
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+# shellcheck disable=SC1091
+. "$SCRIPT_DIR/provider-utils.sh"
+
 # Ensure coordinator CLI is on PATH
 export PATH="$PROJECT_DIR/.claude/scripts:$PATH"
 export MAC10_LOOP_ID="$LOOP_ID"
@@ -227,7 +231,13 @@ while true; do
     }
   fi
 
-  # Launch Codex for one iteration
+  # Reload provider config so provider/model changes in agent-launcher.env
+  # take effect on next launch cycle without restarting the sentinel.
+  mac10_load_provider_config "$PROJECT_DIR"
+  AGENT_CLI="$(mac10_provider_cli)"
+  LOOP_MODEL="$(mac10_resolve_role_model loop)"
+
+  # Launch agent for one iteration
   # Namespace-aware prompt file selection:
   # codex10 namespace → prefer .codex/commands-codex10/loop-agent.md, fallback to .codex/commands/loop-agent.md
   # mac10 namespace   → use .claude/commands/loop-agent.md (uses mac10 commands)
@@ -239,7 +249,7 @@ while true; do
       PROMPT_FILE="$PROJECT_DIR/.codex/commands/loop-agent.md"
     fi
   fi
-  echo "[loop-sentinel-$LOOP_ID] Launching codex (iteration backoff=${BACKOFF}s)..."
+  echo "[loop-sentinel-$LOOP_ID] Launching ${AGENT_CLI} (provider=${MAC10_AGENT_PROVIDER} model=${LOOP_MODEL} backoff=${BACKOFF}s)..."
   START_TIME=$(date +%s)
   (
     while true; do
@@ -248,7 +258,7 @@ while true; do
     done
   ) &
   _EXEC_HEARTBEAT_PID=$!
-  codex exec --dangerously-bypass-approvals-and-sandbox -m gpt-5.3-codex -C "$PROJECT_DIR" - < "$PROMPT_FILE" 2>&1 || true
+  mac10_run_noninteractive_prompt "$PROJECT_DIR" "$PROMPT_FILE" "$LOOP_MODEL" 2>&1 || true
   _stop_exec_heartbeat
   END_TIME=$(date +%s)
   DURATION=$((END_TIME - START_TIME))

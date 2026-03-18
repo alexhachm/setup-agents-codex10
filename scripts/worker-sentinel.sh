@@ -14,6 +14,10 @@ if [ ! -d "$WORKTREE" ]; then
 fi
 cd "$WORKTREE"
 
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+# shellcheck disable=SC1091
+. "$SCRIPT_DIR/provider-utils.sh"
+
 # Ensure coordinator CLI is on PATH
 export PATH="$PROJECT_DIR/.claude/scripts:$PATH"
 if [ "${MAC10_NAMESPACE:-}" = "codex10" ]; then
@@ -125,7 +129,7 @@ trap cleanup EXIT INT TERM
 
 echo "[sentinel-$WORKER_ID] Ready in $WORKTREE"
 
-launch_codex() {
+launch_worker_agent() {
   # Sync with latest main
   git fetch origin 2>/dev/null || true
   git rebase origin/main 2>/dev/null || {
@@ -133,19 +137,25 @@ launch_codex() {
     git reset --hard origin/main 2>/dev/null || true
   }
 
-  # Launch Codex worker for one non-interactive worker-loop cycle.
+  # Reload provider config so provider/model changes in agent-launcher.env
+  # take effect on next launch cycle without restarting the sentinel.
+  mac10_load_provider_config "$PROJECT_DIR"
+  AGENT_CLI="$(mac10_provider_cli)"
+  WORKER_MODEL="$(mac10_resolve_role_model worker)"
+
+  # Launch worker agent for one non-interactive worker-loop cycle.
   PROMPT_FILE="$WORKTREE/.claude/commands/worker-loop.md"
   if [ -f "$PROJECT_DIR/.claude/commands-codex10/worker-loop.md" ]; then
     PROMPT_FILE="$PROJECT_DIR/.claude/commands-codex10/worker-loop.md"
   fi
   read_reset_context
   start_heartbeat_loop
-  echo "[sentinel-$WORKER_ID] Launching codex..."
-  codex exec --dangerously-bypass-approvals-and-sandbox -m gpt-5.3-codex -C "$WORKTREE" - < "$PROMPT_FILE" 2>&1 || true
+  echo "[sentinel-$WORKER_ID] Launching ${AGENT_CLI} (provider=${MAC10_AGENT_PROVIDER} model=${WORKER_MODEL})..."
+  mac10_run_noninteractive_prompt "$WORKTREE" "$PROMPT_FILE" "$WORKER_MODEL" 2>&1 || true
   stop_heartbeat_loop
 
-  # Reset worker status to idle after Codex exits
-  echo "[sentinel-$WORKER_ID] Codex exited, resetting to idle..."
+  # Reset worker status to idle after agent exits
+  echo "[sentinel-$WORKER_ID] ${AGENT_CLI} exited, resetting to idle..."
   reset_worker_with_context
   RESET_EXPECTED_TASK_ID=""
   RESET_EXPECTED_ASSIGNMENT_TOKEN=""
@@ -155,7 +165,7 @@ launch_codex() {
 EXISTING=$("$MAC10_CMD" my-task "$WORKER_ID" 2>/dev/null || echo "")
 if echo "$EXISTING" | grep -q '"id"'; then
   echo "[sentinel-$WORKER_ID] Found existing task on startup — launching immediately"
-  launch_codex
+  launch_worker_agent
 fi
 
 while true; do
@@ -166,13 +176,13 @@ while true; do
   # Check if we got a task_assigned message
   if echo "$MSGS" | grep -q "task_assigned"; then
     echo "[sentinel-$WORKER_ID] Task received, syncing..."
-    launch_codex
+    launch_worker_agent
   else
     # No task received (timeout or empty response) — check for orphaned assignment before looping
     ORPHAN=$("$MAC10_CMD" my-task "$WORKER_ID" 2>/dev/null || echo "")
     if echo "$ORPHAN" | grep -q '"id"'; then
-      echo "[sentinel-$WORKER_ID] Found orphaned task assignment — launching codex"
-      launch_codex
+      echo "[sentinel-$WORKER_ID] Found orphaned task assignment — launching ${AGENT_CLI:-agent}"
+      launch_worker_agent
     else
       echo "[sentinel-$WORKER_ID] No task received, retrying..."
     fi
