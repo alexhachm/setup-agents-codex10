@@ -93,8 +93,8 @@ Only use this protocol for trivial docs-only edits. For code work, use Tier 2 or
 
 1. Identify the exact file(s) and change needed
 2. Make the change directly in the main project directory
-3. Run the build command inline (e.g., `npm run build`) — no subagent validation
-4. If build passes: commit, push, create PR via `/commit-push-pr` protocol
+3. Run script-aware validation inline: prefer `npm test` when `test` script exists, else `npm run build` when `build` script exists, else skip — no subagent validation
+4. If validation passes: commit, push, create PR via `/commit-push-pr` protocol
 5. Mark complete: `./.codex/scripts/codex10 tier1-complete <request_id> "summary"`
 6. Log: `[TIER1_EXECUTE] request=[id] file=[file] change=[summary]`
 7. Update counters: `tier1_count += 1`; `last_activity_epoch = now_epoch()`
@@ -105,21 +105,34 @@ Only use this protocol for trivial docs-only edits. For code work, use Tier 2 or
 1. Check workers: `./.codex/scripts/codex10 worker-status` to find an idle worker and capture `raw_worker_id` (for example `worker-3`).
 2. Normalize to numeric for claim/assign/release: `worker_id="${raw_worker_id#worker-}"`.
 3. Claim atomically: `./.codex/scripts/codex10 claim-worker "$worker_id"`.
-4. Create task and capture task ID:
+4. Determine validation command (script-aware):
+   ```bash
+   validation_cmd=""
+   validation_field=""
+   if [ -f package.json ] && grep -Eq '"test"[[:space:]]*:' package.json; then
+     validation_cmd="npm test"
+   elif [ -f package.json ] && grep -Eq '"build"[[:space:]]*:' package.json; then
+     validation_cmd="npm run build"
+   fi
+   if [ -n "$validation_cmd" ]; then
+     validation_field=$(printf ',"validation":"%s"' "$validation_cmd")
+   fi
+   ```
+5. Create task and capture task ID:
    ```bash
    task_id="$(
-     echo '{"request_id":"[id]","subject":"[task title]","description":"DOMAIN: [domain]\nFILES: [files]\nVALIDATION: tier2\nTIER: 2\n\n[detailed requirements]\n\n[success criteria]","domain":"[domain]","tier":2,"priority":"normal","files":["file1.js","file2.js"],"validation":"npm run build"}' \
+     echo '{"request_id":"[id]","subject":"[task title]","description":"DOMAIN: [domain]\nFILES: [files]\nVALIDATION: tier2\nTIER: 2\n\n[detailed requirements]\n\n[success criteria]","domain":"[domain]","tier":2,"priority":"normal","files":["file1.js","file2.js"]'"$validation_field"'}' \
        | ./.codex/scripts/codex10 create-task - \
        | awk '/Task created:/ {print $3}'
    )"
    [ -n "$task_id" ] || { echo "Failed to capture task_id from create-task output"; exit 1; }
    ```
-5. Assign task with captured numeric ID: `./.codex/scripts/codex10 assign-task "$task_id" "$worker_id"`.
-6. Record request tier/state transition: `./.codex/scripts/codex10 triage <request_id> 2 "Assigned Tier 2 task <task_id>"`.
-7. Release claim: `./.codex/scripts/codex10 release-worker "$worker_id"`.
-8. Do not run `launch-worker.sh` after assignment; `assign-task` already wakes/spawns the worker.
-9. Log: `[TIER2_ASSIGN] request=[id] worker=[worker-N] task=[subject]`
-10. Update counters: `decomposition_count += 0.5`; if whole even count then `curation_due = true`; `last_activity_epoch = now_epoch()`
+6. Assign task with captured numeric ID: `./.codex/scripts/codex10 assign-task "$task_id" "$worker_id"`.
+7. Record request tier/state transition: `./.codex/scripts/codex10 triage <request_id> 2 "Assigned Tier 2 task <task_id>"`.
+8. Release claim: `./.codex/scripts/codex10 release-worker "$worker_id"`.
+9. Do not run `launch-worker.sh` after assignment; `assign-task` already wakes/spawns the worker.
+10. Log: `[TIER2_ASSIGN] request=[id] worker=[worker-N] task=[subject]`
+11. Update counters: `decomposition_count += 0.5`; if whole even count then `curation_due = true`; `last_activity_epoch = now_epoch()`
 
 ## Tier 3 Decomposition Protocol
 1. Think deeply and decompose into self-contained tasks with explicit file ownership.
