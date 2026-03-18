@@ -4,19 +4,28 @@ const fs = require('fs');
 const os = require('os');
 const path = require('path');
 const net = require('net');
+const crypto = require('crypto');
 
 const REGISTRY_PATH = path.join(os.tmpdir(), 'mac10-instances.json');
 const LOCK_PATH = REGISTRY_PATH + '.lock';
+
+// LOCK_STALE_MS: age at which a held lock is considered abandoned by a crashed process.
 const LOCK_STALE_MS = 10000;
 
+// LOCK_ACQUIRE_TIMEOUT_MS: max time to wait for lock acquisition. Mutable for tests.
+let LOCK_ACQUIRE_TIMEOUT_MS = 10000;
+
+// acquireLock returns a unique ownership token on success, or null on timeout.
+// No force-unlink fallback — fail-closed when lock cannot be acquired.
 function acquireLock() {
-  const deadline = Date.now() + LOCK_STALE_MS;
+  const token = `${process.pid}:${crypto.randomUUID()}`;
+  const deadline = Date.now() + LOCK_ACQUIRE_TIMEOUT_MS;
   while (Date.now() < deadline) {
     try {
-      fs.writeFileSync(LOCK_PATH, String(process.pid), { flag: 'wx' });
-      return true;
+      fs.writeFileSync(LOCK_PATH, token, { flag: 'wx' });
+      return token;
     } catch {
-      // Check if lock is stale
+      // Check if lock is stale (held by a crashed process)
       try {
         const stat = fs.statSync(LOCK_PATH);
         if (Date.now() - stat.mtimeMs > LOCK_STALE_MS) {
@@ -29,13 +38,19 @@ function acquireLock() {
       while (Date.now() - start < 50) { /* spin */ }
     }
   }
-  // Force remove stale lock as last resort
-  try { fs.unlinkSync(LOCK_PATH); } catch {}
-  return false;
+  return null;
 }
 
-function releaseLock() {
-  try { fs.unlinkSync(LOCK_PATH); } catch {}
+// releaseLock verifies token ownership before releasing. Non-owner calls are silently ignored.
+function releaseLock(token) {
+  if (!token) return;
+  try {
+    const content = fs.readFileSync(LOCK_PATH, 'utf8');
+    if (content === token) {
+      fs.unlinkSync(LOCK_PATH);
+    }
+    // Non-matching token: silently reject — lock remains held by its owner
+  } catch { /* lock file already gone */ }
 }
 
 function readRegistry() {
@@ -67,7 +82,10 @@ function normalizeNamespace(namespace) {
 function register({ projectDir, port, pid, name, tmuxSession, startedAt, namespace }) {
   const ns = normalizeNamespace(namespace);
   const resolvedProject = path.resolve(projectDir);
-  acquireLock();
+  const token = acquireLock();
+  if (!token) {
+    throw new Error('register: failed to acquire registry lock');
+  }
   try {
     const entries = readRegistry().filter((e) => {
       const eProject = path.resolve(e.projectDir || '');
@@ -85,36 +103,40 @@ function register({ projectDir, port, pid, name, tmuxSession, startedAt, namespa
     });
     writeRegistry(entries);
   } finally {
-    releaseLock();
+    releaseLock(token);
   }
 }
 
 function deregister(port) {
-  acquireLock();
+  const token = acquireLock();
+  if (!token) {
+    throw new Error('deregister: failed to acquire registry lock');
+  }
   try {
     const entries = readRegistry().filter(e => e.port !== port);
     writeRegistry(entries);
   } finally {
-    releaseLock();
+    releaseLock(token);
   }
 }
 
+// list() is lock-free for the read path. If stale entries need pruning, a lock is
+// acquired opportunistically; pruning is skipped if the lock is unavailable rather
+// than aborting the read, since callers only need a consistent snapshot.
 function list() {
-  acquireLock();
-  try {
-    const entries = readRegistry();
-    const alive = entries.filter(e => isPidAlive(e.pid));
-    const normalized = alive.map((e) => ({
-      ...e,
-      namespace: normalizeNamespace(e.namespace),
-    }));
-    if (alive.length !== entries.length) {
-      writeRegistry(normalized);
+  const entries = readRegistry();
+  const alive = entries.filter(e => isPidAlive(e.pid));
+  const normalized = alive.map((e) => ({
+    ...e,
+    namespace: normalizeNamespace(e.namespace),
+  }));
+  if (alive.length !== entries.length) {
+    const token = acquireLock();
+    if (token) {
+      try { writeRegistry(normalized); } finally { releaseLock(token); }
     }
-    return normalized;
-  } finally {
-    releaseLock();
   }
+  return normalized;
 }
 
 function findByProject(dir, namespace = null) {
@@ -146,4 +168,15 @@ async function acquirePort(base = 3100) {
   throw new Error('No free port found in range ' + base + '-' + (base + 99));
 }
 
-module.exports = { register, deregister, list, findByProject, acquirePort, REGISTRY_PATH };
+module.exports = {
+  register,
+  deregister,
+  list,
+  findByProject,
+  acquirePort,
+  REGISTRY_PATH,
+  LOCK_PATH,
+  acquireLock,
+  releaseLock,
+  _setLockAcquireTimeout: (ms) => { LOCK_ACQUIRE_TIMEOUT_MS = ms; },
+};
