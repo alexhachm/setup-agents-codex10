@@ -322,7 +322,7 @@ function escalate(worker, staleSec, projectDir) {
 }
 
 function handleDeath(worker, reason) {
-  const assignedTaskId = Number.parseInt(String(worker.current_task_id || ''), 10);
+  const assignedTaskId = worker.current_task_id;
 
   db.log('coordinator', 'worker_death', {
     worker_id: worker.id,

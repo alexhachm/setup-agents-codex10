@@ -221,6 +221,54 @@ describe('Bounded assignment recovery', () => {
     assert.strictEqual(exhaustedLog.max_reassignments, 1);
     assert.strictEqual(exhaustedLog.outcome, 'failed_retry_exhausted');
   });
+
+  it('fails task at reassignment cap when worker pane dies (handleDeath path)', () => {
+    db.setConfig('watchdog_task_reassign_limit', '1');
+    db.registerWorker(1, '/wt-1', 'agent-1');
+    const reqId = db.createRequest('Cap fires on worker death');
+    const taskId = db.createTask({
+      request_id: reqId,
+      subject: 'Cap at death task',
+      description: 'Should fail via handleDeath when reassignment cap is reached',
+    });
+    db.updateTask(taskId, {
+      status: 'in_progress',
+      assigned_to: 1,
+      liveness_reassign_count: 1,
+    });
+    db.updateWorker(1, {
+      status: 'running',
+      current_task_id: taskId,
+      launched_at: new Date(Date.now() - 300 * 1000).toISOString(),
+      last_heartbeat: new Date(Date.now() - 10 * 1000).toISOString(),
+    });
+
+    const originalIsTmuxAvailable = tmux.isTmuxAvailable;
+    const originalIsPaneAlive = tmux.isPaneAlive;
+    tmux.isTmuxAvailable = () => true;
+    tmux.isPaneAlive = () => false;
+    try {
+      tick(tmpDir);
+    } finally {
+      tmux.isTmuxAvailable = originalIsTmuxAvailable;
+      tmux.isPaneAlive = originalIsPaneAlive;
+    }
+
+    const task = db.getTask(taskId);
+    assert.strictEqual(task.status, 'failed');
+    assert.match(String(task.result || ''), /Liveness recovery exhausted/i);
+
+    const worker = db.getWorker(1);
+    assert.strictEqual(worker.status, 'idle');
+    assert.strictEqual(worker.current_task_id, null);
+
+    const exhaustedLog = db.getLog(100, 'coordinator')
+      .filter((entry) => entry.action === 'task_liveness_retry_exhausted')
+      .map((entry) => JSON.parse(entry.details))
+      .find((entry) => entry.task_id === taskId);
+    assert.ok(exhaustedLog, 'task_liveness_retry_exhausted log entry must exist');
+    assert.strictEqual(exhaustedLog.outcome, 'failed_retry_exhausted');
+  });
 });
 
 describe('Claim atomicity', () => {
