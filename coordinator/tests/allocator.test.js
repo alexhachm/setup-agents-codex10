@@ -9,6 +9,12 @@ const os = require('os');
 const db = require('../src/db');
 const allocator = require('../src/allocator');
 
+// insightIngestion is required by allocator; mock it to avoid side effects in tests
+const insightIngestion = require('../src/insight-ingestion');
+if (typeof insightIngestion.ingestAllocatorEvent !== 'function') {
+  insightIngestion.ingestAllocatorEvent = () => {};
+}
+
 let tmpDir;
 
 beforeEach(() => {
@@ -328,5 +334,130 @@ describe('Request completion tracking', () => {
     assert.strictEqual(result.failed, 0);
     assert.strictEqual(result.all_completed, false);
     assert.strictEqual(result.all_done, true);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Research batch availability signalling
+// ---------------------------------------------------------------------------
+
+describe('signalResearchBatchAvailability', () => {
+  beforeEach(() => {
+    // Reset dedup timer between tests
+    allocator.stop();
+  });
+
+  it('sends research_batch_available mail when queued intents exist and no batch is running', () => {
+    db.enqueueResearchIntent({
+      intent_type: 'browser_research',
+      intent_payload: { q: 'signal-test' },
+      priority_score: 500,
+      batch_size_cap: 5,
+      timeout_window_ms: 120000,
+    });
+
+    // Drain existing mail
+    db.checkMail('allocator');
+
+    allocator.tick();
+
+    const mail = db.checkMail('allocator');
+    const signals = mail.filter(m => m.type === 'research_batch_available');
+    assert.strictEqual(signals.length, 1);
+    assert.ok(signals[0].payload.queued_intent_count >= 1);
+  });
+
+  it('does not send mail when no queued intents exist', () => {
+    db.checkMail('allocator');
+    allocator.tick();
+    const mail = db.checkMail('allocator');
+    const signals = mail.filter(m => m.type === 'research_batch_available');
+    assert.strictEqual(signals.length, 0);
+  });
+
+  it('does not send mail when a batch is already running', () => {
+    // Enqueue an intent
+    db.enqueueResearchIntent({
+      intent_type: 'browser_research',
+      intent_payload: { q: 'running-batch' },
+      priority_score: 500,
+      batch_size_cap: 5,
+      timeout_window_ms: 120000,
+    });
+    // Materialize a batch plan (intents → planned) and simulate it running
+    const plan = db.materializeResearchBatchPlan({ max_batch_size: 5 });
+    const batchId = plan.batches[0].batch_id;
+    const stages = db.listResearchBatchStages(batchId);
+    // Mark the first stage running so batch becomes running
+    db.markResearchBatchStage({ stage_id: stages[0].id, status: 'running' });
+
+    // Now enqueue a second intent that stays queued
+    db.enqueueResearchIntent({
+      intent_type: 'browser_research',
+      intent_payload: { q: 'waiting-intent' },
+      priority_score: 300,
+      batch_size_cap: 5,
+      timeout_window_ms: 120000,
+    });
+
+    db.checkMail('allocator');
+    allocator.tick();
+
+    const mail = db.checkMail('allocator');
+    const signals = mail.filter(m => m.type === 'research_batch_available');
+    assert.strictEqual(signals.length, 0, 'should not signal when a batch is running');
+  });
+
+  it('signals again after running batch completes', () => {
+    db.enqueueResearchIntent({
+      intent_type: 'browser_research',
+      intent_payload: { q: 'post-complete' },
+      priority_score: 500,
+      batch_size_cap: 5,
+      timeout_window_ms: 120000,
+    });
+    const plan = db.materializeResearchBatchPlan({ max_batch_size: 5 });
+    const stages = db.listResearchBatchStages(plan.batches[0].batch_id);
+    db.markResearchBatchStage({ stage_id: stages[0].id, status: 'running' });
+    db.markResearchBatchStage({ stage_id: stages[0].id, status: 'completed' });
+
+    // Enqueue a new intent
+    db.enqueueResearchIntent({
+      intent_type: 'browser_research',
+      intent_payload: { q: 'next-run' },
+      priority_score: 500,
+      batch_size_cap: 5,
+      timeout_window_ms: 120000,
+    });
+
+    db.checkMail('allocator');
+    allocator.tick();
+
+    const mail = db.checkMail('allocator');
+    const signals = mail.filter(m => m.type === 'research_batch_available');
+    assert.strictEqual(signals.length, 1, 'should signal again after batch completes');
+  });
+
+  it('dedup window prevents duplicate signals within RESEARCH_NOTIFY_DEDUP_MS', () => {
+    db.enqueueResearchIntent({
+      intent_type: 'browser_research',
+      intent_payload: { q: 'dedup-signal' },
+      priority_score: 500,
+      batch_size_cap: 5,
+      timeout_window_ms: 120000,
+    });
+    db.checkMail('allocator');
+
+    // First tick fires the signal
+    allocator.tick();
+    const mail1 = db.checkMail('allocator');
+    const sig1 = mail1.filter(m => m.type === 'research_batch_available');
+    assert.strictEqual(sig1.length, 1);
+
+    // Second immediate tick should be suppressed by dedup window
+    allocator.tick();
+    const mail2 = db.checkMail('allocator');
+    const sig2 = mail2.filter(m => m.type === 'research_batch_available');
+    assert.strictEqual(sig2.length, 0, 'duplicate signal within dedup window should be suppressed');
   });
 });
