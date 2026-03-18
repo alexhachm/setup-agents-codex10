@@ -12,6 +12,8 @@ CREATE TABLE IF NOT EXISTS requests (
   tier INTEGER,  -- 1, 2, or 3 (set after triage)
   status TEXT NOT NULL DEFAULT 'pending'
     CHECK (status IN ('pending','triaging','executing_tier1','decomposed','in_progress','integrating','completed','failed')),
+  previous_status TEXT,  -- status before the most recent transition (observability)
+  status_cause TEXT,     -- reason for the most recent status transition (observability)
   created_at TEXT NOT NULL DEFAULT (datetime('now')),
   updated_at TEXT NOT NULL DEFAULT (datetime('now')),
   completed_at TEXT,
