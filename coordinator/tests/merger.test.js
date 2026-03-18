@@ -513,6 +513,30 @@ describe('Overlap validation command selection', () => {
     assert.ok(!commands.includes('npm run build'));
   });
 
+  it('should prefer task.validation commands over default when both are available', () => {
+    const { commandLog } = setupMockMergeCli();
+    fs.writeFileSync(path.join(tmpDir, 'package.json'), JSON.stringify({
+      name: 'overlap-test',
+      scripts: {
+        build: 'echo build',
+        test: 'echo test',
+      },
+    }, null, 2));
+    db.setConfig('merge_validation', 'true');
+
+    const { pendingMergeId } = seedOverlapMergeTask('npm run validate:custom');
+    merger.processQueue(tmpDir);
+
+    const pendingMerge = db.getDb().prepare('SELECT status, error FROM merge_queue WHERE id = ?').get(pendingMergeId);
+    assert.strictEqual(pendingMerge.status, 'merged');
+    assert.strictEqual(pendingMerge.error, null);
+
+    const commands = fs.existsSync(commandLog) ? fs.readFileSync(commandLog, 'utf8') : '';
+    assert.ok(commands.includes('npm run validate:custom'), 'Task-specific validation should run');
+    assert.ok(!commands.includes('npm run build'), 'Default build script should not run when task commands are provided');
+    assert.ok(!commands.includes('npm run test'), 'Default test script should not run when task commands are provided');
+  });
+
   it('should prefer build script for default overlap validation when build and test are both present', () => {
     const { commandLog } = setupMockMergeCli();
     fs.writeFileSync(path.join(tmpDir, 'package.json'), JSON.stringify({

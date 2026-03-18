@@ -517,38 +517,41 @@ function runOverlapValidation(entry, projectDir) {
   const taskValidationCommands = getTaskValidationCommands(task && task.validation);
   const defaultValidation = getDefaultValidationCommand(validationDir);
 
+  // Task-specific commands take priority: when provided, skip the generic default
+  const useTaskValidation = taskValidationCommands.length > 0;
+
   try {
     safeExec('git', ['fetch', 'origin'], validationDir);
 
-    if (wtPath) {
-      // Validate directly in worktree (branch already checked out)
-      if (defaultValidation.command) {
-        runValidationCommand(defaultValidation.command, wtPath);
-      }
-    } else {
-      // Fallback: old behavior
+    if (!wtPath) {
+      // Ensure we're on the task's branch before running validation in the project dir
       safeExec('git', ['checkout', entry.branch], projectDir);
-      if (defaultValidation.command) {
-        runValidationCommand(defaultValidation.command, projectDir);
+    }
+
+    if (useTaskValidation) {
+      // Task commands provided — run them exclusively instead of the generic default
+      for (const command of taskValidationCommands) {
+        runValidationCommand(command, validationDir);
       }
-    }
-
-    if (!defaultValidation.command) {
-      db.log('coordinator', 'overlap_validation_default_skipped', {
-        merge_id: entry.id,
-        task_id: entry.task_id,
-        reason: defaultValidation.reason,
-      });
     } else {
-      db.log('coordinator', 'overlap_validation_default_selected', {
-        merge_id: entry.id,
-        task_id: entry.task_id,
-        source: defaultValidation.source,
-      });
-    }
+      // No task commands — fall back to package.json default (if available)
+      if (defaultValidation.command) {
+        runValidationCommand(defaultValidation.command, validationDir);
+      }
 
-    for (const command of taskValidationCommands) {
-      runValidationCommand(command, validationDir);
+      if (!defaultValidation.command) {
+        db.log('coordinator', 'overlap_validation_default_skipped', {
+          merge_id: entry.id,
+          task_id: entry.task_id,
+          reason: defaultValidation.reason,
+        });
+      } else {
+        db.log('coordinator', 'overlap_validation_default_selected', {
+          merge_id: entry.id,
+          task_id: entry.task_id,
+          source: defaultValidation.source,
+        });
+      }
     }
 
     if (!wtPath) {
