@@ -806,3 +806,37 @@ describe('tryRebase stash guard', () => {
     assert.strictEqual(stashLogs[0].reason_code, 'stash_recovery');
   });
 });
+
+describe('functional_conflict merge status', () => {
+  it('should set merge status to conflict (not failed) when functional_conflict occurs', () => {
+    const reqId = db.createRequest('Feature');
+    const taskId = db.createTask({ request_id: reqId, subject: 'T1', description: 'D1' });
+
+    db.updateTask(taskId, { status: 'completed' });
+    db.updateRequest(reqId, { status: 'integrating' });
+
+    db.enqueueMerge({
+      request_id: reqId,
+      task_id: taskId,
+      pr_url: 'https://github.com/org/repo/pull/10',
+      branch: 'agent-1',
+    });
+
+    // Executor returns functional_conflict result
+    const mergeExecutor = () => ({
+      success: false,
+      functional_conflict: true,
+      error: 'post-merge validation failed: tests do not pass',
+    });
+
+    merger.processQueue(tmpDir, mergeExecutor);
+
+    const entry = db.getDb().prepare('SELECT * FROM merge_queue WHERE request_id = ?').get(reqId);
+    assert.strictEqual(entry.status, 'conflict', 'functional_conflict should set status to conflict, not failed');
+    assert.ok(entry.error.startsWith('functional_conflict:'), 'error should preserve functional_conflict: prefix');
+
+    const logs = readCoordinatorLogEntries('functional_conflict');
+    assert.strictEqual(logs.length, 1);
+    assert.strictEqual(logs[0].merge_id, entry.id);
+  });
+});

@@ -24,6 +24,7 @@ const LOOP_STALE_HEARTBEAT_SEC =
 const MERGE_TIMEOUT_SEC = 300;
 const MERGE_CONFLICT_GRACE_SEC = 600;
 const MERGE_TIMEOUT_ERROR = `Merge timed out after ${MERGE_TIMEOUT_SEC / 60} minutes`;
+const FUNCTIONAL_CONFLICT_ERROR_PREFIX = 'functional_conflict:';
 const SQLITE_DATETIME_PATTERN = /^(\d{4})-(\d{2})-(\d{2}) (\d{2}):(\d{2}):(\d{2})(?:\.(\d{1,3}))?$/;
 
 // Escalation thresholds (seconds since last heartbeat)
@@ -551,7 +552,12 @@ function recoverStaleIntegrations(now, options = {}) {
       'SELECT * FROM merge_queue WHERE request_id = ?'
     ).all(req.id);
 
-    const hasConflicts = freshMerges.some(m => m.status === 'conflict');
+    // Guard: treat 'failed' merges with functional_conflict: error prefix as conflict-type
+    // so active fix tasks (conflict-remediation in progress) prevent premature request failure.
+    const hasConflicts = freshMerges.some(
+      m => m.status === 'conflict' ||
+           (m.status === 'failed' && typeof m.error === 'string' && m.error.startsWith(FUNCTIONAL_CONFLICT_ERROR_PREFIX))
+    );
     const allTerminal = freshMerges.every(m => ['merged', 'conflict', 'failed'].includes(m.status));
     if (!allTerminal) continue;
 

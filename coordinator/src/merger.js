@@ -313,7 +313,7 @@ function processQueue(projectDir, mergeExecutor = attemptMerge) {
       // Check if entire request is now complete
       checkRequestCompletion(entry.request_id);
     } else if (result.functional_conflict) {
-      db.updateMerge(entry.id, { status: 'failed', error: `functional_conflict: ${result.error}` });
+      db.updateMerge(entry.id, { status: 'conflict', error: `functional_conflict: ${result.error}` });
       db.log('coordinator', 'functional_conflict', {
         merge_id: entry.id,
         branch: entry.branch,
