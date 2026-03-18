@@ -1,0 +1,10 @@
+#!/usr/bin/env bash
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+REPO_DIR="$(cd "$SCRIPT_DIR/../.." && pwd)"
+MAC10_BIN="$REPO_DIR/coordinator/bin/mac10"
+if [ ! -f "$MAC10_BIN" ]; then
+  echo "ERROR: mac10 CLI not found at $MAC10_BIN" >&2
+  echo "  Has the setup-agents repo moved? Re-run setup.sh to fix." >&2
+  exit 1
+fi
+exec node "$MAC10_BIN" "$@"
