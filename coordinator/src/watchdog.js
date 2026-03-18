@@ -541,7 +541,18 @@ function recoverStaleIntegrations(now, options = {}) {
     const allMerged = freshMerges.every(m => m.status === 'merged');
 
     if (allMerged) {
-      // Case 2: All merges succeeded → mark request completed
+      // Case 2: All merges succeeded — guard against non-terminal or failed sibling tasks
+      const taskCompletion = db.checkRequestCompletion(req.id);
+      if (taskCompletion.total > 0 && (!taskCompletion.all_done || taskCompletion.failed > 0)) {
+        db.log('coordinator', 'stale_integration_gated', {
+          request_id: req.id,
+          reason: !taskCompletion.all_done ? 'non_terminal_tasks' : 'failed_tasks',
+          total: taskCompletion.total,
+          completed: taskCompletion.completed,
+          failed: taskCompletion.failed,
+        });
+        continue;
+      }
       const result = `All ${freshMerges.length} PR(s) merged successfully`;
       db.updateRequest(req.id, {
         status: 'completed',
