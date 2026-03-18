@@ -478,6 +478,140 @@ describe('Stale decomposed request recovery', () => {
   });
 });
 
+describe('Non-tmux worker liveness', () => {
+  it('does not reset freshly assigned worker when tmux is unavailable', () => {
+    db.registerWorker(1, '/wt-1', 'agent-1');
+    const reqId = db.createRequest('Non-tmux fresh assign');
+    const taskId = db.createTask({
+      request_id: reqId,
+      subject: 'Fresh assignment',
+      description: 'Just assigned — must not be reset without tmux',
+    });
+    db.updateTask(taskId, { status: 'assigned', assigned_to: 1 });
+    db.updateWorker(1, {
+      status: 'assigned',
+      current_task_id: taskId,
+      launched_at: new Date().toISOString(),
+      last_heartbeat: new Date().toISOString(),
+    });
+
+    const originalIsTmuxAvailable = tmux.isTmuxAvailable;
+    tmux.isTmuxAvailable = () => false;
+    try {
+      tick(tmpDir);
+    } finally {
+      tmux.isTmuxAvailable = originalIsTmuxAvailable;
+    }
+
+    const worker = db.getWorker(1);
+    assert.strictEqual(worker.status, 'assigned');
+    assert.strictEqual(worker.current_task_id, taskId);
+  });
+
+  it('does not reset running worker with recent heartbeat when tmux is unavailable', () => {
+    db.registerWorker(1, '/wt-1', 'agent-1');
+    const reqId = db.createRequest('Non-tmux running worker');
+    const taskId = db.createTask({
+      request_id: reqId,
+      subject: 'Running task',
+      description: 'Active worker with fresh heartbeat — must not be reset',
+    });
+    db.updateTask(taskId, { status: 'in_progress', assigned_to: 1 });
+    db.updateWorker(1, {
+      status: 'running',
+      current_task_id: taskId,
+      launched_at: new Date(Date.now() - 120 * 1000).toISOString(),
+      last_heartbeat: new Date(Date.now() - 10 * 1000).toISOString(),
+    });
+
+    const originalIsTmuxAvailable = tmux.isTmuxAvailable;
+    tmux.isTmuxAvailable = () => false;
+    try {
+      tick(tmpDir);
+    } finally {
+      tmux.isTmuxAvailable = originalIsTmuxAvailable;
+    }
+
+    const worker = db.getWorker(1);
+    assert.strictEqual(worker.status, 'running');
+    assert.strictEqual(worker.current_task_id, taskId);
+  });
+
+  it('recovers stale non-tmux worker via heartbeat-based paths', () => {
+    db.registerWorker(1, '/wt-1', 'agent-1');
+    const reqId = db.createRequest('Stale non-tmux worker');
+    const taskId = db.createTask({
+      request_id: reqId,
+      subject: 'Stale assignment',
+      description: 'Worker with stale heartbeat should be recovered via liveness staleness',
+    });
+    const staleTime = new Date(Date.now() - 6 * 60 * 1000).toISOString();
+    db.updateTask(taskId, { status: 'assigned', assigned_to: 1 });
+    db.updateWorker(1, {
+      status: 'assigned',
+      current_task_id: taskId,
+      launched_at: staleTime,
+      last_heartbeat: staleTime,
+    });
+
+    const originalIsTmuxAvailable = tmux.isTmuxAvailable;
+    tmux.isTmuxAvailable = () => false;
+    try {
+      tick(tmpDir);
+    } finally {
+      tmux.isTmuxAvailable = originalIsTmuxAvailable;
+    }
+
+    const task = db.getTask(taskId);
+    assert.strictEqual(task.status, 'ready');
+    assert.strictEqual(task.assigned_to, null);
+    assert.strictEqual(task.liveness_reassign_count, 1);
+    assert.strictEqual(task.liveness_last_reassign_reason, 'worker_liveness_stale');
+
+    const worker = db.getWorker(1);
+    assert.strictEqual(worker.status, 'idle');
+    assert.strictEqual(worker.current_task_id, null);
+  });
+
+  it('preserves pane-death behavior when tmux is available', () => {
+    db.registerWorker(1, '/wt-1', 'agent-1');
+    const reqId = db.createRequest('Tmux pane death');
+    const taskId = db.createTask({
+      request_id: reqId,
+      subject: 'Dead pane task',
+      description: 'Worker pane died — handleDeath must fire',
+    });
+    db.updateTask(taskId, { status: 'in_progress', assigned_to: 1 });
+    db.updateWorker(1, {
+      status: 'running',
+      current_task_id: taskId,
+      launched_at: new Date(Date.now() - 120 * 1000).toISOString(),
+      last_heartbeat: new Date(Date.now() - 10 * 1000).toISOString(),
+    });
+
+    const originalIsTmuxAvailable = tmux.isTmuxAvailable;
+    const originalIsPaneAlive = tmux.isPaneAlive;
+    tmux.isTmuxAvailable = () => true;
+    tmux.isPaneAlive = () => false;
+    try {
+      tick(tmpDir);
+    } finally {
+      tmux.isTmuxAvailable = originalIsTmuxAvailable;
+      tmux.isPaneAlive = originalIsPaneAlive;
+    }
+
+    const worker = db.getWorker(1);
+    assert.strictEqual(worker.status, 'idle');
+    assert.strictEqual(worker.current_task_id, null);
+
+    const deathLog = db.getLog(100, 'coordinator')
+      .filter((entry) => entry.action === 'worker_death')
+      .map((entry) => JSON.parse(entry.details))
+      .find((entry) => entry.worker_id === 1 && entry.reason === 'tmux_pane_dead');
+    assert.ok(deathLog);
+  });
+});
+
 describe('Stale integration recovery', () => {
   it('keeps failed merge requests recoverable while remediation is active or just queued', () => {
     const requestId = db.createRequest('Failed merge remediation');

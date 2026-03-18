@@ -151,14 +151,17 @@ function tick(projectDir) {
       continue;
     }
 
-    // ZFC death detection: check if tmux pane is actually alive
-    const windowName = `worker-${worker.id}`;
-    const paneAlive = tmux.isPaneAlive(windowName);
+    // ZFC death detection: check if tmux pane is actually alive.
+    // Non-tmux environments skip this branch and rely on heartbeat/launched_at staleness.
+    if (tmux.isTmuxAvailable()) {
+      const windowName = `worker-${worker.id}`;
+      const paneAlive = tmux.isPaneAlive(windowName);
 
-    if (!paneAlive && worker.status !== 'idle' && worker.status !== 'completed_task') {
-      // Process died unexpectedly
-      handleDeath(worker, 'tmux_pane_dead');
-      continue;
+      if (!paneAlive && worker.status !== 'idle' && worker.status !== 'completed_task') {
+        // Process died unexpectedly
+        handleDeath(worker, 'tmux_pane_dead');
+        continue;
+      }
     }
 
     // Skip workers just launched (grace period)

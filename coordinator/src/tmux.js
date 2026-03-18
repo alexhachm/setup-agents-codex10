@@ -75,6 +75,8 @@ function sendKeys(window, keys) {
   safeExec(['send-keys', '-t', `${SESSION}:${window}`, keys, 'Enter']);
 }
 
+// Returns false when tmux is unavailable — callers that infer worker death from pane
+// absence must first check isTmuxAvailable() to avoid false positives in non-tmux envs.
 function isPaneAlive(window) {
   if (!isAvailable()) return false;
   try {
@@ -86,6 +88,10 @@ function isPaneAlive(window) {
   } catch {
     return false;
   }
+}
+
+function isTmuxAvailable() {
+  return isAvailable();
 }
 
 function getPanePid(window) {
@@ -140,6 +146,7 @@ module.exports = {
   setSession,
   getSession,
   isAvailable,
+  isTmuxAvailable,
   ensureSession,
   createWindow,
   sendKeys,
