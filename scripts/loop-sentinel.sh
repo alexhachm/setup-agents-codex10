@@ -229,11 +229,15 @@ while true; do
 
   # Launch Codex for one iteration
   # Namespace-aware prompt file selection:
-  # codex10 namespace → prefer commands-codex10/loop-agent.md
-  # mac10 namespace   → use commands/loop-agent.md (uses mac10 commands)
+  # codex10 namespace → prefer .codex/commands-codex10/loop-agent.md, fallback to .codex/commands/loop-agent.md
+  # mac10 namespace   → use .claude/commands/loop-agent.md (uses mac10 commands)
   PROMPT_FILE="$PROJECT_DIR/.claude/commands/loop-agent.md"
-  if [ "${MAC10_NAMESPACE:-}" = "codex10" ] && [ -f "$PROJECT_DIR/.claude/commands-codex10/loop-agent.md" ]; then
-    PROMPT_FILE="$PROJECT_DIR/.claude/commands-codex10/loop-agent.md"
+  if [ "${MAC10_NAMESPACE:-}" = "codex10" ]; then
+    if [ -f "$PROJECT_DIR/.codex/commands-codex10/loop-agent.md" ]; then
+      PROMPT_FILE="$PROJECT_DIR/.codex/commands-codex10/loop-agent.md"
+    elif [ -f "$PROJECT_DIR/.codex/commands/loop-agent.md" ]; then
+      PROMPT_FILE="$PROJECT_DIR/.codex/commands/loop-agent.md"
+    fi
   fi
   echo "[loop-sentinel-$LOOP_ID] Launching codex (iteration backoff=${BACKOFF}s)..."
   START_TIME=$(date +%s)
