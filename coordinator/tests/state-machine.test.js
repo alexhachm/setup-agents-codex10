@@ -235,6 +235,55 @@ describe('Task state machine', () => {
     assert.strictEqual(ready[0].request_id, backlogRequestId);
   });
 
+  it('should not promote pending tasks whose request is completed', () => {
+    const reqId = db.createRequest('Completed request');
+    const taskId = db.createTask({ request_id: reqId, subject: 'Stale task', description: 'Should stay pending' });
+    db.updateRequest(reqId, { status: 'completed' });
+
+    db.checkAndPromoteTasks();
+
+    const task = db.getTask(taskId);
+    assert.strictEqual(task.status, 'pending', 'task on completed request must not be promoted');
+  });
+
+  it('should not promote pending tasks whose request is failed', () => {
+    const reqId = db.createRequest('Failed request');
+    const taskId = db.createTask({ request_id: reqId, subject: 'Stale task', description: 'Should stay pending' });
+    db.updateRequest(reqId, { status: 'failed' });
+
+    db.checkAndPromoteTasks();
+
+    const task = db.getTask(taskId);
+    assert.strictEqual(task.status, 'pending', 'task on failed request must not be promoted');
+  });
+
+  it('should not promote dependency-resolved tasks whose request is failed', () => {
+    const reqId = db.createRequest('Failed request with deps');
+    const t1 = db.createTask({ request_id: reqId, subject: 'Dep', description: 'Already done' });
+    const t2 = db.createTask({
+      request_id: reqId,
+      subject: 'Downstream',
+      description: 'Depends on t1',
+      depends_on: [t1],
+    });
+    db.updateTask(t1, { status: 'completed' });
+    db.updateRequest(reqId, { status: 'failed' });
+
+    db.checkAndPromoteTasks();
+
+    assert.strictEqual(db.getTask(t2).status, 'pending', 'dep-resolved task on failed request must not be promoted');
+  });
+
+  it('should still promote pending tasks on active requests normally', () => {
+    const reqId = db.createRequest('Active request');
+    const taskId = db.createTask({ request_id: reqId, subject: 'Task', description: 'Should be promoted' });
+
+    db.checkAndPromoteTasks();
+
+    const task = db.getTask(taskId);
+    assert.strictEqual(task.status, 'ready', 'task on active request should be promoted to ready');
+  });
+
   it('should keep pending tasks blocked when dependency IDs do not exist', () => {
     const reqId = db.createRequest('Feature');
     const blockedId = db.createTask({
