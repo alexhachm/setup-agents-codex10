@@ -46,6 +46,9 @@ fi
 
 BACKOFF=5
 PRECHECK_BACKOFF=10
+RESTART_SIGNAL="$PROJECT_DIR/.codex/signals/.codex10.restart-signal"
+LAST_RESTART_TS=0
+RESTART_COOLDOWN_SEC=120
 HEARTBEAT_INTERVAL=30
 LAST_HEARTBEAT_TS=0
 
@@ -106,6 +109,30 @@ sleep_with_loop_heartbeats() {
 }
 
 while true; do
+  # Check for restart signal before prompt preflight
+  if [ -f "$RESTART_SIGNAL" ]; then
+    NOW_TS=$(date +%s)
+    if [ $((NOW_TS - LAST_RESTART_TS)) -lt "$RESTART_COOLDOWN_SEC" ]; then
+      echo "[loop-sentinel-$LOOP_ID] Restart signal ignored (cooldown active)."
+      rm -f "$RESTART_SIGNAL" 2>/dev/null || true
+    else
+      rm -f "$RESTART_SIGNAL" 2>/dev/null || true
+      echo "[loop-sentinel-$LOOP_ID] Restart signal detected; restarting coordinator..."
+      "$MAC10_CMD" stop "$PROJECT_DIR" >/dev/null 2>&1 || true
+      sleep 2
+      if "$MAC10_CMD" start "$PROJECT_DIR" >/dev/null 2>&1; then
+        LAST_RESTART_TS="$NOW_TS"
+        BACKOFF=5
+        PRECHECK_BACKOFF=10
+        echo "[loop-sentinel-$LOOP_ID] Coordinator restart complete."
+      else
+        echo "[loop-sentinel-$LOOP_ID] Coordinator restart failed; retrying after backoff."
+        sleep_with_loop_heartbeats "$BACKOFF"
+        continue
+      fi
+    fi
+  fi
+
   # Check if loop is still active
   PROMPT_JSON=$("$MAC10_CMD" loop-prompt "$LOOP_ID" 2>/dev/null || echo "")
   if [ -z "$PROMPT_JSON" ]; then
