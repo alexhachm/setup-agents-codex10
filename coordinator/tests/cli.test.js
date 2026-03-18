@@ -4659,3 +4659,45 @@ describe('memory CLI — quota-pressure and iterative-run scenarios', () => {
     assert.ok(highRel.artifacts.every(a => a.relevance_score >= 900));
   });
 });
+
+describe('research-queue COMMAND_SCHEMAS validation', () => {
+  it('queue-research rejects missing topic', async () => {
+    const res = await sendCommand('queue-research', { question: 'What is X?' });
+    assert.strictEqual(res.error, 'Missing required field "topic" for command "queue-research"');
+  });
+
+  it('queue-research rejects missing question', async () => {
+    const res = await sendCommand('queue-research', { topic: 'X' });
+    assert.strictEqual(res.error, 'Missing required field "question" for command "queue-research"');
+  });
+
+  it('queue-research rejects wrong type for mode', async () => {
+    const res = await sendCommand('queue-research', { topic: 'X', question: 'Q?', mode: 42 });
+    assert.strictEqual(res.error, 'Field "mode" must be of type string');
+  });
+
+  it('queue-research rejects wrong type for source_task_id', async () => {
+    const res = await sendCommand('queue-research', { topic: 'X', question: 'Q?', source_task_id: 'not-a-number' });
+    assert.strictEqual(res.error, 'Field "source_task_id" must be of type number');
+  });
+
+  it('research-status rejects wrong type for limit', async () => {
+    const res = await sendCommand('research-status', { limit: 'fifty' });
+    assert.strictEqual(res.error, 'Field "limit" must be of type number');
+  });
+
+  it('research-requeue-stale rejects wrong type for max_age_minutes', async () => {
+    const res = await sendCommand('research-requeue-stale', { max_age_minutes: '120' });
+    assert.strictEqual(res.error, 'Field "max_age_minutes" must be of type number');
+  });
+
+  it('research-start rejects missing id', async () => {
+    const res = await sendCommand('research-start', {});
+    assert.strictEqual(res.error, 'Missing required field "id" for command "research-start"');
+  });
+
+  it('research-start rejects wrong type for id', async () => {
+    const res = await sendCommand('research-start', { id: 'abc' });
+    assert.strictEqual(res.error, 'Field "id" must be of type number');
+  });
+});

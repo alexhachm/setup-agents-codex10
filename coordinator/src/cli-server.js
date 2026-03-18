@@ -543,6 +543,15 @@ const COMMAND_SCHEMAS = {
     required: ['intent_id', 'error'],
     types: { intent_id: 'number', error: 'string' },
   },
+  'queue-research':      {
+    required: ['topic', 'question'],
+    types: { topic: 'string', question: 'string', mode: 'string', priority: 'string', context: 'string', source_agent: 'string', source_task_id: 'number' },
+  },
+  'research-status':     { required: [], types: { topic: 'string', status: 'string', limit: 'number' } },
+  'research-gaps':       { required: [], types: {} },
+  'research-next':       { required: [], types: {} },
+  'research-requeue-stale': { required: [], types: { max_age_minutes: 'number' } },
+  'research-start':      { required: ['id'], types: { id: 'number' } },
   'memory-snapshots': {
     required: [],
     types: {
