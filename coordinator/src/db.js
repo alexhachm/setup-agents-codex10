@@ -444,7 +444,7 @@ const VALID_COLUMNS = Object.freeze({
   workers: new Set(['status', 'domain', 'worktree_path', 'branch', 'tmux_session', 'tmux_window', 'pid', 'current_task_id', 'claimed_by', 'claimed_at', 'last_heartbeat', 'launched_at', 'tasks_completed']),
   merge_queue: new Set(['status', 'priority', 'completion_checkpoint', 'merged_at', 'error']),
   changes: new Set(['description', 'domain', 'file_path', 'function_name', 'tooltip', 'enabled', 'status']),
-  loops: new Set(['prompt', 'status', 'iteration_count', 'last_checkpoint', 'tmux_session', 'tmux_window', 'pid', 'last_heartbeat', 'stopped_at']),
+  loops: new Set(['prompt', 'status', 'iteration_count', 'last_checkpoint', 'namespace', 'tmux_session', 'tmux_window', 'pid', 'last_heartbeat', 'stopped_at']),
 });
 
 function validateColumns(table, fields) {
@@ -863,6 +863,12 @@ function init(projectDir) {
     }
   }
   if (existingTables.includes('merge_queue')) ensureMergeQueueColumns(db);
+  if (existingTables.includes('loops')) {
+    const loopCols = db.prepare("PRAGMA table_info(loops)").all().map(c => c.name);
+    if (!loopCols.includes('namespace')) {
+      db.exec("ALTER TABLE loops ADD COLUMN namespace TEXT");
+    }
+  }
 
   // Now safe to run full schema (CREATE TABLE IF NOT EXISTS + indexes)
   const schema = fs.readFileSync(path.join(__dirname, 'schema.sql'), 'utf8');

@@ -323,6 +323,7 @@ CREATE TABLE IF NOT EXISTS loops (
     CHECK (status IN ('active','paused','stopped','failed')),
   iteration_count INTEGER NOT NULL DEFAULT 0,
   last_checkpoint TEXT,
+  namespace TEXT,
   tmux_session TEXT,
   tmux_window TEXT,
   pid INTEGER,
