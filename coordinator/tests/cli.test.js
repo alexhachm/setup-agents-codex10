@@ -2848,8 +2848,6 @@ describe('CLI Server', () => {
 
     db.updateTask(sourceTaskId, { status: 'failed' });
     db.updateTask(replacementTaskId, { status: 'completed' });
-    db.checkAndPromoteTasks();
-    assert.strictEqual(db.getTask(blockedTaskId).status, 'pending');
 
     const replanned = await sendCommand('replan-dependency', {
       from_task_id: sourceTaskId,
@@ -2885,8 +2883,6 @@ describe('CLI Server', () => {
 
     db.updateTask(sourceTaskId, { status: 'failed' });
     db.updateTask(failedReplacementTaskId, { status: 'failed' });
-    db.checkAndPromoteTasks();
-    assert.strictEqual(db.getTask(blockedTaskId).status, 'pending');
 
     const replanned = await sendCommand('replan-dependency', {
       from_task_id: sourceTaskId,

@@ -2506,11 +2506,15 @@ function checkAndPromoteTasks() {
     const depStatus = d.prepare(
       `SELECT
          COUNT(*) AS total,
-         COALESCE(SUM(CASE WHEN status = 'completed' THEN 1 ELSE 0 END), 0) AS completed
+         COALESCE(SUM(CASE WHEN status = 'completed' THEN 1 ELSE 0 END), 0) AS completed,
+         COALESCE(SUM(CASE WHEN status = 'failed' THEN 1 ELSE 0 END), 0) AS failed,
+         MIN(CASE WHEN status = 'failed' THEN id ELSE NULL END) AS first_failed_id
        FROM tasks
        WHERE id IN (${uniqueDeps.map(() => '?').join(',')})`
     ).get(...uniqueDeps);
-    if (depStatus.total === uniqueDeps.length && depStatus.completed === uniqueDeps.length) {
+    if (depStatus.failed > 0) {
+      updateTask(task.id, { status: 'failed', result: `blocked by failed dependency task #${depStatus.first_failed_id}` });
+    } else if (depStatus.total === uniqueDeps.length && depStatus.completed === uniqueDeps.length) {
       updateTask(task.id, { status: 'ready' });
     }
   }
