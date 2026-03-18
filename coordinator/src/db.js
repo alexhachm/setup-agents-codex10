@@ -2472,8 +2472,21 @@ function checkAndPromoteTasks() {
       updateTask(task.id, { status: 'failed', result: `Invalid depends_on JSON: ${e.message}` });
       continue;
     }
+    if (!Array.isArray(deps)) {
+      const msg = `Malformed depends_on for task ${task.id}: expected array, got ${JSON.stringify(deps)}`;
+      console.error(`[db] checkAndPromoteTasks: ${msg}`);
+      updateTask(task.id, { status: 'failed', result: msg });
+      continue;
+    }
     if (!deps.length) {
       updateTask(task.id, { status: 'ready' });
+      continue;
+    }
+    const invalidDep = deps.find((d) => typeof d !== 'number' || !Number.isInteger(d) || d <= 0);
+    if (invalidDep !== undefined) {
+      const msg = `Malformed depends_on for task ${task.id}: invalid element ${JSON.stringify(invalidDep)}`;
+      console.error(`[db] checkAndPromoteTasks: ${msg}`);
+      updateTask(task.id, { status: 'failed', result: msg });
       continue;
     }
     const uniqueDeps = [...new Set(deps)];
