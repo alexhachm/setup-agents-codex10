@@ -344,7 +344,6 @@ describe('Task state machine', () => {
 
     db.updateTask(sourceTask, { status: 'failed' });
     db.updateTask(replacementTask, { status: 'completed' });
-    db.checkAndPromoteTasks();
 
     const replanned = db.replanTaskDependency({ fromTaskId: sourceTask, toTaskId: replacementTask });
     assert.deepStrictEqual(
@@ -385,7 +384,6 @@ describe('Task state machine', () => {
 
     db.updateTask(sourceTask, { status: 'failed' });
     db.updateTask(replacementTask, { status: 'completed' });
-    db.checkAndPromoteTasks();
 
     const replanned = db.replanTaskDependency({
       fromTaskId: sourceTask,
@@ -398,7 +396,78 @@ describe('Task state machine', () => {
     assert.strictEqual(db.getTask(scopedTask).depends_on, `[${replacementTask}]`);
     assert.strictEqual(db.getTask(unscopedTask).depends_on, `[${sourceTask}]`);
     assert.strictEqual(db.getTask(scopedTask).status, 'ready');
-    assert.strictEqual(db.getTask(unscopedTask).status, 'pending');
+    // unscopedTask was not replanned; its dependency (sourceTask) is still failed → cascade-terminated
+    assert.strictEqual(db.getTask(unscopedTask).status, 'failed');
+  });
+
+  it('should terminalize pending task when a prerequisite has failed', () => {
+    const reqId = db.createRequest('Feature');
+    const t1 = db.createTask({ request_id: reqId, subject: 'Task 1', description: 'First' });
+    const t2 = db.createTask({
+      request_id: reqId,
+      subject: 'Task 2',
+      description: 'Second',
+      depends_on: [t1],
+    });
+
+    db.updateTask(t1, { status: 'failed', result: 'Something went wrong' });
+    db.checkAndPromoteTasks();
+
+    const task2 = db.getTask(t2);
+    assert.strictEqual(task2.status, 'failed');
+    assert.ok(task2.result.includes(`#${t1}`), `result should mention failed dep #${t1}, got: ${task2.result}`);
+  });
+
+  it('should promote pending task to ready when all prerequisites are completed', () => {
+    const reqId = db.createRequest('Feature');
+    const t1 = db.createTask({ request_id: reqId, subject: 'Task 1', description: 'First' });
+    const t2 = db.createTask({
+      request_id: reqId,
+      subject: 'Task 2',
+      description: 'Second',
+      depends_on: [t1],
+    });
+
+    db.updateTask(t1, { status: 'completed' });
+    db.checkAndPromoteTasks();
+
+    assert.strictEqual(db.getTask(t2).status, 'ready');
+  });
+
+  it('should keep task pending when some prerequisites are still pending', () => {
+    const reqId = db.createRequest('Feature');
+    const t1 = db.createTask({ request_id: reqId, subject: 'Task 1', description: 'First' });
+    const t2 = db.createTask({ request_id: reqId, subject: 'Task 2', description: 'Still pending' });
+    const t3 = db.createTask({
+      request_id: reqId,
+      subject: 'Task 3',
+      description: 'Depends on both',
+      depends_on: [t1, t2],
+    });
+
+    db.updateTask(t1, { status: 'completed' });
+    db.checkAndPromoteTasks();
+
+    assert.strictEqual(db.getTask(t3).status, 'pending');
+  });
+
+  it('should cascade-fail dependents when all tasks in a request are failed', () => {
+    const reqId = db.createRequest('All failed request');
+    const t1 = db.createTask({ request_id: reqId, subject: 'Task 1', description: 'Will fail' });
+    const t2 = db.createTask({
+      request_id: reqId,
+      subject: 'Task 2',
+      description: 'Depends on failing t1',
+      depends_on: [t1],
+    });
+
+    db.updateRequest(reqId, { status: 'integrating' });
+    db.updateTask(t1, { status: 'failed', result: 'Original failure' });
+    db.checkAndPromoteTasks();
+
+    assert.strictEqual(db.getTask(t2).status, 'failed');
+    const completion = db.checkRequestCompletion(reqId, { repair_stale_decomposed: false });
+    assert.strictEqual(completion.all_done, true);
   });
 
   it('should persist browser-offload task fields and lifecycle transitions', () => {
