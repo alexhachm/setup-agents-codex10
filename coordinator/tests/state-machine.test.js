@@ -761,6 +761,138 @@ describe('Browser callback events cursor retrieval', () => {
   });
 });
 
+describe('Request status observability (status_cause / previous_status)', () => {
+  it('should record previous_status automatically on status transition', () => {
+    const id = db.createRequest('Observability test');
+    db.updateRequest(id, { status: 'triaging' });
+    const after = db.getRequest(id);
+    assert.strictEqual(after.status, 'triaging');
+    assert.strictEqual(after.previous_status, 'pending');
+  });
+
+  it('should record status_cause when explicitly provided', () => {
+    const id = db.createRequest('Status cause test');
+    db.updateRequest(id, { status: 'in_progress', status_cause: 'architect_decomposed' });
+    const after = db.getRequest(id);
+    assert.strictEqual(after.status, 'in_progress');
+    assert.strictEqual(after.status_cause, 'architect_decomposed');
+  });
+
+  it('should update previous_status on each subsequent transition', () => {
+    const id = db.createRequest('Multi-step observability test');
+    db.updateRequest(id, { status: 'triaging' });
+    db.updateRequest(id, { status: 'decomposed' });
+    db.updateRequest(id, { status: 'in_progress' });
+    const after = db.getRequest(id);
+    assert.strictEqual(after.status, 'in_progress');
+    assert.strictEqual(after.previous_status, 'decomposed');
+  });
+});
+
+describe('Request lifecycle reconciliation', () => {
+  it('should clear stale terminal metadata from a non-terminal request', () => {
+    const id = db.createRequest('Stale metadata test');
+    // Simulate stale state: request in in_progress but completed_at is set
+    db.getDb()
+      .prepare("UPDATE requests SET status = 'in_progress', completed_at = '2026-01-01 00:00:00', result = 'stale' WHERE id = ?")
+      .run(id);
+
+    const stale = db.getRequest(id);
+    assert.strictEqual(stale.status, 'in_progress');
+    assert.ok(stale.completed_at, 'should have stale completed_at before reconcile');
+    assert.strictEqual(stale.result, 'stale');
+
+    const changes = db.reconcileRequestLifecycle(id);
+    assert.ok(changes.some(c => c.type === 'cleared_stale_terminal_metadata'));
+
+    const repaired = db.getRequest(id);
+    assert.strictEqual(repaired.completed_at, null);
+    assert.strictEqual(repaired.result, null);
+    assert.strictEqual(repaired.status_cause, 'reconcile_cleared_stale_terminal_metadata');
+  });
+
+  it('should advance in_progress request with all terminal tasks and no pending merges to integrating', () => {
+    const id = db.createRequest('in_progress all terminal');
+    const t1 = db.createTask({ request_id: id, subject: 'T1', description: 'Done' });
+    const t2 = db.createTask({ request_id: id, subject: 'T2', description: 'Failed' });
+    db.updateRequest(id, { status: 'in_progress' });
+    db.updateTask(t1, { status: 'completed' });
+    db.updateTask(t2, { status: 'failed' });
+
+    const changes = db.reconcileRequestLifecycle(id);
+    assert.ok(changes.some(c => c.type === 'advanced_in_progress_to_integrating'));
+
+    const after = db.getRequest(id);
+    assert.strictEqual(after.status, 'integrating');
+    assert.strictEqual(after.status_cause, 'reconcile_in_progress_all_tasks_terminal');
+  });
+
+  it('should not advance in_progress request with pending merges to integrating', () => {
+    const id = db.createRequest('in_progress with pending merges');
+    const t1 = db.createTask({ request_id: id, subject: 'T1', description: 'Done' });
+    db.updateRequest(id, { status: 'in_progress' });
+    db.updateTask(t1, { status: 'completed' });
+    db.enqueueMerge({
+      request_id: id,
+      task_id: t1,
+      pr_url: 'https://github.com/org/repo/pull/999',
+      branch: 'agent-1',
+    });
+
+    const changes = db.reconcileRequestLifecycle(id);
+    assert.strictEqual(changes.filter(c => c.type === 'advanced_in_progress_to_integrating').length, 0);
+
+    const after = db.getRequest(id);
+    assert.strictEqual(after.status, 'in_progress');
+  });
+
+  it('should not advance in_progress request with active tasks', () => {
+    const id = db.createRequest('in_progress with active tasks');
+    const t1 = db.createTask({ request_id: id, subject: 'T1', description: 'Done' });
+    const t2 = db.createTask({ request_id: id, subject: 'T2', description: 'Still going' });
+    db.updateRequest(id, { status: 'in_progress' });
+    db.updateTask(t1, { status: 'completed' });
+    db.updateTask(t2, { status: 'assigned' });
+
+    const changes = db.reconcileRequestLifecycle(id);
+    assert.strictEqual(changes.filter(c => c.type === 'advanced_in_progress_to_integrating').length, 0);
+
+    const after = db.getRequest(id);
+    assert.strictEqual(after.status, 'in_progress');
+  });
+
+  it('should not touch terminal requests', () => {
+    const id = db.createRequest('Terminal request');
+    const completedAt = new Date().toISOString();
+    db.updateRequest(id, { status: 'completed', result: 'Done', completed_at: completedAt });
+
+    const changes = db.reconcileRequestLifecycle(id);
+    assert.strictEqual(changes.length, 0);
+
+    const after = db.getRequest(id);
+    assert.strictEqual(after.status, 'completed');
+    assert.ok(after.result, 'result should be preserved on terminal request');
+  });
+
+  it('should sweep all active requests with reconcileAllActiveRequests', () => {
+    const id1 = db.createRequest('Stale 1');
+    const id2 = db.createRequest('Stale 2');
+    // Inject stale metadata into both non-terminal requests
+    db.getDb()
+      .prepare("UPDATE requests SET status = 'integrating', completed_at = '2026-01-01 00:00:00' WHERE id = ?")
+      .run(id1);
+    db.getDb()
+      .prepare("UPDATE requests SET status = 'in_progress', completed_at = '2026-01-01 00:00:00' WHERE id = ?")
+      .run(id2);
+
+    const totalFixed = db.reconcileAllActiveRequests();
+    assert.ok(totalFixed >= 2, `expected at least 2 repairs, got ${totalFixed}`);
+
+    assert.strictEqual(db.getRequest(id1).completed_at, null);
+    assert.strictEqual(db.getRequest(id2).completed_at, null);
+  });
+});
+
 describe('Usage cost burn rate', () => {
   it('should include completed and failed task spend while requiring completed_at', () => {
     const requestId = db.createRequest('Burn-rate aggregation');

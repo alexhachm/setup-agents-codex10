@@ -233,6 +233,10 @@ function tick(projectDir) {
   // Recover stale tier-3 decomposed requests that never produced tasks.
   recoverStaleDecomposedRequests('watchdog_tick');
 
+  // Reconcile lifecycle invariants: clear stale terminal metadata, advance
+  // decomposed→in_progress when tasks exist, in_progress→integrating when all terminal.
+  db.reconcileAllActiveRequests();
+
   // Recover stale integrations
   recoverStaleIntegrations(now);
 

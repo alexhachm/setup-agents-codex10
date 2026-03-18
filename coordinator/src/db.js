@@ -424,7 +424,7 @@ function compareCompletedTaskCursors(left, right) {
 }
 
 const VALID_COLUMNS = Object.freeze({
-  requests: new Set(['description', 'tier', 'status', 'result', 'completed_at', 'loop_id']),
+  requests: new Set(['description', 'tier', 'status', 'result', 'completed_at', 'loop_id', 'status_cause', 'previous_status']),
   tasks: new Set([
     'request_id', 'subject', 'description', 'domain', 'files', 'priority', 'tier', 'depends_on',
     'assigned_to', 'status', 'pr_url', 'branch', 'validation', 'overlap_with',
@@ -963,6 +963,12 @@ function init(projectDir) {
     if (!reqCols.includes('loop_id')) {
       db.exec("ALTER TABLE requests ADD COLUMN loop_id INTEGER REFERENCES loops(id)");
     }
+    if (!reqCols.includes('previous_status')) {
+      db.exec("ALTER TABLE requests ADD COLUMN previous_status TEXT");
+    }
+    if (!reqCols.includes('status_cause')) {
+      db.exec("ALTER TABLE requests ADD COLUMN status_cause TEXT");
+    }
   }
   if (existingTables.includes('merge_queue')) ensureMergeQueueColumns(db);
   if (existingTables.includes('loops')) {
@@ -1036,9 +1042,14 @@ function updateRequest(id, fields) {
   const normalizedFields = { ...fields };
   if (Object.prototype.hasOwnProperty.call(normalizedFields, 'status')) {
     const current = getDb().prepare('SELECT status FROM requests WHERE id = ?').get(id);
-    if (shouldClearRequestCompletionMetadata(current && current.status, normalizedFields.status)) {
+    const previousStatus = current && current.status ? current.status : null;
+    if (shouldClearRequestCompletionMetadata(previousStatus, normalizedFields.status)) {
       normalizedFields.completed_at = null;
       normalizedFields.result = null;
+    }
+    // Auto-capture previous_status for observability unless caller explicitly provides it
+    if (!Object.prototype.hasOwnProperty.call(normalizedFields, 'previous_status')) {
+      normalizedFields.previous_status = previousStatus;
     }
   }
   const sets = [];
@@ -4091,6 +4102,112 @@ function listLoopRequests(loopId) {
   return getDb().prepare('SELECT * FROM requests WHERE loop_id = ? ORDER BY created_at DESC').all(loopId);
 }
 
+// --- Request lifecycle reconciliation ---
+
+/**
+ * Reconcile invariants for a single request:
+ * 1. Non-terminal requests must not retain terminal completion metadata.
+ * 2. A 'decomposed' request that already has tasks should advance to 'in_progress'.
+ * 3. An 'in_progress' request with all tasks in terminal state and no pending/running
+ *    merges should advance to 'integrating' so the merger can complete it.
+ *
+ * Returns an array of change descriptors (empty if nothing was repaired).
+ */
+function reconcileRequestLifecycle(requestId) {
+  const request = getDb().prepare('SELECT * FROM requests WHERE id = ?').get(requestId);
+  if (!request) return [];
+
+  const changes = [];
+
+  // Invariant 1: non-terminal requests must not carry terminal completion metadata.
+  if (!isTerminalRequestStatus(request.status)) {
+    if (request.completed_at !== null || request.result !== null) {
+      const staleFields = {};
+      if (request.completed_at !== null) staleFields.completed_at = null;
+      if (request.result !== null) staleFields.result = null;
+      staleFields.status_cause = 'reconcile_cleared_stale_terminal_metadata';
+      getDb()
+        .prepare(
+          `UPDATE requests SET completed_at = NULL, result = NULL,
+            status_cause = 'reconcile_cleared_stale_terminal_metadata',
+            updated_at = datetime('now')
+           WHERE id = ? AND status NOT IN ('completed','failed')`
+        )
+        .run(requestId);
+      const detail = {
+        type: 'cleared_stale_terminal_metadata',
+        request_id: requestId,
+        previous_status: request.status,
+        had_completed_at: request.completed_at !== null,
+        had_result: request.result !== null,
+      };
+      changes.push(detail);
+      log('coordinator', 'reconcile_cleared_stale_terminal_metadata', detail);
+    }
+  }
+
+  // Re-read to get current state after potential mutation above
+  const current = getDb().prepare('SELECT * FROM requests WHERE id = ?').get(requestId);
+  if (!current) return changes;
+
+  // Invariant 2: 'in_progress' with all tasks in terminal state (completed or failed)
+  //   and no pending/running merges → advance to 'integrating' so the merger can
+  //   evaluate completion.  This repairs requests that got stuck in 'in_progress'
+  //   after their tasks finished but before the merger observed the transition.
+  if (current.status === 'in_progress') {
+    const taskStats = getDb()
+      .prepare(
+        `SELECT
+           COUNT(*) AS total,
+           SUM(CASE WHEN status IN ('completed','failed') THEN 1 ELSE 0 END) AS terminal
+         FROM tasks WHERE request_id = ?`
+      )
+      .get(requestId);
+    const total = Number(taskStats.total) || 0;
+    const terminal = Number(taskStats.terminal) || 0;
+    if (total > 0 && terminal === total) {
+      const activeMerges = getDb()
+        .prepare(
+          "SELECT COUNT(*) as cnt FROM merge_queue WHERE request_id = ? AND status IN ('pending','ready','merging')"
+        )
+        .get(requestId);
+      if (Number(activeMerges.cnt) === 0) {
+        updateRequest(requestId, {
+          status: 'integrating',
+          status_cause: 'reconcile_in_progress_all_tasks_terminal',
+        });
+        const detail = {
+          type: 'advanced_in_progress_to_integrating',
+          request_id: requestId,
+          total_tasks: total,
+          terminal_tasks: terminal,
+        };
+        changes.push(detail);
+        log('coordinator', 'reconcile_advanced_in_progress_to_integrating', detail);
+      }
+    }
+  }
+
+  return changes;
+}
+
+/**
+ * Run reconcileRequestLifecycle for all non-terminal requests.
+ * Called periodically by the watchdog to heal stale lifecycle state.
+ * Returns the total number of repairs made.
+ */
+function reconcileAllActiveRequests() {
+  const activeRequests = getDb()
+    .prepare("SELECT id FROM requests WHERE status NOT IN ('completed','failed')")
+    .all();
+  let totalChanges = 0;
+  for (const req of activeRequests) {
+    const changes = reconcileRequestLifecycle(req.id);
+    totalChanges += changes.length;
+  }
+  return totalChanges;
+}
+
 module.exports = {
   init, close, getDb,
   coordinatorAgeMs,
@@ -4112,6 +4229,7 @@ module.exports = {
   registerWorker, getWorker, updateWorker, getIdleWorkers, getAllWorkers, claimWorker, releaseWorker,
   recoverStalledAssignments,
   recoverStaleDecomposedZeroTaskRequests, checkRequestCompletion,
+  reconcileRequestLifecycle, reconcileAllActiveRequests,
   getUsageCostBurnRate, getRequestLatestCompletedTaskCursor, hasRequestCompletedTaskProgressSince,
   sendMail, checkMail, checkMailBlocking, purgeOldMail,
   enqueueMerge, getNextMerge, updateMerge,
