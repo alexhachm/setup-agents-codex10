@@ -372,4 +372,121 @@ describe('Batch orchestration endpoints', () => {
     assert.ok(result.body.batch_status && typeof result.body.batch_status === 'object');
     assert.ok(typeof result.body.batch_status.queue_depth === 'number');
   });
+
+  it('GET /api/memory/snapshots returns empty list when no snapshots exist', async () => {
+    const result = await requestJson('/api/memory/snapshots');
+    assert.strictEqual(result.status, 200);
+    assert.strictEqual(result.body.ok, true);
+    assert.ok(Array.isArray(result.body.snapshots));
+    assert.strictEqual(result.body.snapshots.length, 0);
+  });
+
+  it('GET /api/memory/snapshots filters by context key', async () => {
+    db.createProjectMemorySnapshot({
+      project_context_key: 'ctx-alpha',
+      snapshot_payload: { data: 'alpha' },
+      relevance_score: 0.8,
+    });
+    db.createProjectMemorySnapshot({
+      project_context_key: 'ctx-beta',
+      snapshot_payload: { data: 'beta' },
+      relevance_score: 0.5,
+    });
+    const result = await requestJson('/api/memory/snapshots?project_context_key=ctx-alpha');
+    assert.strictEqual(result.status, 200);
+    assert.strictEqual(result.body.ok, true);
+    assert.strictEqual(result.body.snapshots.length, 1);
+    assert.strictEqual(result.body.snapshots[0].project_context_key, 'ctx-alpha');
+  });
+
+  it('GET /api/memory/snapshots/:id returns 404 for missing snapshot', async () => {
+    const result = await requestJson('/api/memory/snapshots/99999');
+    assert.strictEqual(result.status, 404);
+    assert.strictEqual(result.body.ok, false);
+  });
+
+  it('GET /api/memory/snapshots/:id returns snapshot and lineage', async () => {
+    const snap = db.createProjectMemorySnapshot({
+      project_context_key: 'ctx-lineage-test',
+      snapshot_payload: { data: 'lineage-test' },
+    });
+    const result = await requestJson(`/api/memory/snapshots/${snap.id}?include_lineage=true`);
+    assert.strictEqual(result.status, 200);
+    assert.strictEqual(result.body.ok, true);
+    assert.strictEqual(result.body.snapshot.id, snap.id);
+    assert.ok(Array.isArray(result.body.lineage));
+  });
+
+  it('GET /api/memory/insights returns empty list when no artifacts exist', async () => {
+    const result = await requestJson('/api/memory/insights');
+    assert.strictEqual(result.status, 200);
+    assert.strictEqual(result.body.ok, true);
+    assert.ok(Array.isArray(result.body.artifacts));
+    assert.strictEqual(result.body.artifacts.length, 0);
+  });
+
+  it('GET /api/memory/insights filters by validation_status', async () => {
+    db.createInsightArtifact({
+      project_context_key: 'ctx-insights',
+      artifact_payload: { content: 'validated insight' },
+      validation_status: 'validated',
+    });
+    db.createInsightArtifact({
+      project_context_key: 'ctx-insights',
+      artifact_payload: { content: 'unvalidated insight' },
+      validation_status: 'unvalidated',
+    });
+    const result = await requestJson('/api/memory/insights?validation_status=validated');
+    assert.strictEqual(result.status, 200);
+    assert.strictEqual(result.body.ok, true);
+    assert.strictEqual(result.body.artifacts.length, 1);
+    assert.strictEqual(result.body.artifacts[0].validation_status, 'validated');
+  });
+
+  it('GET /api/memory/insights/:id returns 404 for missing artifact', async () => {
+    const result = await requestJson('/api/memory/insights/99999');
+    assert.strictEqual(result.status, 404);
+    assert.strictEqual(result.body.ok, false);
+  });
+
+  it('GET /api/memory/insights/:id returns artifact and lineage', async () => {
+    const artifact = db.createInsightArtifact({
+      project_context_key: 'ctx-artifact-lineage',
+      artifact_payload: { insight: 'test' },
+    });
+    const result = await requestJson(`/api/memory/insights/${artifact.id}?include_lineage=true`);
+    assert.strictEqual(result.status, 200);
+    assert.strictEqual(result.body.ok, true);
+    assert.strictEqual(result.body.artifact.id, artifact.id);
+    assert.ok(Array.isArray(result.body.lineage));
+  });
+
+  it('GET /api/memory/lineage returns empty list when no links exist', async () => {
+    const result = await requestJson('/api/memory/lineage');
+    assert.strictEqual(result.status, 200);
+    assert.strictEqual(result.body.ok, true);
+    assert.ok(Array.isArray(result.body.links));
+    assert.strictEqual(result.body.links.length, 0);
+  });
+
+  it('GET /api/memory/lineage filters by request_id', async () => {
+    const reqId = db.createRequest('lineage test request');
+    const snap = db.createProjectMemorySnapshot({
+      project_context_key: 'ctx-lineage-req',
+      snapshot_payload: { data: 'req-lineage' },
+      request_id: reqId,
+    });
+    const result = await requestJson(`/api/memory/lineage?request_id=${reqId}`);
+    assert.strictEqual(result.status, 200);
+    assert.strictEqual(result.body.ok, true);
+    assert.ok(result.body.links.length >= 1);
+    assert.ok(result.body.links.every(l => l.request_id === reqId));
+    assert.ok(result.body.links.some(l => l.snapshot_id === snap.id));
+  });
+
+  it('GET /api/memory/snapshots returns 400 for invalid task_id', async () => {
+    const result = await requestJson('/api/memory/snapshots?task_id=abc');
+    assert.strictEqual(result.status, 400);
+    assert.strictEqual(result.body.ok, false);
+  });
 });

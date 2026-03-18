@@ -534,6 +534,55 @@ const COMMAND_SCHEMAS = {
     required: ['stage_id', 'status'],
     types: { stage_id: 'number', status: 'string', error: 'string' },
   },
+  'memory-snapshots': {
+    required: [],
+    types: {
+      project_context_key: 'string',
+      request_id: 'string',
+      task_id: 'number',
+      run_id: 'string',
+      validation_status: 'string',
+      min_relevance_score: 'number',
+      limit: 'number',
+      offset: 'number',
+    },
+  },
+  'memory-snapshot': {
+    required: ['id'],
+    types: { id: 'number', include_lineage: 'boolean' },
+  },
+  'memory-insights': {
+    required: [],
+    types: {
+      project_context_key: 'string',
+      snapshot_id: 'number',
+      artifact_type: 'string',
+      request_id: 'string',
+      task_id: 'number',
+      run_id: 'string',
+      validation_status: 'string',
+      min_relevance_score: 'number',
+      limit: 'number',
+      offset: 'number',
+    },
+  },
+  'memory-insight': {
+    required: ['id'],
+    types: { id: 'number', include_lineage: 'boolean' },
+  },
+  'memory-lineage': {
+    required: [],
+    types: {
+      snapshot_id: 'number',
+      insight_artifact_id: 'number',
+      request_id: 'string',
+      task_id: 'number',
+      run_id: 'string',
+      lineage_type: 'string',
+      limit: 'number',
+      offset: 'number',
+    },
+  },
 };
 
 const COMPLETE_TASK_USAGE_FIELD_TYPES = Object.freeze({
@@ -4167,6 +4216,81 @@ function handleCommand(cmd, conn, handlers) {
           status: args.status,
         });
         respond(conn, { ok: true, ...collectResult });
+        break;
+      }
+
+      case 'memory-snapshots': {
+        const snapshots = db.listProjectMemorySnapshots({
+          project_context_key: args.project_context_key || null,
+          request_id: args.request_id || null,
+          task_id: args.task_id || null,
+          run_id: args.run_id || null,
+          validation_status: args.validation_status || null,
+          min_relevance_score: args.min_relevance_score != null ? args.min_relevance_score : null,
+          limit: args.limit || 100,
+          offset: args.offset || 0,
+        });
+        respond(conn, { ok: true, snapshots });
+        break;
+      }
+
+      case 'memory-snapshot': {
+        const snap = db.getProjectMemorySnapshot(args.id);
+        if (!snap) {
+          respond(conn, { ok: false, error: `Snapshot ${args.id} not found` });
+          break;
+        }
+        let lineage = null;
+        if (args.include_lineage) {
+          lineage = db.listProjectMemoryLineageLinks({ snapshot_id: args.id });
+        }
+        respond(conn, { ok: true, snapshot: snap, lineage });
+        break;
+      }
+
+      case 'memory-insights': {
+        const artifacts = db.listInsightArtifacts({
+          project_context_key: args.project_context_key || null,
+          snapshot_id: args.snapshot_id || null,
+          artifact_type: args.artifact_type || null,
+          request_id: args.request_id || null,
+          task_id: args.task_id || null,
+          run_id: args.run_id || null,
+          validation_status: args.validation_status || null,
+          min_relevance_score: args.min_relevance_score != null ? args.min_relevance_score : null,
+          limit: args.limit || 100,
+          offset: args.offset || 0,
+        });
+        respond(conn, { ok: true, artifacts });
+        break;
+      }
+
+      case 'memory-insight': {
+        const artifact = db.getInsightArtifact(args.id);
+        if (!artifact) {
+          respond(conn, { ok: false, error: `Insight artifact ${args.id} not found` });
+          break;
+        }
+        let insightLineage = null;
+        if (args.include_lineage) {
+          insightLineage = db.listProjectMemoryLineageLinks({ insight_artifact_id: args.id });
+        }
+        respond(conn, { ok: true, artifact, lineage: insightLineage });
+        break;
+      }
+
+      case 'memory-lineage': {
+        const links = db.listProjectMemoryLineageLinks({
+          snapshot_id: args.snapshot_id || null,
+          insight_artifact_id: args.insight_artifact_id || null,
+          request_id: args.request_id || null,
+          task_id: args.task_id || null,
+          run_id: args.run_id || null,
+          lineage_type: args.lineage_type || null,
+          limit: args.limit || 200,
+          offset: args.offset || 0,
+        });
+        respond(conn, { ok: true, links });
         break;
       }
 
