@@ -191,7 +191,11 @@ Before resetting:
 1. **Curate** all knowledge files (the full curation cycle above)
 2. **Write** updated `codebase-insights.md` with anything new from this session
 3. **Write** to `patterns.md` any decomposition patterns that worked/failed
-4. **Check stagger:** `./.codex/scripts/codex10 status` — if Master-3 is resetting, defer.
+4. **Check stagger:**
+   ```bash
+   cat .codex/state/codex10.agent-health.json
+   ```
+   If Master-3 status is "resetting", `sleep 30` and check again. Do not reset simultaneously.
 5. Log: `[RESET] reason=[trigger]`
 6. Exit and relaunch `/scan-codebase`
 
