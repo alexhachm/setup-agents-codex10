@@ -1,6 +1,7 @@
 'use strict';
 
 const db = require('./db');
+const insightIngestion = require('./insight-ingestion');
 
 let intervalId = null;
 let lastNotifyTs = 0;
@@ -108,6 +109,9 @@ function signalResearchBatchAvailability() {
     queued_intent_count: queuedIntentCount,
   });
   db.log('allocator', 'research_batch_signaled', {
+    queued_intent_count: queuedIntentCount,
+  });
+  insightIngestion.ingestAllocatorEvent('research_batch_available', {
     queued_intent_count: queuedIntentCount,
   });
 }

@@ -4,6 +4,7 @@ const { execFileSync } = require('child_process');
 const path = require('path');
 const fs = require('fs');
 const db = require('./db');
+const insightIngestion = require('./insight-ingestion');
 
 const BRANCH_RE = /^[a-zA-Z0-9._\/-]+$/;
 const PR_URL_RE = /^https:\/\/github\.com\/[a-zA-Z0-9._-]+\/[a-zA-Z0-9._-]+\/pull\/\d+$/;
@@ -197,6 +198,7 @@ function completeRequestIfTransition(requestId, result) {
 
   db.sendMail('master-1', 'request_completed', { request_id: requestId, result });
   db.log('coordinator', 'request_completed', { request_id: requestId });
+  insightIngestion.ingestMergeEvent('request_completed', { request_id: requestId, result });
   return true;
 }
 
@@ -309,6 +311,12 @@ function processQueue(projectDir, mergeExecutor = attemptMerge) {
     if (result.success) {
       db.updateMerge(entry.id, { status: 'merged', merged_at: new Date().toISOString() });
       db.log('coordinator', 'merge_success', { merge_id: entry.id, branch: entry.branch });
+      insightIngestion.ingestMergeEvent('merge_success', {
+        merge_id: entry.id,
+        request_id: entry.request_id,
+        task_id: entry.task_id,
+        branch: entry.branch,
+      });
 
       // Check if entire request is now complete
       checkRequestCompletion(entry.request_id);
@@ -319,6 +327,13 @@ function processQueue(projectDir, mergeExecutor = attemptMerge) {
         branch: entry.branch,
         error: result.error,
       });
+      insightIngestion.ingestMergeEvent('functional_conflict', {
+        merge_id: entry.id,
+        request_id: entry.request_id,
+        task_id: entry.task_id,
+        branch: entry.branch,
+        error: result.error,
+      });
     } else {
       db.updateMerge(entry.id, {
         status: result.conflict ? 'conflict' : 'failed',
@@ -326,6 +341,14 @@ function processQueue(projectDir, mergeExecutor = attemptMerge) {
       });
       db.log('coordinator', 'merge_failed', {
         merge_id: entry.id,
+        branch: entry.branch,
+        error: result.error,
+        tier: result.tier,
+      });
+      insightIngestion.ingestMergeEvent('merge_failed', {
+        merge_id: entry.id,
+        request_id: entry.request_id,
+        task_id: entry.task_id,
         branch: entry.branch,
         error: result.error,
         tier: result.tier,
