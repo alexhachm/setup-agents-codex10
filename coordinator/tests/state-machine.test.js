@@ -287,7 +287,7 @@ describe('Task state machine', () => {
     assert.strictEqual(task.status, 'ready', 'task on active request should be promoted to ready');
   });
 
-  it('should keep pending tasks blocked when dependency IDs do not exist', () => {
+  it('should fail tasks with nonexistent dependency IDs (regression: must not become ready)', () => {
     const reqId = db.createRequest('Feature');
     const blockedId = db.createTask({
       request_id: reqId,
@@ -299,10 +299,12 @@ describe('Task state machine', () => {
     db.checkAndPromoteTasks();
 
     const blockedTask = db.getTask(blockedId);
-    assert.strictEqual(blockedTask.status, 'pending');
+    assert.strictEqual(blockedTask.status, 'failed');
+    assert.ok(blockedTask.result.includes('missing_dependency_ids'), `Expected missing_dependency_ids in result, got: ${blockedTask.result}`);
+    assert.ok(blockedTask.result.includes('999999'), `Expected 999999 in result, got: ${blockedTask.result}`);
   });
 
-  it('should keep mixed existing and missing dependencies blocked', () => {
+  it('should fail tasks with mixed existing and missing dependencies', () => {
     const reqId = db.createRequest('Feature');
     const t1 = db.createTask({ request_id: reqId, subject: 'Task 1', description: 'First' });
     const t2 = db.createTask({
@@ -314,11 +316,10 @@ describe('Task state machine', () => {
 
     db.checkAndPromoteTasks();
     assert.strictEqual(db.getTask(t1).status, 'ready');
-    assert.strictEqual(db.getTask(t2).status, 'pending');
-
-    db.updateTask(t1, { status: 'completed' });
-    db.checkAndPromoteTasks();
-    assert.strictEqual(db.getTask(t2).status, 'pending');
+    assert.strictEqual(db.getTask(t2).status, 'failed');
+    const t2Task = db.getTask(t2);
+    assert.ok(t2Task.result.includes('missing_dependency_ids'), `Expected missing_dependency_ids in result, got: ${t2Task.result}`);
+    assert.ok(t2Task.result.includes('999999'), `Expected 999999 in result, got: ${t2Task.result}`);
   });
 
   it('should replan blocked dependencies and promote newly unblocked tasks', () => {
