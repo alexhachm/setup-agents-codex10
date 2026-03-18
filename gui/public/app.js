@@ -57,6 +57,7 @@
       changes: [],
       changesDomainFilter: '',
       browserOffload: createBrowserOffloadState(),
+      batchConfig: null,
     };
   }
 
@@ -124,6 +125,8 @@
           if (tab.id === activeTabId) onGitPushComplete(msg.code);
         } else if (msg.type === 'browser_offload_event') {
           handleBrowserOffloadEvent(tab, msg);
+        } else if (msg.type === 'batch_config_updated') {
+          if (tab.id === activeTabId) fetchBatchConfig(tab);
         }
       } catch (e) { console.error('WS parse error:', e); }
     };
@@ -177,6 +180,7 @@
     fetchTabPresets(tab);
     fetchTabStatus(tab);
     fetchTabChanges(tab);
+    fetchBatchConfig(tab);
   }
 
   function addTab(port, name, projectDir) {
@@ -216,6 +220,8 @@
   function clearPanels() {
     renderState({ requests: [], workers: [], tasks: [] });
     document.getElementById('log-list').innerHTML = '';
+    document.getElementById('batch-metrics').innerHTML = '';
+    document.getElementById('batch-list').innerHTML = '';
     document.getElementById('browser-workflow-state').textContent = 'idle';
     document.getElementById('browser-workflow-state').className = 'browser-state-chip browser-state-idle';
     document.getElementById('browser-session-meta').textContent = 'No active browser offload session.';
@@ -264,6 +270,7 @@
     renderTasks(Array.isArray(state.tasks) ? state.tasks : [], state);
     const tab = activeTab();
     if (tab) renderBrowserOffload(tab, state);
+    if (tab) renderBatchPanel(tab, state);
   }
 
   function renderWorkers(workers) {
@@ -1889,6 +1896,116 @@
     if (!tab) return;
     tab.changesDomainFilter = this.value;
     renderChanges(tab);
+  });
+
+  // --- Batch orchestration ---
+
+  function fetchBatchConfig(tab) {
+    tabFetch(tab, '/api/batch/config')
+      .then(r => r.json())
+      .then(cfg => {
+        tab.batchConfig = cfg;
+        if (tab.id === activeTabId) renderBatchPanel(tab, tab.state || {});
+      })
+      .catch(err => console.error('Batch config fetch failed:', err));
+  }
+
+  function renderBatchPanel(tab, state) {
+    const batchStatus = state && state.batch_status ? state.batch_status : {};
+    const cfg = tab && tab.batchConfig ? tab.batchConfig : {};
+
+    updateInputValue(document.getElementById('batch-max-size'), cfg.max_size != null ? String(cfg.max_size) : '');
+    updateInputValue(document.getElementById('batch-timeout-ms'), cfg.timeout_ms != null ? String(cfg.timeout_ms) : '');
+    updateInputValue(document.getElementById('batch-candidate-limit'), cfg.candidate_limit != null ? String(cfg.candidate_limit) : '');
+
+    const metrics = [
+      { label: 'Queue Depth', value: batchStatus.queue_depth != null ? String(batchStatus.queue_depth) : '\u2014' },
+      { label: 'In-Flight Batches', value: batchStatus.in_flight_batches != null ? String(batchStatus.in_flight_batches) : '\u2014' },
+      { label: 'In-Flight Stages', value: batchStatus.in_flight_stages != null ? String(batchStatus.in_flight_stages) : '\u2014' },
+      { label: 'Partial Failures', value: batchStatus.partial_failure_count != null ? String(batchStatus.partial_failure_count) : '\u2014' },
+      { label: 'Completed', value: batchStatus.completed_count != null ? String(batchStatus.completed_count) : '\u2014' },
+      { label: 'Dedupe Hit Rate', value: batchStatus.dedupe_hit_rate_pct != null ? `${batchStatus.dedupe_hit_rate_pct}%` : '\u2014' },
+    ];
+    document.getElementById('batch-metrics').innerHTML =
+      `<div class="batch-metrics-grid">${metrics.map(m =>
+        `<div class="batch-metric"><span class="batch-metric-label">${escapeHtml(m.label)}</span><span class="batch-metric-value">${escapeHtml(m.value)}</span></div>`
+      ).join('')}</div>`;
+
+    const batchListEl = document.getElementById('batch-list');
+    const recentBatches = Array.isArray(batchStatus.recent_batches) ? batchStatus.recent_batches : [];
+    let batchHtml = '';
+    if (recentBatches.length === 0) {
+      batchHtml += '<div style="color:#8b949e;font-size:13px;margin-top:8px">No batches yet</div>';
+    } else {
+      batchHtml += '<div class="batch-list-header">Recent Batches</div>' + recentBatches.slice(0, 10).map(b =>
+        `<div class="batch-item">` +
+        `<span style="color:#58a6ff">#${escapeHtml(String(b.id))}</span> ` +
+        `<span class="worker-status badge-${escapeHtml(b.status || 'unknown')}">${escapeHtml(b.status || 'unknown')}</span> ` +
+        `<span style="font-size:11px;color:#8b949e">${escapeHtml(String(b.planned_intent_count || 0))} intents</span>` +
+        (b.duration_ms != null ? ` <span class="task-chip"><span class="task-chip-label">dur</span>${escapeHtml(String(b.duration_ms))}ms</span>` : '') +
+        (b.last_error ? `<div style="font-size:11px;color:#f85149">${escapeHtml(String(b.last_error).slice(0, 80))}</div>` : '') +
+        `</div>`
+      ).join('');
+    }
+    const fanout = Array.isArray(batchStatus.fanout_by_request) ? batchStatus.fanout_by_request : [];
+    if (fanout.length > 0) {
+      batchHtml += '<div class="batch-list-header" style="margin-top:12px">Fan-out Completeness by Request</div>' + fanout.slice(0, 10).map(f => {
+        const pct = f.total_fanout > 0 ? Math.round((f.completed_fanout / f.total_fanout) * 100) : 0;
+        return `<div class="batch-item">` +
+          `<span style="color:#58a6ff">${escapeHtml(String(f.request_id || '-'))}</span> ` +
+          `<span class="task-chip"><span class="task-chip-label">done</span>${escapeHtml(String(f.completed_fanout || 0))}/${escapeHtml(String(f.total_fanout || 0))} (${pct}%)</span>` +
+          (f.failed_fanout > 0 ? ` <span class="task-chip" style="color:#f85149"><span class="task-chip-label">fail</span>${escapeHtml(String(f.failed_fanout))}</span>` : '') +
+          (f.pending_fanout > 0 ? ` <span class="task-chip"><span class="task-chip-label">pend</span>${escapeHtml(String(f.pending_fanout))}</span>` : '') +
+          `</div>`;
+      }).join('');
+    }
+    batchListEl.innerHTML = batchHtml;
+  }
+
+  async function saveBatchConfig(tab) {
+    const maxSizeVal = document.getElementById('batch-max-size').value.trim();
+    const timeoutVal = document.getElementById('batch-timeout-ms').value.trim();
+    const candidateLimitVal = document.getElementById('batch-candidate-limit').value.trim();
+    const body = {};
+    if (maxSizeVal) body.max_size = parseInt(maxSizeVal, 10);
+    if (timeoutVal) body.timeout_ms = parseInt(timeoutVal, 10);
+    if (candidateLimitVal) body.candidate_limit = parseInt(candidateLimitVal, 10);
+    if (Object.keys(body).length === 0) return;
+
+    const btn = document.getElementById('batch-save-btn');
+    const msg = document.getElementById('batch-save-msg');
+    btn.disabled = true;
+    btn.textContent = 'Saving...';
+    try {
+      const data = await tabFetchJson(tab, '/api/batch/config', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(body),
+      });
+      msg.style.display = '';
+      if (data.ok) {
+        msg.textContent = 'Saved';
+        msg.style.color = '#3fb950';
+        tab.batchConfig = { ...tab.batchConfig, ...body };
+      } else {
+        msg.textContent = data.error || 'Failed';
+        msg.style.color = '#f85149';
+      }
+    } catch (err) {
+      msg.style.display = '';
+      msg.textContent = 'Error: ' + err.message;
+      msg.style.color = '#f85149';
+    } finally {
+      btn.disabled = false;
+      btn.textContent = 'Save';
+      setTimeout(() => { msg.style.display = 'none'; }, 3000);
+    }
+  }
+
+  document.getElementById('batch-save-btn').addEventListener('click', () => {
+    const tab = activeTab();
+    if (!tab) return;
+    saveBatchConfig(tab);
   });
 
   // --- Keyboard shortcuts ---

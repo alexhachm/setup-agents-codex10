@@ -10,6 +10,7 @@
     tasks: { title: 'Tasks', render: renderTasks },
     browser: { title: 'Browser Offload', render: renderBrowserOffload },
     log: { title: 'Activity Log', render: renderLog },
+    batch: { title: 'Batch Orchestration', render: renderBatch },
   };
 
   const config = PANELS[panel];
@@ -598,6 +599,54 @@
     }
     var keys = Object.keys(state).slice(0, 3);
     return keys.length > 0 ? 'keys: ' + keys.join(', ') : 'present';
+  }
+
+  function renderBatch(data) {
+    var el = document.getElementById('popout-panel');
+    var batch = data && data.batch_status ? data.batch_status : {};
+
+    var metrics = [
+      ['Queue Depth', batch.queue_depth != null ? String(batch.queue_depth) : '\u2014'],
+      ['In-Flight Batches', batch.in_flight_batches != null ? String(batch.in_flight_batches) : '\u2014'],
+      ['In-Flight Stages', batch.in_flight_stages != null ? String(batch.in_flight_stages) : '\u2014'],
+      ['Partial Failures', batch.partial_failure_count != null ? String(batch.partial_failure_count) : '\u2014'],
+      ['Completed', batch.completed_count != null ? String(batch.completed_count) : '\u2014'],
+      ['Dedupe Hit Rate', batch.dedupe_hit_rate_pct != null ? (batch.dedupe_hit_rate_pct + '%') : '\u2014'],
+    ];
+    var metricsHtml = '<div class="batch-metrics-grid">' + metrics.map(function(m) {
+      return '<div class="batch-metric"><span class="batch-metric-label">' + escapeHtml(m[0]) + '</span>' +
+        '<span class="batch-metric-value">' + escapeHtml(m[1]) + '</span></div>';
+    }).join('') + '</div>';
+
+    var recentBatches = Array.isArray(batch.recent_batches) ? batch.recent_batches : [];
+    var batchesHtml = recentBatches.length === 0
+      ? '<div style="color:#8b949e;font-size:13px">No batches yet</div>'
+      : recentBatches.slice(0, 10).map(function(b) {
+          return '<div class="batch-item">' +
+            '<span style="color:#58a6ff">#' + escapeHtml(String(b.id)) + '</span> ' +
+            '<span class="worker-status badge-' + escapeHtml(b.status || 'unknown') + '">' + escapeHtml(b.status || 'unknown') + '</span> ' +
+            '<span style="font-size:11px;color:#8b949e">' + escapeHtml(String(b.planned_intent_count || 0)) + ' intents</span>' +
+            (b.duration_ms != null ? ' <span class="task-chip"><span class="task-chip-label">dur</span>' + escapeHtml(String(b.duration_ms)) + 'ms</span>' : '') +
+            (b.last_error ? '<div style="font-size:11px;color:#f85149">' + escapeHtml(String(b.last_error).slice(0, 80)) + '</div>' : '') +
+            '</div>';
+        }).join('');
+
+    var fanout = Array.isArray(batch.fanout_by_request) ? batch.fanout_by_request : [];
+    var fanoutHtml = fanout.length === 0 ? '' :
+      '<div class="batch-list-header" style="font-weight:600;margin-top:12px;margin-bottom:4px">Fan-out by Request</div>' +
+      fanout.slice(0, 10).map(function(f) {
+        var pct = f.total_fanout > 0 ? Math.round((f.completed_fanout / f.total_fanout) * 100) : 0;
+        return '<div class="batch-item">' +
+          '<span style="color:#58a6ff">' + escapeHtml(String(f.request_id || '-')) + '</span> ' +
+          '<span class="task-chip"><span class="task-chip-label">done</span>' + escapeHtml(String(f.completed_fanout || 0)) + '/' + escapeHtml(String(f.total_fanout || 0)) + ' (' + pct + '%)</span>' +
+          (f.failed_fanout > 0 ? ' <span class="task-chip" style="color:#f85149"><span class="task-chip-label">fail</span>' + escapeHtml(String(f.failed_fanout)) + '</span>' : '') +
+          (f.pending_fanout > 0 ? ' <span class="task-chip"><span class="task-chip-label">pend</span>' + escapeHtml(String(f.pending_fanout)) + '</span>' : '') +
+          '</div>';
+      }).join('');
+
+    el.innerHTML = metricsHtml +
+      '<div class="batch-list-header" style="font-weight:600;margin-top:12px;margin-bottom:4px">Recent Batches</div>' +
+      batchesHtml + fanoutHtml;
   }
 
   function renderLog(data) {

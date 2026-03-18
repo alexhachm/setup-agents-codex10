@@ -133,6 +133,24 @@
       </div>
     </section>
 
+    <section id="batch-panel">
+      <div class="panel-header" data-panel="batch"><h2>Batch Orchestration</h2></div>
+      <div class="batch-controls">
+        <div class="batch-config-row">
+          <label for="batch-max-size">Max Size</label>
+          <input type="number" id="batch-max-size" min="1" max="100" placeholder="5" />
+          <label for="batch-timeout-ms">Timeout (ms)</label>
+          <input type="number" id="batch-timeout-ms" min="1000" placeholder="120000" />
+          <label for="batch-candidate-limit">Candidate Limit</label>
+          <input type="number" id="batch-candidate-limit" min="1" max="5000" placeholder="200" />
+          <button id="batch-save-btn">Save</button>
+          <span id="batch-save-msg" style="display:none"></span>
+        </div>
+      </div>
+      <div id="batch-metrics"></div>
+      <div id="batch-list"></div>
+    </section>
+
     <section id="masters-panel">
       <h2>Masters</h2>
       <div class="masters-grid">
