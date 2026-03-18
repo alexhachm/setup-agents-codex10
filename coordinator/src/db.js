@@ -971,6 +971,7 @@ function init(projectDir) {
       db.exec("ALTER TABLE loops ADD COLUMN namespace TEXT");
     }
   }
+  if (existingTables.includes('presets')) ensurePresetModelColumns(db);
 
   // Now safe to run full schema (CREATE TABLE IF NOT EXISTS + indexes)
   const schema = fs.readFileSync(path.join(__dirname, 'schema.sql'), 'utf8');
@@ -983,6 +984,7 @@ function init(projectDir) {
   ensureResearchBatchingSchema(db);
   ensureProjectMemoryPersistenceSchema(db);
   ensureBrowserOffloadPersistenceSchema(db);
+  ensurePresetModelColumns(db);
 
   // Store project dir in config
   db.prepare('UPDATE config SET value = ? WHERE key = ?').run(projectDir, 'project_dir');
@@ -3588,16 +3590,38 @@ function setConfig(key, value) {
 
 // --- Preset helpers ---
 
-function savePreset(name, projectDir, githubRepo, numWorkers) {
+function ensurePresetModelColumns(database) {
+  const presetCols = database.prepare("PRAGMA table_info(presets)").all().map((c) => c.name);
+  if (presetCols.length === 0) return;
+  if (!presetCols.includes('provider')) {
+    database.exec("ALTER TABLE presets ADD COLUMN provider TEXT");
+  }
+  if (!presetCols.includes('fast_model')) {
+    database.exec("ALTER TABLE presets ADD COLUMN fast_model TEXT");
+  }
+  if (!presetCols.includes('deep_model')) {
+    database.exec("ALTER TABLE presets ADD COLUMN deep_model TEXT");
+  }
+  if (!presetCols.includes('economy_model')) {
+    database.exec("ALTER TABLE presets ADD COLUMN economy_model TEXT");
+  }
+}
+
+function savePreset(name, projectDir, githubRepo, numWorkers, opts = {}) {
+  const { provider = null, fast_model = null, deep_model = null, economy_model = null } = opts;
   getDb().prepare(`
-    INSERT INTO presets (name, project_dir, github_repo, num_workers)
-    VALUES (?, ?, ?, ?)
+    INSERT INTO presets (name, project_dir, github_repo, num_workers, provider, fast_model, deep_model, economy_model)
+    VALUES (?, ?, ?, ?, ?, ?, ?, ?)
     ON CONFLICT(name) DO UPDATE SET
       project_dir = excluded.project_dir,
       github_repo = excluded.github_repo,
       num_workers = excluded.num_workers,
+      provider = excluded.provider,
+      fast_model = excluded.fast_model,
+      deep_model = excluded.deep_model,
+      economy_model = excluded.economy_model,
       updated_at = datetime('now')
-  `).run(name, projectDir, githubRepo || '', numWorkers || 4);
+  `).run(name, projectDir, githubRepo || '', numWorkers || 4, provider, fast_model, deep_model, economy_model);
 }
 
 function listPresets() {

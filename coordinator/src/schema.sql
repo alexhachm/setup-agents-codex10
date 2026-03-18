@@ -356,6 +356,10 @@ CREATE TABLE IF NOT EXISTS presets (
   project_dir TEXT NOT NULL,
   github_repo TEXT NOT NULL DEFAULT '',
   num_workers INTEGER NOT NULL DEFAULT 4,
+  provider TEXT,        -- optional: 'anthropic', 'openai', etc.
+  fast_model TEXT,      -- optional: model for fast/tier1 tasks
+  deep_model TEXT,      -- optional: model for deep/tier3 tasks
+  economy_model TEXT,   -- optional: model for economy tasks
   created_at TEXT NOT NULL DEFAULT (datetime('now')),
   updated_at TEXT NOT NULL DEFAULT (datetime('now'))
 );
