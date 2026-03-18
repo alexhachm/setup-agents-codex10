@@ -109,6 +109,8 @@ MAX_FOLLOW_UPS = 3
 POOL_MIN_TABS = 5
 POOL_MAX_TABS = 10
 POOL_RESIZE_INTERVAL_SEC = 30 * 60   # Pick new random target every ~30 min
+# Minimum time (seconds) a session must run before it can be reset early due to queue backlog
+SESSION_MIN_ACTIVE_SEC = 5 * 60      # 5 minutes — prevents hammering on fast-cycling sessions
 TAB_CLOSE_DELAY_MIN = 60             # Min seconds a completed tab lingers
 TAB_CLOSE_DELAY_MAX = 300            # Max seconds before tab closes
 TAB_OPEN_STAGGER = 3                 # Seconds between opening new tabs
@@ -204,10 +206,13 @@ class TabSlot:
         return f"<TabSlot {self.slot_id} state={self.state.value} item={getattr(self.item, 'get', lambda k, d=None: d)('id', None) if self.item else None}>"
 
 
+PROJECT_GITHUB_REPO = "alexhachm/setup-agents-codex10"
+
+
 def _discover_github_repo():
     """Discover the GitHub repo URL from git remote origin.
 
-    Returns 'owner/repo' string or empty string if not discoverable.
+    Returns 'owner/repo' string. Falls back to PROJECT_GITHUB_REPO if discovery fails.
     """
     try:
         result = subprocess.run(
@@ -216,19 +221,18 @@ def _discover_github_repo():
             cwd=str(PROJECT_DIR),
         )
         remote_url = result.stdout.strip()
-        if not remote_url:
-            return ""
-        # HTTPS: https://github.com/owner/repo.git
-        m = re.match(r'https?://github\.com/([^/]+/[^/]+?)(?:\.git)?$', remote_url)
-        if m:
-            return m.group(1)
-        # SSH: git@github.com:owner/repo.git
-        m = re.match(r'git@github\.com:([^/]+/[^/.]+?)(?:\.git)?$', remote_url)
-        if m:
-            return m.group(1)
+        if remote_url:
+            # HTTPS: https://github.com/owner/repo.git
+            m = re.match(r'https?://github\.com/([^/]+/[^/]+?)(?:\.git)?$', remote_url)
+            if m:
+                return m.group(1)
+            # SSH: git@github.com:owner/repo.git
+            m = re.match(r'git@github\.com:([^/]+/[^/.]+?)(?:\.git)?$', remote_url)
+            if m:
+                return m.group(1)
     except Exception as e:
         log.debug(f"GitHub repo discovery failed: {e}")
-    return ""
+    return PROJECT_GITHUB_REPO
 
 # Discover once at module load
 GITHUB_REPO = _discover_github_repo()
@@ -1193,11 +1197,42 @@ async def select_model(page, mode):
 
     Pure function — operates on a given page. Caller tracks model state.
 
-    - standard: default model (no action needed on fresh chat)
+    - standard: select GPT-5.4 Pro (or highest available Pro model)
     - thinking: verify Pro pill is active in composer (thinking is built-in)
     - deep_research: click Deep Research in the model switcher sidebar
     """
     if mode == "standard":
+        # Select GPT-5.4 Pro (or highest available Pro model)
+        current_label = await _get_current_model_label(page)
+        log.info(f"Current model label (standard): '{current_label}'")
+        # Already on a Pro/5.4 model — nothing to do
+        if "5.4" in current_label or ("pro" in current_label.lower() and "deep" not in current_label.lower()):
+            log.info("Already on Pro model — standard mode ready")
+            return True
+        # Try to select GPT-5.4 Pro via the model switcher
+        try:
+            model_btn = await _find_model_button(page)
+            if model_btn:
+                await model_btn.click()
+                await asyncio.sleep(1)
+                # Prefer "GPT-5.4 Pro" exact match, then any "5.4 Pro", then "Pro"
+                for label_text in ("GPT-5.4 Pro", "5.4 Pro", "gpt-5.4-pro", "Pro"):
+                    try:
+                        option = await page.find(f"text={label_text}", timeout=3)
+                        if option:
+                            await option.click()
+                            await random_delay()
+                            new_label = await _get_current_model_label(page)
+                            log.info(f"Selected model '{label_text}' → label now: '{new_label}'")
+                            return True
+                    except Exception:
+                        continue
+                # Close switcher — could not find Pro
+                await page.evaluate("document.body.click()")
+                log.warning("Could not find GPT-5.4 Pro in model switcher — using current default")
+        except Exception as e:
+            log.warning(f"Standard model selection failed: {e}")
+        # Proceed with whatever model is currently active
         return True
 
     current_label = await _get_current_model_label(page)
@@ -1561,8 +1596,21 @@ class TabPool:
         while not self._shutdown:
             update_health("polling")
 
-            # Session exhausted — idle until session timer resets
+            # Session exhausted — reset early if queue has waiting items, else idle
             if self._session_dispatched >= self._session_n:
+                session_age = time.monotonic() - self._session_start_time
+                if session_age >= SESSION_MIN_ACTIVE_SEC:
+                    # Check if there are items waiting before paying the poll cost
+                    next_item = get_next_queued()
+                    if next_item:
+                        log.info(
+                            f"Session N={self._session_n} exhausted after {session_age:.0f}s "
+                            f"but queue has items — resetting session early"
+                        )
+                        self._start_new_session()
+                        # Put item back — we'll pick it up on next loop iteration
+                        # (get_next_queued is read-only / peek; no side effects)
+                        continue
                 await asyncio.sleep(POLL_INTERVAL_SEC)
                 continue
 
