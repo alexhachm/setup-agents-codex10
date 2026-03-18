@@ -275,6 +275,33 @@ describe('Request completion tracking', () => {
     assert.strictEqual(reopened.result, null);
   });
 
+  it('should not complete request when one task is completed and one failed merge row exists', () => {
+    const reqId = db.createRequest('Feature');
+    const taskId = db.createTask({ request_id: reqId, subject: 'Completed task', description: 'Done' });
+
+    db.updateRequest(reqId, { status: 'in_progress' });
+    db.updateTask(taskId, { status: 'completed' });
+
+    // Enqueue a merge and mark it as failed (non-recoverable, e.g. functional conflict)
+    const enqueueResult = db.enqueueMerge({
+      request_id: reqId,
+      task_id: taskId,
+      pr_url: 'https://github.com/org/repo/pull/200',
+      branch: 'agent-1',
+    });
+    db.updateMerge(enqueueResult.lastInsertRowid, {
+      status: 'failed',
+      error: 'functional_conflict: build failed after merge',
+    });
+
+    merger.onTaskCompleted(taskId);
+
+    const requestAfter = db.getRequest(reqId);
+    assert.notStrictEqual(requestAfter.status, 'completed');
+    assert.strictEqual(getRequestCompletionMailCount(reqId), 0);
+    assert.strictEqual(getRequestCompletionLogCount(reqId), 0);
+  });
+
   it('should emit request_completed exactly once when final task becomes terminal', () => {
     const reqId = db.createRequest('Feature');
     const mergedTaskId = db.createTask({ request_id: reqId, subject: 'Merged task', description: 'Already done' });

@@ -257,10 +257,27 @@ function onTaskCompleted(taskId) {
       db.updateRequest(task.request_id, { status: 'integrating' });
       db.log('coordinator', 'request_ready_for_merge', { request_id: task.request_id });
     } else {
+      // Verify clean merge state: complete ONLY when (a) no merge rows or (b) all merged.
+      // Non-recoverable failed/conflict rows still block completion.
+      const allMergeRows = db.getDb().prepare(
+        "SELECT id, status FROM merge_queue WHERE request_id = ?"
+      ).all(task.request_id);
+      const blockingRows = allMergeRows.filter(m => m.status !== 'merged');
+      if (blockingRows.length > 0) {
+        const blockingStatuses = blockingRows.map(m => m.status);
+        db.updateRequest(task.request_id, { status: 'integrating' });
+        db.log('coordinator', 'request_completion_blocked_by_merge', {
+          request_id: task.request_id,
+          blocking_statuses: blockingStatuses,
+          blocking_merge_ids: blockingRows.map(m => m.id),
+        });
+        return;
+      }
+
       if (failedTasks.length > 0) {
         return;
       }
-      // No PRs to merge — complete immediately (e.g. verification tasks, already-merged)
+      // No PRs to merge (or all merged) — complete immediately
       const result = `All ${allTasks.length} task(s) completed (no PRs to merge)`;
       completeRequestIfTransition(task.request_id, result);
     }
