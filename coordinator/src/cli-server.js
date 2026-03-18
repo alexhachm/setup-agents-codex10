@@ -1385,16 +1385,31 @@ function isWorkerClaimedAssignmentError(err) {
   ));
 }
 
+/** Validate that every element in a depends_on array is a positive integer task ID. */
+function validateDependsOnElements(arr) {
+  for (const el of arr) {
+    if (typeof el !== 'number' || !Number.isInteger(el) || el <= 0) {
+      throw new Error(
+        `depends_on elements must be positive integers; got ${JSON.stringify(el)}`
+      );
+    }
+  }
+}
+
 /** Parse depends_on into an array of task ids. Accepts arrays or JSON-array strings. */
 function parseDependsOnField(dependsOn) {
   if (dependsOn === null || dependsOn === undefined) return null;
-  if (Array.isArray(dependsOn)) return dependsOn;
+  if (Array.isArray(dependsOn)) {
+    validateDependsOnElements(dependsOn);
+    return dependsOn;
+  }
   if (typeof dependsOn === 'string') {
     try {
       const parsed = JSON.parse(dependsOn);
       if (!Array.isArray(parsed)) {
         throw new Error('depends_on JSON must be an array');
       }
+      validateDependsOnElements(parsed);
       return parsed;
     } catch (e) {
       throw new Error(`Invalid depends_on: ${e.message}`);

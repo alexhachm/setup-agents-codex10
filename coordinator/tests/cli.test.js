@@ -593,6 +593,71 @@ describe('CLI Server', () => {
     assert.strictEqual(task.status, 'ready'); // no deps → auto-ready
   });
 
+  it('should reject create-task with depends_on containing an object', async () => {
+    const reqResult = await sendCommand('request', { description: 'Feature' });
+    const result = await sendCommand('create-task', {
+      request_id: reqResult.request_id,
+      subject: 'Bad dep obj',
+      description: 'Task with bad dependency',
+      depends_on: [{}],
+    });
+    assert.ok(result.error, 'Expected an error response');
+    assert.match(result.error, /depends_on elements must be positive integers/i);
+  });
+
+  it('should reject create-task with depends_on containing a string', async () => {
+    const reqResult = await sendCommand('request', { description: 'Feature' });
+    const result = await sendCommand('create-task', {
+      request_id: reqResult.request_id,
+      subject: 'Bad dep str',
+      description: 'Task with string dependency',
+      depends_on: ['abc'],
+    });
+    assert.ok(result.error, 'Expected an error response');
+    assert.match(result.error, /depends_on elements must be positive integers/i);
+  });
+
+  it('should accept create-task with depends_on containing valid positive integer ids', async () => {
+    const reqResult = await sendCommand('request', { description: 'Feature' });
+    // Create two prerequisite tasks first
+    const dep1 = await sendCommand('create-task', {
+      request_id: reqResult.request_id,
+      subject: 'Dep 1',
+      description: 'First dependency',
+      tier: 2,
+    });
+    const dep2 = await sendCommand('create-task', {
+      request_id: reqResult.request_id,
+      subject: 'Dep 2',
+      description: 'Second dependency',
+      tier: 2,
+    });
+    assert.strictEqual(dep1.ok, true);
+    assert.strictEqual(dep2.ok, true);
+    const result = await sendCommand('create-task', {
+      request_id: reqResult.request_id,
+      subject: 'Dependent task',
+      description: 'Task with valid integer deps',
+      depends_on: [dep1.task_id, dep2.task_id],
+      tier: 2,
+    });
+    assert.strictEqual(result.ok, true);
+    assert.ok(result.task_id);
+  });
+
+  it('should handle malformed depends_on data in checkAndPromoteTasks gracefully', () => {
+    // Directly inject a task with a non-integer element in depends_on to simulate malformed DB data
+    const reqId = db.createRequest('Feature');
+    const taskId = db.createTask({ request_id: reqId, subject: 'Malformed dep task', description: 'Test' });
+    // Force malformed depends_on into DB (bypassing validation)
+    db.getDb().prepare("UPDATE tasks SET status = 'pending', depends_on = '[\"notanint\"]' WHERE id = ?").run(taskId);
+    // Should not throw; should mark task as failed
+    assert.doesNotThrow(() => db.checkAndPromoteTasks());
+    const task = db.getTask(taskId);
+    assert.strictEqual(task.status, 'failed');
+    assert.match(task.result, /Malformed depends_on/i);
+  });
+
   it('should handle worker task lifecycle', async () => {
     db.registerWorker(1, '/wt-1', 'agent-1');
     const reqId = db.createRequest('Feature');
