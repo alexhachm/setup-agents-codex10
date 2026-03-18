@@ -960,20 +960,20 @@ async function main() {
         if (argv.length < 2) { console.error('Usage: mac10 request <description>'); process.exit(1); }
         result = await send(socketPath, 'request', { description: argv.slice(1).join(' ') });
         if (result.ok) console.log(`Request created: ${result.request_id}`);
-        else console.error(result.error);
+        else { console.error(result.error); process.exit(1); }
         break;
 
       case 'fix':
         if (argv.length < 2) { console.error('Usage: mac10 fix <description>'); process.exit(1); }
         result = await send(socketPath, 'fix', { description: argv.slice(1).join(' ') });
         if (result.ok) console.log(`Urgent fix created: ${result.request_id} (task ${result.task_id})`);
-        else console.error(result.error);
+        else { console.error(result.error); process.exit(1); }
         break;
 
       case 'status':
         result = await send(socketPath, 'status', {});
         if (result.ok) printStatus(result);
-        else console.error(result.error);
+        else { console.error(result.error); process.exit(1); }
         break;
 
       case 'clarify':
@@ -983,7 +983,7 @@ async function main() {
           message: argv.slice(2).join(' '),
         });
         if (result.ok) console.log('Clarification sent.');
-        else console.error(result.error);
+        else { console.error(result.error); process.exit(1); }
         break;
 
       case 'log':
@@ -992,7 +992,7 @@ async function main() {
           for (const entry of result.logs.reverse()) {
             console.log(`[${entry.created_at}] ${entry.actor}: ${entry.action} ${formatDetails(entry.details)}`);
           }
-        } else console.error(result.error);
+        } else { console.error(result.error); process.exit(1); }
         break;
 
       case 'history':
@@ -1011,7 +1011,7 @@ async function main() {
           const legacyResult = await send(socketPath, 'log', { limit: legacyLimit });
           if (!legacyResult.ok) {
             console.error(legacyResult.error || result.error);
-            break;
+            process.exit(1);
           }
           rows = (legacyResult.logs || [])
             .filter((entry) => detailsMatchRequest(entry.details, requestId))
@@ -1019,7 +1019,7 @@ async function main() {
             .reverse();
         } else {
           console.error(result.error);
-          break;
+          process.exit(1);
         }
 
         if (rows.length === 0) {
@@ -1053,7 +1053,7 @@ async function main() {
           reasoning: argv.slice(3).join(' '),
         });
         if (result.ok) console.log('Triage recorded.');
-        else console.error(result.error);
+        else { console.error(result.error); process.exit(1); }
         break;
 
       case 'create-task':
@@ -1062,7 +1062,7 @@ async function main() {
         const taskArgs = JSON.parse(taskInput);
         result = await send(socketPath, 'create-task', taskArgs);
         if (result.ok) console.log(`Task created: ${result.task_id}`);
-        else console.error(result.error);
+        else { console.error(result.error); process.exit(1); }
         break;
 
       case 'tier1-complete':
@@ -1071,7 +1071,7 @@ async function main() {
           result: argv.slice(2).join(' '),
         });
         if (result.ok) console.log('Tier 1 completed.');
-        else console.error(result.error);
+        else { console.error(result.error); process.exit(1); }
         break;
 
       case 'ask-clarification':
@@ -1080,7 +1080,7 @@ async function main() {
           question: argv.slice(2).join(' '),
         });
         if (result.ok) console.log('Clarification request sent.');
-        else console.error(result.error);
+        else { console.error(result.error); process.exit(1); }
         break;
 
       // WORKER
@@ -1106,7 +1106,7 @@ async function main() {
           task_id: parseInt(argv[2], 10),
         });
         if (result.ok) console.log('Task started.');
-        else console.error(result.error);
+        else { console.error(result.error); process.exit(1); }
         break;
 
       case 'heartbeat':
@@ -1123,7 +1123,7 @@ async function main() {
         if (!argv[1]) { console.error('Usage: mac10 reset-worker <worker_id>'); process.exit(1); }
         result = await send(socketPath, 'reset-worker', { worker_id: argv[1] });
         if (result.ok) console.log('ok');
-        else console.error(result.error);
+        else { console.error(result.error); process.exit(1); }
         break;
 
       case 'complete-task':
@@ -1153,7 +1153,7 @@ async function main() {
           usage: completionArgs.usage,
         });
         if (result.ok) console.log('Task completed.');
-        else console.error(result.error);
+        else { console.error(result.error); process.exit(1); }
         break;
 
       case 'fail-task':
@@ -1176,7 +1176,7 @@ async function main() {
           usage: failTaskArgs.usage,
         });
         if (result.ok) console.log('Task failure recorded.');
-        else console.error(result.error);
+        else { console.error(result.error); process.exit(1); }
         break;
 
       case 'browser-create-session': {
@@ -1196,7 +1196,7 @@ async function main() {
           channel: argv[4],
         });
         if (result.ok) console.log(JSON.stringify(result, null, 2));
-        else console.error(result.error);
+        else { console.error(result.error); process.exit(1); }
         break;
       }
 
@@ -1217,7 +1217,7 @@ async function main() {
           channel: argv[4],
         });
         if (result.ok) console.log(JSON.stringify(result, null, 2));
-        else console.error(result.error);
+        else { console.error(result.error); process.exit(1); }
         break;
       }
 
@@ -1244,7 +1244,7 @@ async function main() {
           guidance,
         });
         if (result.ok) console.log(JSON.stringify(result, null, 2));
-        else console.error(result.error);
+        else { console.error(result.error); process.exit(1); }
         break;
       }
 
@@ -1278,7 +1278,7 @@ async function main() {
           chunk,
         });
         if (result.ok) console.log(JSON.stringify(result, null, 2));
-        else console.error(result.error);
+        else { console.error(result.error); process.exit(1); }
         break;
       }
 
@@ -1302,7 +1302,7 @@ async function main() {
           result: parseOptionalJsonArg(rawResult),
         });
         if (result.ok) console.log(JSON.stringify(result, null, 2));
-        else console.error(result.error);
+        else { console.error(result.error); process.exit(1); }
         break;
       }
 
@@ -1330,7 +1330,7 @@ async function main() {
           error: errorMessage,
         });
         if (result.ok) console.log(JSON.stringify(result, null, 2));
-        else console.error(result.error);
+        else { console.error(result.error); process.exit(1); }
         break;
       }
 
@@ -1350,7 +1350,7 @@ async function main() {
           job_id: argv[3],
         });
         if (result.ok) console.log(JSON.stringify(result, null, 2));
-        else console.error(result.error);
+        else { console.error(result.error); process.exit(1); }
         break;
       }
 
@@ -1362,7 +1362,7 @@ async function main() {
           content: argv.slice(3).join(' '),
         });
         if (result.ok) console.log('Knowledge distilled.');
-        else console.error(result.error);
+        else { console.error(result.error); process.exit(1); }
         break;
 
       case 'inbox': {
@@ -1467,7 +1467,7 @@ async function main() {
               console.log(JSON.stringify(msg));
             }
           }
-        } else console.error(result.error);
+        } else { console.error(result.error); process.exit(1); }
         break;
       }
 
@@ -1482,7 +1482,7 @@ async function main() {
               console.log(`  #${t.id} [${t.priority}] ${t.subject} ${t.domain ? `[${t.domain}]` : ''}`);
             }
           }
-        } else console.error(result.error);
+        } else { console.error(result.error); process.exit(1); }
         break;
 
       case 'assign-task':
@@ -1492,7 +1492,7 @@ async function main() {
           worker_id: parseInt(argv[2], 10),
         });
         if (result.ok) console.log(`Task ${result.task_id} assigned to worker-${result.worker_id}.`);
-        else console.error(result.error);
+        else { console.error(result.error); process.exit(1); }
         break;
 
       case 'claim-worker':
@@ -1504,7 +1504,7 @@ async function main() {
         if (result.ok) {
           if (result.claimed) console.log(`Worker ${argv[1]} claimed.`);
           else console.log(`Worker ${argv[1]} not available (busy or already claimed).`);
-        } else console.error(result.error);
+        } else { console.error(result.error); process.exit(1); }
         break;
 
       case 'release-worker':
@@ -1513,7 +1513,7 @@ async function main() {
           worker_id: parseInt(argv[1], 10),
         });
         if (result.ok) console.log(`Worker ${argv[1]} released.`);
-        else console.error(result.error);
+        else { console.error(result.error); process.exit(1); }
         break;
 
       case 'worker-status':
@@ -1529,7 +1529,7 @@ async function main() {
               console.log(`  worker-${w.id} [${w.status}]${dom}${task}${claim}`);
             }
           }
-        } else console.error(result.error);
+        } else { console.error(result.error); process.exit(1); }
         break;
 
       case 'check-completion':
@@ -1541,7 +1541,7 @@ async function main() {
           const statusLabel = completionStatusLabel(result);
           const suffix = statusLabel ? ` — ${statusLabel}` : '';
           console.log(`Request ${result.request_id}: ${result.completed}/${result.total} completed, ${result.failed} failed${suffix}`);
-        } else console.error(result.error);
+        } else { console.error(result.error); process.exit(1); }
         break;
 
       case 'check-overlaps':
@@ -1561,7 +1561,7 @@ async function main() {
             }
             console.log('');
           }
-        } else console.error(result.error);
+        } else { console.error(result.error); process.exit(1); }
         break;
 
       case 'replan-dependency': {
@@ -1598,6 +1598,7 @@ async function main() {
           }
         } else {
           console.error(result.error);
+          process.exit(1);
         }
         break;
       }
@@ -1620,7 +1621,7 @@ async function main() {
           force_retry: retryTerminal,
         });
         if (result.ok) console.log(`Integration triggered for ${result.request_id}: ${result.merges_queued} merge(s) queued.`);
-        else console.error(result.error);
+        else { console.error(result.error); process.exit(1); }
         break;
       }
 
@@ -1632,7 +1633,7 @@ async function main() {
           branch: argv[3] || '',
         });
         if (result.ok) console.log(`Worker ${result.worker_id} registered.`);
-        else console.error(result.error);
+        else { console.error(result.error); process.exit(1); }
         break;
 
       case 'repair':
@@ -1643,7 +1644,7 @@ async function main() {
           const inspectedPairs = Number.isFinite(supersessionBackfill.inspected) ? supersessionBackfill.inspected : 0;
           console.log(`Repaired: ${result.reset_workers} workers, ${result.orphaned_tasks} tasks, ${repairedPairs}/${inspectedPairs} superseded request pairs`);
         }
-        else console.error(result.error);
+        else { console.error(result.error); process.exit(1); }
         break;
 
       case 'gui':
@@ -1653,13 +1654,13 @@ async function main() {
       case 'ping':
         result = await send(socketPath, 'ping', {});
         if (result.ok) console.log(`pong (${Date.now() - result.ts}ms)`);
-        else console.error(result.error);
+        else { console.error(result.error); process.exit(1); }
         break;
 
       case 'add-worker':
         result = await send(socketPath, 'add-worker', {});
         if (result.ok) console.log(`Worker ${result.worker_id} created (${result.worktree_path}, branch: ${result.branch})`);
-        else console.error(`Error: ${result.error}`);
+        else { console.error(`Error: ${result.error}`); process.exit(1); }
         break;
 
       case 'merge-status':
@@ -1676,7 +1677,7 @@ async function main() {
             }
             console.log('');
           }
-        } else console.error(result.error);
+        } else { console.error(result.error); process.exit(1); }
         break;
 
       case 'log-change': {
@@ -1698,7 +1699,7 @@ async function main() {
         }
         result = await send(socketPath, 'log-change', changeArgs);
         if (result.ok) console.log(`Change logged: #${result.change_id}`);
-        else console.error(result.error);
+        else { console.error(result.error); process.exit(1); }
         break;
       }
 
@@ -1716,7 +1717,7 @@ async function main() {
               console.log(`  #${c.id} [${toggle}]${stat} ${c.description} ${c.domain ? `[${c.domain}]` : ''}`);
             }
           }
-        } else console.error(result.error);
+        } else { console.error(result.error); process.exit(1); }
         break;
       }
 
@@ -1724,14 +1725,14 @@ async function main() {
       case 'loop':
         result = await send(socketPath, 'loop', { prompt: loopPrompt });
         if (result.ok) console.log(`Loop created: ${result.loop_id}`);
-        else console.error(result.error);
+        else { console.error(result.error); process.exit(1); }
         break;
 
       case 'stop-loop':
         if (!argv[1]) { console.error('Usage: mac10 stop-loop <loop_id>'); process.exit(1); }
         result = await send(socketPath, 'stop-loop', { loop_id: parseInt(argv[1], 10) });
         if (result.ok) console.log(`Loop ${result.loop_id} stopped.`);
-        else console.error(result.error);
+        else { console.error(result.error); process.exit(1); }
         break;
 
       case 'loop-status':
@@ -1745,7 +1746,7 @@ async function main() {
               console.log(`  #${l.id} [${l.status}] iter:${l.iteration_count}${cp}`);
             }
           }
-        } else console.error(result.error);
+        } else { console.error(result.error); process.exit(1); }
         break;
 
       case 'loop-checkpoint':
@@ -1755,7 +1756,7 @@ async function main() {
           summary: argv.slice(2).join(' '),
         });
         if (result.ok) console.log(`Checkpoint saved (iteration ${result.iteration}).`);
-        else console.error(result.error);
+        else { console.error(result.error); process.exit(1); }
         break;
 
       case 'loop-heartbeat':
@@ -1767,14 +1768,14 @@ async function main() {
             process.exit(2);
           }
           console.log('ok');
-        } else console.error(result.error);
+        } else { console.error(result.error); process.exit(1); }
         break;
 
       case 'set-config':
         if (!argv[1] || !argv[2]) { console.error('Usage: mac10 set-config <key> <value>'); process.exit(1); }
         result = await send(socketPath, 'set-config', { key: argv[1], value: argv[2] });
         if (result.ok) console.log(`set ${result.key}=${result.value}`);
-        else console.error(result.error || 'failed');
+        else { console.error(result.error || 'failed'); process.exit(1); }
         break;
 
       case 'loop-prompt':
@@ -1782,7 +1783,7 @@ async function main() {
         result = await send(socketPath, 'loop-prompt', { loop_id: parseInt(argv[1], 10) });
         if (result.ok) {
           console.log(JSON.stringify(result, null, 2));
-        } else console.error(result.error);
+        } else { console.error(result.error); process.exit(1); }
         break;
 
       case 'loop-refresh-prompt':
@@ -1792,7 +1793,7 @@ async function main() {
           prompt: argv.slice(2).join(' '),
         });
         if (result.ok) console.log(`Loop ${result.loop_id} prompt refreshed.`);
-        else console.error(result.error);
+        else { console.error(result.error); process.exit(1); }
         break;
 
       case 'loop-set-prompt':
@@ -1802,7 +1803,7 @@ async function main() {
           prompt: argv.slice(2).join(' '),
         });
         if (result.ok) console.log(`Loop ${result.loop_id} prompt updated.`);
-        else console.error(result.error);
+        else { console.error(result.error); process.exit(1); }
         break;
 
       case 'loop-request':
@@ -1823,7 +1824,7 @@ async function main() {
             const replacedBy = target.replaced_by ? ` replaced_by=${target.replaced_by}` : '';
             console.log(`Superseded target: ${target.request_id} [${target.status}] ${disposition}${replacedBy}`);
           }
-        } else console.error(result.error);
+        } else { console.error(result.error); process.exit(1); }
         break;
 
       case 'loop-requests': {
@@ -1847,6 +1848,7 @@ async function main() {
           printLoopRequestsRows(result.requests);
         } else {
           console.error(result.error);
+          process.exit(1);
         }
         break;
       }

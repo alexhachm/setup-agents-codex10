@@ -4286,6 +4286,60 @@ describe('CLI Server', () => {
     assert.strictEqual(healthyHighAssignment.routing.routing_reason, 'fallback-budget-upgrade:high->xhigh');
   });
 
+  // === CLI exit code regression tests ===
+
+  it('should exit with code 1 when assign-task RPC fails for non-existent task', async () => {
+    db.registerWorker(1, '/wt-1', 'agent-1');
+    const result = await runMac10Cli(['assign-task', '9999', '1']);
+    assert.strictEqual(result.status, 1);
+  });
+
+  it('should exit with code 1 when integrate fails for request with incomplete tasks', async () => {
+    const reqId = db.createRequest('Integration exit-code test');
+    db.createTask({ request_id: reqId, subject: 'Incomplete task', description: 'Not done yet' });
+    const result = await runMac10Cli(['integrate', reqId]);
+    assert.strictEqual(result.status, 1);
+  });
+
+  it('should exit with code 1 when create-task RPC fails due to invalid args', async () => {
+    // createTask throws when required fields are missing, outer catch responds ok:false
+    const result = await runMac10Cli(['create-task', JSON.stringify({ request_id: null, subject: '' })]);
+    assert.strictEqual(result.status, 1);
+  });
+
+  it('should exit with code 2 when loop-heartbeat returns stopped status', async () => {
+    const created = await sendCommand('loop', { prompt: 'CLI exit-code test stopped' });
+    assert.strictEqual(created.ok, true);
+    db.updateLoop(created.loop_id, { status: 'stopped' });
+    const result = await runMac10Cli(['loop-heartbeat', String(created.loop_id)]);
+    assert.strictEqual(result.status, 2);
+  });
+
+  it('should exit with code 2 when loop-heartbeat returns paused status', async () => {
+    const created = await sendCommand('loop', { prompt: 'CLI exit-code test paused' });
+    assert.strictEqual(created.ok, true);
+    db.updateLoop(created.loop_id, { status: 'paused' });
+    const result = await runMac10Cli(['loop-heartbeat', String(created.loop_id)]);
+    assert.strictEqual(result.status, 2);
+  });
+
+  it('should exit with code 1 when loop-heartbeat fails for a loop in failed status', async () => {
+    const created = await sendCommand('loop', { prompt: 'CLI exit-code test failed' });
+    assert.strictEqual(created.ok, true);
+    db.updateLoop(created.loop_id, { status: 'failed' });
+    const result = await runMac10Cli(['loop-heartbeat', String(created.loop_id)]);
+    assert.strictEqual(result.status, 1);
+    assert.match(result.stderr, /failed/i);
+  });
+
+  it('should exit with code 0 when loop-heartbeat succeeds for an active loop', async () => {
+    const created = await sendCommand('loop', { prompt: 'CLI exit-code test active' });
+    assert.strictEqual(created.ok, true);
+    const result = await runMac10Cli(['loop-heartbeat', String(created.loop_id)]);
+    assert.strictEqual(result.status, 0);
+    assert.strictEqual(result.stderr, '');
+  });
+
   it('should honor model_xhigh/model_mini and per-class reasoning updates on direct fallback classes', async () => {
     db.registerWorker(1, '/wt-1', 'agent-1');
     db.registerWorker(2, '/wt-2', 'agent-2');
