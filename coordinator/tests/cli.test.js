@@ -2453,7 +2453,7 @@ describe('CLI Server', () => {
     }
   });
 
-  it('should preserve last_heartbeat for stopped/paused loop-heartbeat and return loop status', async () => {
+  it('should reject loop-heartbeat for stopped/paused loops without mutating last_heartbeat', async () => {
     for (const status of ['stopped', 'paused']) {
       const created = await sendCommand('loop', { prompt: `Heartbeat guard ${status}` });
       assert.strictEqual(created.ok, true);
@@ -2465,8 +2465,8 @@ describe('CLI Server', () => {
       });
 
       const heartbeat = await sendCommand('loop-heartbeat', { loop_id: created.loop_id });
-      assert.strictEqual(heartbeat.ok, true);
-      assert.strictEqual(heartbeat.status, status);
+      assert.strictEqual(heartbeat.ok, false);
+      assert.strictEqual(heartbeat.error, `Loop is ${status}, not active`);
 
       const loop = db.getLoop(created.loop_id);
       assert.strictEqual(loop.status, status);
@@ -4307,20 +4307,22 @@ describe('CLI Server', () => {
     assert.strictEqual(result.status, 1);
   });
 
-  it('should exit with code 2 when loop-heartbeat returns stopped status', async () => {
+  it('should exit with code 1 when loop-heartbeat is rejected for a stopped loop', async () => {
     const created = await sendCommand('loop', { prompt: 'CLI exit-code test stopped' });
     assert.strictEqual(created.ok, true);
     db.updateLoop(created.loop_id, { status: 'stopped' });
     const result = await runMac10Cli(['loop-heartbeat', String(created.loop_id)]);
-    assert.strictEqual(result.status, 2);
+    assert.strictEqual(result.status, 1);
+    assert.match(result.stderr, /stopped/i);
   });
 
-  it('should exit with code 2 when loop-heartbeat returns paused status', async () => {
+  it('should exit with code 1 when loop-heartbeat is rejected for a paused loop', async () => {
     const created = await sendCommand('loop', { prompt: 'CLI exit-code test paused' });
     assert.strictEqual(created.ok, true);
     db.updateLoop(created.loop_id, { status: 'paused' });
     const result = await runMac10Cli(['loop-heartbeat', String(created.loop_id)]);
-    assert.strictEqual(result.status, 2);
+    assert.strictEqual(result.status, 1);
+    assert.match(result.stderr, /paused/i);
   });
 
   it('should exit with code 1 when loop-heartbeat fails for a loop in failed status', async () => {
