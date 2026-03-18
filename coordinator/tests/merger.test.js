@@ -866,6 +866,129 @@ describe('tryRebase stash guard', () => {
   });
 });
 
+describe('functional_conflict recovery sweep', () => {
+  it('should reset failed functional_conflict entries older than 5 minutes to pending and then attempt merge', () => {
+    const reqId = db.createRequest('Feature');
+    const taskId = db.createTask({ request_id: reqId, subject: 'T1', description: 'D1' });
+
+    db.updateTask(taskId, { status: 'completed' });
+    db.updateRequest(reqId, { status: 'integrating' });
+
+    const enqueueResult = db.enqueueMerge({
+      request_id: reqId,
+      task_id: taskId,
+      pr_url: 'https://github.com/org/repo/pull/300',
+      branch: 'agent-1',
+    });
+    const mergeId = enqueueResult.lastInsertRowid;
+
+    // Simulate a previously failed functional_conflict entry with an old timestamp
+    db.updateMerge(mergeId, { status: 'failed', error: 'functional_conflict: validation failed' });
+    db.getDb().prepare("UPDATE merge_queue SET updated_at = datetime('now', '-6 minutes') WHERE id = ?").run(mergeId);
+
+    let mergeAttempts = 0;
+    merger.processQueue(tmpDir, () => { mergeAttempts += 1; return { success: true }; });
+
+    // Recovery sweep should have reset the entry; getNextMerge should then pick it up
+    assert.strictEqual(mergeAttempts, 1, 'merge should be attempted after recovery resets the entry to pending');
+
+    const recoveryLogs = readCoordinatorLogEntries('functional_conflict_recovery_sweep');
+    assert.strictEqual(recoveryLogs.length, 1);
+    assert.ok(Array.isArray(recoveryLogs[0].merge_ids) && recoveryLogs[0].merge_ids.includes(mergeId));
+  });
+
+  it('should NOT reset functional_conflict failed entries that are less than 5 minutes old', () => {
+    const reqId = db.createRequest('Feature');
+    const taskId = db.createTask({ request_id: reqId, subject: 'T1', description: 'D1' });
+
+    db.updateTask(taskId, { status: 'completed' });
+    db.updateRequest(reqId, { status: 'integrating' });
+
+    const enqueueResult = db.enqueueMerge({
+      request_id: reqId,
+      task_id: taskId,
+      pr_url: 'https://github.com/org/repo/pull/301',
+      branch: 'agent-1',
+    });
+    const mergeId = enqueueResult.lastInsertRowid;
+
+    // Simulate a recent functional_conflict failure (not old enough for recovery)
+    db.updateMerge(mergeId, { status: 'failed', error: 'functional_conflict: validation failed' });
+    // Leave updated_at as-is (recent)
+
+    let mergeAttempts = 0;
+    merger.processQueue(tmpDir, () => { mergeAttempts += 1; return { success: true }; });
+
+    assert.strictEqual(mergeAttempts, 0, 'merge should not be attempted — entry is too recent');
+
+    const entry = db.getDb().prepare('SELECT status FROM merge_queue WHERE id = ?').get(mergeId);
+    assert.strictEqual(entry.status, 'failed', 'entry should remain failed');
+
+    const recoveryLogs = readCoordinatorLogEntries('functional_conflict_recovery_sweep');
+    assert.strictEqual(recoveryLogs.length, 0);
+  });
+
+  it('should NOT reset functional_conflict entries on non-integrating requests', () => {
+    const reqId = db.createRequest('Feature');
+    const taskId = db.createTask({ request_id: reqId, subject: 'T1', description: 'D1' });
+
+    db.updateTask(taskId, { status: 'completed' });
+    db.updateRequest(reqId, { status: 'in_progress' }); // not integrating
+
+    const enqueueResult = db.enqueueMerge({
+      request_id: reqId,
+      task_id: taskId,
+      pr_url: 'https://github.com/org/repo/pull/302',
+      branch: 'agent-1',
+    });
+    const mergeId = enqueueResult.lastInsertRowid;
+
+    db.updateMerge(mergeId, { status: 'failed', error: 'functional_conflict: validation failed' });
+    db.getDb().prepare("UPDATE merge_queue SET updated_at = datetime('now', '-10 minutes') WHERE id = ?").run(mergeId);
+
+    let mergeAttempts = 0;
+    merger.processQueue(tmpDir, () => { mergeAttempts += 1; return { success: true }; });
+
+    assert.strictEqual(mergeAttempts, 0, 'merge should not be attempted — request is not integrating');
+
+    const entry = db.getDb().prepare('SELECT status FROM merge_queue WHERE id = ?').get(mergeId);
+    assert.strictEqual(entry.status, 'failed', 'entry should remain failed');
+  });
+
+  it('onTaskCompleted should reset functional_conflict failed entries to pending and move request to integrating', () => {
+    const reqId = db.createRequest('Feature');
+    const taskId1 = db.createTask({ request_id: reqId, subject: 'T1', description: 'D1' });
+    const taskId2 = db.createTask({ request_id: reqId, subject: 'T2', description: 'D2' });
+
+    db.updateTask(taskId1, { status: 'completed' });
+    db.updateTask(taskId2, { status: 'completed' });
+    db.updateRequest(reqId, { status: 'integrating' });
+
+    const enqueueResult = db.enqueueMerge({
+      request_id: reqId,
+      task_id: taskId1,
+      pr_url: 'https://github.com/org/repo/pull/303',
+      branch: 'agent-1',
+    });
+    const mergeId = enqueueResult.lastInsertRowid;
+
+    db.updateMerge(mergeId, { status: 'failed', error: 'functional_conflict: build failed after merge' });
+
+    merger.onTaskCompleted(taskId2);
+
+    // The failed functional_conflict entry should be reset to pending
+    const entry = db.getDb().prepare('SELECT status, error FROM merge_queue WHERE id = ?').get(mergeId);
+    assert.strictEqual(entry.status, 'pending', 'functional_conflict failed entry should be reset to pending');
+    assert.strictEqual(entry.error, null, 'error should be cleared');
+
+    // Request should remain integrating, not completed
+    const requestAfter = db.getRequest(reqId);
+    assert.strictEqual(requestAfter.status, 'integrating');
+    assert.strictEqual(getRequestCompletionMailCount(reqId), 0);
+    assert.strictEqual(getRequestCompletionLogCount(reqId), 0);
+  });
+});
+
 describe('functional_conflict merge status', () => {
   it('should set merge status to conflict (not failed) when functional_conflict occurs', () => {
     const reqId = db.createRequest('Feature');
