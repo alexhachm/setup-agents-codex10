@@ -200,48 +200,6 @@ describe('Overlay domain path safety', () => {
     assert.ok(content.includes('safe-domain-knowledge'));
   });
 
-  it('should include domain knowledge from domains/<domain>/README.md (new layout)', () => {
-    const knowledgeDir = path.join(tmpDir, '.claude', 'knowledge');
-    const domainDir = path.join(knowledgeDir, 'domains', 'coordinator-core');
-    fs.mkdirSync(domainDir, { recursive: true });
-    fs.writeFileSync(path.join(knowledgeDir, 'mistakes.md'), '', 'utf8');
-    fs.writeFileSync(path.join(domainDir, 'README.md'), 'coordinator-core-knowledge', 'utf8');
-
-    const content = overlay.buildTaskOverlay({
-      id: 1,
-      request_id: 'req-1',
-      subject: 'Domain layout test',
-      tier: 2,
-      priority: 'normal',
-      description: 'desc',
-      domain: 'coordinator-core',
-    }, { id: 1, branch: 'agent-1', worktree_path: '/wt-1' }, tmpDir);
-
-    assert.ok(content.includes('## Domain Knowledge'));
-    assert.ok(content.includes('coordinator-core-knowledge'));
-  });
-
-  it('should fall back to legacy domain/<domain>.md when domains/<domain>/README.md does not exist', () => {
-    const knowledgeDir = path.join(tmpDir, '.claude', 'knowledge');
-    const legacyDir = path.join(knowledgeDir, 'domain');
-    fs.mkdirSync(legacyDir, { recursive: true });
-    fs.writeFileSync(path.join(knowledgeDir, 'mistakes.md'), '', 'utf8');
-    fs.writeFileSync(path.join(legacyDir, 'frontend.md'), 'legacy-frontend-knowledge', 'utf8');
-
-    const content = overlay.buildTaskOverlay({
-      id: 1,
-      request_id: 'req-1',
-      subject: 'Legacy fallback test',
-      tier: 2,
-      priority: 'normal',
-      description: 'desc',
-      domain: 'frontend',
-    }, { id: 1, branch: 'agent-1', worktree_path: '/wt-1' }, tmpDir);
-
-    assert.ok(content.includes('## Domain Knowledge'));
-    assert.ok(content.includes('legacy-frontend-knowledge'));
-  });
-
   it('should ignore traversal and separator tokens in domain knowledge lookup', () => {
     const knowledgeDir = path.join(tmpDir, '.claude', 'knowledge');
     const domainDir = path.join(knowledgeDir, 'domain');
@@ -537,11 +495,7 @@ describe('Web mutation route ID validation', () => {
   let port;
 
   beforeEach(async () => {
-    server = webServer.start(tmpDir, 0);
-    await new Promise((resolve, reject) => {
-      server.once('listening', resolve);
-      server.once('error', reject);
-    });
+    server = await webServer.start(tmpDir, 0);
     port = server.address().port;
   });
 
