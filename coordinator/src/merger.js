@@ -603,11 +603,11 @@ function getDefaultValidationCommand(validationDir) {
   }
 
   const scripts = packageJson && typeof packageJson.scripts === 'object' ? packageJson.scripts : {};
+  if (typeof scripts.test === 'string' && scripts.test.trim()) {
+    return { command: { file: 'npm', args: ['test'] }, reason: null, source: 'scripts.test' };
+  }
   if (typeof scripts.build === 'string' && scripts.build.trim()) {
     return { command: { file: 'npm', args: ['run', 'build'] }, reason: null, source: 'scripts.build' };
-  }
-  if (typeof scripts.test === 'string' && scripts.test.trim()) {
-    return { command: { file: 'npm', args: ['run', 'test'] }, reason: null, source: 'scripts.test' };
   }
   return { command: null, reason: 'no_build_or_test_script' };
 }
