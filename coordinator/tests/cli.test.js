@@ -1009,6 +1009,29 @@ describe('CLI Server', () => {
     assert.strictEqual(getCoordinatorOwnershipMismatchEvents('start-task', 1, taskId).length, 1);
   });
 
+  it('should skip start-task with ok:true when worker current_task_id does not match', async () => {
+    db.registerWorker(1, '/wt-1', 'agent-1');
+    const reqId = db.createRequest('Stale start-task guard');
+    const oldTaskId = db.createTask({ request_id: reqId, subject: 'Old task', description: 'Was reassigned' });
+    const newTaskId = db.createTask({ request_id: reqId, subject: 'New task', description: 'Worker now owns this' });
+    db.updateTask(oldTaskId, { status: 'assigned', assigned_to: 1 });
+    db.updateTask(newTaskId, { status: 'assigned', assigned_to: 1 });
+    // Worker's current assignment has moved to newTaskId (watchdog reassigned)
+    db.updateWorker(1, { status: 'assigned', current_task_id: newTaskId });
+
+    const result = await sendCommand('start-task', { worker_id: '1', task_id: String(oldTaskId) });
+    assert.strictEqual(result.ok, true);
+    assert.strictEqual(result.skipped, true);
+    assert.strictEqual(result.reason, 'worker_current_task_mismatch');
+
+    // Task and worker state must be unchanged
+    assert.strictEqual(db.getTask(oldTaskId).status, 'assigned');
+    assert.strictEqual(db.getTask(oldTaskId).started_at, null);
+    assert.strictEqual(db.getWorker(1).current_task_id, newTaskId);
+    assert.strictEqual(getWorkerTaskStartedEvents(1, oldTaskId).length, 0);
+    assert.strictEqual(getCoordinatorOwnershipMismatchEvents('start-task', 1, oldTaskId).length, 1);
+  });
+
   it('should treat duplicate start-task calls on owned in-progress task as idempotent', async () => {
     db.registerWorker(1, '/wt-1', 'agent-1');
     const reqId = db.createRequest('Duplicate starts');
