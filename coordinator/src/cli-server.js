@@ -1755,7 +1755,8 @@ function reopenFailedRequestForActiveRemediation({ requestId, taskId = null, wor
   return reopen;
 }
 
-function validateWorkerTaskOwnership(command, rawWorkerId, rawTaskId) {
+function validateWorkerTaskOwnership(command, rawWorkerId, rawTaskId, options = {}) {
+  const { logic = 'and', softFail = false } = options;
   const worker = db.getWorker(rawWorkerId);
   const task = db.getTask(rawTaskId);
   const parsedWorkerId = parseWorkerId(rawWorkerId);
@@ -1769,10 +1770,21 @@ function validateWorkerTaskOwnership(command, rawWorkerId, rawTaskId) {
   } else {
     const parsedAssignedWorkerId = parseWorkerId(task.assigned_to);
     const parsedCurrentTaskId = parseTaskId(worker.current_task_id);
-    if (parsedWorkerId === null || parsedAssignedWorkerId === null || parsedAssignedWorkerId !== parsedWorkerId) {
-      reason = 'task_assignment_mismatch';
-    } else if (parsedTaskId === null || parsedCurrentTaskId === null || parsedCurrentTaskId !== parsedTaskId) {
-      reason = 'worker_current_task_mismatch';
+    if (logic === 'or') {
+      // OR logic: ownership is valid if EITHER task.assigned_to matches worker_id
+      // OR worker.current_task_id matches task_id. Both must fail to be a mismatch.
+      const assignmentMatch = parsedWorkerId !== null && parsedAssignedWorkerId !== null && parsedAssignedWorkerId === parsedWorkerId;
+      const currentTaskMatch = parsedTaskId !== null && parsedCurrentTaskId !== null && parsedCurrentTaskId === parsedTaskId;
+      if (!assignmentMatch && !currentTaskMatch) {
+        reason = parsedAssignedWorkerId !== parsedWorkerId ? 'task_assignment_mismatch' : 'worker_current_task_mismatch';
+      }
+    } else {
+      // AND logic (default): both checks must pass
+      if (parsedWorkerId === null || parsedAssignedWorkerId === null || parsedAssignedWorkerId !== parsedWorkerId) {
+        reason = 'task_assignment_mismatch';
+      } else if (parsedTaskId === null || parsedCurrentTaskId === null || parsedCurrentTaskId !== parsedTaskId) {
+        reason = 'worker_current_task_mismatch';
+      }
     }
   }
 
@@ -1785,9 +1797,12 @@ function validateWorkerTaskOwnership(command, rawWorkerId, rawTaskId) {
       task_assigned_to: task ? task.assigned_to : null,
       worker_current_task_id: worker ? worker.current_task_id : null,
     });
+    const response = softFail
+      ? { ok: true, skipped: true, reason }
+      : { ok: false, error: 'ownership_mismatch', reason };
     return {
       ok: false,
-      response: { ok: false, error: 'ownership_mismatch', reason },
+      response,
       worker: null,
       task: null,
     };
@@ -2536,7 +2551,7 @@ function handleCommand(cmd, conn, handlers) {
       }
       case 'complete-task': {
         const { worker_id, task_id, pr_url, result, branch } = args;
-        const ownership = validateWorkerTaskOwnership('complete-task', worker_id, task_id);
+        const ownership = validateWorkerTaskOwnership('complete-task', worker_id, task_id, { logic: 'or', softFail: true });
         if (!ownership.ok) {
           respond(conn, ownership.response);
           break;
