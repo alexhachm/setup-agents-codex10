@@ -76,9 +76,12 @@
   function connectTab(tab) {
     if (tab.ws && (tab.ws.readyState === WebSocket.OPEN || tab.ws.readyState === WebSocket.CONNECTING)) return;
     const protocol = location.protocol === 'https:' ? 'wss:' : 'ws:';
-    tab.ws = new WebSocket(`${protocol}//${location.hostname}:${tab.port}`);
+    // Capture the socket in a local variable so stale handlers can detect they've been superseded.
+    const ws = new WebSocket(`${protocol}//${location.hostname}:${tab.port}`);
+    tab.ws = ws;
 
-    tab.ws.onopen = () => {
+    ws.onopen = () => {
+      if (tab.ws !== ws) return; // stale — a newer connection replaced this one
       tab.connected = true;
       tab.reconnectDelay = 1000;
       if (tab.reconnectTimer) { clearTimeout(tab.reconnectTimer); tab.reconnectTimer = null; }
@@ -86,11 +89,12 @@
       if (tab.id === activeTabId) updateConnectionIndicator(true);
     };
 
-    tab.ws.onerror = (err) => {
+    ws.onerror = (err) => {
       console.error('WebSocket error (port ' + tab.port + '):', err);
     };
 
-    tab.ws.onclose = () => {
+    ws.onclose = () => {
+      if (tab.ws !== ws) return; // stale — a newer connection replaced this one; don't schedule another reconnect
       tab.connected = false;
       renderTabBar();
       if (tab.id === activeTabId) updateConnectionIndicator(false);
@@ -98,7 +102,8 @@
       tab.reconnectDelay = Math.min(tab.reconnectDelay * 2, MAX_RECONNECT_DELAY);
     };
 
-    tab.ws.onmessage = (event) => {
+    ws.onmessage = (event) => {
+      if (tab.ws !== ws) return; // stale
       try {
         const msg = JSON.parse(event.data);
         if (msg.type === 'init' || msg.type === 'state') {

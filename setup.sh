@@ -264,7 +264,7 @@ if [ -f "$RUNTIME_LOOP_SENTINEL" ]; then
   fi
 fi
 
-for s in worker-sentinel.sh loop-sentinel.sh launch-worker.sh signal-wait.sh state-lock.sh; do
+for s in worker-sentinel.sh loop-sentinel.sh launch-worker.sh signal-wait.sh state-lock.sh provider-utils.sh; do
   SRC="$SCRIPT_DIR/scripts/$s"
   if [ "$s" = "loop-sentinel.sh" ]; then
     SRC="$LOOP_SENTINEL_SOURCE"
