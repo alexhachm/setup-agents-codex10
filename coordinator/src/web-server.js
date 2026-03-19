@@ -1388,7 +1388,7 @@ function start(projectDir, port = 3100, scriptDir = null, handlers = {}) {
         } catch {}
       }
       db.log('gui', 'setup_finished', { code });
-      broadcast({ type: 'setup_complete', code: code || 0 });
+      broadcast({ type: 'setup_complete', code: code !== null ? code : 1 });
       setupProcess = null;
     });
 
@@ -1551,7 +1551,7 @@ function start(projectDir, port = 3100, scriptDir = null, handlers = {}) {
       if (buf) broadcast({ type: 'git_push_log', line: buf });
       if (errBuf) broadcast({ type: 'git_push_log', line: errBuf });
       db.log('gui', 'git_push_finished', { code, repo });
-      broadcast({ type: 'git_push_complete', code: code || 0 });
+      broadcast({ type: 'git_push_complete', code: code !== null ? code : 1 });
     });
 
     pushProc.on('error', (err) => {
