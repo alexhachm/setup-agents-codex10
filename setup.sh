@@ -47,6 +47,7 @@ if grep -qi microsoft /proc/version 2>/dev/null; then
   }
   _wsl_shim gh
   _wsl_shim codex
+  _wsl_shim claude
   # Ensure nvm node is on PATH
   [ -s "$HOME/.nvm/nvm.sh" ] && . "$HOME/.nvm/nvm.sh" 2>/dev/null
 fi
@@ -59,6 +60,45 @@ if grep -qi microsoft /proc/version 2>/dev/null || [ -n "${WSL_DISTRO_NAME:-}" ]
 elif [[ "${OSTYPE:-}" == msys* || "${OSTYPE:-}" == cygwin* ]]; then
   IS_MSYS=true
 fi
+
+# --- Source provider utilities ---
+# shellcheck disable=SC1091
+. "$SCRIPT_DIR/scripts/provider-utils.sh"
+
+# --- Provider selection ---
+
+echo "[0/8] Provider selection..."
+
+AGENT_LAUNCHER_CONFIG="$(mac10_provider_config_file "$PROJECT_DIR")"
+AGENT_LAUNCHER_DIR="$(dirname "$AGENT_LAUNCHER_CONFIG")"
+mkdir -p "$AGENT_LAUNCHER_DIR"
+
+# Load existing config if present
+if [ -f "$AGENT_LAUNCHER_CONFIG" ]; then
+  # shellcheck disable=SC1090
+  . "$AGENT_LAUNCHER_CONFIG"
+fi
+
+DEFAULT_PROVIDER="${MAC10_AGENT_PROVIDER:-codex}"
+echo "  Select agent provider:"
+echo "    1) codex  — OpenAI Codex CLI (default)"
+echo "    2) claude — Anthropic Claude Code CLI"
+printf "  Provider [%s]: " "$DEFAULT_PROVIDER"
+if [ -t 0 ]; then
+  read -r PROVIDER_INPUT
+else
+  PROVIDER_INPUT=""
+fi
+PROVIDER_INPUT="$(printf '%s' "${PROVIDER_INPUT:-}" | tr '[:upper:]' '[:lower:]' | tr -d '[:space:]')"
+case "$PROVIDER_INPUT" in
+  1|codex)  MAC10_AGENT_PROVIDER="codex" ;;
+  2|claude) MAC10_AGENT_PROVIDER="claude" ;;
+  *)        MAC10_AGENT_PROVIDER="${DEFAULT_PROVIDER:-codex}" ;;
+esac
+export MAC10_AGENT_PROVIDER
+printf 'MAC10_AGENT_PROVIDER=%s\n' "$MAC10_AGENT_PROVIDER" > "$AGENT_LAUNCHER_CONFIG"
+echo "  Selected provider: $MAC10_AGENT_PROVIDER"
+echo ""
 
 # --- Preflight checks ---
 
@@ -78,7 +118,7 @@ check_cmd gh
 if [ "$IS_WSL" = true ]; then
   check_cmd tmux
 fi
-check_cmd codex
+check_cmd "$(mac10_provider_cli)"
 
 NODE_VER=$(node -v | sed 's/v//' | cut -d. -f1)
 if [ "$NODE_VER" -lt 18 ]; then
@@ -572,9 +612,9 @@ if [ "$IS_MSYS" = true ]; then
     echo "  Master-3 (Allocator/Fast) terminal opened."
   else
     echo "  Windows Terminal not found — start manually:"
-    echo "    cd $PROJECT_DIR && codex --dangerously-bypass-approvals-and-sandbox -m gpt-5.3-codex -C $PROJECT_DIR -- \"\$(cat .claude/commands-codex10/master-loop.md)\""
-    echo "    cd $PROJECT_DIR && codex exec --dangerously-bypass-approvals-and-sandbox -m gpt-5.3-codex -C $PROJECT_DIR - < .claude/commands-codex10/architect-loop.md"
-    echo "    cd $PROJECT_DIR && codex exec --dangerously-bypass-approvals-and-sandbox -m gpt-5.3-codex -C $PROJECT_DIR - < .claude/commands-codex10/allocate-loop.md"
+    echo "    bash $WIN_LAUNCH_SCRIPT $PROJECT_DIR fast /master-loop"
+    echo "    bash $WIN_LAUNCH_SCRIPT $PROJECT_DIR deep /architect-loop"
+    echo "    bash $WIN_LAUNCH_SCRIPT $PROJECT_DIR fast /allocate-loop"
   fi
 elif [ "$IS_WSL" = true ]; then
   # WSL — use wt.exe with wsl.exe
@@ -590,16 +630,16 @@ elif [ "$IS_WSL" = true ]; then
     echo "  Master-3 (Allocator/Fast) terminal opened."
   else
     echo "  Windows Terminal not found — start manually:"
-    echo "    cd $PROJECT_DIR && codex --dangerously-bypass-approvals-and-sandbox -m gpt-5.3-codex -C $PROJECT_DIR -- \"\$(cat .claude/commands-codex10/master-loop.md)\""
-    echo "    cd $PROJECT_DIR && codex exec --dangerously-bypass-approvals-and-sandbox -m gpt-5.3-codex -C $PROJECT_DIR - < .claude/commands-codex10/architect-loop.md"
-    echo "    cd $PROJECT_DIR && codex exec --dangerously-bypass-approvals-and-sandbox -m gpt-5.3-codex -C $PROJECT_DIR - < .claude/commands-codex10/allocate-loop.md"
+    echo "    bash $LAUNCH_SCRIPT $PROJECT_DIR fast /master-loop"
+    echo "    bash $LAUNCH_SCRIPT $PROJECT_DIR deep /architect-loop"
+    echo "    bash $LAUNCH_SCRIPT $PROJECT_DIR fast /allocate-loop"
   fi
 else
   # macOS / Linux — use native terminal
   echo "  Start manually in separate terminals:"
-  echo "    cd $PROJECT_DIR && codex --dangerously-bypass-approvals-and-sandbox -m gpt-5.3-codex -C $PROJECT_DIR -- \"\$(cat .claude/commands-codex10/master-loop.md)\""
-  echo "    cd $PROJECT_DIR && codex exec --dangerously-bypass-approvals-and-sandbox -m gpt-5.3-codex -C $PROJECT_DIR - < .claude/commands-codex10/architect-loop.md"
-  echo "    cd $PROJECT_DIR && codex exec --dangerously-bypass-approvals-and-sandbox -m gpt-5.3-codex -C $PROJECT_DIR - < .claude/commands-codex10/allocate-loop.md"
+  echo "    bash $LAUNCH_SCRIPT $PROJECT_DIR fast /master-loop"
+  echo "    bash $LAUNCH_SCRIPT $PROJECT_DIR deep /architect-loop"
+  echo "    bash $LAUNCH_SCRIPT $PROJECT_DIR fast /allocate-loop"
 fi
 
 echo ""
