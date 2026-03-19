@@ -2495,7 +2495,14 @@ function handleCommand(cmd, conn, handlers) {
         const { worker_id, task_id } = args;
         const ownership = validateWorkerTaskOwnership('start-task', worker_id, task_id);
         if (!ownership.ok) {
-          respond(conn, ownership.response);
+          // Stale agents whose current_task assignment changed (e.g. after watchdog
+          // sentinel_reset) should be silently skipped — same pattern as the
+          // reset-worker stale-sentinel guards.
+          if (ownership.response.reason === 'worker_current_task_mismatch') {
+            respond(conn, { ok: true, skipped: true, reason: 'worker_current_task_mismatch' });
+          } else {
+            respond(conn, ownership.response);
+          }
           break;
         }
         const { task } = ownership;
