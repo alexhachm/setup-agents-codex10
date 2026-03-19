@@ -1162,7 +1162,7 @@ describe('CLI Server', () => {
     assert.strictEqual(completedWorker.tasks_completed, 1);
   });
 
-  it('should reject complete-task when task is assigned to another worker and preserve ownership state', async () => {
+  it('should skip complete-task with ok:true skipped:true when neither ownership check passes', async () => {
     db.registerWorker(1, '/wt-1', 'agent-1');
     db.registerWorker(2, '/wt-2', 'agent-2');
     const reqId = db.createRequest('Complete-task ownership guard');
@@ -1177,7 +1177,8 @@ describe('CLI Server', () => {
       result: null,
       completed_at: null,
     });
-    db.updateWorker(1, { status: 'busy', current_task_id: taskId, tasks_completed: 0 });
+    // Worker 1 has no current task — neither ownership check passes (OR logic both fail)
+    db.updateWorker(1, { status: 'busy', current_task_id: null, tasks_completed: 0 });
     db.updateWorker(2, { status: 'busy', current_task_id: taskId, tasks_completed: 3 });
 
     const result = await sendCommand('complete-task', {
@@ -1187,8 +1188,8 @@ describe('CLI Server', () => {
       branch: 'agent-1',
       result: 'Attempted takeover',
     });
-    assert.strictEqual(result.ok, false);
-    assert.strictEqual(result.error, 'ownership_mismatch');
+    assert.strictEqual(result.ok, true);
+    assert.strictEqual(result.skipped, true);
     assert.strictEqual(result.reason, 'task_assignment_mismatch');
 
     const task = db.getTask(taskId);
@@ -1202,7 +1203,7 @@ describe('CLI Server', () => {
 
     const workerOne = db.getWorker(1);
     assert.strictEqual(workerOne.status, 'busy');
-    assert.strictEqual(workerOne.current_task_id, taskId);
+    assert.strictEqual(workerOne.current_task_id, null);
     assert.strictEqual(workerOne.tasks_completed, 0);
 
     const workerTwo = db.getWorker(2);
@@ -1211,6 +1212,32 @@ describe('CLI Server', () => {
     assert.strictEqual(workerTwo.tasks_completed, 3);
 
     assert.strictEqual(getCoordinatorOwnershipMismatchEvents('complete-task', 1, taskId).length, 1);
+  });
+
+  it('should allow complete-task when only current_task_id matches (OR logic)', async () => {
+    db.registerWorker(1, '/wt-1', 'agent-1');
+    db.registerWorker(2, '/wt-2', 'agent-2');
+    const reqId = db.createRequest('Complete-task OR logic');
+    const taskId = db.createTask({ request_id: reqId, subject: 'OR ownership', description: 'Task assigned to worker 2 but worker 1 has it as current_task_id' });
+    db.updateTask(taskId, {
+      status: 'in_progress',
+      assigned_to: 2,
+    });
+    // Worker 1's current_task_id matches task — second OR check passes
+    db.updateWorker(1, { status: 'busy', current_task_id: taskId });
+    db.updateWorker(2, { status: 'idle', current_task_id: null });
+
+    const result = await sendCommand('complete-task', {
+      worker_id: '1',
+      task_id: String(taskId),
+      result: 'OR logic completion',
+    });
+    assert.strictEqual(result.ok, true);
+    assert.strictEqual(result.skipped, undefined);
+
+    const task = db.getTask(taskId);
+    assert.strictEqual(task.status, 'completed');
+    assert.strictEqual(getCoordinatorOwnershipMismatchEvents('complete-task', 1, taskId).length, 0);
   });
 
   it('should reject fail-task when task is assigned to another worker and preserve ownership state', async () => {
