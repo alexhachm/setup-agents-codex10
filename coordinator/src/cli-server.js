@@ -2736,6 +2736,17 @@ function handleCommand(cmd, conn, handlers) {
           break;
         }
         const failedTask = ownership.task;
+        if (failedTask.status !== 'assigned' && failedTask.status !== 'in_progress') {
+          db.log('coordinator', 'ownership_mismatch', {
+            command: 'fail-task',
+            worker_id: wid || null,
+            task_id: tid || null,
+            reason: 'task_not_active',
+            task_status: failedTask.status,
+          });
+          respond(conn, { ok: false, error: 'ownership_mismatch', reason: 'task_not_active' });
+          break;
+        }
         const usage = normalizeCompleteTaskUsagePayload(args.usage);
         const usageTaskFields = mapUsagePayloadToTaskFields(usage, failedTask);
         const routingMeta = failedTask ? {

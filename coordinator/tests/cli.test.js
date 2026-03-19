@@ -1305,6 +1305,46 @@ describe('CLI Server', () => {
     assert.strictEqual(getCoordinatorOwnershipMismatchEvents('fail-task', 1, taskId).length, 1);
   });
 
+  it('should reject fail-task when task is already completed or failed (not in active state)', async () => {
+    db.registerWorker(1, '/wt-1', 'agent-1');
+    const reqId = db.createRequest('Fail-task active status guard');
+
+    // Test 1: reject when task is already completed
+    const completedTaskId = db.createTask({ request_id: reqId, subject: 'Already completed task', description: 'Task already done' });
+    db.updateTask(completedTaskId, { status: 'completed', assigned_to: 1 });
+    db.updateWorker(1, { status: 'assigned', current_task_id: completedTaskId });
+
+    const completedResult = await sendCommand('fail-task', {
+      worker_id: '1',
+      task_id: String(completedTaskId),
+      error: 'Attempted to fail a completed task',
+    });
+    assert.strictEqual(completedResult.ok, false);
+    assert.strictEqual(completedResult.error, 'ownership_mismatch');
+    assert.strictEqual(completedResult.reason, 'task_not_active');
+
+    const completedTaskAfter = db.getTask(completedTaskId);
+    assert.strictEqual(completedTaskAfter.status, 'completed');
+
+    // Test 2: reject when task is already failed
+    const failedTaskId = db.createTask({ request_id: reqId, subject: 'Already failed task', description: 'Task already failed' });
+    db.updateTask(failedTaskId, { status: 'failed', assigned_to: 1 });
+    db.updateWorker(1, { status: 'assigned', current_task_id: failedTaskId });
+
+    const alreadyFailedResult = await sendCommand('fail-task', {
+      worker_id: '1',
+      task_id: String(failedTaskId),
+      error: 'Attempted to fail an already-failed task',
+    });
+    assert.strictEqual(alreadyFailedResult.ok, false);
+    assert.strictEqual(alreadyFailedResult.error, 'ownership_mismatch');
+    assert.strictEqual(alreadyFailedResult.reason, 'task_not_active');
+
+    const failedTaskAfter = db.getTask(failedTaskId);
+    assert.strictEqual(failedTaskAfter.status, 'failed');
+    assert.strictEqual(failedTaskAfter.result, null);
+  });
+
   it('should persist and propagate identical usage values for canonical, Anthropic alias, and OpenAI alias fail-task payloads', async () => {
     db.registerWorker(1, '/wt-1', 'agent-1');
     db.registerWorker(2, '/wt-2', 'agent-2');
