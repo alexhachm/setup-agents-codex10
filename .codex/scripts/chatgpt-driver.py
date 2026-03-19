@@ -837,6 +837,10 @@ class ResponseDetector:
         self.state = ResponseState.IDLE
         self._state_entered_at = time.time()
         self._last_log_state = None
+        # DR guard: set True once 300s have elapsed in STREAMING so that
+        # subsequent complete signals (after a COLLECTING→STREAMING revert)
+        # skip the time check and proceed directly to COLLECTING.
+        self._dr_wait_300s_done = False
 
     def _transition(self, new_state):
         if new_state != self.state:
@@ -900,7 +904,10 @@ class ResponseDetector:
             elif self.state == ResponseState.STABILIZING:
                 self._handle_stabilizing(s)
             elif self.state == ResponseState.COLLECTING:
-                return await self._handle_collecting()
+                result = await self._handle_collecting()
+                if result is not None:
+                    return result
+                # result is None → DR text too short, reverted to STREAMING
 
             # Check start timeout separately
             if (self.state == ResponseState.WAITING_FOR_START
@@ -950,6 +957,19 @@ class ResponseDetector:
             return  # Still processing — stay in STREAMING
 
         if dr_phase == "complete":
+            # Guard against premature Plan-phase completion (~37 s in).
+            # The Plan stub is only ~400 chars; the real report is 5000-20000.
+            # Require 300 s in STREAMING before accepting the "complete" signal.
+            # _dr_wait_300s_done is set once so post-revert checks still pass.
+            if not self._dr_wait_300s_done:
+                time_in_state = self._time_in_state()
+                if time_in_state < 300:
+                    log.info(
+                        f"DR phase=complete after {time_in_state:.0f}s in STREAMING; "
+                        "likely Plan stub — waiting for full report (need 300s)"
+                    )
+                    return  # Stay in STREAMING
+                self._dr_wait_300s_done = True
             log.info("Deep Research complete (send button reappeared)")
             self._transition(ResponseState.COLLECTING)
             return
@@ -998,21 +1018,33 @@ class ResponseDetector:
                 self._transition(ResponseState.COLLECTING)
 
     async def _handle_collecting(self):
-        """COLLECTING: validate and return the response."""
-        self._transition(ResponseState.DONE)
+        """COLLECTING: validate and return the response.
 
+        Returns (success, text) on completion, or None if DR text is too short
+        and the state has been reverted to STREAMING for further waiting.
+        """
         # Final DOM stabilization
         await asyncio.sleep(2)
 
         # Deep Research: text is inside a cross-origin iframe, use copy button
         if self.mode == "deep_research":
             text = await self._collect_dr_text()
+            _DR_ACCEPT_MIN = 2000
+            if len(text.strip()) < _DR_ACCEPT_MIN:
+                log.warning(
+                    f"DR text only {len(text.strip())} chars (< {_DR_ACCEPT_MIN}); "
+                    "reverting to STREAMING to await full report"
+                )
+                self._transition(ResponseState.STREAMING)
+                return None  # Signal outer loop: not done yet, continue waiting
         else:
             try:
                 text = await self.monitor.get_last_text()
             except Exception as e:
+                self._transition(ResponseState.DONE)
                 return False, f"Failed to collect response: {e}"
 
+        self._transition(ResponseState.DONE)
         valid, reason = self._validate_response(text)
         if not valid:
             log.warning(f"Response validation failed: {reason}")
