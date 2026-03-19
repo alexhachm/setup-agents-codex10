@@ -1,5 +1,6 @@
 'use strict';
 
+const crypto = require('crypto');
 const db = require('./db');
 const tmux = require('./tmux');
 const recovery = require('./recovery');
@@ -10,6 +11,8 @@ let lastMailPurge = 0;
 let startupRecoverySweepPending = true;
 // Track last escalation level per worker to avoid duplicate nudge/triage mails
 const lastEscalationLevel = new Map();
+// Track tmux pane output hash at Level 3 triage to detect active workers at Level 4
+const lastOutputHash = new Map();
 
 // Default escalation thresholds (seconds since last heartbeat).
 const THRESHOLDS = Object.freeze({
@@ -125,6 +128,7 @@ function stop() {
   if (intervalId) { clearInterval(intervalId); intervalId = null; }
   startupRecoverySweepPending = true;
   lastEscalationLevel.clear();
+  lastOutputHash.clear();
 }
 
 function runStartupRecoverySweep() {
@@ -150,6 +154,7 @@ function tick(projectDir) {
     // Skip idle workers and clear their escalation tracking
     if (worker.status === 'idle') {
       lastEscalationLevel.delete(worker.id);
+      lastOutputHash.delete(worker.id);
       continue;
     }
 
@@ -278,7 +283,26 @@ function escalate(worker, staleSec, projectDir) {
   const prevLevel = lastEscalationLevel.get(worker.id) || 0;
 
   if (staleSec >= THRESHOLDS.terminate) {
-    // Level 4: Terminate and reassign (always fires — destructive action)
+    // Level 4: Terminate and reassign
+    // Fresh-output guard: if tmux pane output has changed since Level 3 triage,
+    // the worker is still active despite the stale heartbeat — reset escalation
+    // to avoid unnecessary task reassignment churn.
+    if (tmux.isTmuxAvailable()) {
+      const currentOutput = tmux.capturePane(windowName, 20);
+      const currentHash = crypto.createHash('md5').update(currentOutput || '').digest('hex');
+      const prevHash = lastOutputHash.get(worker.id);
+      if (prevHash !== undefined && currentHash !== prevHash) {
+        lastEscalationLevel.delete(worker.id);
+        lastOutputHash.delete(worker.id);
+        db.log('coordinator', 'watchdog_terminate_aborted', {
+          worker_id: worker.id,
+          stale_sec: staleSec,
+          reason: 'fresh_output_detected',
+        });
+        return;
+      }
+      lastOutputHash.set(worker.id, currentHash);
+    }
     db.log('coordinator', 'watchdog_terminate', {
       worker_id: worker.id,
       stale_sec: staleSec,
@@ -286,11 +310,15 @@ function escalate(worker, staleSec, projectDir) {
     tmux.killWindow(windowName);
     handleDeath(worker, 'heartbeat_timeout');
     lastEscalationLevel.delete(worker.id);
+    lastOutputHash.delete(worker.id);
 
   } else if (staleSec >= THRESHOLDS.triage && prevLevel < 3) {
     // Level 3: Triage — capture output, log for analysis (once per escalation)
     lastEscalationLevel.set(worker.id, 3);
     const output = tmux.capturePane(windowName, 20);
+    // Seed lastOutputHash so Level 4 (60s later) has a valid baseline to compare against.
+    // Without seeding here, prevHash is always undefined and the fresh-output guard is a no-op.
+    lastOutputHash.set(worker.id, crypto.createHash('md5').update(output || '').digest('hex'));
     db.log('coordinator', 'watchdog_triage', {
       worker_id: worker.id,
       stale_sec: staleSec,
