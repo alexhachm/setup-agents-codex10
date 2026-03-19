@@ -865,7 +865,7 @@ describe('tryRebase dirty-worktree reset', () => {
   });
 });
 
-describe('functional_conflict recovery sweep', () => {
+describe('stale conflict recovery sweep', () => {
   it('should reset failed functional_conflict entries older than 5 minutes to pending and then attempt merge', () => {
     const reqId = db.createRequest('Feature');
     const taskId = db.createTask({ request_id: reqId, subject: 'T1', description: 'D1' });
@@ -891,7 +891,7 @@ describe('functional_conflict recovery sweep', () => {
     // Recovery sweep should have reset the entry; getNextMerge should then pick it up
     assert.strictEqual(mergeAttempts, 1, 'merge should be attempted after recovery resets the entry to pending');
 
-    const recoveryLogs = readCoordinatorLogEntries('functional_conflict_recovery_sweep');
+    const recoveryLogs = readCoordinatorLogEntries('stale_conflict_recovery_sweep');
     assert.strictEqual(recoveryLogs.length, 1);
     assert.ok(Array.isArray(recoveryLogs[0].merge_ids) && recoveryLogs[0].merge_ids.includes(mergeId));
   });
@@ -923,7 +923,7 @@ describe('functional_conflict recovery sweep', () => {
     const entry = db.getDb().prepare('SELECT status FROM merge_queue WHERE id = ?').get(mergeId);
     assert.strictEqual(entry.status, 'failed', 'entry should remain failed');
 
-    const recoveryLogs = readCoordinatorLogEntries('functional_conflict_recovery_sweep');
+    const recoveryLogs = readCoordinatorLogEntries('stale_conflict_recovery_sweep');
     assert.strictEqual(recoveryLogs.length, 0);
   });
 
@@ -952,6 +952,67 @@ describe('functional_conflict recovery sweep', () => {
 
     const entry = db.getDb().prepare('SELECT status FROM merge_queue WHERE id = ?').get(mergeId);
     assert.strictEqual(entry.status, 'failed', 'entry should remain failed');
+  });
+
+  it('should reset conflict status entries older than 5 minutes to pending and then attempt merge', () => {
+    const reqId = db.createRequest('Feature');
+    const taskId = db.createTask({ request_id: reqId, subject: 'T1', description: 'D1' });
+
+    db.updateTask(taskId, { status: 'completed' });
+    db.updateRequest(reqId, { status: 'integrating' });
+
+    const enqueueResult = db.enqueueMerge({
+      request_id: reqId,
+      task_id: taskId,
+      pr_url: 'https://github.com/org/repo/pull/304',
+      branch: 'agent-1',
+    });
+    const mergeId = enqueueResult.lastInsertRowid;
+
+    // Simulate a previously conflicted entry (git conflict) with an old timestamp
+    db.updateMerge(mergeId, { status: 'conflict', error: 'merge conflict: cannot be automatically merged' });
+    db.getDb().prepare("UPDATE merge_queue SET updated_at = datetime('now', '-6 minutes') WHERE id = ?").run(mergeId);
+
+    let mergeAttempts = 0;
+    merger.processQueue(tmpDir, () => { mergeAttempts += 1; return { success: true }; });
+
+    // Recovery sweep should have reset the entry; getNextMerge should then pick it up
+    assert.strictEqual(mergeAttempts, 1, 'merge should be attempted after recovery resets the conflict entry to pending');
+
+    const recoveryLogs = readCoordinatorLogEntries('stale_conflict_recovery_sweep');
+    assert.strictEqual(recoveryLogs.length, 1);
+    assert.ok(Array.isArray(recoveryLogs[0].merge_ids) && recoveryLogs[0].merge_ids.includes(mergeId));
+  });
+
+  it('should NOT reset conflict status entries that are less than 5 minutes old', () => {
+    const reqId = db.createRequest('Feature');
+    const taskId = db.createTask({ request_id: reqId, subject: 'T1', description: 'D1' });
+
+    db.updateTask(taskId, { status: 'completed' });
+    db.updateRequest(reqId, { status: 'integrating' });
+
+    const enqueueResult = db.enqueueMerge({
+      request_id: reqId,
+      task_id: taskId,
+      pr_url: 'https://github.com/org/repo/pull/305',
+      branch: 'agent-1',
+    });
+    const mergeId = enqueueResult.lastInsertRowid;
+
+    // Recent conflict entry — should not be swept
+    db.updateMerge(mergeId, { status: 'conflict', error: 'merge conflict: cannot be automatically merged' });
+    // Leave updated_at as-is (recent)
+
+    let mergeAttempts = 0;
+    merger.processQueue(tmpDir, () => { mergeAttempts += 1; return { success: true }; });
+
+    assert.strictEqual(mergeAttempts, 0, 'merge should not be attempted — entry is too recent');
+
+    const entry = db.getDb().prepare('SELECT status FROM merge_queue WHERE id = ?').get(mergeId);
+    assert.strictEqual(entry.status, 'conflict', 'entry should remain conflict');
+
+    const recoveryLogs = readCoordinatorLogEntries('stale_conflict_recovery_sweep');
+    assert.strictEqual(recoveryLogs.length, 0);
   });
 
   it('onTaskCompleted should reset functional_conflict failed entries to pending and move request to integrating', () => {

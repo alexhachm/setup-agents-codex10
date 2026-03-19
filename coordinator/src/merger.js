@@ -298,22 +298,21 @@ function processQueue(projectDir, mergeExecutor = attemptMerge) {
   processingStartedAt = Date.now();
 
   try {
-    // Recovery sweep: reset functional_conflict failed entries on integrating requests older than 5 min
-    const functionalConflictRecovery = db.getDb().prepare(`
+    // Recovery sweep: reset stale conflict/functional_conflict entries on integrating requests older than 5 min
+    const staleConflictRecovery = db.getDb().prepare(`
       SELECT mq.id
         FROM merge_queue mq
         JOIN requests r ON r.id = mq.request_id
-       WHERE mq.status = 'failed'
-         AND mq.error LIKE 'functional_conflict:%'
+       WHERE (mq.status = 'conflict' OR (mq.status = 'failed' AND mq.error LIKE 'functional_conflict:%'))
          AND r.status = 'integrating'
          AND mq.updated_at <= datetime('now', '-5 minutes')
     `).all();
-    if (functionalConflictRecovery.length > 0) {
-      for (const m of functionalConflictRecovery) {
+    if (staleConflictRecovery.length > 0) {
+      for (const m of staleConflictRecovery) {
         db.updateMerge(m.id, { status: 'pending', error: null });
       }
-      db.log('coordinator', 'functional_conflict_recovery_sweep', {
-        merge_ids: functionalConflictRecovery.map((m) => m.id),
+      db.log('coordinator', 'stale_conflict_recovery_sweep', {
+        merge_ids: staleConflictRecovery.map((m) => m.id),
       });
     }
 
