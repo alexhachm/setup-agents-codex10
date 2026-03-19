@@ -252,10 +252,15 @@
         // Remove tabs for dead instances (except if manually added)
         for (const [id, tab] of tabs) {
           if (!activePorts.has(tab.port) && !tab.connected) {
+            disconnectTab(tab);
             tabs.delete(id);
             if (activeTabId === id) {
               const first = tabs.keys().next();
-              activeTabId = first.done ? null : first.value;
+              if (!first.done) {
+                switchTab(first.value);
+              } else {
+                activeTabId = null;
+              }
             }
           }
         }
