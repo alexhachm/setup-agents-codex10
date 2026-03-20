@@ -269,6 +269,44 @@ describe('Bounded assignment recovery', () => {
     assert.ok(exhaustedLog, 'task_liveness_retry_exhausted log entry must exist');
     assert.strictEqual(exhaustedLog.outcome, 'failed_retry_exhausted');
   });
+
+  it('fails task when liveness_reassign_count reaches the configured cap (count-based cap, not status guard)', () => {
+    // Explicitly set cap to 3 — verifies count-based cap enforcement, not status-based guards
+    db.setConfig('watchdog_task_reassign_limit', '3');
+    db.registerWorker(1, '/wt-1', 'agent-1');
+    const reqId = db.createRequest('Max reassignments cap test');
+    const taskId = db.createTask({
+      request_id: reqId,
+      subject: 'Cap at 3 task',
+      description: 'Should fail when liveness_reassign_count reaches the configured cap of 3',
+    });
+    // Pre-set count to 3 — exactly at the cap — so next recovery attempt must fail, not reassign
+    db.updateTask(taskId, {
+      status: 'assigned',
+      assigned_to: 1,
+      liveness_reassign_count: 3,
+    });
+    // Worker is idle (orphan state) so recovery picks up this task
+    db.updateWorker(1, { status: 'idle', current_task_id: null });
+
+    tick(tmpDir);
+
+    const task = db.getTask(taskId);
+    // Must transition to failed — not ready — because count >= cap
+    assert.strictEqual(task.status, 'failed');
+    assert.strictEqual(task.assigned_to, null);
+    assert.match(String(task.result || ''), /Liveness recovery exhausted/i);
+
+    const exhaustedLog = db.getLog(100, 'coordinator')
+      .filter((entry) => entry.action === 'task_liveness_retry_exhausted')
+      .map((entry) => JSON.parse(entry.details))
+      .find((entry) => entry.task_id === taskId);
+    assert.ok(exhaustedLog, 'task_liveness_retry_exhausted log entry must exist');
+    // Confirm the log reflects the configured cap of 3, proving count-based enforcement
+    assert.strictEqual(exhaustedLog.max_reassignments, 3);
+    assert.strictEqual(exhaustedLog.outcome, 'failed_retry_exhausted');
+    assert.strictEqual(exhaustedLog.reassignment_count, 3);
+  });
 });
 
 describe('Claim atomicity', () => {
