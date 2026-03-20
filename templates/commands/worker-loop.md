@@ -18,14 +18,20 @@ First, ensure `codex10` is on PATH. Run this before any other command:
 export PATH="$(pwd)/.codex/scripts:$PATH"
 ```
 
-### Read Knowledge
+### Read Knowledge (Tier 1 — always read)
 
-Read these files to learn from previous work:
-- `.codex/knowledge/mistakes.md` — avoid repeating known errors
-- `.codex/knowledge/patterns.md` — follow established patterns
+Read these handbook files to learn from previous work:
+- `.codex/knowledge/handbook/pitfalls.md` — avoid repeating known errors
+- `.codex/knowledge/handbook/workflow.md` — follow established patterns
 - `.codex/knowledge/instruction-patches.md` — apply any patches targeting "worker", then note them
-- `.codex/knowledge/worker-lessons.md` — lessons from fix reports
-- `.codex/knowledge/change-summaries.md` — understand recent changes by other workers
+
+### Retrieve Domain Knowledge (Tier 2 — on demand, after task assignment)
+
+After receiving your task in Step 2, read the relevant domain doc:
+- `.codex/knowledge/domains/<task-domain>/README.md` — domain-specific patterns and invariants
+
+If the task involves a topic with a research rollup, check:
+- `.codex/knowledge/research/topics/<topic>/_rollup.md` — prior research on the topic
 
 ## Step 2: Get Your Task
 
@@ -72,13 +78,25 @@ On conflict: `git rebase --abort && git reset --hard origin/main`
 ## Step 5: Do the Work
 
 1. **Read** the relevant files and understand the codebase context
-2. **Plan** your approach (for 5+ file changes, spawn a `code-architect` subagent for a review)
-3. **Implement** the changes described in the task
-4. **Send heartbeats** every 30 seconds during long work:
+2. **Check for prior research** — before investigating any external repo, doc, or pattern, check if it's already been researched:
+   - Look in `.codex/knowledge/research/topics/<topic>/_rollup.md`
+   - Grep frontmatter: `grep -rl "<keyword>" .codex/knowledge/research/ | head -5`
+   - If found, read the rollup first. Only create new research if it's insufficient.
+3. **Queue research if gap found** — if the rollup is insufficient or doesn't exist:
+   ```bash
+   ./.codex/scripts/codex10 queue-research "<topic>" "<specific question>" \
+     --context "Task $TASK_ID: $TASK_SUBJECT" \
+     --links '["<relevant_urls>"]'
+   ```
+   Boundary: queue only external intelligence (docs/benchmarks/comparisons). Do not queue repo-internal code-reading questions.
+   Do NOT wait for the result. Continue with available knowledge. The research will be available for the next session.
+4. **Plan** your approach (for 5+ file changes, spawn a `code-architect` subagent for a review)
+5. **Implement** the changes described in the task
+6. **Send heartbeats** every 30 seconds during long work:
    ```bash
    ./.codex/scripts/codex10 heartbeat $WORKER_ID
    ```
-5. **Self-verify**: run the build/test commands from the task's validation field
+7. **Self-verify**: run the build/test commands from the task's validation field
 
 ## Step 6: Validate
 
@@ -95,7 +113,27 @@ Validation depends on the task tier:
 
 ## Step 7: Ship
 
+### 7a: Commit, Push, and Create PR
+
 Run `/commit-push-pr` to create the PR.
+
+### 7b: Merge Prep
+
+Send a heartbeat, then spawn the `merge-prep` subagent to ensure the PR is mergeable:
+
+```bash
+./.codex/scripts/codex10 heartbeat $WORKER_ID
+```
+
+Spawn the `merge-prep` subagent (economy model). It will rebase onto main, force-push, and verify mergeability.
+
+- If `MERGE_PREP_PASSED` → proceed to Step 8
+- If `MERGE_PREP_FAILED` → you have full context of your changes. Fix the issue yourself (resolve conflicts, adjust code), then re-spawn `merge-prep`
+- If second `MERGE_PREP_FAILED` → fail the task and exit:
+  ```bash
+  ./.codex/scripts/codex10 fail-task $WORKER_ID $TASK_ID "merge-prep failed twice: <error>"
+  ```
+  Do NOT call `complete-task`. Go directly to **Phase: Budget/Reset Exit**.
 
 ## Step 8: Report Completion
 
@@ -113,9 +151,18 @@ If you failed to complete the task:
 
 Update counters: `tasks_completed += 1`, `context_budget += 2000`
 
-## Step 9: Write Change Summary
+## Step 9: Knowledge Persistence
 
-Append a brief summary to `.codex/knowledge/change-summaries.md`:
+After completing a task, persist what you learned:
+
+### 9a: Update living docs (refine in-place, don't append)
+
+- **Update** `.codex/knowledge/domains/<task-domain>/README.md` — add new insights, remove redundancy, cap changelog to last 5 entries. If the file doesn't exist yet, create it using the living doc template (see handbook files for format).
+- **Update** `.codex/knowledge/handbook/pitfalls.md` — only if you discovered a new pitfall during this task.
+
+### 9b: Append to generated logs (audit trail)
+
+Append a brief summary to `.codex/knowledge/generated/change-log.md`:
 
 ```markdown
 ## [TASK_ID] [subject] — [date]
@@ -123,6 +170,21 @@ Append a brief summary to `.codex/knowledge/change-summaries.md`:
 - Files: [list]
 - What changed: [1-2 sentences]
 - PR: [url]
+```
+
+### 9c: Persist research (if applicable)
+
+If you researched an external repo, documentation, or architectural pattern during this task:
+1. Create a research note at `.codex/knowledge/research/topics/<topic>/YYYY-MM-DD__<source-slug>__R-<shortid>.md`
+2. Update (or create) the topic rollup at `.codex/knowledge/research/topics/<topic>/_rollup.md`
+
+### 9d: Emit quality signals
+
+Append to `.codex/knowledge/signals/uses/YYYY-MM.md`:
+
+```
+YYYY-MM-DD T-<task_id> used: <knowledge files you read that influenced your work>
+YYYY-MM-DD T-<task_id> vote: <file> +1|-1 "<brief reason>"
 ```
 
 ## Step 10: Qualitative Self-Check
@@ -158,26 +220,29 @@ sleep 15
 
 If a new task arrives → go back to Step 3.
 
-If no task → lightweight distillation:
-1. Append any domain-specific learnings to `.codex/knowledge/domain/$DOMAIN.md`
-2. Run:
+If no task → lightweight knowledge update:
+1. Update `.codex/knowledge/domains/$DOMAIN/README.md` with any session learnings (refine in-place)
+2. Emit quality signals to `.codex/knowledge/signals/uses/YYYY-MM.md`
+3. Run:
    ```bash
    ./.codex/scripts/codex10 distill $WORKER_ID "$DOMAIN" "Key learnings from this session"
    ```
-3. EXIT — the sentinel handles the next cycle.
+4. EXIT — the sentinel handles the next cycle.
 
 ## Phase: Budget/Reset Exit
 
-Full distillation before exiting:
+Full knowledge persistence before exiting:
 
-1. Write domain knowledge to `.codex/knowledge/domain/$DOMAIN.md`
-2. Append mistakes to `.codex/knowledge/mistakes.md`
-3. Append change summary to `.codex/knowledge/change-summaries.md`
-4. Run:
+1. **Refine** `.codex/knowledge/domains/$DOMAIN/README.md` — consolidate everything you learned this session. Remove redundant entries. Update invariants and pitfalls.
+2. **Update** `.codex/knowledge/handbook/pitfalls.md` if you discovered new pitfalls
+3. **Append** audit entry to `.codex/knowledge/generated/change-log.md`
+4. **Emit** quality signals to `.codex/knowledge/signals/uses/YYYY-MM.md`
+5. **Prune check** (if signal data exists): run `bash .codex/scripts/knowledge-score.sh --bottom 3` and review. If any file you touched has a negative score, trim or archive it to `.codex/knowledge/archive/`.
+6. Run:
    ```bash
    ./.codex/scripts/codex10 distill $WORKER_ID "$DOMAIN" "Full distillation — session ending"
    ```
-5. EXIT — the sentinel handles the next cycle.
+7. EXIT — the sentinel handles the next cycle.
 
 ---
 
