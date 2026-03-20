@@ -55,3 +55,10 @@ Learnings from past task decompositions. Updated by the Architect after completi
 ### Quality Gating Beyond Tests
 - "Tests pass" is insufficient for mergeability; add: lint/format/typing gates + patch-size limit per task
 - Consider "review notes" artifacts from worker explaining rationale and risks — improves human review at scale
+
+### Worker Execution Scaffold (research-confirmed, 2026-03-19)
+- Canonical worker loop: **EXPLORE → PLAN → EDIT → VERIFY → REPORT** (used by OpenHands, SWE-Agent, Aider, Claude/Cursor plan mode)
+- After 2 failed verification cycles: stop and emit structured `FAILURE_REPORT` with `FAILURE_CLASS`, `TOP_3_HYPOTHESES`, `BEST_NEXT_ACTION`, `SHOULD_ESCALATE` — never thrash
+- Never repeat a failed command unchanged; step back, form new hypothesis, change approach
+- Parallelize by **file/domain boundary** only — not just because more workers seem powerful (parallel same-file = conflict trap)
+- Keep stable instructions separate from live task state; task packets are generated per-session, not embedded in shared instruction files
