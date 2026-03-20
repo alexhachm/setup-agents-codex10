@@ -126,7 +126,7 @@ Use the real output to understand current state. **NEVER fabricate status.**
 
 ### Step 4: Inbox sweep and completion check
 
-#### 5a. Drain inbox
+#### 4a. Drain inbox
 
 ```bash
 ./.codex/scripts/codex10 inbox allocator
@@ -170,7 +170,7 @@ Process each message by type:
    ```
 3. Assign to the original worker
 
-#### 5b. Completion sweep
+#### 4b. Completion sweep
 
 For each active request_id, check whether all tasks are done:
 ```bash

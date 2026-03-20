@@ -126,7 +126,7 @@ Use the real output to understand current state. **NEVER fabricate status.**
 
 ### Step 4: Inbox sweep and completion check
 
-#### 5a. Drain inbox
+#### 4a. Drain inbox
 
 ```bash
 ./.codex/scripts/codex10 inbox allocator
@@ -197,7 +197,7 @@ Master-3 handles this directly via subagent — NO fix task creation.
 - Do NOT create fix tasks for merge_failed
 - The merger and watchdog no longer send this event type
 
-#### 5b. Completion sweep
+#### 4b. Completion sweep
 
 For each active request_id, check whether all tasks are done:
 ```bash
