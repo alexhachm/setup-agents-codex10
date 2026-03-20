@@ -634,34 +634,65 @@ function recoverStaleIntegrations(now, options = {}) {
         reason: 'all_merged',
       });
     } else if (hasConflicts) {
-      // Case 3: Merge conflicts — wait for allocator to create fix tasks
+      // Case 3: Merge conflicts — auto-retry by resetting conflict merges to pending (up to 3 times)
       // Check if there are active tasks that could be fix tasks from the allocator
       if (hasActiveRemediationTasks(req.id)) {
-        // Fix tasks in progress — don't mark request as failed yet
+        // Fix tasks in progress — don't retry yet
         continue;
       }
 
-      // No active tasks — give allocator a grace period to create fix tasks
+      // Give conflicts a grace period before attempting retry (don't retry brand new conflicts)
       if (isWithinRemediationGraceWindow(now, req.id, freshMerges, 'conflict', 'conflict_age')) {
         continue;
       }
 
-      // Grace period expired and no fix tasks — mark as failed
-      const failedMerges = freshMerges.filter(m => m.status !== 'merged');
-      const details = failedMerges.map(m => `${m.branch}: ${m.status}${m.error ? ' - ' + m.error.slice(0, 100) : ''}`).join('; ');
-      db.updateRequest(req.id, {
-        status: 'failed',
-        result: `Merge failures (allocator did not resolve): ${details}`,
-      });
-      db.sendMail('master-1', 'request_failed', {
-        request_id: req.id,
-        error: `Merge failures: ${details}`,
-      });
-      db.log('coordinator', 'stale_integration_recovered', {
-        request_id: req.id,
-        reason: 'merge_conflict_unresolved',
-        details,
-      });
+      // Count previous auto-retries via activity_log
+      const MAX_MERGE_CONFLICT_RETRIES = 3;
+      const retryRow = db.getDb().prepare(
+        "SELECT COUNT(*) as count FROM activity_log WHERE action = 'merge_conflict_retry' AND json_extract(details, '$.request_id') = ?"
+      ).get(req.id);
+      const retryCount = Number(retryRow && retryRow.count) || 0;
+
+      const conflictMerges = freshMerges.filter(
+        m => m.status === 'conflict' ||
+             (m.status === 'failed' && typeof m.error === 'string' && m.error.startsWith(FUNCTIONAL_CONFLICT_ERROR_PREFIX))
+      );
+
+      if (retryCount < MAX_MERGE_CONFLICT_RETRIES) {
+        // Reset conflict merges to pending for automatic re-merge
+        for (const m of conflictMerges) {
+          db.updateMerge(m.id, { status: 'pending', error: null });
+        }
+        db.log('coordinator', 'merge_conflict_retry', {
+          request_id: req.id,
+          retry_number: retryCount + 1,
+          max_retries: MAX_MERGE_CONFLICT_RETRIES,
+          merge_ids: conflictMerges.map(m => m.id),
+        });
+        db.log('coordinator', 'stale_integration_recovered', {
+          request_id: req.id,
+          reason: 'merge_conflict_retry',
+          retry_number: retryCount + 1,
+        });
+      } else {
+        // Retry limit reached — fail the request
+        const failedMerges = freshMerges.filter(m => m.status !== 'merged');
+        const details = failedMerges.map(m => `${m.branch}: ${m.status}${m.error ? ' - ' + m.error.slice(0, 100) : ''}`).join('; ');
+        db.updateRequest(req.id, {
+          status: 'failed',
+          result: `Merge conflicts unresolved after ${MAX_MERGE_CONFLICT_RETRIES} retries: ${details}`,
+        });
+        db.sendMail('master-1', 'request_failed', {
+          request_id: req.id,
+          error: `Merge conflicts unresolved after ${MAX_MERGE_CONFLICT_RETRIES} retries: ${details}`,
+        });
+        db.log('coordinator', 'stale_integration_recovered', {
+          request_id: req.id,
+          reason: 'merge_conflict_retry_exhausted',
+          retries: retryCount,
+          details,
+        });
+      }
     } else {
       // Case 4: All resolved but some failed (no conflicts) → mark request failed
       if (hasActiveRemediationTasks(req.id)) {
