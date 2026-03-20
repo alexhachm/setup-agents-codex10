@@ -124,7 +124,7 @@ If there are tasks to allocate:
 Use the real output to understand current state. **NEVER fabricate status.**
 `context_budget += 10`
 
-### Step 5: Inbox sweep and completion check
+### Step 4: Inbox sweep and completion check
 
 #### 5a. Drain inbox
 
@@ -193,13 +193,13 @@ If all tasks for a request are completed:
 - Keep workers fed first; defer integration while runnable tasks exist.
 - Low-effort routed work (`spark` / `mini` / `reasoning_effort=low`) may be merged directly on worker completion by coordinator runtime. Treat these as already merge-handled unless a `merge_failed` message appears.
 
-### Step 6: Heartbeat check (every 3rd cycle)
+### Step 5: Heartbeat check (every 3rd cycle)
 If `polling_cycle % 3 == 0`:
 - **Skip workers with status "idle"** — they are NOT running (no terminal open), so no heartbeat expected
 - Only check "running"/"busy" workers for stale heartbeats (>300s → set status to "idle"). Use 300s (5 min) to allow for worker startup time — Claude CLI takes significant time to initialize.
 - Update codex10.agent-health.json with current context_budget
 
-### Step 7: Reset check
+### Step 6: Reset check
 
 Check if reset needed:
 ```bash
@@ -212,11 +212,11 @@ started_at_ts=$(jq -r '.["master-3"].started_at // empty' .codex/state/codex10.a
 List all active workers and their domains from memory. If you can't do it accurately, reset immediately.
 
 If `context_budget >= 5000` OR 20 minutes elapsed OR self-detected degradation:
-1. Go to Step 8 (distill and reset)
+1. Go to Step 7 (distill and reset)
 
 Otherwise, go back to Step 1.
 
-### Step 8: Pre-Reset Distillation
+### Step 7: Pre-Reset Distillation
 
 1. **Distill allocation learnings:**
 ```bash
