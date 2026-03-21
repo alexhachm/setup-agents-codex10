@@ -1846,6 +1846,7 @@ async function main() {
         );
         if (jsonMode) {
           console.log(JSON.stringify(result, null, 2));
+          if (!result.ok) process.exit(1);
         } else if (result.ok) {
           printLoopRequestsRows(result.requests);
         } else {
