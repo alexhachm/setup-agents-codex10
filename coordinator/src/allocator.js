@@ -14,12 +14,11 @@ function start(projectDir) {
   const intervalMs = parseInt(db.getConfig('allocator_interval_ms')) || 2000;
 
   intervalId = setInterval(() => {
-    try {
-      tick(projectDir);
-    } catch (e) {
-      db.log('coordinator', 'allocator_error', { error: e.message });
-    }
+    runTickSafely(projectDir, 'interval');
   }, intervalMs);
+
+  // Run an immediate pass so restart/recovery does not wait for the first interval.
+  runTickSafely(projectDir, 'startup');
 
   db.log('coordinator', 'allocator_started', { interval_ms: intervalMs });
 }
@@ -74,6 +73,17 @@ function tick() {
     ready_count: readyTasks.length,
     idle_count: idleWorkers.length,
   });
+}
+
+function runTickSafely(projectDir, phase = 'interval') {
+  try {
+    tick(projectDir);
+  } catch (e) {
+    db.log('coordinator', 'allocator_error', {
+      error: e.message,
+      phase,
+    });
+  }
 }
 
 function signalResearchBatchAvailability() {

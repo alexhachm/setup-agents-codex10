@@ -123,6 +123,24 @@ describe('Allocator tick (thin notifier)', () => {
     assert.strictEqual(available[0].payload.idle_count, 1);
   });
 
+  it('should run an immediate tick on start so long intervals do not stall assignment signaling', () => {
+    db.setConfig('allocator_interval_ms', '999999');
+    db.registerWorker(1, '/wt-1', 'agent-1');
+    const reqId = db.createRequest('Immediate startup tick');
+    const taskId = db.createTask({ request_id: reqId, subject: 'Task', description: 'Desc' });
+    db.updateTask(taskId, { status: 'ready' });
+
+    // Drain existing mail, then start allocator.
+    db.checkMail('allocator');
+    allocator.start(tmpDir);
+
+    const mail = db.checkMail('allocator');
+    const available = mail.filter((m) => m.type === 'tasks_available');
+    assert.strictEqual(available.length, 1);
+    assert.strictEqual(available[0].payload.ready_count, 1);
+    assert.strictEqual(available[0].payload.idle_count, 1);
+  });
+
   it('should stop reassignment when liveness retry limit is exhausted', () => {
     db.setConfig('watchdog_task_reassign_limit', '1');
     db.registerWorker(1, '/wt-1', 'agent-1');
