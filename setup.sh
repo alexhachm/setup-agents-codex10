@@ -80,21 +80,35 @@ if [ -f "$AGENT_LAUNCHER_CONFIG" ]; then
 fi
 
 DEFAULT_PROVIDER="${MAC10_AGENT_PROVIDER:-codex}"
-echo "  Select agent provider:"
-echo "    1) codex  — OpenAI Codex CLI (default)"
-echo "    2) claude — Anthropic Claude Code CLI"
-printf "  Provider [%s]: " "$DEFAULT_PROVIDER"
-if [ -t 0 ]; then
-  read -r PROVIDER_INPUT
+FORCED_PROVIDER="$(printf '%s' "${MAC10_FORCE_PROVIDER:-}" | tr '[:upper:]' '[:lower:]' | tr -d '[:space:]')"
+if [ -n "$FORCED_PROVIDER" ]; then
+  case "$FORCED_PROVIDER" in
+    codex|claude)
+      MAC10_AGENT_PROVIDER="$FORCED_PROVIDER"
+      ;;
+    *)
+      echo "ERROR: MAC10_FORCE_PROVIDER must be 'codex' or 'claude' (got: ${MAC10_FORCE_PROVIDER})"
+      exit 1
+      ;;
+  esac
+  echo "  Provider forced by MAC10_FORCE_PROVIDER: $MAC10_AGENT_PROVIDER"
 else
-  PROVIDER_INPUT=""
+  echo "  Select agent provider:"
+  echo "    1) codex  - OpenAI Codex CLI (default)"
+  echo "    2) claude - Anthropic Claude Code CLI"
+  printf "  Provider [%s]: " "$DEFAULT_PROVIDER"
+  if [ -t 0 ]; then
+    read -r PROVIDER_INPUT
+  else
+    PROVIDER_INPUT=""
+  fi
+  PROVIDER_INPUT="$(printf '%s' "${PROVIDER_INPUT:-}" | tr '[:upper:]' '[:lower:]' | tr -d '[:space:]')"
+  case "$PROVIDER_INPUT" in
+    1|codex)  MAC10_AGENT_PROVIDER="codex" ;;
+    2|claude) MAC10_AGENT_PROVIDER="claude" ;;
+    *)        MAC10_AGENT_PROVIDER="${DEFAULT_PROVIDER:-codex}" ;;
+  esac
 fi
-PROVIDER_INPUT="$(printf '%s' "${PROVIDER_INPUT:-}" | tr '[:upper:]' '[:lower:]' | tr -d '[:space:]')"
-case "$PROVIDER_INPUT" in
-  1|codex)  MAC10_AGENT_PROVIDER="codex" ;;
-  2|claude) MAC10_AGENT_PROVIDER="claude" ;;
-  *)        MAC10_AGENT_PROVIDER="${DEFAULT_PROVIDER:-codex}" ;;
-esac
 export MAC10_AGENT_PROVIDER
 printf 'MAC10_AGENT_PROVIDER=%s\n' "$MAC10_AGENT_PROVIDER" > "$AGENT_LAUNCHER_CONFIG"
 echo "  Selected provider: $MAC10_AGENT_PROVIDER"
@@ -338,9 +352,16 @@ chmod +x "$MAC10_COMPAT"
 
 # Claude-side wrappers: use the namespaced mac10-codex10 path (enforces codex10 namespace)
 # CLAUDE_COMPAT uses MAC10_CLI (hardcoded codex10), not the plain compat shim
-cp "$MAC10_CLI" "$CLAUDE_COMPAT"
-cp "$CODEX10_CLI" "$CLAUDE_CODEX10"
-cp "$MAC10_CLI" "$CLAUDE_NAMESPACED"
+copy_if_distinct_path() {
+  local src="$1"
+  local dst="$2"
+  if [ "$src" != "$dst" ]; then
+    cp "$src" "$dst"
+  fi
+}
+copy_if_distinct_path "$MAC10_CLI" "$CLAUDE_COMPAT"
+copy_if_distinct_path "$CODEX10_CLI" "$CLAUDE_CODEX10"
+copy_if_distinct_path "$MAC10_CLI" "$CLAUDE_NAMESPACED"
 chmod +x "$CLAUDE_COMPAT" "$CLAUDE_CODEX10" "$CLAUDE_NAMESPACED"
 
 # Add to PATH for this project's agents
