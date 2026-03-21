@@ -22,6 +22,10 @@ User ──mac10 CLI──→ Coordinator (Node.js) ──tmux──→ Workers 
 # Prerequisites: node 18+, git, gh, tmux, codex
 bash setup.sh /path/to/your-project 4
 
+# Or use provider-specific full launchers (defaults to current repo + 4 workers)
+./start-codex.sh [project_dir] [num_workers]
+./start-claude.sh [project_dir] [num_workers]
+
 # Submit a request
 mac10 request "Add user authentication"
 
