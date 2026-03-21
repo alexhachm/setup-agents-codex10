@@ -26,6 +26,12 @@ bash setup.sh /path/to/your-project 4
 ./start-codex.sh [project_dir] [num_workers]
 ./start-claude.sh [project_dir] [num_workers]
 
+# Built-in lifecycle controls (supported by both provider launchers)
+./start-codex.sh --help
+./start-codex.sh --stop [project_dir]
+./start-codex.sh --pause [project_dir]
+# Equivalent: ./start-claude.sh --stop|--pause [project_dir]
+
 # Submit a request
 mac10 request "Add user authentication"
 
