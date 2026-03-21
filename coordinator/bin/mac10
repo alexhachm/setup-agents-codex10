@@ -1065,14 +1065,16 @@ async function main() {
         else { console.error(result.error); process.exit(1); }
         break;
 
-      case 'tier1-complete':
+      case 'tier1-complete': {
+        const tier1Result = argv[2] === '-' ? fs.readFileSync(0, 'utf8').trim() : argv.slice(2).join(' ');
         result = await send(socketPath, 'tier1-complete', {
           request_id: argv[1],
-          result: argv.slice(2).join(' '),
+          result: tier1Result,
         });
         if (result.ok) console.log('Tier 1 completed.');
         else { console.error(result.error); process.exit(1); }
         break;
+      }
 
       case 'ask-clarification':
         result = await send(socketPath, 'ask-clarification', {
