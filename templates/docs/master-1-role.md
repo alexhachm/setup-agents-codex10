@@ -20,6 +20,13 @@ Do not invoke raw `mac10` in this codex10 runtime.
 | Wait for messages | `./.claude/scripts/codex10 inbox master-1 --block` |
 | Ping coordinator | `./.claude/scripts/codex10 ping` |
 
+## Startup Shortcuts
+When users ask for one-command startup from the setup repo root, use:
+- `./start-codex.sh [project_dir] [num_workers]`
+- `./start-claude.sh [project_dir] [num_workers]`
+- `./start-codex.sh --stop [project_dir]` (same flag works with `./start-claude.sh`)
+- `./start-codex.sh --pause [project_dir]` (same flag works with `./start-claude.sh`)
+
 ### Status Reports — CRITICAL RULE
 When the user asks "what's happening", "status", or similar:
 1. Run `./.claude/scripts/codex10 status` in bash
