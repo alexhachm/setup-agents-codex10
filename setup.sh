@@ -4,6 +4,19 @@
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+
+print_usage() {
+  cat <<'EOF'
+Usage:
+  bash setup.sh <project_dir> [num_workers]
+EOF
+}
+
+if [ "${1:-}" = "--help" ] || [ "${1:-}" = "-h" ]; then
+  print_usage
+  exit 0
+fi
+
 PROJECT_DIR="${1:?Usage: bash setup.sh <project_dir> [num_workers]}"
 NUM_WORKERS="${2:-4}"
 MAX_WORKERS=8
@@ -92,6 +105,12 @@ if ! git -C "$PROJECT_DIR" rev-parse --is-inside-work-tree &>/dev/null; then
   exit 1
 fi
 
+if ! git -C "$PROJECT_DIR" rev-parse --verify HEAD^{commit} &>/dev/null; then
+  echo "ERROR: $PROJECT_DIR has no commits yet."
+  echo "  Create an initial commit before launching workers."
+  exit 1
+fi
+
 # Check gh auth
 if ! gh auth status &>/dev/null; then
   echo "ERROR: GitHub CLI not authenticated. Run 'gh auth login' first."
@@ -120,6 +139,21 @@ if [ -d "$LEGACY_DIR" ] && [ ! -e "$CODEX_DIR" ]; then
   echo "  Migrated existing .claude directory to .codex."
 fi
 
+# Ensure .claude symlink exists for Claude CLI compatibility.
+# Claude auto-discovers settings from .claude/ — without this symlink,
+# hooks, permissions, and commands are invisible to Claude agents.
+if [ -d "$CODEX_DIR" ] && [ ! -e "$LEGACY_DIR" ]; then
+  ln -s "$CODEX_DIR" "$LEGACY_DIR"
+  echo "  Created .claude -> .codex symlink for Claude CLI compatibility."
+elif [ -L "$LEGACY_DIR" ]; then
+  CURRENT_TARGET="$(readlink "$LEGACY_DIR" || true)"
+  if [ "$CURRENT_TARGET" != "$CODEX_DIR" ] && [ "$CURRENT_TARGET" != ".codex" ]; then
+    rm -f "$LEGACY_DIR"
+    ln -s "$CODEX_DIR" "$LEGACY_DIR"
+    echo "  Fixed .claude symlink -> .codex."
+  fi
+fi
+
 mkdir -p "$CODEX_DIR/commands"
 mkdir -p "$CODEX_DIR/commands-codex10"
 mkdir -p "$CODEX_DIR/state"
@@ -144,6 +178,19 @@ rm -rf "$SYMLINK_PROBE_DIR" "$SYMLINK_PROBE_LINK" 2>/dev/null || true
 # --- Copy templates ---
 
 echo "[4/8] Copying templates..."
+
+copy_if_needed() {
+  local src="$1"
+  local dest="$2"
+  if [ ! -e "$src" ]; then
+    echo "ERROR: Source path not found: $src" >&2
+    exit 1
+  fi
+  if [ -e "$dest" ] && [ "$src" -ef "$dest" ]; then
+    return 0
+  fi
+  cp "$src" "$dest"
+}
 
 # Commands (shared) — only copy if not already present
 for f in "$SCRIPT_DIR/templates/commands/"*.md; do
@@ -190,14 +237,28 @@ fi
 cp "$SCRIPT_DIR/templates/worker-claude.md" "$CODEX_DIR/worker-agents.md"
 
 # Scripts
-for s in worker-sentinel.sh loop-sentinel.sh launch-worker.sh signal-wait.sh state-lock.sh; do
-  cp "$SCRIPT_DIR/scripts/$s" "$CODEX_DIR/scripts/"
+for s in worker-sentinel.sh loop-sentinel.sh launch-worker.sh signal-wait.sh state-lock.sh provider-utils.sh; do
+  dest="$CODEX_DIR/scripts/$s"
+  # Skip if already a symlink pointing to canonical scripts/
+  [ -L "$dest" ] && continue
+  copy_if_needed "$SCRIPT_DIR/scripts/$s" "$dest"
+done
+
+# Research runtime assets (optional): install when present in source repo.
+for s in research-gaps.sh research-sentinel.sh knowledge-score.sh test-research-pipeline.sh install-chrome.sh \
+         chatgpt-driver.py compose-research-prompt.py ingest-research.py requirements-research.txt; do
+  src="$SCRIPT_DIR/scripts/$s"
+  [ -f "$src" ] || src="$SCRIPT_DIR/.codex/scripts/$s"
+  [ -f "$src" ] || continue
+  copy_if_needed "$src" "$CODEX_DIR/scripts/$s"
 done
 chmod +x "$CODEX_DIR/scripts/"*.sh
 
 # Hooks
 mkdir -p "$CODEX_DIR/hooks"
-cp "$SCRIPT_DIR/.codex/hooks/pre-tool-secret-guard.sh" "$CODEX_DIR/hooks/" 2>/dev/null || true
+if [ -f "$SCRIPT_DIR/.codex/hooks/pre-tool-secret-guard.sh" ]; then
+  copy_if_needed "$SCRIPT_DIR/.codex/hooks/pre-tool-secret-guard.sh" "$CODEX_DIR/hooks/pre-tool-secret-guard.sh"
+fi
 chmod +x "$CODEX_DIR/hooks/"*.sh 2>/dev/null || true
 
 # Settings
@@ -223,16 +284,28 @@ cat > "$MAC10_CLI" << 'WRAPPER'
 #!/usr/bin/env bash
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 MAC10_BIN="PLACEHOLDER_MAC10_BIN"
+MAC10_PROJECT_DIR="PLACEHOLDER_MAC10_PROJECT_DIR"
 if [ ! -f "$MAC10_BIN" ]; then
   echo "ERROR: mac10 CLI not found at $MAC10_BIN" >&2
   echo "  Has the setup-agents repo moved? Re-run setup.sh to fix." >&2
   exit 1
 fi
+if [ ! -d "$MAC10_PROJECT_DIR" ]; then
+  echo "ERROR: mac10 project directory not found at $MAC10_PROJECT_DIR" >&2
+  echo "  Re-run setup.sh to regenerate wrappers for this project." >&2
+  exit 1
+fi
 export MAC10_NAMESPACE="codex10"
+export MAC10_PROJECT_DIR
+cd "$MAC10_PROJECT_DIR" || {
+  echo "ERROR: failed to enter $MAC10_PROJECT_DIR" >&2
+  exit 1
+}
 exec node "$MAC10_BIN" "$@"
 WRAPPER
 # Substitute the actual path into the wrapper (quoted heredoc prevents expansion above)
 sed -i "s|PLACEHOLDER_MAC10_BIN|$MAC10_BIN|" "$MAC10_CLI"
+sed -i "s|PLACEHOLDER_MAC10_PROJECT_DIR|$PROJECT_DIR|" "$MAC10_CLI"
 chmod +x "$MAC10_CLI"
 
 # Primary codex wrapper name used by codex-specific prompts/scripts
@@ -240,20 +313,32 @@ cp "$MAC10_CLI" "$CODEX10_CLI"
 chmod +x "$CODEX10_CLI"
 
 # Compatibility shim: many prompts still invoke `mac10` directly.
-# Preserve caller namespace for non-codex flows.
+# Default to codex10 for this project; callers may override MAC10_NAMESPACE.
 cat > "$MAC10_COMPAT" << 'WRAPPER'
 #!/usr/bin/env bash
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 MAC10_BIN="PLACEHOLDER_MAC10_BIN"
+MAC10_PROJECT_DIR="PLACEHOLDER_MAC10_PROJECT_DIR"
 if [ ! -f "$MAC10_BIN" ]; then
   echo "ERROR: mac10 CLI not found at $MAC10_BIN" >&2
   echo "  Has the setup-agents repo moved? Re-run setup.sh to fix." >&2
   exit 1
 fi
-export MAC10_NAMESPACE="${MAC10_NAMESPACE:-mac10}"
+if [ ! -d "$MAC10_PROJECT_DIR" ]; then
+  echo "ERROR: mac10 project directory not found at $MAC10_PROJECT_DIR" >&2
+  echo "  Re-run setup.sh to regenerate wrappers for this project." >&2
+  exit 1
+fi
+export MAC10_NAMESPACE="${MAC10_NAMESPACE:-codex10}"
+export MAC10_PROJECT_DIR
+cd "$MAC10_PROJECT_DIR" || {
+  echo "ERROR: failed to enter $MAC10_PROJECT_DIR" >&2
+  exit 1
+}
 exec node "$MAC10_BIN" "$@"
 WRAPPER
 sed -i "s|PLACEHOLDER_MAC10_BIN|$MAC10_BIN|" "$MAC10_COMPAT"
+sed -i "s|PLACEHOLDER_MAC10_PROJECT_DIR|$PROJECT_DIR|" "$MAC10_COMPAT"
 chmod +x "$MAC10_COMPAT"
 
 # Add to PATH for this project's agents
@@ -281,10 +366,14 @@ for i in $(seq 1 "$NUM_WORKERS"); do
   else
     # Create branch if it doesn't exist
     git branch "$BRANCH" "$MAIN_BRANCH" 2>/dev/null || true
-    git worktree add "$WT_PATH" "$BRANCH" 2>/dev/null || {
+    if ! git worktree add "$WT_PATH" "$BRANCH" 2>/dev/null; then
       # Branch might already exist from a previous run
-      git worktree add "$WT_PATH" "$BRANCH" --force 2>/dev/null || true
-    }
+      if ! git worktree add "$WT_PATH" "$BRANCH" --force 2>/dev/null; then
+        echo "ERROR: failed to create worktree wt-$i at $WT_PATH"
+        echo "  Ensure the repo has a valid HEAD commit and no conflicting worktree state."
+        exit 1
+      fi
+    fi
   fi
 
   # Copy CLAUDE.md for worker
@@ -295,15 +384,16 @@ for i in $(seq 1 "$NUM_WORKERS"); do
   if [ -L "$WT_PATH/.codex" ]; then
     CURRENT_TARGET="$(readlink "$WT_PATH/.codex" || true)"
     if [ "$CURRENT_TARGET" != "$CODEX_DIR" ]; then
-      echo "ERROR: $WT_PATH/.codex points to unexpected target: $CURRENT_TARGET"
-      echo "  Expected: $CODEX_DIR"
-      exit 1
+      rm -f "$WT_PATH/.codex"
+      ln -s "$CODEX_DIR" "$WT_PATH/.codex"
+      echo "  Fixed wt-$i/.codex symlink -> $CODEX_DIR"
     fi
-  elif [ -e "$WT_PATH/.codex" ]; then
-    echo "ERROR: $WT_PATH/.codex exists and is not a symlink."
-    echo "  Remove it and rerun setup so workers can share the centralized runtime."
-    exit 1
-  else
+  elif [ -d "$WT_PATH/.codex" ]; then
+    # Stale copy from previous run — remove and replace with symlink
+    rm -rf "$WT_PATH/.codex"
+    ln -s "$CODEX_DIR" "$WT_PATH/.codex"
+    echo "  Replaced stale wt-$i/.codex directory with symlink."
+  elif [ ! -e "$WT_PATH/.codex" ]; then
     ln -s "$CODEX_DIR" "$WT_PATH/.codex"
   fi
 
@@ -426,92 +516,16 @@ else
   echo "  Run manually: $CODEX10_CLI register-worker <id> <worktree_path> <branch>"
 fi
 
-# --- Launch all 3 masters ---
-
-echo "Launching master agents..."
-
-LAUNCH_SCRIPT="$SCRIPT_DIR/scripts/launch-agent.sh"
-
-if [ "$IS_MSYS" = true ]; then
-  # Native Windows (Git Bash) — use wt.exe with bash.exe, no wsl.exe
-  WIN_LAUNCH_SCRIPT="$(cygpath -w "$LAUNCH_SCRIPT" 2>/dev/null || printf '%s' "$LAUNCH_SCRIPT")"
-  if command -v wt.exe >/dev/null 2>&1; then
-    wt.exe -w 0 new-tab --title "Master-1 (Interface)" bash.exe -l "$WIN_LAUNCH_SCRIPT" "$PROJECT_DIR" fast /master-loop &
-    echo "  Master-1 (Interface/Fast) terminal opened."
-    sleep 1
-    wt.exe -w 0 new-tab --title "Master-2 (Architect)" bash.exe -l "$WIN_LAUNCH_SCRIPT" "$PROJECT_DIR" deep /architect-loop &
-    echo "  Master-2 (Architect/Deep) terminal opened."
-    sleep 1
-    wt.exe -w 0 new-tab --title "Master-3 (Allocator)" bash.exe -l "$WIN_LAUNCH_SCRIPT" "$PROJECT_DIR" fast /allocate-loop &
-    echo "  Master-3 (Allocator/Fast) terminal opened."
-  else
-    echo "  Windows Terminal not found — start manually:"
-    echo "    cd $PROJECT_DIR && codex --dangerously-bypass-approvals-and-sandbox -m gpt-5.3-codex -C $PROJECT_DIR -- \"\$(cat .codex/commands-codex10/master-loop.md)\""
-    echo "    cd $PROJECT_DIR && codex exec --dangerously-bypass-approvals-and-sandbox -m gpt-5.3-codex -C $PROJECT_DIR - < .codex/commands-codex10/architect-loop.md"
-    echo "    cd $PROJECT_DIR && codex exec --dangerously-bypass-approvals-and-sandbox -m gpt-5.3-codex -C $PROJECT_DIR - < .codex/commands-codex10/allocate-loop.md"
-  fi
-elif [ "$IS_WSL" = true ]; then
-  # WSL — use wt.exe with wsl.exe
-  WT_EXE="/mnt/c/Users/$USER/AppData/Local/Microsoft/WindowsApps/wt.exe"
-  if [ -f "$WT_EXE" ]; then
-    "$WT_EXE" -w 0 new-tab --title "Master-1 (Interface)" -- wsl.exe -d "$WSL_DISTRO_NAME" -- bash "$LAUNCH_SCRIPT" "$PROJECT_DIR" fast /master-loop &
-    echo "  Master-1 (Interface/Fast) terminal opened."
-    sleep 1
-    "$WT_EXE" -w 0 new-tab --title "Master-2 (Architect)" -- wsl.exe -d "$WSL_DISTRO_NAME" -- bash "$LAUNCH_SCRIPT" "$PROJECT_DIR" deep /architect-loop &
-    echo "  Master-2 (Architect/Deep) terminal opened."
-    sleep 1
-    "$WT_EXE" -w 0 new-tab --title "Master-3 (Allocator)" -- wsl.exe -d "$WSL_DISTRO_NAME" -- bash "$LAUNCH_SCRIPT" "$PROJECT_DIR" fast /allocate-loop &
-    echo "  Master-3 (Allocator/Fast) terminal opened."
-  else
-    echo "  Windows Terminal not found — start manually:"
-    echo "    cd $PROJECT_DIR && codex --dangerously-bypass-approvals-and-sandbox -m gpt-5.3-codex -C $PROJECT_DIR -- \"\$(cat .codex/commands-codex10/master-loop.md)\""
-    echo "    cd $PROJECT_DIR && codex exec --dangerously-bypass-approvals-and-sandbox -m gpt-5.3-codex -C $PROJECT_DIR - < .codex/commands-codex10/architect-loop.md"
-    echo "    cd $PROJECT_DIR && codex exec --dangerously-bypass-approvals-and-sandbox -m gpt-5.3-codex -C $PROJECT_DIR - < .codex/commands-codex10/allocate-loop.md"
-  fi
-else
-  # macOS / Linux — use native terminal
-  echo "  Start manually in separate terminals:"
-  echo "    cd $PROJECT_DIR && codex --dangerously-bypass-approvals-and-sandbox -m gpt-5.3-codex -C $PROJECT_DIR -- \"\$(cat .codex/commands-codex10/master-loop.md)\""
-  echo "    cd $PROJECT_DIR && codex exec --dangerously-bypass-approvals-and-sandbox -m gpt-5.3-codex -C $PROJECT_DIR - < .codex/commands-codex10/architect-loop.md"
-  echo "    cd $PROJECT_DIR && codex exec --dangerously-bypass-approvals-and-sandbox -m gpt-5.3-codex -C $PROJECT_DIR - < .codex/commands-codex10/allocate-loop.md"
-fi
-
 echo ""
 echo "========================================"
 echo " mac10 Setup Complete!"
 echo "========================================"
 echo ""
-DASHBOARD_URL="$(node - "$PROJECT_DIR" "$NAMESPACE" <<'NODE'
-const fs = require('fs');
-const os = require('os');
-const path = require('path');
-const projectDir = path.resolve(process.argv[2] || '.');
-const namespace = (process.argv[3] || 'mac10').trim() || 'mac10';
-const registryPath = path.join(os.tmpdir(), 'mac10-instances.json');
-try {
-  const entries = JSON.parse(fs.readFileSync(registryPath, 'utf8'));
-  const match = entries.find((e) =>
-    path.resolve(e.projectDir || '') === projectDir &&
-    ((e.namespace || 'mac10') === namespace) &&
-    Number.isInteger(e.port)
-  );
-  if (match) process.stdout.write(`http://localhost:${match.port}`);
-} catch {}
-NODE
-)"
-if [ -z "$DASHBOARD_URL" ]; then
-  DASHBOARD_URL="http://localhost:3100"
-fi
-
-echo "3 Masters launched:"
-echo "  Master-1 (Interface/Fast)  — user's contact point"
-echo "  Master-2 (Architect/Deep)  — triage & decomposition"
-echo "  Master-3 (Allocator/Fast)  — task-worker matching"
+echo "Coordinator is running. To launch the full system, run one of:"
 echo ""
-echo "Dashboard:    $DASHBOARD_URL"
-echo "Submit work:  $CODEX10_CLI request \"Add user authentication\""
-echo "Check status: $CODEX10_CLI status"
-echo "View logs:    $CODEX10_CLI log"
+echo "  bash start-claude.sh $PROJECT_DIR $NUM_WORKERS   # Use Claude (sonnet/opus)"
+echo "  bash start-codex.sh  $PROJECT_DIR $NUM_WORKERS   # Use Codex (gpt-5.3-codex)"
 echo ""
-echo "Workers will be spawned automatically when tasks are assigned."
+echo "To stop:  bash start-claude.sh --stop $PROJECT_DIR"
+echo "To pause: bash start-claude.sh --pause $PROJECT_DIR"
 echo ""

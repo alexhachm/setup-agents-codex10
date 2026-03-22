@@ -13,6 +13,7 @@ const PR_URL_RE = /^https:\/\/github\.com\/[a-zA-Z0-9._-]+\/[a-zA-Z0-9._-]+\/pul
 const PR_NUMBER_RE = /^#?(\d+)$/;
 const PR_REFERENCE_RE = /^(pull request|pull|pr)\s*#?(\d+)$/i;
 const WORKER_BRANCH_RE = /^agent-\d+$/;
+const DEBUG_ENABLED = /^(1|true|yes|on)$/i.test(String(process.env.MAC10_DEBUG || ''));
 
 function namespacedCandidates(baseName) {
   if (NAMESPACE === 'mac10') return [baseName];
@@ -21,50 +22,144 @@ function namespacedCandidates(baseName) {
   return STRICT_NAMESPACE ? [namespaced] : [namespaced, baseName];
 }
 
+function debugLog(message, details = null) {
+  if (!DEBUG_ENABLED) return;
+  const payload = details === null ? '' : ` ${JSON.stringify(details)}`;
+  console.error(`[mac10:debug] ${message}${payload}`);
+}
+
+function collectSearchRoots(startDir = process.cwd()) {
+  const roots = [];
+  const seen = new Set();
+  const addRoot = (value) => {
+    if (!value) return;
+    const resolved = path.resolve(value);
+    if (seen.has(resolved)) return;
+    seen.add(resolved);
+    roots.push(resolved);
+  };
+
+  // Project-scoped wrappers export this so commands are deterministic from any cwd.
+  addRoot(process.env.MAC10_PROJECT_DIR || '');
+  let dir = path.resolve(startDir);
+  while (true) {
+    addRoot(dir);
+    const parent = path.dirname(dir);
+    if (parent === dir) break;
+    dir = parent;
+  }
+  return roots;
+}
+
+function connectionTargetFromStateDir(stateDir) {
+  // 1. Unix socket path redirect (WSL2/NTFS workaround — most reliable on WSL)
+  for (const name of namespacedCandidates('mac10.sock.path')) {
+    const sockPathFile = path.join(stateDir, name);
+    if (fs.existsSync(sockPathFile)) {
+      const sockPath = fs.readFileSync(sockPathFile, 'utf8').trim();
+      try {
+        if (fs.statSync(sockPath).isSocket()) return sockPath;
+      } catch {}
+    }
+  }
+
+  // 2. Unix socket file directly
+  for (const name of namespacedCandidates('mac10.sock')) {
+    const sock = path.join(stateDir, name);
+    try {
+      if (fs.existsSync(sock) && fs.statSync(sock).isSocket()) return sock;
+    } catch {}
+  }
+
+  // 3. TCP bridge (cross-environment: Git Bash ↔ WSL)
+  for (const name of namespacedCandidates('mac10.tcp.port')) {
+    const tcpFile = path.join(stateDir, name);
+    if (fs.existsSync(tcpFile)) {
+      const port = parseInt(fs.readFileSync(tcpFile, 'utf8').trim(), 10);
+      if (port > 0) return { host: '127.0.0.1', port };
+    }
+  }
+
+  // 4. Windows named pipe (last — often stale when coordinator moves to WSL)
+  for (const name of namespacedCandidates('mac10.pipe')) {
+    const pipeFile = path.join(stateDir, name);
+    if (fs.existsSync(pipeFile)) {
+      return fs.readFileSync(pipeFile, 'utf8').trim();
+    }
+  }
+
+  return null;
+}
+
+function connectionTargetAnyNamespace(stateDir) {
+  if (STRICT_NAMESPACE || NAMESPACE !== 'mac10') return null;
+  let entries = [];
+  try {
+    entries = fs.readdirSync(stateDir).sort();
+  } catch {
+    return null;
+  }
+
+  for (const entry of entries) {
+    if (!entry.endsWith('.sock.path')) continue;
+    const sockPathFile = path.join(stateDir, entry);
+    try {
+      const sockPath = fs.readFileSync(sockPathFile, 'utf8').trim();
+      if (fs.statSync(sockPath).isSocket()) return sockPath;
+    } catch {}
+  }
+
+  for (const entry of entries) {
+    if (!entry.endsWith('.sock')) continue;
+    const sock = path.join(stateDir, entry);
+    try {
+      if (fs.statSync(sock).isSocket()) return sock;
+    } catch {}
+  }
+
+  for (const entry of entries) {
+    if (!entry.endsWith('.tcp.port')) continue;
+    const tcpFile = path.join(stateDir, entry);
+    try {
+      const port = parseInt(fs.readFileSync(tcpFile, 'utf8').trim(), 10);
+      if (port > 0) return { host: '127.0.0.1', port };
+    } catch {}
+  }
+
+  for (const entry of entries) {
+    if (!entry.endsWith('.pipe')) continue;
+    const pipeFile = path.join(stateDir, entry);
+    try {
+      const pipePath = fs.readFileSync(pipeFile, 'utf8').trim();
+      if (pipePath) return pipePath;
+    } catch {}
+  }
+
+  return null;
+}
+
 // Connection target: either a socket path (string) or TCP config ({host, port})
 // Priority: Unix socket (fastest, native) > TCP bridge > Windows named pipe
 function findConnectionTarget() {
   if (process.env.MAC10_SOCKET) return process.env.MAC10_SOCKET;
-
-  let dir = process.cwd();
-  while (dir !== path.dirname(dir)) {
-    const stateDir = path.join(dir, '.codex', 'state');
-
-    // 1. Unix socket path redirect (WSL2/NTFS workaround — most reliable on WSL)
-    for (const name of namespacedCandidates('mac10.sock.path')) {
-      const sockPathFile = path.join(stateDir, name);
-      if (fs.existsSync(sockPathFile)) {
-        const sockPath = fs.readFileSync(sockPathFile, 'utf8').trim();
-        // Verify the socket actually exists (avoid stale references)
-        try { if (fs.statSync(sockPath).isSocket()) return sockPath; } catch {}
-      }
+  for (const root of collectSearchRoots()) {
+    const stateDir = path.join(root, '.codex', 'state');
+    const target = connectionTargetFromStateDir(stateDir);
+    if (target) {
+      debugLog('Resolved coordinator target', { root, stateDir, target });
+      return target;
     }
-
-    // 2. Unix socket file directly
-    for (const name of namespacedCandidates('mac10.sock')) {
-      const sock = path.join(stateDir, name);
-      try { if (fs.existsSync(sock) && fs.statSync(sock).isSocket()) return sock; } catch {}
+    const fallbackTarget = connectionTargetAnyNamespace(stateDir);
+    if (fallbackTarget) {
+      debugLog('Resolved fallback coordinator target', { root, stateDir, target: fallbackTarget });
+      return fallbackTarget;
     }
-
-    // 3. TCP bridge (cross-environment: Git Bash ↔ WSL)
-    for (const name of namespacedCandidates('mac10.tcp.port')) {
-      const tcpFile = path.join(stateDir, name);
-      if (fs.existsSync(tcpFile)) {
-        const port = parseInt(fs.readFileSync(tcpFile, 'utf8').trim(), 10);
-        if (port > 0) return { host: '127.0.0.1', port };
-      }
-    }
-
-    // 4. Windows named pipe (last — often stale when coordinator moves to WSL)
-    for (const name of namespacedCandidates('mac10.pipe')) {
-      const pipeFile = path.join(stateDir, name);
-      if (fs.existsSync(pipeFile)) {
-        return fs.readFileSync(pipeFile, 'utf8').trim();
-      }
-    }
-
-    dir = path.dirname(dir);
   }
+  debugLog('No coordinator endpoint found', {
+    cwd: process.cwd(),
+    namespace: NAMESPACE,
+    project_env: process.env.MAC10_PROJECT_DIR || null,
+  });
   console.error('Error: mac10 coordinator not running (no socket found)');
   console.error('Run "mac10 start" from the project root first.');
   process.exit(1);
@@ -110,6 +205,12 @@ function send(target, command, args) {
       }
     });
     conn.on('error', (e) => {
+      debugLog('Transport error', {
+        command,
+        code: e.code || null,
+        message: e.message,
+        target: typeof target === 'object' ? `${target.host}:${target.port}` : target,
+      });
       if (e.code === 'ENOENT' || e.code === 'ECONNREFUSED') {
         settle(reject, new Error('Coordinator not running. Start with: mac10 start'));
       } else {
@@ -128,38 +229,22 @@ function send(target, command, args) {
   });
 }
 
-function findConnectionTargetForProject(projectDir) {
+function findConnectionTargetForProject(projectDir, { silent = false } = {}) {
   const stateDir = path.join(projectDir, '.codex', 'state');
-
-  // Priority matches findConnectionTarget: sock.path > sock > TCP > pipe
-  for (const name of namespacedCandidates('mac10.sock.path')) {
-    const sockPathFile = path.join(stateDir, name);
-    if (fs.existsSync(sockPathFile)) {
-      const sockPath = fs.readFileSync(sockPathFile, 'utf8').trim();
-      try { if (fs.statSync(sockPath).isSocket()) return sockPath; } catch {}
-    }
+  const target = connectionTargetFromStateDir(stateDir);
+  if (target) {
+    debugLog('Resolved coordinator target for project', { projectDir, stateDir, target });
+    return target;
   }
-
-  for (const name of namespacedCandidates('mac10.sock')) {
-    const sock = path.join(stateDir, name);
-    try { if (fs.existsSync(sock) && fs.statSync(sock).isSocket()) return sock; } catch {}
+  const fallbackTarget = connectionTargetAnyNamespace(stateDir);
+  if (fallbackTarget) {
+    debugLog('Resolved fallback coordinator target for project', { projectDir, stateDir, target: fallbackTarget });
+    return fallbackTarget;
   }
-
-  for (const name of namespacedCandidates('mac10.tcp.port')) {
-    const tcpFile = path.join(stateDir, name);
-    if (fs.existsSync(tcpFile)) {
-      const port = parseInt(fs.readFileSync(tcpFile, 'utf8').trim(), 10);
-      if (port > 0) return { host: '127.0.0.1', port };
-    }
+  if (silent) {
+    debugLog('No coordinator target for project', { projectDir, stateDir });
+    return null;
   }
-
-  for (const name of namespacedCandidates('mac10.pipe')) {
-    const pipeFile = path.join(stateDir, name);
-    if (fs.existsSync(pipeFile)) {
-      return fs.readFileSync(pipeFile, 'utf8').trim();
-    }
-  }
-
   console.error(`Error: mac10 coordinator not running for project: ${projectDir}`);
   process.exit(1);
 }
@@ -203,6 +288,10 @@ function getPidFilePath(projectDir) {
 }
 
 function findProjectRoot(startDir = process.cwd()) {
+  const envProjectDir = process.env.MAC10_PROJECT_DIR;
+  if (envProjectDir) {
+    return path.resolve(envProjectDir);
+  }
   let dir = path.resolve(startDir);
   while (dir !== path.dirname(dir)) {
     if (fs.existsSync(path.join(dir, '.codex', 'state'))) {
@@ -507,6 +596,12 @@ function parseCompleteTaskArgs(optionalArgs, rawWorkerId, projectCwd = process.c
 
 async function main() {
   const rawArgv = process.argv.slice(2);
+  debugLog('Invocation', {
+    argv: rawArgv,
+    cwd: process.cwd(),
+    namespace: NAMESPACE,
+    project_env: process.env.MAC10_PROJECT_DIR || null,
+  });
   if (rawArgv.length === 0) {
     printUsage();
     process.exit(0);
@@ -565,6 +660,7 @@ async function main() {
       env: {
         ...process.env,
         MAC10_NAMESPACE: NAMESPACE,
+        PATH: [process.env.HOME + '/bin', process.env.HOME + '/.local/bin', process.env.PATH].filter(Boolean).join(':'),
       },
     });
     child.unref();
@@ -1146,7 +1242,10 @@ async function main() {
             process.exit(2);
           }
           console.log('ok');
-        } else console.error(result.error);
+        } else {
+          console.error(result.error);
+          process.exit(1);
+        }
         break;
 
       case 'set-config':
@@ -1161,7 +1260,10 @@ async function main() {
         result = await send(socketPath, 'loop-prompt', { loop_id: parseInt(argv[1], 10) });
         if (result.ok) {
           console.log(JSON.stringify(result, null, 2));
-        } else console.error(result.error);
+        } else {
+          console.error(result.error);
+          process.exit(1);
+        }
         break;
 
       case 'loop-request':
@@ -1207,6 +1309,7 @@ async function main() {
         result = await send(socketPath, 'loop-requests', { loop_id: parseInt(argv[1], 10) });
         if (jsonMode) {
           console.log(JSON.stringify(result, null, 2));
+          if (!result.ok) process.exit(1);
         } else if (result.ok) {
           if (result.requests.length === 0) {
             console.log('No requests for this loop.');
@@ -1217,6 +1320,7 @@ async function main() {
           }
         } else {
           console.error(result.error);
+          process.exit(1);
         }
         break;
       }
@@ -1305,7 +1409,7 @@ async function main() {
       case 'research-requeue-stale': {
         const maxAge = argv[1] ? parseInt(argv[1], 10) : 120;
         result = await send(socketPath, 'research-requeue-stale', {
-          max_age_minutes: Number.isFinite(maxAge) && maxAge > 0 ? maxAge : 120,
+          max_age_minutes: Number.isFinite(maxAge) && maxAge >= 0 ? maxAge : 120,
         });
         if (result.ok) {
           if ((result.requeued || 0) === 0) {

@@ -7,7 +7,7 @@ You are a coding worker in the mac10 multi-agent system. You receive tasks from 
 1. **Receive** a task via `mac10 my-task`
 2. **Implement** the requested changes
 3. **Validate** your work (build, test, lint)
-4. **Ship** via `/commit-push-pr`
+4. **Ship** by committing locally; push/create a PR only if a remote exists
 5. **Report** via `mac10 complete-task` or `mac10 fail-task`
 
 ## Communication
@@ -34,13 +34,28 @@ Read knowledge files before starting work:
 
 Then run `/worker-loop` to begin.
 
+## External Search (Third-Party Search Engine)
+
+**NEVER use native web search or browsing tools.** All external information lookups go through the research queue — a third-party search engine backed by ChatGPT:
+
+```bash
+mac10 queue-research <topic> <question> [--mode standard|thinking|deep_research] [--priority urgent|normal|low] [--context "..."]
+```
+
+- **When to use:** Any time you need information not in the codebase or knowledge files — API docs, best practices, library behavior, error diagnosis, design patterns, implementation examples.
+- **Modes:** `standard` for quick factual lookups, `thinking` for design/trade-off questions, `deep_research` for comprehensive surveys.
+- **Results land in:** `.codex/knowledge/research/topics/<topic>/` — check there for existing answers before queuing a new search.
+- **Always check first:** Read `.codex/knowledge/research/topics/` to see if your question was already researched. Avoid duplicate queries.
+
+This is your only search interface. Do not use WebSearch, WebFetch, or any browser-based lookup. Queue the research and check results on your next pass.
+
 ## Rules
 
 1. **One task at a time.** Never work on multiple tasks.
 2. **Stay in domain.** Only modify files listed in your task or closely related. Domain mismatch = fail + exit.
 3. **Heartbeat.** Send heartbeats every 30s to avoid watchdog termination.
-4. **Sync first.** Always `git fetch origin && git rebase origin/main` before coding.
-5. **Validate.** Tier 2: build-validator. Tier 3: build-validator + verify-app.
+4. **Sync first when possible.** If `origin` exists, fetch/rebase before coding. If no remote exists, stay on the assigned branch.
+5. **Validate with real repo commands.** Use the task validation field or the smallest relevant local check. Do not rely on helper slash-commands unless they actually exist in the repo.
 6. **Exit when done.** Don't loop — the sentinel handles lifecycle.
 
 ## Context Budget

@@ -22,33 +22,111 @@ function safeExec(file, args, cwd) {
   return execFileSync(file, args, { encoding: 'utf8', cwd, timeout: 60000 }).trim();
 }
 
+function refResolvesToCommit(projectDir, ref) {
+  try {
+    execFileSync('git', ['rev-parse', '--verify', '--quiet', `${ref}^{commit}`], {
+      encoding: 'utf8',
+      cwd: projectDir,
+      stdio: ['ignore', 'ignore', 'ignore'],
+    });
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+function normalizePrimaryBranchCandidate(raw) {
+  return String(raw || '')
+    .trim()
+    .replace(/^refs\/heads\//, '')
+    .replace(/^refs\/remotes\/origin\//, '')
+    .replace(/^origin\//, '')
+    .trim();
+}
+
+function resolvePrimaryBranch(projectDir) {
+  const candidates = [];
+  const seen = new Set();
+
+  const addCandidate = (raw) => {
+    const normalized = normalizePrimaryBranchCandidate(raw);
+    if (!normalized || seen.has(normalized)) return;
+    seen.add(normalized);
+    candidates.push(normalized);
+  };
+
+  addCandidate(db.getConfig('primary_branch'));
+
+  try {
+    addCandidate(execFileSync('git', ['symbolic-ref', '--short', 'refs/remotes/origin/HEAD'], {
+      encoding: 'utf8',
+      cwd: projectDir,
+      stdio: ['ignore', 'pipe', 'ignore'],
+    }));
+  } catch {}
+
+  try {
+    addCandidate(execFileSync('git', ['rev-parse', '--abbrev-ref', 'origin/HEAD'], {
+      encoding: 'utf8',
+      cwd: projectDir,
+      stdio: ['ignore', 'pipe', 'ignore'],
+    }));
+  } catch {}
+
+  try {
+    addCandidate(execFileSync('git', ['symbolic-ref', '--quiet', '--short', 'HEAD'], {
+      encoding: 'utf8',
+      cwd: projectDir,
+      stdio: ['ignore', 'pipe', 'ignore'],
+    }));
+  } catch {}
+
+  addCandidate('main');
+  addCandidate('master');
+
+  for (const candidate of candidates) {
+    if (
+      refResolvesToCommit(projectDir, `refs/heads/${candidate}`) ||
+      refResolvesToCommit(projectDir, `refs/remotes/origin/${candidate}`) ||
+      refResolvesToCommit(projectDir, candidate)
+    ) {
+      return candidate;
+    }
+  }
+
+  throw new Error(`Unable to resolve primary branch for merge. Tried: ${candidates.join(', ') || '(none)'}`);
+}
+
+function hasOriginRemote(projectDir) {
+  try {
+    execFileSync('git', ['remote', 'get-url', 'origin'], {
+      encoding: 'utf8',
+      cwd: projectDir,
+      stdio: ['ignore', 'ignore', 'ignore'],
+    });
+    return true;
+  } catch {
+    return false;
+  }
+}
+
 let processing = false;
 let processingStartedAt = 0;
 const PROCESSING_TIMEOUT_MS = 300000; // 5 minutes — reset flag if stuck
 let mergerIntervalId = null;
-let lastAssignmentPriorityDeferralLogMs = 0;
-const ASSIGNMENT_PRIORITY_DEFERRAL_LOG_MS = 15000;
-
-function getBooleanConfig(key, defaultValue = false) {
-  const raw = db.getConfig(key);
-  if (raw === null || raw === undefined) return defaultValue;
-  const normalized = String(raw).trim().toLowerCase();
-  if (!normalized) return defaultValue;
-  if (['1', 'true', 'yes', 'on'].includes(normalized)) return true;
-  if (['0', 'false', 'no', 'off'].includes(normalized)) return false;
-  return defaultValue;
-}
 
 function start(projectDir) {
   // Merger is triggered by task completions, but also runs periodic checks
+  // P3 fix: read interval from config instead of hardcoded 5000
+  const intervalMs = parseInt(db.getConfig('merger_interval_ms')) || 30000;
   mergerIntervalId = setInterval(() => {
     try {
       processQueue(projectDir);
     } catch (e) {
       db.log('coordinator', 'merger_error', { error: e.message });
     }
-  }, 5000);
-  db.log('coordinator', 'merger_started');
+  }, intervalMs);
+  db.log('coordinator', 'merger_started', { interval_ms: intervalMs });
 }
 
 function onTaskCompleted(taskId) {
@@ -119,19 +197,8 @@ function processQueue(projectDir) {
   processingStartedAt = Date.now();
 
   try {
-    const prioritizeAssignment = getBooleanConfig('prioritize_assignment_over_merge', true);
-    if (prioritizeAssignment) {
-      const readyTaskCount = db.getReadyTasks().length;
-      if (readyTaskCount > 0) {
-        const now = Date.now();
-        if (now - lastAssignmentPriorityDeferralLogMs > ASSIGNMENT_PRIORITY_DEFERRAL_LOG_MS) {
-          db.log('coordinator', 'merge_deferred_assignment_priority', { ready_tasks: readyTaskCount });
-          lastAssignmentPriorityDeferralLogMs = now;
-        }
-        processing = false;
-        return;
-      }
-    }
+    // P2 fix: merger and allocator are independent — removed deferral code that
+    // caused merge starvation (1,349 deferrals). They don't compete for resources.
 
     const entry = db.getNextMerge();
     if (!entry) { processing = false; return; }
@@ -181,6 +248,12 @@ function attemptMerge(entry, projectDir) {
     return { success: false, functional_conflict: true, error: preValidation.error, tier: 'validation' };
   }
 
+  if (!entry.pr_url && entry.branch) {
+    const localMerge = tryLocalBranchMerge(entry, projectDir);
+    if (localMerge.success) return { success: true, tier: 'local' };
+    return { success: false, conflict: true, error: localMerge.error, tier: 'local' };
+  }
+
   // Tier 1: Clean merge via gh CLI
   const tier1 = tryCleanMerge(entry, projectDir);
   if (tier1.success) return { success: true, tier: 1 };
@@ -199,8 +272,13 @@ function attemptMerge(entry, projectDir) {
     if (retry.success) return { success: true, tier: 2 };
   }
 
-  // Tiers 1 & 2 failed — escalate to allocator
-  escalateToAllocator(entry, tier2.error || tier1.error, false);
+  // Tiers 1 & 2 failed — log only (merge-prep subagent handles git conflicts at worker level)
+  db.log('coordinator', 'merge_escalation_skipped', {
+    merge_id: entry.id,
+    branch: entry.branch,
+    error: tier2.error || tier1.error,
+    reason: 'non_functional_conflict_logged_only',
+  });
   return { success: false, conflict: true, error: tier2.error || tier1.error, tier: 3 };
 }
 
@@ -285,15 +363,24 @@ function runOverlapValidation(entry, projectDir) {
   const validationDir = wtPath || projectDir;
 
   try {
-    safeExec('git', ['fetch', 'origin'], validationDir);
+    if (hasOriginRemote(validationDir)) {
+      safeExec('git', ['fetch', 'origin'], validationDir);
+    } else {
+      db.log('coordinator', 'overlap_validation_skip_fetch', {
+        merge_id: entry.id,
+        task_id: entry.task_id,
+        reason: 'no_origin_remote',
+      });
+    }
 
     if (wtPath) {
-      // Validate directly in worktree (branch already checked out)
-      safeExec('npm', ['run', 'build'], wtPath);
+      // Validate directly in worktree — run tests from coordinator/ subdir
+      const coordDir = path.join(wtPath, 'coordinator');
+      safeExec('npm', ['test'], coordDir);
     } else {
       // Fallback: old behavior
       safeExec('git', ['checkout', entry.branch], projectDir);
-      safeExec('npm', ['run', 'build'], projectDir);
+      safeExec('npm', ['test'], path.join(projectDir, 'coordinator'));
     }
 
     // Run task-specific validation if set
@@ -399,15 +486,44 @@ function tryCleanMerge(entry, projectDir) {
   }
 }
 
+function tryLocalBranchMerge(entry, projectDir) {
+  const targetBranch = resolvePrimaryBranch(projectDir);
+
+  try {
+    safeExec('git', ['checkout', targetBranch], projectDir);
+    safeExec('git', ['merge', '--no-ff', '--no-edit', entry.branch], projectDir);
+    if (hasOriginRemote(projectDir)) {
+      try {
+        safeExec('git', ['push', 'origin', targetBranch], projectDir);
+      } catch (pushError) {
+        db.log('coordinator', 'local_merge_push_failed', {
+          merge_id: entry.id,
+          branch: entry.branch,
+          target_branch: targetBranch,
+          error: pushError.message,
+        });
+      }
+    }
+    return { success: true };
+  } catch (e) {
+    try { safeExec('git', ['merge', '--abort'], projectDir); } catch {}
+    try { safeExec('git', ['checkout', targetBranch], projectDir); } catch {}
+    return { success: false, error: e.message };
+  }
+}
+
 
 function checkRequestCompletion(requestId) {
+  const taskSummary = db.checkRequestCompletion(requestId);
+  if (!taskSummary.all_done) return;
+
   const allMerges = db.getDb().prepare(
     "SELECT * FROM merge_queue WHERE request_id = ?"
   ).all(requestId);
 
   const allMerged = allMerges.every(m => m.status === 'merged');
   if (allMerged && allMerges.length > 0) {
-    const result = `All ${allMerges.length} PR(s) merged successfully`;
+    const result = `All ${allMerges.length} merge item(s) integrated successfully`;
     db.updateRequest(requestId, {
       status: 'completed',
       completed_at: new Date().toISOString(),
@@ -424,7 +540,6 @@ function checkRequestCompletion(requestId) {
 
 function stop() {
   if (mergerIntervalId) { clearInterval(mergerIntervalId); mergerIntervalId = null; }
-  lastAssignmentPriorityDeferralLogMs = 0;
 }
 
 module.exports = { start, stop, onTaskCompleted, processQueue, attemptMerge };

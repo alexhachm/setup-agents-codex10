@@ -42,9 +42,13 @@ export PATH="$(pwd)/.codex/scripts:$PATH"
 
 ## Output
 
-### 1. Write `codebase-insights.md`
+### 1. Write scan output to `generated/codebase-scan/`
 
-Write findings to `.codex/knowledge/codebase-insights.md` (~2000 tokens max):
+Write findings to `.codex/knowledge/generated/codebase-scan/latest.md` (~2000 tokens max).
+
+**Do NOT overwrite** `.codex/knowledge/handbook/architecture.md` — that is a curated living document. Only update it if the scan reveals something that contradicts or extends the handbook. The scan output is disposable; the handbook is persistent.
+
+Write to:
 
 ```markdown
 # Codebase Insights

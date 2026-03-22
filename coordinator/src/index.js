@@ -19,6 +19,19 @@ const stateDir = path.join(projectDir, '.codex', 'state');
 const pidFile = path.join(stateDir, namespace === 'mac10' ? 'mac10.pid' : `${namespace}.pid`);
 let ownsPidLock = false;
 
+function resolveProjectProvider(projectPath) {
+  const envFile = path.join(projectPath, '.codex', 'state', 'agent-launcher.env');
+  try {
+    const raw = fs.readFileSync(envFile, 'utf8');
+    const match = raw.match(/^MAC10_AGENT_PROVIDER=([^\r\n]+)$/m);
+    if (match) {
+      const provider = String(match[1]).trim().toLowerCase();
+      return provider === 'claude' ? 'claude' : 'codex';
+    }
+  } catch {}
+  return 'codex';
+}
+
 function isPidAlive(pid) {
   if (!Number.isInteger(pid) || pid <= 0) return false;
   try {
@@ -260,6 +273,7 @@ console.log('Merger running.');
     const masterWindowName = 'master-1';
     if (!tmux.hasWindow(masterWindowName)) {
       const launchAgentPath = path.join(scriptDir, 'scripts', 'launch-agent.sh');
+      const provider = resolveProjectProvider(projectDir);
       if (fs.existsSync(launchAgentPath)) {
         tmux.createWindow(
           masterWindowName,
@@ -267,6 +281,19 @@ console.log('Merger running.');
           projectDir
         );
         db.log('coordinator', 'master1_launched', { window: masterWindowName, namespace });
+        if (provider === 'claude') {
+          setTimeout(() => {
+            try {
+              tmux.sendKeys(masterWindowName, '');
+              db.log('coordinator', 'master1_trust_prompt_confirmed', { window: masterWindowName });
+            } catch (err) {
+              db.log('coordinator', 'master1_trust_prompt_confirm_failed', {
+                window: masterWindowName,
+                error: err.message,
+              });
+            }
+          }, 1500);
+        }
         console.log('Master-1 (Interface) launched.');
       }
     }

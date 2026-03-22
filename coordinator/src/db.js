@@ -270,8 +270,11 @@ function listTasks(filters = {}) {
 function getReadyTasks() {
   // Tasks that are ready and have no unfinished dependencies
   return getDb().prepare(`
-    SELECT * FROM tasks
-    WHERE status = 'ready' AND assigned_to IS NULL
+    SELECT t.* FROM tasks t
+    JOIN requests r ON r.id = t.request_id
+    WHERE t.status = 'ready'
+      AND t.assigned_to IS NULL
+      AND r.status NOT IN ('completed', 'failed')
     ORDER BY CASE priority WHEN 'urgent' THEN 0 WHEN 'high' THEN 1 WHEN 'normal' THEN 2 WHEN 'low' THEN 3 END, id
   `).all();
 }

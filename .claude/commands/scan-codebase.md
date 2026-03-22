@@ -4,10 +4,10 @@ Perform a 2-pass progressive scan of the codebase. Write findings to knowledge f
 
 ## Setup
 
-Ensure `mac10` is on PATH:
+Ensure `codex10` is on PATH:
 
 ```bash
-export PATH="$(pwd)/.claude/scripts:$PATH"
+export PATH="$(pwd)/.codex/scripts:$PATH"
 ```
 
 ## Pass 1: Structure (zero file reads)
@@ -44,7 +44,7 @@ export PATH="$(pwd)/.claude/scripts:$PATH"
 
 ### 1. Write `codebase-insights.md`
 
-Write findings to `.claude/knowledge/codebase-insights.md` (~2000 tokens max):
+Write findings to `.codex/knowledge/codebase-insights.md` (~2000 tokens max):
 
 ```markdown
 # Codebase Insights
@@ -83,7 +83,7 @@ Last scanned: YYYY-MM-DD
 
 ### 2. Write `codebase-map.json`
 
-Write a machine-readable map to `.claude/state/codebase-map.json`:
+Write a machine-readable map to `.codex/state/codebase-map.json`:
 
 ```json
 {
@@ -111,4 +111,16 @@ Write a machine-readable map to `.claude/state/codebase-map.json`:
 
 After scanning, automatically start the architect loop:
 
-Run `/architect-loop`
+```bash
+if [ ! -f .codex/commands-codex10/architect-loop.md ]; then
+  if [ -f ../setup-agents-codex10/templates/commands/architect-loop.md ]; then
+    mkdir -p .codex/commands-codex10
+    cp ../setup-agents-codex10/templates/commands/architect-loop.md .codex/commands-codex10/architect-loop.md
+  else
+    echo "ERROR: Missing architect-loop prompt at both project and template paths." >&2
+    exit 1
+  fi
+fi
+
+/architect-loop
+```

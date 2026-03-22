@@ -74,3 +74,7 @@ gh pr view --json url -q '.url'
 ```
 
 Report the PR URL. This is your deliverable.
+
+## Note: Rebase Failures
+
+If the rebase in Step 4 fails with unresolvable conflicts, proceed anyway (skip push). The `merge-prep` subagent in the worker-loop Step 7b handles rebasing and push as its dedicated responsibility.

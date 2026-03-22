@@ -1,20 +1,30 @@
 # Allocation Learnings
-<!-- Updated 2026-03-13T02:49:30Z by Master-3 -->
+<!-- Updated 2026-03-21T04:58Z by Master-3 -->
 
-## Worker Performance
-- worker-2 remained the most effective owner for recurring coordinator-routing functional-conflict fixes; same-worker reassignment preserved context across task chain #94/#96/#101/#104/#108.
-- worker-1 handled orchestration-docs merge-fix cycles consistently, but repeated validator failures (npm run build missing script) produced recurring fix churn.
-- worker-4 was effective for coordinator-routing overlap fixes when immediately reassigned after idle transitions.
+## Domain-Worker Pairings
+- worker-1: coordinator-tests
+- worker-2: coordinator-routing
+- worker-3: coordinator-routing
+- worker-4: orchestration-docs / unassigned (flexible)
 
-## Task Duration Actuals
-- Idle-gated same-worker fixes were usually assigned within a single polling window once target worker transitioned idle.
-- Merge conflict remediation for req-a0b3fcce/req-592efca7 repeatedly re-entered queue due validator-path failures, increasing end-to-end integration latency.
+## Allocation Patterns
+- Coordinator runtime auto-handles merges for T2 tasks; integrate returns "0 merges queued" consistently.
+- T1/T2 requests bypass allocator entirely.
+- w4 often used by Master-2 for direct Tier-2 assignments.
+- Extended idle sessions (6+ consecutive) are normal when system awaits new user input.
+- jq not available; use python3 -c "import json..." for all JSON ops on agent-health.json.
 
-## Allocation Decisions
-- Enforcing assignment-first throughput and immediate idle-transition assignment cleared urgent ready backlogs quickly (#94/#95/#96, then #101/#104/#108).
-- Deduplicating by current task state before creating new fixes reduced redundant task creation for already-active remediation chains.
-- Deferring integration whenever ready tasks were present prevented merge throughput from starving assignment throughput.
-
-## Fix Cycle Patterns
-- Dominant recurrence source: merge validator invoking npm run build in a repo without a build script; this repeatedly emits functional_conflict and merge_failed across multiple historical tasks.
-- Requests req-a0b3fcce and req-592efca7 repeatedly spawn follow-on fixes against the same file set (coordinator/src/overlay.js and worker-loop docs for a0; coordinator/src/cli-server.js + coordinator/tests/cli.test.js for 592efca7).
+## Changelog (last 5)
+- session 71: ~115 cycles, ~20min, 0 tasks. 17th consecutive idle. All 4 workers idle throughout.
+- session 70: ~120 cycles, ~20min, 0 tasks. 16th consecutive idle. All 4 workers idle throughout.
+- session 69: ~120 cycles, ~20min, 0 tasks. 15th consecutive idle. All 4 workers idle throughout.
+- session 68: ~120 cycles, ~20min, 0 tasks. 14th consecutive idle. All 4 workers idle throughout.
+- session 67: ~120 cycles, ~20min, 0 tasks. 13th consecutive idle. All 4 workers idle throughout.
+- session 66: ~107 cycles, ~20min, 0 tasks. 12th consecutive idle. All 4 workers idle throughout.
+- session 65: 107 cycles, ~20min, 0 tasks. 11th consecutive idle. All 4 workers idle throughout.
+- session 64: 108 cycles, ~20min, 0 tasks. 10th consecutive idle. All 4 workers idle throughout.
+- session 63: 108 cycles, ~20min, 0 tasks. 9th consecutive idle. All 4 workers idle throughout.
+- session 62: 96 cycles, ~20min, 0 tasks. 8th consecutive idle. All 4 workers idle throughout.
+- session 61: 126 cycles, ~20min, 0 tasks. 7th consecutive idle. All 4 workers idle throughout.
+- session 60: 56 cycles, ~20min, 0 tasks. 6th consecutive idle.
+- session 59: 35 cycles, ~15min, 0 tasks. 5th consecutive idle.

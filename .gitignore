@@ -1,10 +1,15 @@
 node_modules/
 .codex/state/
+.codex/venv/
+.codex/logs/
+.codex/scripts/__pycache__/
 .claude/state/
 **/state/mac10.sock.path
 **/state/mac10.tcp.port
+coordinator/.codex/
 *.db
 *.db-shm
 *.db-wal
 *.log
 .worktrees/
+.tmp-pr-body-*.md

@@ -4,6 +4,9 @@ const db = require('./db');
 
 let intervalId = null;
 let lastNotifyTs = 0;
+// P3 fix: state-based dedup — only log when counts change
+let lastLoggedReadyCount = -1;
+let lastLoggedIdleCount = -1;
 
 const NOTIFY_DEDUP_MS = 10000; // Only notify allocator agent once per 10s
 
@@ -24,6 +27,8 @@ function start(projectDir) {
 function stop() {
   if (intervalId) { clearInterval(intervalId); intervalId = null; }
   lastNotifyTs = 0;
+  lastLoggedReadyCount = -1;
+  lastLoggedIdleCount = -1;
 }
 
 function tick() {
@@ -46,10 +51,15 @@ function tick() {
     ready_count: readyTasks.length,
     idle_count: idleWorkers.length,
   });
-  db.log('allocator', 'tasks_available', {
-    ready_count: readyTasks.length,
-    idle_count: idleWorkers.length,
-  });
+  // P3 fix: only log when counts actually change to avoid log spam
+  if (readyTasks.length !== lastLoggedReadyCount || idleWorkers.length !== lastLoggedIdleCount) {
+    lastLoggedReadyCount = readyTasks.length;
+    lastLoggedIdleCount = idleWorkers.length;
+    db.log('allocator', 'tasks_available', {
+      ready_count: readyTasks.length,
+      idle_count: idleWorkers.length,
+    });
+  }
 }
 
 module.exports = { start, stop, tick };

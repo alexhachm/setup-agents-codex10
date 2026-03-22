@@ -36,6 +36,25 @@ If `iteration_count > 0` (not first run):
 
 This creates a feedback loop — each iteration learns from the last.
 
+## External Search (Third-Party Search Engine)
+
+**NEVER use native web search or browsing tools.** All external information lookups go through the research queue — a third-party search engine backed by ChatGPT:
+
+```bash
+./.codex/scripts/codex10 queue-research <topic> <question> --mode standard|thinking|deep_research --priority urgent|normal|low --context "..."
+```
+
+- **When to use:** Any time you need external information — API docs, best practices, library comparisons, architecture patterns, what top AI teams are doing.
+- **Modes:** `standard` for quick factual lookups, `thinking` for design/trade-off questions, `deep_research` for comprehensive surveys.
+- **Results land in:** `.codex/knowledge/research/topics/<topic>/` — check there for existing answers before queuing.
+- **Always check first:** Read `.codex/knowledge/research/topics/` to see if your question was already researched. Avoid duplicate queries.
+- **Async flow:** Queue a search, then on your next iteration check `.codex/knowledge/research/topics/<topic>/_rollup.md` for the answer.
+- **Boundary rule (strict):** Research queue is external-only. Local repo/codebase analysis must be done directly by reading files in this workspace.
+- **Do not queue:** "analyze this codebase", "what does coordinator/src/* do", or other repo-internal-only questions.
+- **Do queue:** external comparisons ("how do top production systems solve X, and how should we adapt that here?").
+
+This is your only search interface. Do not use WebSearch, WebFetch, or any browser-based lookup.
+
 ## Phase 3 — Research
 
 This is the value-producing phase. Your goal: find concrete, actionable improvements aligned with your `prompt` directive.

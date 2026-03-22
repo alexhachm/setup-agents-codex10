@@ -1,8 +1,7 @@
 #!/usr/bin/env bash
-# Launch a Codex agent in the specified project directory.
+# Launch a provider-backed agent in the specified project directory.
 # Usage: launch-agent.sh <project-dir> <model-or-alias> <slash-command>
-# Avoids semicolons so Windows Terminal doesn't split the command.
-set -euo pipefail
+set -uo pipefail
 
 if [ $# -lt 3 ]; then
   echo "Usage: launch-agent.sh <project-dir> <model> <slash-command>" >&2
@@ -17,14 +16,20 @@ if [ ! -d "$DIR" ]; then
   echo "ERROR: Directory not found: $DIR" >&2
   exit 1
 fi
-cd "$DIR"
+cd "$DIR" || {
+  echo "ERROR: Cannot cd to $DIR" >&2
+  exit 1
+}
 
-# Ensure codex10 CLI is on PATH (project wrapper + coordinator bin)
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+# shellcheck disable=SC1091
+. "$SCRIPT_DIR/provider-utils.sh"
+
+# Ensure codex10 CLI is on PATH (project wrapper + coordinator bin).
 export MAC10_NAMESPACE="${MAC10_NAMESPACE:-codex10}"
 SHIM_DIR="$DIR/.codex/scripts/.codex10-shims"
 mkdir -p "$SHIM_DIR"
-cat > "$SHIM_DIR/mac10" << 'SHIM'
+cat > "$SHIM_DIR/mac10" <<'SHIM'
 #!/usr/bin/env bash
 set -euo pipefail
 PROJECT_SCRIPTS="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
@@ -43,63 +48,42 @@ export PATH="$SCRIPT_DIR/../coordinator/bin:$SHIM_DIR:$DIR/.codex/scripts:$PATH"
 # Source nvm if available (ensures consistent Node.js version)
 [ -s "$HOME/.nvm/nvm.sh" ] && . "$HOME/.nvm/nvm.sh" 2>/dev/null
 
-resolve_model() {
-  case "$1" in
-    sonnet|opus|fast|deep)
-      printf '%s' "gpt-5.3-codex"
-      ;;
-    haiku|economy)
-      printf '%s' "gpt-5.1-codex-mini"
-      ;;
-    *)
-      printf '%s' "$1"
-      ;;
-  esac
-}
-
-resolve_prompt_file() {
-  local slash_cmd="$1"
-  local name="${slash_cmd#/}"
-  local candidate
-
-  # Prefer codex10-local command templates to avoid cross-stack collisions.
-  candidate="$DIR/.codex/commands-codex10/${name}.md"
-  if [ -f "$candidate" ]; then printf '%s' "$candidate"; return 0; fi
-
-  # Project command templates (legacy behavior).
-  candidate="$DIR/.codex/commands/${name}.md"
-  if [ -f "$candidate" ]; then printf '%s' "$candidate"; return 0; fi
-
-  # Fallback to codex10 repository templates.
-  candidate="$SCRIPT_DIR/../templates/commands/${name}.md"
-  if [ -f "$candidate" ]; then printf '%s' "$candidate"; return 0; fi
-
-  return 1
-}
-
-MODEL_RESOLVED="$(resolve_model "$MODEL")"
-PROMPT_FILE="$(resolve_prompt_file "$CMD" || true)"
+mac10_load_provider_config "$DIR"
+CLI_NAME="$(mac10_provider_cli)"
+MODEL_RESOLVED="$(mac10_resolve_role_model "$MODEL")"
+PROMPT_FILE="$(mac10_resolve_prompt_file "$DIR" "$CMD" "$SCRIPT_DIR" || true)"
 
 if [ -z "${PROMPT_FILE:-}" ]; then
   echo "ERROR: No command template found for '$CMD' (expected .codex/commands/<name>.md)" >&2
   exit 1
 fi
 
-export CODEX_PROJECT_DIR="$DIR"
+if ! command -v "$CLI_NAME" >/dev/null 2>&1; then
+  echo "ERROR: '$CLI_NAME' command not found in PATH" >&2
+  exit 1
+fi
+
 export MAC10_AGENT_ROLE="$CMD"
 
-# Master-1 is user-facing and must remain interactive in the terminal.
-# Architect/Allocator are autonomous loops and run non-interactively.
 if [ "$CMD" = "/master-loop" ]; then
-  PROMPT_TEXT="$(cat "$PROMPT_FILE")"
-  codex --dangerously-bypass-approvals-and-sandbox -m "$MODEL_RESOLVED" -C "$DIR" -- "$PROMPT_TEXT"
-else
-  # Keep autonomous masters alive: if a non-interactive run exits,
-  # relaunch after a short backoff.
-  while true; do
-    codex exec --dangerously-bypass-approvals-and-sandbox -m "$MODEL_RESOLVED" -C "$DIR" - < "$PROMPT_FILE" || true
-    echo "[launch-agent] $CMD exited; restarting in 3s..."
-    sleep 3
-  done
+  mac10_run_interactive_prompt "$DIR" "$PROMPT_FILE" "$MODEL_RESOLVED"
+  exit $?
 fi
-exec bash
+
+BACKOFF=3
+MAX_BACKOFF=60
+while true; do
+  START_TIME=$(date +%s)
+  mac10_run_noninteractive_prompt "$DIR" "$PROMPT_FILE" "$MODEL_RESOLVED" 2>&1 || true
+  END_TIME=$(date +%s)
+  ELAPSED=$(( END_TIME - START_TIME ))
+  echo "[launch-agent] provider=${MAC10_AGENT_PROVIDER} cli=${CLI_NAME} cmd=${CMD} exited after ${ELAPSED}s"
+  if [ "$ELAPSED" -gt 10 ]; then
+    BACKOFF=3
+  else
+    echo "[launch-agent] WARNING: $CMD exited very quickly (${ELAPSED}s)"
+    BACKOFF=$(( BACKOFF * 2 > MAX_BACKOFF ? MAX_BACKOFF : BACKOFF * 2 ))
+  fi
+  echo "[launch-agent] Restarting in ${BACKOFF}s..."
+  sleep "$BACKOFF"
+done

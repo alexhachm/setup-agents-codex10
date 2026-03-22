@@ -6,6 +6,8 @@ const path = require('path');
 const crypto = require('crypto');
 const { execFileSync } = require('child_process');
 const db = require('./db');
+const tmux = require('./tmux');
+const researchQueue = require('./research-queue');
 let modelRouter = null;
 try {
   modelRouter = require('./model-router');
@@ -19,6 +21,38 @@ function getConfigValue(getConfig, key, fallback) {
   if (value === undefined || value === null) return fallback;
   const trimmed = String(value).trim();
   return trimmed === '' ? fallback : trimmed;
+}
+
+function readLauncherEnvValue(projectDir, key) {
+  if (!projectDir || !key) return '';
+  const envFile = path.join(projectDir, '.codex', 'state', 'agent-launcher.env');
+  try {
+    const raw = fs.readFileSync(envFile, 'utf8');
+    const match = raw.match(new RegExp(`^${key}=([^\\r\\n]+)$`, 'm'));
+    return match ? String(match[1]).trim() : '';
+  } catch {
+    return '';
+  }
+}
+
+function resolveAgentProvider(projectDir) {
+  const configured = (
+    readLauncherEnvValue(projectDir, 'MAC10_AGENT_PROVIDER') ||
+    process.env.MAC10_AGENT_PROVIDER ||
+    'codex'
+  ).trim().toLowerCase();
+  return configured === 'claude' ? 'claude' : 'codex';
+}
+
+function defaultFallbackModel(provider, routingClass) {
+  if (provider === 'claude') {
+    return routingClass === 'spark' ? 'sonnet' : 'opus';
+  }
+  return routingClass === 'spark' ? 'gpt-5.3-codex-spark' : 'gpt-5.3-codex';
+}
+
+function isTerminalRequestStatus(status) {
+  return status === 'completed' || status === 'failed';
 }
 
 function resolveFallbackRoutingClass(task) {
@@ -48,9 +82,10 @@ function fallbackModelRouter() {
     routeTask(task = {}, opts = {}) {
       const getConfig = opts.getConfig;
       const routingClass = resolveFallbackRoutingClass(task);
+      const provider = resolveAgentProvider(_projectDir || process.cwd());
       const defaultModel = routingClass === 'spark'
-        ? getConfigValue(getConfig, 'model_spark', 'gpt-5.3-codex-spark')
-        : getConfigValue(getConfig, 'model_flagship', 'gpt-5.3-codex');
+        ? getConfigValue(getConfig, 'model_spark', defaultFallbackModel(provider, routingClass))
+        : getConfigValue(getConfig, 'model_flagship', defaultFallbackModel(provider, routingClass));
       const configuredModel = getConfigValue(getConfig, `model_${routingClass}`, defaultModel);
       const budget = this.getBudgetState(getConfig);
       const routingReason = 'Fell back to CLI routing shim (model-router unavailable)';
@@ -85,12 +120,103 @@ const PR_URL_RE = /^https:\/\/github\.com\/[a-zA-Z0-9._-]+\/[a-zA-Z0-9._-]+\/pul
 const PR_NUMBER_RE = /^#?(\d+)$/;
 const PR_REFERENCE_RE = /^(pull request|pull|pr)\s*#?(\d+)$/i;
 const WORKER_BRANCH_RE = /^agent-\d+$/;
+const RESEARCH_INTERNAL_SCOPE_RE = /\b(this codebase|this repo|repository itself|scan the codebase|read every major file)\b/i;
+const RESEARCH_INTERNAL_PATH_RE = /(\.codex\/|\.claude\/|coordinator\/src\/|templates\/commands\/|scripts\/[a-z0-9._-]+\.sh|[a-z0-9._-]+\.(js|ts|py|md)\b)/i;
+const RESEARCH_EXTERNAL_ANCHOR_RE = /\b(compare|production|state[- ]of[- ]the[- ]art|benchmark|framework|industry|top (teams|companies|labs|projects)|external|open[- ]source|202[0-9])\b/i;
+const RESEARCH_WEAK_DOMAIN_PROMPT_RE = /^what are the key patterns,\s*best practices,\s*and potential pitfalls.*in this codebase\??$/i;
 const ROUTING_BUDGET_STATE_KEY = 'routing_budget_state';
 const ROUTING_BUDGET_REMAINING_KEY = 'routing_budget_flagship_remaining';
 const ROUTING_BUDGET_THRESHOLD_KEY = 'routing_budget_flagship_threshold';
 const LEGACY_BUDGET_REMAINING_KEY = 'flagship_budget_remaining';
 const LEGACY_BUDGET_THRESHOLD_KEY = 'flagship_budget_threshold';
 const PR_RESOLVE_ERROR_RE = /Could not resolve to a PullRequest/i;
+
+function clampWorkerLimit(raw) {
+  const parsed = Number.parseInt(String(raw), 10);
+  if (!Number.isFinite(parsed)) return LEGACY_MAX_WORKERS_DEFAULT;
+  return Math.min(WORKER_LIMIT_MAX, Math.max(WORKER_LIMIT_MIN, parsed));
+}
+
+function refResolvesToCommit(projectDir, ref) {
+  if (!ref) return false;
+  try {
+    execFileSync('git', ['rev-parse', '--verify', `${ref}^{commit}`], {
+      cwd: projectDir,
+      stdio: 'ignore',
+    });
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+function normalizePrimaryBranchCandidate(raw) {
+  const value = String(raw || '').trim();
+  if (!value) return '';
+  return value
+    .replace(/^refs\/heads\//, '')
+    .replace(/^refs\/remotes\/origin\//, '')
+    .replace(/^origin\//, '')
+    .trim();
+}
+
+function resolvePrimaryBranch(projectDir, configuredPrimary) {
+  const seen = new Set();
+  const candidates = [];
+  const addCandidate = (raw) => {
+    const normalized = normalizePrimaryBranchCandidate(raw);
+    if (!normalized || seen.has(normalized)) return;
+    seen.add(normalized);
+    candidates.push(normalized);
+  };
+
+  addCandidate(configuredPrimary);
+
+  try {
+    const remoteHead = execFileSync(
+      'git',
+      ['symbolic-ref', '--short', 'refs/remotes/origin/HEAD'],
+      { cwd: projectDir, encoding: 'utf8' },
+    ).trim();
+    addCandidate(remoteHead);
+  } catch {}
+
+  try {
+    const abbrevRemoteHead = execFileSync(
+      'git',
+      ['rev-parse', '--abbrev-ref', 'origin/HEAD'],
+      { cwd: projectDir, encoding: 'utf8' },
+    ).trim();
+    addCandidate(abbrevRemoteHead);
+  } catch {}
+
+  try {
+    const currentHead = execFileSync(
+      'git',
+      ['symbolic-ref', '--quiet', '--short', 'HEAD'],
+      { cwd: projectDir, encoding: 'utf8' },
+    ).trim();
+    addCandidate(currentHead);
+  } catch {}
+
+  addCandidate('main');
+  addCandidate('master');
+
+  for (const candidate of candidates) {
+    if (
+      refResolvesToCommit(projectDir, `refs/heads/${candidate}`) ||
+      refResolvesToCommit(projectDir, `refs/remotes/origin/${candidate}`) ||
+      refResolvesToCommit(projectDir, candidate)
+    ) {
+      return candidate;
+    }
+  }
+
+  throw new Error(
+    `Cannot resolve a valid base branch for worker creation. ` +
+    `Set 'primary_branch' to an existing branch and retry. Tried: ${candidates.join(', ') || '(none)'}`,
+  );
+}
 
 function namespacedFile(defaultName, namespacedName) {
   return NAMESPACE === 'mac10' ? defaultName : namespacedName;
@@ -215,6 +341,7 @@ const COMMAND_SCHEMAS = {
   'loop-prompt':       { required: ['loop_id'], types: { loop_id: 'number' } },
   'loop-request':      { required: ['loop_id', 'description'], types: { loop_id: 'number', description: 'string' } },
   'loop-requests':     { required: ['loop_id'], types: { loop_id: 'number' } },
+  'research-requeue-stale': { required: [], types: { max_age_minutes: 'number' } },
 };
 
 function parseBudgetNumber(value) {
@@ -260,6 +387,41 @@ function mergeBudgetState(raw, overrides = {}) {
   }
   state.flagship = flagship;
   return state;
+}
+
+function validateResearchQueueInput({ topic, question, context, links }) {
+  const q = String(question || '').trim();
+  const ctx = String(context || '').trim();
+  if (!q) return { ok: false, error: 'Research question cannot be empty' };
+
+  if (RESEARCH_WEAK_DOMAIN_PROMPT_RE.test(q)) {
+    return {
+      ok: false,
+      error: 'Research queue is external-only. Analyze this repository directly via local agents first, then queue external comparison questions.',
+    };
+  }
+
+  const combined = `${q}\n${ctx}`;
+  const hasInternalScope = RESEARCH_INTERNAL_SCOPE_RE.test(combined) || RESEARCH_INTERNAL_PATH_RE.test(combined);
+  const hasExternalAnchor = RESEARCH_EXTERNAL_ANCHOR_RE.test(combined)
+    || (Array.isArray(links) && links.length > 0);
+
+  if (hasInternalScope && !hasExternalAnchor) {
+    return {
+      ok: false,
+      error: 'Research queue is for external intelligence. Repo-internal/codebase landscaping must be done by normal agents.',
+    };
+  }
+
+  const safeTopic = String(topic || '').trim().toLowerCase();
+  if (safeTopic.includes('codebase') && !hasExternalAnchor) {
+    return {
+      ok: false,
+      error: 'Codebase-only research topic rejected. Use local analysis first; queue only external benchmarking/comparison.',
+    };
+  }
+
+  return { ok: true };
 }
 
 /** Parse a files field into an array. Handles arrays, JSON strings, and comma-separated strings. */
@@ -625,6 +787,8 @@ function queueMergeWithRecovery({
   const queueCwd = _projectDir || process.cwd();
   const resolvedPr = resolveQueuePrTarget(pr_url, branch, queueCwd);
   const resolvedPrUrl = resolvedPr.pr_url;
+  const sanitizedBranch = sanitizeBranchName(branch);
+  const branchOnlyMerge = Boolean(sanitizedBranch) && !resolvedPr.resolvable && branchExists(sanitizedBranch, queueCwd);
 
   if (resolvedPr.source === 'branch_fallback' && isValidGitHubPrUrl(resolvedPrUrl)) {
     db.updateTask(task_id, { pr_url: resolvedPrUrl });
@@ -637,7 +801,7 @@ function queueMergeWithRecovery({
     });
   }
 
-  if (!resolvedPr.resolvable) {
+  if (!resolvedPr.resolvable && !branchOnlyMerge) {
     const staleEntries = db.getDb().prepare(`
       SELECT id, status
       FROM merge_queue
@@ -661,54 +825,66 @@ function queueMergeWithRecovery({
     };
   }
 
-  db.getDb().prepare(`
-    DELETE FROM merge_queue
-    WHERE request_id = ?
-      AND task_id = ?
-      AND pr_url <> ?
-      AND status NOT IN ('merged', 'merging')
-  `).run(request_id, task_id, resolvedPrUrl);
+  if (resolvedPrUrl) {
+    db.getDb().prepare(`
+      DELETE FROM merge_queue
+      WHERE request_id = ?
+        AND task_id = ?
+        AND pr_url <> ?
+        AND status NOT IN ('merged', 'merging')
+    `).run(request_id, task_id, resolvedPrUrl);
+  }
 
   const getLatestCheckpoint = () => {
     if (latest_completion_timestamp !== undefined) return latest_completion_timestamp;
     return db.getRequestLatestCompletedTaskCursor(request_id);
   };
   const latestCheckpoint = getLatestCheckpoint();
+  const effectivePrUrl = resolvedPr.resolvable ? resolvedPrUrl : '';
 
   const enqueueResult = db.enqueueMerge({
     request_id,
     task_id,
-    pr_url: resolvedPrUrl,
-    branch,
+    pr_url: effectivePrUrl,
+    branch: sanitizedBranch,
     priority: normalizedPriority,
     completion_checkpoint: latestCheckpoint,
   });
   if (enqueueResult.inserted) {
-    const existingDuplicatePrOwner = db.getDb().prepare(`
-      SELECT id, request_id, task_id, branch, status
-      FROM merge_queue
-      WHERE pr_url = ?
-        AND id != ?
-        AND (
-          request_id != ?
-          OR task_id != ?
-          OR branch != ?
-        )
-      ORDER BY id DESC
-      LIMIT 1
-    `).get(resolvedPrUrl, enqueueResult.lastInsertRowid, request_id, task_id, branch);
-    if (existingDuplicatePrOwner) {
-      db.log('coordinator', 'merge_queue_duplicate_pr_ownership_preserved', {
+    if (resolvedPrUrl) {
+      const existingDuplicatePrOwner = db.getDb().prepare(`
+        SELECT id, request_id, task_id, branch, status
+        FROM merge_queue
+        WHERE pr_url = ?
+          AND id != ?
+          AND (
+            request_id != ?
+            OR task_id != ?
+            OR branch != ?
+          )
+        ORDER BY id DESC
+        LIMIT 1
+      `).get(resolvedPrUrl, enqueueResult.lastInsertRowid, request_id, task_id, sanitizedBranch);
+      if (existingDuplicatePrOwner) {
+        db.log('coordinator', 'merge_queue_duplicate_pr_ownership_preserved', {
+          request_id,
+          task_id,
+          pr_url: resolvedPrUrl,
+          branch: sanitizedBranch,
+          new_merge_id: enqueueResult.lastInsertRowid,
+          existing_merge_id: existingDuplicatePrOwner.id,
+          existing_request_id: existingDuplicatePrOwner.request_id,
+          existing_task_id: existingDuplicatePrOwner.task_id,
+          existing_branch: existingDuplicatePrOwner.branch,
+          existing_status: existingDuplicatePrOwner.status,
+        });
+      }
+    } else if (branchOnlyMerge) {
+      db.log('coordinator', 'merge_queue_branch_only', {
         request_id,
         task_id,
-        pr_url: resolvedPrUrl,
-        branch,
-        new_merge_id: enqueueResult.lastInsertRowid,
-        existing_merge_id: existingDuplicatePrOwner.id,
-        existing_request_id: existingDuplicatePrOwner.request_id,
-        existing_task_id: existingDuplicatePrOwner.task_id,
-        existing_branch: existingDuplicatePrOwner.branch,
-        existing_status: existingDuplicatePrOwner.status,
+        branch: sanitizedBranch,
+        merge_id: enqueueResult.lastInsertRowid,
       });
     }
     return {
@@ -717,7 +893,7 @@ function queueMergeWithRecovery({
       refreshed: false,
       retried: false,
       resolved_pr_url: resolvedPrUrl,
-      pr_resolution_source: resolvedPr.source,
+      pr_resolution_source: branchOnlyMerge ? 'branch_only' : resolvedPr.source,
     };
   }
 
@@ -731,27 +907,29 @@ function queueMergeWithRecovery({
   `).get(request_id, task_id);
 
   if (!existing) {
-    const existingByPr = db.getDb().prepare(`
-      SELECT id, request_id, task_id, branch, status
-      FROM merge_queue
-      WHERE pr_url = ?
-      ORDER BY id DESC
-      LIMIT 1
-    `).get(resolvedPrUrl);
-    if (existingByPr) {
-      return {
-        queued: false,
-        inserted: false,
-        refreshed: false,
-        retried: false,
-        reason: 'existing_pr_owned_by_other_request',
-        merge_id: existingByPr.id,
-        existing_request_id: existingByPr.request_id,
-        existing_task_id: existingByPr.task_id,
-        existing_branch: existingByPr.branch,
-        resolved_pr_url: resolvedPrUrl,
-        pr_resolution_source: resolvedPr.source,
-      };
+    if (resolvedPrUrl) {
+      const existingByPr = db.getDb().prepare(`
+        SELECT id, request_id, task_id, branch, status
+        FROM merge_queue
+        WHERE pr_url = ?
+        ORDER BY id DESC
+        LIMIT 1
+      `).get(resolvedPrUrl);
+      if (existingByPr) {
+        return {
+          queued: false,
+          inserted: false,
+          refreshed: false,
+          retried: false,
+          reason: 'existing_pr_owned_by_other_request',
+          merge_id: existingByPr.id,
+          existing_request_id: existingByPr.request_id,
+          existing_task_id: existingByPr.task_id,
+          existing_branch: existingByPr.branch,
+          resolved_pr_url: resolvedPrUrl,
+          pr_resolution_source: resolvedPr.source,
+        };
+      }
     }
     return {
       queued: false,
@@ -760,7 +938,7 @@ function queueMergeWithRecovery({
       retried: false,
       reason: 'missing_existing_entry',
       resolved_pr_url: resolvedPrUrl,
-      pr_resolution_source: resolvedPr.source,
+      pr_resolution_source: branchOnlyMerge ? 'branch_only' : resolvedPr.source,
     };
   }
   if (existing.status === 'merged' || existing.status === 'merging') {
@@ -771,7 +949,7 @@ function queueMergeWithRecovery({
       retried: false,
       reason: `status_${existing.status}`,
       resolved_pr_url: resolvedPrUrl,
-      pr_resolution_source: resolvedPr.source,
+      pr_resolution_source: branchOnlyMerge ? 'branch_only' : resolvedPr.source,
     };
   }
   if (String(existing.request_id) !== String(request_id) || Number(existing.task_id) !== Number(task_id)) {
@@ -786,7 +964,7 @@ function queueMergeWithRecovery({
       existing_task_id: existing.task_id,
       existing_branch: existing.branch,
       resolved_pr_url: resolvedPrUrl,
-      pr_resolution_source: resolvedPr.source,
+      pr_resolution_source: branchOnlyMerge ? 'branch_only' : resolvedPr.source,
     };
   }
 
@@ -817,7 +995,7 @@ function queueMergeWithRecovery({
         retried: false,
         reason: 'terminal_without_fresh_progress',
         resolved_pr_url: resolvedPrUrl,
-        pr_resolution_source: resolvedPr.source,
+        pr_resolution_source: branchOnlyMerge ? 'branch_only' : resolvedPr.source,
       };
     }
     return {
@@ -827,7 +1005,7 @@ function queueMergeWithRecovery({
       retried: false,
       reason: 'already_current',
       resolved_pr_url: resolvedPrUrl,
-      pr_resolution_source: resolvedPr.source,
+      pr_resolution_source: branchOnlyMerge ? 'branch_only' : resolvedPr.source,
     };
   }
 
@@ -842,8 +1020,8 @@ function queueMergeWithRecovery({
         updated_at = strftime('%Y-%m-%dT%H:%M:%fZ','now')
     WHERE id = ?
   `).run(
-    branch,
-    resolvedPrUrl,
+    sanitizedBranch,
+    effectivePrUrl,
     desiredPriority,
     desiredStatus,
     shouldRetry ? 1 : 0,
@@ -859,7 +1037,7 @@ function queueMergeWithRecovery({
     previous_status: existing.status,
     merge_id: existing.id,
     resolved_pr_url: resolvedPrUrl,
-    pr_resolution_source: resolvedPr.source,
+    pr_resolution_source: branchOnlyMerge ? 'branch_only' : resolvedPr.source,
   };
 }
 
@@ -1092,6 +1270,18 @@ function handleCommand(cmd, conn, handlers) {
         break;
       }
       case 'create-task': {
+        const request = db.getRequest(args.request_id);
+        if (!request) {
+          respond(conn, { ok: false, error: `Request not found: ${args.request_id}` });
+          break;
+        }
+        if (isTerminalRequestStatus(request.status)) {
+          respond(conn, { ok: false, error: `Request ${args.request_id} is already ${request.status}` });
+          break;
+        }
+        if (request.status === 'pending') {
+          db.updateRequest(args.request_id, { status: 'triaging' });
+        }
         // Normalize files to an array before persisting (handles strings, JSON strings, arrays)
         args.files = parseFilesField(args.files);
         args.depends_on = parseDependsOnField(args.depends_on);
@@ -1381,7 +1571,9 @@ function handleCommand(cmd, conn, handlers) {
         const assignResult = db.getDb().transaction(() => {
           const freshTask = db.getTask(assignTaskId);
           const freshWorker = db.getWorker(assignWorkerId);
+          const request = freshTask ? db.getRequest(freshTask.request_id) : null;
           if (!freshTask || freshTask.status !== 'ready' || freshTask.assigned_to) return { ok: false, reason: 'task_not_ready' };
+          if (!request || isTerminalRequestStatus(request.status)) return { ok: false, reason: 'request_not_assignable' };
           if (!freshWorker || freshWorker.status !== 'idle') return { ok: false, reason: 'worker_not_idle' };
 
           db.updateTask(assignTaskId, { status: 'assigned', assigned_to: assignWorkerId });
@@ -1679,35 +1871,8 @@ function handleCommand(cmd, conn, handlers) {
         const branchName = `agent-${nextId}`;
         try {
           fs.mkdirSync(wtDir, { recursive: true });
-          // Create branch from configured/default branch (not current checked-out feature branch).
-          const mainBranch = (() => {
-            const configuredPrimary = (db.getConfig('primary_branch') || '').trim();
-            if (configuredPrimary) return configuredPrimary;
-
-            try {
-              const remoteHead = execFileSync(
-                'git',
-                ['symbolic-ref', '--short', 'refs/remotes/origin/HEAD'],
-                { cwd: projDir, encoding: 'utf8' },
-              ).trim();
-              if (remoteHead.startsWith('origin/')) {
-                return remoteHead.slice('origin/'.length);
-              }
-            } catch {}
-
-            try {
-              const abbrevRemoteHead = execFileSync(
-                'git',
-                ['rev-parse', '--abbrev-ref', 'origin/HEAD'],
-                { cwd: projDir, encoding: 'utf8' },
-              ).trim();
-              if (abbrevRemoteHead.startsWith('origin/')) {
-                return abbrevRemoteHead.slice('origin/'.length);
-              }
-            } catch {}
-
-            return 'main';
-          })();
+          const configuredPrimary = (db.getConfig('primary_branch') || '').trim();
+          const mainBranch = resolvePrimaryBranch(projDir, configuredPrimary);
           try {
             execFileSync('git', ['branch', branchName, mainBranch], { cwd: projDir, encoding: 'utf8' });
           } catch (branchError) {
@@ -1909,6 +2074,10 @@ function handleCommand(cmd, conn, handlers) {
           break;
         }
         db.stopLoop(args.loop_id);
+        // P4 fix: kill the tmux pane immediately so the running process stops now
+        if (loop.tmux_window) {
+          try { tmux.killWindow(loop.tmux_window); } catch (e) { /* pane may already be dead */ }
+        }
         respond(conn, { ok: true, loop_id: args.loop_id });
         break;
       }
@@ -2060,6 +2229,153 @@ function handleCommand(cmd, conn, handlers) {
         }
         const loopReqs = db.listLoopRequests(args.loop_id);
         respond(conn, { ok: true, requests: loopReqs });
+        break;
+      }
+
+      // === RESEARCH commands ===
+      case 'queue-research': {
+        const { topic, question, mode, priority, links, context, source_task_id, source_agent, relevant_files } = args;
+        if (!topic || !question) {
+          respond(conn, { ok: false, error: 'topic and question are required' });
+          break;
+        }
+        let parsedLinks = null;
+        if (links) {
+          try {
+            parsedLinks = typeof links === 'string' ? JSON.parse(links) : links;
+          } catch (e) {
+            respond(conn, { ok: false, error: `Invalid links JSON: ${e.message}` });
+            break;
+          }
+        }
+        let parsedFiles = null;
+        if (relevant_files) {
+          try {
+            parsedFiles = typeof relevant_files === 'string' ? JSON.parse(relevant_files) : relevant_files;
+          } catch (e) {
+            respond(conn, { ok: false, error: `Invalid relevant_files JSON: ${e.message}` });
+            break;
+          }
+        }
+        const researchValidation = validateResearchQueueInput({
+          topic,
+          question,
+          context,
+          links: parsedLinks,
+        });
+        if (!researchValidation.ok) {
+          respond(conn, { ok: false, error: researchValidation.error });
+          break;
+        }
+        const qr = researchQueue.queueResearch({
+          topic, question, context,
+          priority: priority || 'normal',
+          mode: mode || 'standard',
+          source_task_id, source_agent,
+          target_links: parsedLinks,
+          relevant_files: parsedFiles,
+        });
+        respond(conn, { ok: true, ...qr });
+        break;
+      }
+      case 'research-status': {
+        const filters = {};
+        if (args.topic) filters.topic = args.topic;
+        if (args.status) filters.status = args.status;
+        filters.limit = args.limit || 50;
+        const items = researchQueue.listResearch(filters);
+        respond(conn, { ok: true, items, count: items.length });
+        break;
+      }
+      case 'research-gaps': {
+        // Run the gap detector script and auto-queue top gaps
+        const projectDir = db.getConfig('project_dir') || _projectDir || process.cwd();
+        const gapScript = path.join(projectDir, '.codex', 'scripts', 'research-gaps.sh');
+        let gaps = [];
+        try {
+          const rawOutput = execFileSync('bash', [gapScript, projectDir], {
+            timeout: 60000,
+            encoding: 'utf8',
+            cwd: projectDir,
+          });
+          gaps = JSON.parse(rawOutput.trim() || '[]');
+        } catch (e) {
+          respond(conn, { ok: false, error: `Gap analysis failed: ${e.message}` });
+          break;
+        }
+        // Auto-queue top 5 gaps
+        const queued = [];
+        const skipped = [];
+        const maxAutoQueue = Math.min(gaps.length, 5);
+        for (let i = 0; i < maxAutoQueue; i++) {
+          const gap = gaps[i];
+          const validation = validateResearchQueueInput({
+            topic: gap.topic,
+            question: gap.suggested_question,
+            context: gap.context || '',
+            links: null,
+          });
+          if (!validation.ok) {
+            skipped.push({ ...gap, reason: validation.error });
+            continue;
+          }
+          const qr = researchQueue.queueResearch({
+            topic: gap.topic,
+            question: gap.suggested_question,
+            priority: gap.priority || 'normal',
+            mode: gap.mode || 'standard',
+            source_agent: 'gap-detector',
+          });
+          queued.push({ ...gap, queue_id: qr.id, deduplicated: qr.deduplicated });
+        }
+        respond(conn, { ok: true, gaps_found: gaps.length, queued, skipped });
+        break;
+      }
+      case 'research-next': {
+        const next = researchQueue.getNextQueued();
+        respond(conn, { ok: true, item: next });
+        break;
+      }
+      case 'research-requeue-stale': {
+        const maxAge = Number(args.max_age_minutes);
+        const result = researchQueue.requeueStaleInProgress(
+          Number.isFinite(maxAge) && maxAge >= 0 ? Math.floor(maxAge) : 120
+        );
+        respond(conn, { ok: true, ...result });
+        break;
+      }
+      case 'research-start': {
+        const { id: rsId } = args;
+        if (!rsId) {
+          respond(conn, { ok: false, error: 'id is required' });
+          break;
+        }
+        const started = researchQueue.markInProgress(rsId);
+        if (!started) {
+          respond(conn, { ok: false, error: 'research item is missing or not queued' });
+          break;
+        }
+        respond(conn, { ok: true });
+        break;
+      }
+      case 'research-complete': {
+        const { id: rcId, note_path } = args;
+        if (!rcId || !note_path) {
+          respond(conn, { ok: false, error: 'id and note_path are required' });
+          break;
+        }
+        researchQueue.markComplete(rcId, note_path);
+        respond(conn, { ok: true });
+        break;
+      }
+      case 'research-fail': {
+        const { id: rfId, error: rfError } = args;
+        if (!rfId) {
+          respond(conn, { ok: false, error: 'id is required' });
+          break;
+        }
+        researchQueue.markFailed(rfId, rfError || 'Unknown error');
+        respond(conn, { ok: true });
         break;
       }
 

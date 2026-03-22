@@ -1,11 +1,11 @@
-# mac10 — Multi-Agent Orchestration for Codex
+# mac10 — Multi-Agent Orchestration for Codex and Claude Code
 
-A deterministic coordination system for multiple Codex agents. LLMs do coding work; Node.js does coordination.
+A deterministic coordination system for multiple terminal coding agents. LLM CLIs do coding work; Node.js does coordination.
 
 ## Architecture
 
 ```
-User ──mac10 CLI──→ Coordinator (Node.js) ──tmux──→ Workers (Deep)
+User ──mac10 CLI──→ Coordinator (Node.js) ──tmux──→ Workers (Provider-backed)
                          |                              |
                     SQLite WAL                    mac10 CLI
                          |                              |
@@ -14,20 +14,24 @@ User ──mac10 CLI──→ Coordinator (Node.js) ──tmux──→ Workers 
 
 - **Coordinator**: Node.js process. Owns all state (SQLite), worker lifecycle (tmux), task allocation, merge queue, watchdog.
 - **Architect**: Single deep-model agent. Triages requests into Tier 1/2/3, decomposes complex work into tasks.
-- **Workers 1-8**: Deep-model agents in git worktrees. Receive tasks, code, create PRs.
+- **Workers 1-8**: Provider-backed agents in git worktrees. Receive tasks, code, create PRs.
 
 ## Quick Start
 
 ```bash
-# Prerequisites: node 18+, git, gh, tmux, codex
+# Prerequisites: node 18+, git, gh, tmux (WSL), and at least one of: codex, claude
 bash setup.sh /path/to/your-project 4
+
+# Or choose explicitly without prompts
+bash setup.sh /path/to/your-project 4 --provider codex
+bash setup.sh /path/to/your-project 4 --provider claude --fast-model sonnet --deep-model opus --economy-model haiku
 
 # Submit a request
 mac10 request "Add user authentication"
 
-# Start the architect
+# Start the architect manually with the shared launcher
 cd /path/to/your-project
-codex exec --dangerously-bypass-approvals-and-sandbox -m gpt-5.3-codex -C "$(pwd)" - < .codex/commands/architect-loop.md
+bash ./scripts/launch-agent.sh "$(pwd)" deep /architect-loop
 
 # Check status
 mac10 status
@@ -45,7 +49,9 @@ WORKER:    my-task, start-task, heartbeat, complete-task, fail-task, distill, in
 SYSTEM:    start, stop, repair, gui, ping
 ```
 
-## Autonomous Loop (Codex)
+Interactive setup prompts for provider and role models when both CLIs are available. Re-run `setup.sh` to switch the whole directory between Codex and Claude Code without changing coordinator state, worktrees, or prompt mirrors.
+
+## Autonomous Loop
 
 For codex10 projects, use the namespaced wrapper:
 
@@ -60,7 +66,7 @@ Runtime path is:
 1. `codex10 loop "<prompt>"` sends CLI command `loop`.
 2. Coordinator calls `createLoop()` (in `coordinator/src/db.js`) and stores an `active` row in `loops`.
 3. `onLoopCreated` fires and spawns `scripts/loop-sentinel.sh` in tmux (`loop-<id>` window).
-4. Sentinel repeatedly runs one `codex exec` loop iteration and reports heartbeat/checkpoints.
+4. Sentinel repeatedly runs one provider-specific loop iteration and reports heartbeat/checkpoints.
 
 ## How It Works
 

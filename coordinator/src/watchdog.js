@@ -9,6 +9,10 @@ let lastMailPurge = 0;
 let startupRecoverySweepPending = true;
 // Track last escalation level per worker to avoid duplicate nudge/triage mails
 const lastEscalationLevel = new Map();
+// Track last tmux output hash per worker for output freshness detection (P1 fix)
+const lastOutputHash = new Map();
+// Track stale loop heartbeat episodes to avoid log spam (P3 fix)
+const loopStaleLogged = new Set();
 
 // Default escalation thresholds (seconds since last heartbeat).
 const THRESHOLDS = Object.freeze({
@@ -111,6 +115,8 @@ function stop() {
   if (intervalId) { clearInterval(intervalId); intervalId = null; }
   startupRecoverySweepPending = true;
   lastEscalationLevel.clear();
+  lastOutputHash.clear();
+  loopStaleLogged.clear();
 }
 
 function runStartupRecoverySweep() {
@@ -209,7 +215,25 @@ function escalate(worker, staleSec, projectDir) {
   const prevLevel = lastEscalationLevel.get(worker.id) || 0;
 
   if (staleSec >= THRESHOLDS.terminate) {
-    // Level 4: Terminate and reassign (always fires — destructive action)
+    // Output freshness check (P1 fix): if tmux pane output changed since last
+    // tick, the worker is still producing — reset escalation instead of killing.
+    const currentOutput = tmux.capturePane(windowName, 20);
+    const crypto = require('crypto');
+    const currentHash = crypto.createHash('md5').update(currentOutput || '').digest('hex');
+    const prevHash = lastOutputHash.get(worker.id);
+    lastOutputHash.set(worker.id, currentHash);
+
+    if (prevHash && currentHash !== prevHash) {
+      // Output changed — worker is alive, reset escalation clock
+      db.log('coordinator', 'watchdog_output_fresh', {
+        worker_id: worker.id,
+        stale_sec: staleSec,
+      });
+      lastEscalationLevel.set(worker.id, 1); // reset to warn level
+      return;
+    }
+
+    // Level 4: Terminate and reassign (output is genuinely frozen)
     db.log('coordinator', 'watchdog_terminate', {
       worker_id: worker.id,
       stale_sec: staleSec,
@@ -217,6 +241,7 @@ function escalate(worker, staleSec, projectDir) {
     tmux.killWindow(windowName);
     handleDeath(worker, 'heartbeat_timeout');
     lastEscalationLevel.delete(worker.id);
+    lastOutputHash.delete(worker.id);
 
   } else if (staleSec >= THRESHOLDS.triage && prevLevel < 3) {
     // Level 3: Triage — capture output, log for analysis (once per escalation)
@@ -262,14 +287,31 @@ function handleDeath(worker, reason) {
   // If worker had a task, conditionally mark it for reassignment
   // Uses a single conditional UPDATE to avoid TOCTOU race with worker's complete-task
   if (worker.current_task_id) {
-    const result = db.getDb().prepare(
-      "UPDATE tasks SET status='ready', assigned_to=NULL, updated_at=datetime('now') WHERE id=? AND status NOT IN ('completed','failed')"
-    ).run(worker.current_task_id);
-    if (result.changes > 0) {
-      db.log('coordinator', 'task_reassigned', {
+    // Max reassignment cap (P1 fix): if task has been reassigned 3+ times, fail it
+    const MAX_REASSIGNMENTS = 3;
+    const priorReassignments = db.getDb().prepare(
+      "SELECT COUNT(*) as cnt FROM activity_log WHERE action = 'task_reassigned' AND json_extract(details, '$.task_id') = ?"
+    ).get(String(worker.current_task_id));
+
+    if (priorReassignments && priorReassignments.cnt >= MAX_REASSIGNMENTS) {
+      db.getDb().prepare(
+        "UPDATE tasks SET status='failed', assigned_to=NULL, updated_at=datetime('now') WHERE id=? AND status NOT IN ('completed','failed')"
+      ).run(worker.current_task_id);
+      db.log('coordinator', 'task_failed_max_reassign', {
         task_id: worker.current_task_id,
-        reason: `worker-${worker.id} died (${reason})`,
+        reassignment_count: priorReassignments.cnt,
+        reason: `exceeded ${MAX_REASSIGNMENTS} reassignment attempts`,
       });
+    } else {
+      const result = db.getDb().prepare(
+        "UPDATE tasks SET status='ready', assigned_to=NULL, updated_at=datetime('now') WHERE id=? AND status NOT IN ('completed','failed')"
+      ).run(worker.current_task_id);
+      if (result.changes > 0) {
+        db.log('coordinator', 'task_reassigned', {
+          task_id: worker.current_task_id,
+          reason: `worker-${worker.id} died (${reason})`,
+        });
+      }
     }
   }
 
@@ -402,26 +444,12 @@ function recoverStaleIntegrations(now, options = {}) {
           const sourceTask = m.task_id ? db.getTask(m.task_id) : null;
           const timeoutError = `Merge timeout promoted to conflict: ${m.branch || 'unknown-branch'} - ${MERGE_TIMEOUT_ERROR}`;
           db.updateMerge(m.id, { status: 'conflict', error: MERGE_TIMEOUT_ERROR });
-          db.sendMail('allocator', 'merge_failed', {
+          db.log('coordinator', 'merge_timeout_logged', {
             request_id: req.id,
             merge_id: m.id,
             task_id: m.task_id,
             branch: m.branch,
-            pr_url: m.pr_url,
-            status: 'conflict',
-            reason: 'merge_timeout_promoted',
-            subject: sourceTask ? sourceTask.subject : null,
-            domain: sourceTask ? sourceTask.domain : null,
-            files: sourceTask ? sourceTask.files : null,
-            tier: sourceTask ? sourceTask.tier : null,
-            assigned_to: sourceTask ? sourceTask.assigned_to : null,
-            original_task: sourceTask ? {
-              subject: sourceTask.subject,
-              domain: sourceTask.domain,
-              files: sourceTask.files,
-              tier: sourceTask.tier,
-              assigned_to: sourceTask.assigned_to,
-            } : null,
+            reason: 'merge_timeout_promoted_to_conflict',
             error: timeoutError,
           });
           db.log('coordinator', 'merge_timeout', {
@@ -516,9 +544,10 @@ function recoverStaleIntegrations(now, options = {}) {
         request_id: req.id,
         error: `Merge failures: ${details}`,
       });
-      db.sendMail('allocator', 'merge_failed', {
+      db.log('coordinator', 'merge_failed_logged', {
         request_id: req.id,
         error: details,
+        reason: 'case4_failed_merges_no_escalation',
       });
       db.log('coordinator', 'stale_integration_recovered', {
         request_id: req.id,
@@ -566,6 +595,7 @@ function monitorLoops(projectDir) {
     }
 
     // Log warning for stale heartbeats (>5 min) but don't terminate — sentinel auto-restarts
+    // P3 fix: only log once per stale episode to avoid log spam
     if (loop.last_heartbeat) {
       const staleSec = getAgeSeconds(now, loop.last_heartbeat, {
         loop_id: loop.id,
@@ -573,10 +603,16 @@ function monitorLoops(projectDir) {
       });
       if (staleSec === null) continue;
       if (staleSec > 300) {
-        db.log('coordinator', 'loop_heartbeat_stale', {
-          loop_id: loop.id,
-          stale_sec: Math.round(staleSec),
-        });
+        if (!loopStaleLogged.has(loop.id)) {
+          loopStaleLogged.add(loop.id);
+          db.log('coordinator', 'loop_heartbeat_stale', {
+            loop_id: loop.id,
+            stale_sec: Math.round(staleSec),
+          });
+        }
+      } else {
+        // Heartbeat is fresh again — clear stale flag so next episode gets logged
+        loopStaleLogged.delete(loop.id);
       }
     }
   }

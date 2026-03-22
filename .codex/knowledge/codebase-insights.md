@@ -1,72 +1,64 @@
 # Codebase Insights
 
 ## Tech Stack
-- Runtime: Node.js (CommonJS modules, `node >= 18`)
-- Coordinator backend: `express`, `ws`, `better-sqlite3`
-- Persistence: SQLite under `.codex/state/`
-- Frontend: vanilla JS/HTML/CSS served from `gui/public/`
+- Runtime: Node.js (CommonJS, node >= 18)
+- Dependencies: express, ws, better-sqlite3
+- Persistence: SQLite under .codex/state/codex10.db (WAL mode, foreign keys)
+- No TypeScript, no bundler — interpreted JS throughout
 
 ## Build & Test
-- Install deps: `cd coordinator && npm install`
-- Run coordinator: `cd coordinator && npm start`
-- Run tests: `cd coordinator && npm test`
-- Build: none defined (interpreted JS)
-- Lint: none defined in `coordinator/package.json`
+- Test: `cd coordinator && npm test` (node --test tests/*.test.js)
+- No build script exists — validation must use `npm test`
+- No lint script configured
 
 ## Directory Structure
-- `.codex/` — runtime docs, knowledge, scripts, logs, signals, state
-- `coordinator/src/` — orchestration core (CLI server, web server, DB, allocator, merger, watchdog)
-- `coordinator/tests/` — node test suite for state machine, CLI, merger, security, watchdog
-- `coordinator/bin/mac10` — CLI entrypoint to coordinator transport
-- `gui/public/` — dashboard + popout UI assets
-- `scripts/` — launcher/sentinel/locking helper scripts
-- `templates/` — role docs, command prompts, seed knowledge files
+- `coordinator/src/` — orchestration core (13 JS files, ~6.5K LOC total)
+- `coordinator/tests/` — node:test suite (5 test files, ~1.5K LOC)
+- `coordinator/bin/mac10` — CLI entrypoint
+- `gui/public/` — vanilla JS/HTML/CSS dashboard (5 files)
+- `scripts/` — launcher, sentinel, locking helpers (bash)
+- `.codex/scripts/` — codex10 wrapper, sentinels, research scripts
+- `.codex/knowledge/` — curated knowledge files + domain READMEs
+- `templates/` — seed role docs, command prompts, knowledge
 
 ## Domain Map
-- coordinator-core: `coordinator/src/index.js`, `coordinator/src/db.js`, `coordinator/src/schema.sql`
-- coordinator-routing: `coordinator/src/cli-server.js`, `coordinator/src/allocator.js`, `coordinator/src/merger.js`, `coordinator/src/watchdog.js`
-- coordinator-surface: `coordinator/src/web-server.js`, `coordinator/src/hub.js`, `coordinator/bin/mac10`
-- coordinator-runtime: `coordinator/src/tmux.js`, `coordinator/src/instance-registry.js`, `coordinator/src/overlay.js`, `coordinator/src/recovery.js`
-- dashboard-ui: `gui/public/index.html`, `gui/public/app.js`, `gui/public/popout.html`, `gui/public/popout.js`, `gui/public/styles.css`
-- orchestration-scripts: `.codex/scripts/`, `scripts/`
+- **coordinator-core**: src/index.js (286), src/db.js (962), src/schema.sql (189)
+- **coordinator-routing**: src/cli-server.js (2257), src/allocator.js (65), src/merger.js (413), src/watchdog.js (621)
+- **coordinator-surface**: src/web-server.js (1009), src/hub.js (46), bin/mac10
+- **coordinator-runtime**: src/tmux.js (153), src/instance-registry.js (149), src/overlay.js (171), src/recovery.js (20)
+- **dashboard-ui**: gui/public/index.html, app.js, popout.html, popout.js, styles.css
+- **orchestration-scripts**: .codex/scripts/, scripts/
 
 ## Key Patterns
-- DB-first state machine: requests/tasks/workers/loops are persisted and queried via `coordinator/src/db.js`.
-- Thin daemon loops: allocator/watchdog/merger run periodic `tick` loops and log to the same DB.
-- Socket command bus: CLI (`coordinator/bin/mac10`) sends structured commands to `cli-server.js` over Unix socket/TCP/pipe fallback.
-- Security posture: URL/branch/domain/path sanitization and injection tests are concentrated in `cli-server.js`, `merger.js`, and `overlay.js`.
-- UI is websocket-driven with REST bootstrap (`/api/status`) and reconnection backoff.
-
-## Entry Points
-- `coordinator/src/index.js` — main coordinator process
-- `coordinator/src/hub.js` — hub/dashboard instance bootstrap
-- `coordinator/bin/mac10` — CLI command client
-- `gui/public/index.html` + `gui/public/app.js` — browser dashboard
+- DB-first state machine: all entity state (requests, tasks, workers, loops, mail, merges) persisted via db.js
+- Socket command bus: CLI sends structured commands to cli-server.js over Unix socket / TCP / pipe fallback
+- Worktree isolation: each worker gets its own git worktree under .worktrees/wt-N
+- Mail-based IPC: replaces all signal files; recipients are architect/allocator/worker-N
+- Security: URL/branch/domain/path sanitization + injection tests in cli-server, merger, overlay
 
 ## Coupling Hotspots
-- `coordinator/src/cli-server.js` (highest churn surface in recent history)
-- `coordinator/src/db.js`
-- `coordinator/src/watchdog.js`
-- `coordinator/src/web-server.js`
-- `coordinator/src/merger.js`
-- `coordinator/src/schema.sql`
+- cli-server.js (2257 LOC) — highest churn, 40+ command cases, most coupling
+- db.js (962 LOC) — everything depends on it
+- watchdog.js (621 LOC) — death/recovery/stale-claim/loop monitoring
+- web-server.js (1009 LOC) — dashboard API + agent launch
 
-## Large Files (potential split candidates)
-- `coordinator/src/cli-server.js` (~2074 LOC)
-- `coordinator/src/web-server.js` (~1009 LOC)
-- `coordinator/src/db.js` (~962 LOC)
-- `gui/public/app.js` (~964 LOC)
-- `coordinator/src/watchdog.js` (~585 LOC)
-- `coordinator/src/merger.js` (~430 LOC)
+## Large Files
+- coordinator/src/cli-server.js: 2257 lines
+- coordinator/src/web-server.js: 1009 lines
+- coordinator/src/db.js: 962 lines
+- coordinator/src/watchdog.js: 621 lines
+- coordinator/tests/security.test.js: 606 lines
 
-## Session Learnings (2026-03-13)
-- Architect inbox can contain `task_completed` signals while request queue has zero `[pending]` entries; triage should remain request-driven.
-- Backlog pressure for requests was low (`pending_count=0`) while urgent remediation tasks still existed in ready-task queue, confirming request triage and task dispatch are decoupled flows.
-- Staleness baseline file `.codex/state/codebase-map.json` was missing, so staleness checks defaulted to repository-wide change breadth and triggered reset thresholds immediately.
-- For Tier 2 flows, creating and assigning a task did not automatically clear request `[pending]` state in status output; issuing explicit `./.codex/scripts/codex10 triage <request_id> 2 "<reason>"` immediately aligned request state to `[decomposed]`.
-- Fresh reset-gate run measured `commits_since=69` and `changed_file_count=167`, which satisfies full-reset criteria; `/scan-codebase` must be re-run before additional decomposition.
-- Scan pass refreshed baseline with `pending_count=0` and `ready_count=4`, reinforcing that request backlog and ready-task backlog must be tracked independently.
-- `./.codex/scripts/codex10 add-worker` can fail when stale `.worktrees/wt-N` directories already exist; failed provisioning does not auto-repair registry state.
-- Rapid allocator reassignment can race Tier 2 worker claims after a `completed_task` reset, so task creation may need to proceed as queued-ready when no idle worker remains.
+## Active Session Notes
+- Test suite at 536+ tests (MAX_REASSIGNMENTS cap test added PR #292)
+- Ownership validation added to complete-task (PR #286), start-task (PR #287), fail-task (PR #289) handlers
+- Watchdog output freshness guard fixed (PR #288): hash seeded at Level 3
+- Watchdog conflict merge auto-retry added (PR #293): Case 3 now retries up to 3 times via activity_log tracking
+- String() wrapper bug in watchdog handleDeath fixed (commit b879754): INTEGER/TEXT type mismatch prevented MAX_REASSIGNMENTS cap from firing
+- Research pipeline verified working end-to-end (PR #54): thinking mode, 11.6K char response
+- App.js pollInstances resource leak fixed (PR #291): disconnectTab + switchTab
+- Merger functional_conflict recovery already applied (commit 5a1de9c)
+- Dependency promotion bug: tasks with string depends_on IDs may not auto-promote
+- Idle-loop staleness gate can still force a full reset when change breadth spans >=50% of domains, even with zero pending requests.
 
-Last scanned baseline: 2026-03-13T11:48:18Z (`.codex/state/codebase-map.json` rebuilt).
+Last scanned: 2026-03-21

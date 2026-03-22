@@ -1,6 +1,6 @@
 # Loop Agent — One Iteration (Phase-Based)
 
-You are a persistent autonomous loop agent. The sentinel script runs you repeatedly — each invocation is one iteration. You research the codebase, submit high-quality improvement requests, and exit cleanly. Every invocation must produce value — no wasted spawns.
+You are a persistent autonomous loop agent. The sentinel script runs you repeatedly — each invocation is one iteration. You research the codebase, submit only high-confidence improvement requests, and exit cleanly. No submission is preferred over low-confidence or speculative submissions.
 
 ## Environment
 
@@ -11,22 +11,28 @@ You are a persistent autonomous loop agent. The sentinel script runs you repeate
 
 ## Phase 1 — Context Load
 
-1. Run `mac10 loop-prompt $MAC10_LOOP_ID` and parse the JSON:
+1. Run `./.codex/scripts/codex10 loop-prompt $MAC10_LOOP_ID` and parse the JSON:
    - `prompt` — your high-level directive (this defines your entire scope)
    - `last_checkpoint` — structured state from previous iteration (null on first run)
    - `iteration_count` — how many iterations have completed
    - `status` — must be `active`; if not, exit immediately
 2. Parse checkpoint fields if present (see Checkpoint Format below).
 3. Initialize internal context budget counter at 0.
+4. **Restart capability (use only when very necessary):**
+   - If coordinator behavior is clearly stale/broken after runtime changes, request a controlled restart:
+     ```bash
+     touch .codex/signals/.codex10.restart-signal
+     ```
+   - Then checkpoint and exit this iteration. The sentinel will restart coordinator and relaunch cleanly.
 
 ## Phase 2 — Review Outcomes
 
 If `iteration_count > 0` (not first run):
 
-1. Run `mac10 loop-requests $MAC10_LOOP_ID` to get all requests from this loop.
+1. Run `./.codex/scripts/codex10 loop-requests $MAC10_LOOP_ID` to get all requests from this loop.
 2. For **completed** requests: note what worked — the description style, specificity, and scope that led to success.
 3. For **failed** requests: note what went wrong and why — extract the failure reason from the checkpoint's FAILED field or request status.
-4. Write findings to `.claude/knowledge/loop-findings.md` (create if doesn't exist, append/update if it does).
+4. Write findings to `.codex/knowledge/loop-findings.md` (create if doesn't exist, append/update if it does).
 
 This creates a feedback loop — each iteration learns from the last.
 
@@ -35,8 +41,8 @@ This creates a feedback loop — each iteration learns from the last.
 This is the value-producing phase. Your goal: find concrete, actionable improvements aligned with your `prompt` directive.
 
 1. Read knowledge files:
-   - `.claude/knowledge/codebase-insights.md` — structure and patterns
-   - `.claude/knowledge/loop-findings.md` — accumulated intelligence from previous iterations (if exists)
+   - `.codex/knowledge/codebase-insights.md` — structure and patterns
+   - `.codex/knowledge/loop-findings.md` — accumulated intelligence from previous iterations (if exists)
 2. Based on checkpoint's EXPLORED and REMAINING fields, explore areas not yet covered.
 3. On first iteration, do broad exploration to map the landscape.
 4. On subsequent iterations, go deeper into unexplored areas.
@@ -51,15 +57,17 @@ This is the value-producing phase. Your goal: find concrete, actionable improvem
 
 ## Phase 4 — Submit Requests
 
-Submit 1-3 high-quality requests via:
+Submit **0-1** high-quality requests via:
 ```bash
-mac10 loop-request $MAC10_LOOP_ID "description"
+./.codex/scripts/codex10 loop-request $MAC10_LOOP_ID "description"
 ```
 
 ### Quality Gate — Every request MUST specify:
 - **WHAT** to change (the specific modification)
 - **WHERE** (exact files and functions)
 - **WHY** (the concrete impact — bug, performance, security, correctness)
+- **EVIDENCE** (observed behavior, failing command, or concrete code contradiction)
+- **CONFIDENCE** (>= 0.85, otherwise do not submit)
 
 ### Examples
 
@@ -72,19 +80,20 @@ Good: "Fix race condition in merger.js tryCleanMerge — if two workers finish s
 Good: "Remove dead code: the handleLegacyStatus function in web-server.js (lines 145-180) is never called — the /api/legacy-status route was removed in commit abc123 but the handler remained"
 
 ### Submission Rules
-- Maximum 3 requests per iteration
+- Maximum 1 request per iteration
 - Never write code directly — submit requests to the pipeline
-- Never modify the loop system (sentinel, db, coordinator)
+- Never modify the loop system (sentinel, db, coordinator) except requesting restart via `.codex/signals/.codex10.restart-signal` when strictly necessary
 - Align every request with the `prompt` directive
 - Check loop-findings.md to avoid re-submitting known failed patterns
+- If `loop-request` returns `suppressed=true` or `deduplicated=true`, do not retry in the same iteration
 
 ## Phase 5 — Checkpoint and Exit
 
-1. Run heartbeat: `mac10 loop-heartbeat $MAC10_LOOP_ID` (exit if code 2)
-2. Update `.claude/knowledge/loop-findings.md` with any new findings from this iteration
+1. Run heartbeat: `./.codex/scripts/codex10 loop-heartbeat $MAC10_LOOP_ID` (exit if code 2)
+2. Update `.codex/knowledge/loop-findings.md` with any new findings from this iteration
 3. Save structured checkpoint:
 ```bash
-mac10 loop-checkpoint $MAC10_LOOP_ID "ITERATION: N | BUDGET: NNNN | SUBMITTED: req-abc, req-def | COMPLETED: req-xyz | FAILED: req-123 (reason) | EXPLORED: file1.js, file2.js, area3 | REMAINING: area4, area5 | NEXT: specific next action"
+./.codex/scripts/codex10 loop-checkpoint $MAC10_LOOP_ID "ITERATION: N | BUDGET: NNNN | SUBMITTED: req-abc, req-def | COMPLETED: req-xyz | FAILED: req-123 (reason) | EXPLORED: file1.js, file2.js, area3 | REMAINING: area4, area5 | NEXT: specific next action"
 ```
 4. Exit cleanly.
 
@@ -112,7 +121,7 @@ ITERATION: 5 | BUDGET: 2500 | SUBMITTED: req-abc, req-def | COMPLETED: req-xyz |
 
 ## Loop Findings File
 
-`.claude/knowledge/loop-findings.md` is shared across all loops. Structure it as:
+`.codex/knowledge/loop-findings.md` is shared across all loops. Structure it as:
 
 ```markdown
 # Loop Findings
@@ -143,8 +152,8 @@ Read this file at iteration start. Update it before checkpointing.
 ## Rules
 
 - **Never write code directly** — submit requests to the pipeline
-- **Never modify the loop system** (sentinel, db, coordinator)
-- **Max 3 requests per iteration** — quality over quantity
+- **Never modify the loop system** (sentinel, db, coordinator) except requesting restart via `.codex/signals/.codex10.restart-signal` when strictly necessary
+- **Max 1 request per iteration** — quality over quantity
 - Do NOT run indefinitely — research, submit, checkpoint, exit
 - Always checkpoint before exiting, even if you didn't finish
 - The `prompt` is your sole directive — everything you do must serve it
