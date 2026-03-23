@@ -491,6 +491,7 @@ const COMMAND_SCHEMAS = {
   'replan-dependency': { required: ['from_task_id', 'to_task_id'], types: { from_task_id: 'number', to_task_id: 'number', request_id: 'string' } },
   'register-worker':   { required: ['worker_id'], types: { worker_id: 'string', worktree_path: 'string', branch: 'string' } },
   'repair':            { required: [], types: {} },
+  'purge-tasks':       { required: [], types: { status: 'string' } },
   'ping':              { required: [], types: {} },
   'add-worker':        { required: [], types: {} },
   'merge-status':      { required: [], types: { request_id: 'string' } },
@@ -3706,6 +3707,28 @@ function handleCommand(cmd, conn, handlers) {
         });
         break;
       }
+      case 'purge-tasks': {
+        const purgeStatus = args.status || 'failed';
+        const dbConn = db.getDb();
+        const deleteMerges = dbConn.prepare(`
+          DELETE FROM merge_queue
+          WHERE task_id IN (SELECT id FROM tasks WHERE status = ?)
+            AND status IN ('failed', 'conflict')
+        `);
+        const deleteTasks = dbConn.prepare(`
+          DELETE FROM tasks WHERE status = ?
+        `);
+        const tx = dbConn.transaction((s) => {
+          const mergesResult = deleteMerges.run(s);
+          const tasksResult = deleteTasks.run(s);
+          return { purged_merges: mergesResult.changes, purged_tasks: tasksResult.changes };
+        });
+        const result = tx(purgeStatus);
+        db.log('coordinator', 'purge-tasks', { status: purgeStatus, ...result });
+        respond(conn, { ok: true, ...result });
+        break;
+      }
+
       case 'ping': {
         respond(conn, { ok: true, ts: Date.now() });
         break;

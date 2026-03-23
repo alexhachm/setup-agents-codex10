@@ -1649,6 +1649,12 @@ async function main() {
         else { console.error(result.error); process.exit(1); }
         break;
 
+      case 'purge-tasks':
+        result = await send(socketPath, 'purge-tasks', {});
+        if (result.ok) console.log(`Purged ${result.purged_tasks} tasks, ${result.purged_merges} merge entries`);
+        else { console.error(result.error); process.exit(1); }
+        break;
+
       case 'gui':
         console.log('Dashboard: http://localhost:3100');
         break;
@@ -2070,6 +2076,7 @@ SYSTEM:
   start [project_dir]            Start coordinator
   stop [project_dir]             Stop coordinator
   repair                         Fix stuck state
+  purge-tasks                    Remove all failed tasks and their merge queue entries
   add-worker                     Create a new worker worktree (up to max_workers)
   merge-status [request_id]      Show merge queue entries
   gui                            Show dashboard URL
