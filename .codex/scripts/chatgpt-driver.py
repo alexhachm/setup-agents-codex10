@@ -1515,6 +1515,8 @@ class TabPool:
         self._focus_lock = asyncio.Lock()   # safety net for follow-ups
         self._shutdown = False
         self._lifecycle_tasks = set()       # track per-item async tasks
+        # Browser-death detection
+        self._consecutive_open_failures = 0
         # Session state
         self._session_n = 0
         self._session_dispatched = 0
@@ -1663,11 +1665,23 @@ class TabPool:
             # Open a fresh tab for this item
             slot = await self._open_tab()
             if slot.state != TabSlotState.IDLE:
-                log.error(f"Slot {slot.slot_id}: open failed, failing item #{item_id}")
+                self._consecutive_open_failures += 1
+                log.error(
+                    f"Slot {slot.slot_id}: open failed, failing item #{item_id} "
+                    f"(consecutive failures: {self._consecutive_open_failures})"
+                )
                 run_codex10("research-fail", str(item_id), "Tab open failed")
                 if slot in self.slots:
                     self.slots.remove(slot)
+                if self._consecutive_open_failures >= 3:
+                    log.error(
+                        f"Browser death detected: {self._consecutive_open_failures} consecutive "
+                        f"tab-open failures. Shutting down so research-sentinel.sh can restart."
+                    )
+                    self._shutdown = True
+                    break
                 continue
+            self._consecutive_open_failures = 0
 
             slot.item = item
             slot.composed = compose_prompt(item)

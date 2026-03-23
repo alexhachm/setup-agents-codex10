@@ -7,7 +7,7 @@ You are a coding worker in the mac10 multi-agent system. You receive tasks from 
 1. **Receive** a task via `mac10 my-task`
 2. **Implement** the requested changes
 3. **Validate** your work (build, test, lint)
-4. **Ship** via `/commit-push-pr`
+4. **Ship** by committing locally; push/create a PR only if a remote exists
 5. **Report** via `mac10 complete-task` or `mac10 fail-task`
 
 ## Communication
@@ -54,8 +54,8 @@ This is your only search interface. Do not use WebSearch, WebFetch, or any brows
 1. **One task at a time.** Never work on multiple tasks.
 2. **Stay in domain.** Only modify files listed in your task or closely related. Domain mismatch = fail + exit.
 3. **Heartbeat.** Send heartbeats every 30s to avoid watchdog termination.
-4. **Sync first.** Always `git fetch origin && git rebase origin/main` before coding.
-5. **Validate.** Tier 2: build-validator. Tier 3: build-validator + verify-app.
+4. **Sync first when possible.** If `origin` exists, fetch/rebase before coding. If no remote exists, stay on the assigned branch.
+5. **Validate with real repo commands.** Use the task validation field or the smallest relevant local check. Do not rely on helper slash-commands unless they actually exist in the repo.
 6. **Exit when done.** Don't loop — the sentinel handles lifecycle.
 
 ## Context Budget
@@ -66,62 +66,3 @@ Track your context usage. Reset triggers:
 - Self-check failure (can't recall files from memory)
 
 On reset: full knowledge distillation before exiting.
-
-
-# Current Task
-
-**Task ID:** 98
-**Request ID:** req-b66d9a76
-**Subject:** Filter ready-task discovery and promotion to active requests only
-**Tier:** 2
-**Priority:** normal
-**Domain:** coordinator-core
-
-## Description
-
-DOMAIN: coordinator-core
-FILES: coordinator/src/db.js, coordinator/tests/allocator.test.js, coordinator/tests/state-machine.test.js
-VALIDATION: tier2
-TIER: 2
-
-REQUIREMENTS:
-1. In coordinator/src/db.js getReadyTasks(): join requests table and exclude tasks where request status is completed or failed.
-2. In coordinator/src/db.js checkAndPromoteTasks(): apply same request-status filter to both bulk pending->ready update and dependency-based promotion.
-3. Add regression tests proving: (a) tasks attached to completed requests are not returned by getReadyTasks, (b) tasks attached to failed requests are not promoted, (c) normal active-request tasks still work.
-
-SUCCESS CRITERIA:
-- Terminal request tasks never appear in ready-tasks output
-- No false filtering of active request tasks
-- All existing tests pass
-
-## Files to Modify
-
-- coordinator/src/db.js
-- coordinator/tests/allocator.test.js
-- coordinator/tests/state-machine.test.js
-
-## Validation
-
-
-## Known Pitfalls
-
-# Known Pitfalls
-
-Mistakes made by workers. Read before starting any task to avoid repeating them.
-
-## Common Mistakes
-- (none yet)
-
-## Worker Info
-
-- Worker ID: 4
-- Branch: agent-4
-- Worktree: .worktrees/wt-4
-
-## Protocol
-
-Use `mac10` CLI for all coordination:
-- `mac10 start-task <worker_id> <task_id>` — Mark task as started
-- `mac10 heartbeat <worker_id>` — Send heartbeat (every 30s during work)
-- `mac10 complete-task <worker_id> <task_id> <pr_url> <branch>` — Report completion
-- `mac10 fail-task <worker_id> <task_id> <error>` — Report failure
