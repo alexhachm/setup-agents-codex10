@@ -17,6 +17,8 @@ Budget: ~1000 tokens max.
 - `check-overlaps` before deep source work prevents wasted effort on overlap-blocked file sets
 - Mod-3 memory re-anchor (every 3rd iteration) catches context drift early
 - Isolated temp-project repros using unique `MAC10_NAMESPACE` produce clean evidence without mutating coordinator state
+- When a loop request is marked completed as duplicate, treat it as unresolved on main until tests/code verify the fix actually landed; duplicates can close quickly without changing current branch behavior
+- Requests can show `check-completion` as ALL DONE while overall request status is `failed` from integration conflicts; use `loop-requests --json` status/result as source of truth for loop outcome learning
 
 ## Known Stale Corrections (as of 2026-03-18)
 - `coordinator/src/watchdog.js` respawn now includes `MAC10_NAMESPACE` — do not resubmit namespace-drop gap
@@ -29,7 +31,11 @@ Budget: ~1000 tokens max.
 
 ## Active Codebase Gaps (in progress)
 - Loop-36 (iter 0): Reproduced tier1-complete stdin parsing bug on main. coordinator/bin/mac10 `case 'tier1-complete'` sends `argv.slice(2).join(' ')` and does not read stdin when result is `-`. `cd coordinator && npm test` fails at tests/cli.test.js:156 ("should read tier1-complete payload from stdin when result is dash"). Submitted req-b8af0c37.
+- Loop-36 (iter 1 outcome): req-b8af0c37 failed at integration despite worker task completion because merge pipeline hit dirty-worktree rebase conflict (`git rebase origin/main` -> `cannot rebase: You have unstaged changes`). Pattern: good code fix requests can still fail due unrelated merge state.
+- Loop-36 (iter 2): Reproduced a merge-pipeline correctness regression in coordinator/src/merger.js onTaskCompleted: with a failed merge_queue row (`functional_conflict`), onTaskCompleted still marks request `completed` with result `All 1 task(s) completed (no PRs to merge)`. Submitted req-94d60e87 to gate completion on full merge_queue status and add regression coverage.
 - Loop-37 (iter 0): Re-verified the same main-branch regression with fresh evidence and no overlap with active orchestration-scripts tasks. `cd coordinator && npm test` still fails at tests/cli.test.js:156 (actual `-` instead of stdin payload). Submitted req-a36bfdb4 to patch coordinator/bin/mac10 tier1-complete stdin handling.
+- Loop-37 (iter 1): req-a36bfdb4 was auto-completed as duplicate of req-b8af0c37, but current main still fails the same regression test (`cd coordinator && npm test`, tests/cli.test.js:156), so bug remains unresolved on main pending integration.
+- Loop-37 (iter 2): Reproduced merge identity regression in coordinator/src/db.js enqueueMerge: duplicate request+pr_url+branch rows insert when task_id differs. Temp DB repro inserted two pending rows for same PR/branch in one request; live codex10.db also contains duplicate groups (example req-6a20de1d has 9 rows for pull/100 on agent-2). Submitted req-a3e23f09 to restore request+pr_url+branch dedupe contract and add regression coverage.
 - cli-server.js ownership validation: complete-task DONE, start-task DONE, fail-task (req-49ba1237) DONE
 - watchdog.js output freshness guard (req-e4d82c14) DONE
 - web-server.js false success (req-0692ea1a) DONE
@@ -79,4 +85,4 @@ Budget: ~1000 tokens max.
 - setup.sh uncommitted changes: clean — provider-utils.sh added to copy loop, symlink skip guard, launch section replaced with start-claude.sh/start-codex.sh references
 - templates/ uncommitted changes: allocate-loop.md (mailbox-blocking, subagent conflicts, deprecated merge_failed), worker-loop.md (research queue steps, merge-prep, knowledge persistence), settings.json (claude permission, dual-provider hook path) — all intentional, only step numbering bug found
 
-Last curated: 2026-03-19
+Last curated: 2026-03-23

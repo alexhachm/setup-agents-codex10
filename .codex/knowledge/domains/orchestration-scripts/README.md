@@ -52,8 +52,10 @@ State symlink: `.claude/state` → `/home/owner/Desktop/<project>/.claude-shared
 If coordinator crashes (socket/port file exists but no process listening):
 - `tmux send-keys -t <session>:0 "node $MAC10_BIN start" Enter`
 - Verify: `nc -z 127.0.0.1 <port>`
+- If worker CLI reports `mac10 coordinator not running (no socket found)`, run `mac10 start` from the worktree shell to restore socket/bootstrap state.
 
 ## Changelog (last 5)
+- 2026-03-23: Documented worker-side recovery for `no socket found` startup failures via `mac10 start`
 - 2026-03-23: Added `.codex` worktree copy invariants and startup self-healing pattern for symlink/incomplete worktree states
 - 2026-03-22: Added external project cleanup procedure and coordinator recovery pattern
 - 2026-03-16: Condensed from append-only domain file into living doc
