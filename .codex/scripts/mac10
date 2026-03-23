@@ -1,0 +1,21 @@
+#!/usr/bin/env bash
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+MAC10_BIN="/mnt/c/Users/Owner/Desktop/setup-agents-codex10/coordinator/bin/mac10"
+MAC10_PROJECT_DIR="/mnt/c/Users/Owner/Desktop/setup-agents-codex10"
+if [ ! -f "$MAC10_BIN" ]; then
+  echo "ERROR: mac10 CLI not found at $MAC10_BIN" >&2
+  echo "  Has the setup-agents repo moved? Re-run setup.sh to fix." >&2
+  exit 1
+fi
+if [ ! -d "$MAC10_PROJECT_DIR" ]; then
+  echo "ERROR: mac10 project directory not found at $MAC10_PROJECT_DIR" >&2
+  echo "  Re-run setup.sh to regenerate wrappers for this project." >&2
+  exit 1
+fi
+export MAC10_NAMESPACE="${MAC10_NAMESPACE:-codex10}"
+export MAC10_PROJECT_DIR
+cd "$MAC10_PROJECT_DIR" || {
+  echo "ERROR: failed to enter $MAC10_PROJECT_DIR" >&2
+  exit 1
+}
+exec node "$MAC10_BIN" "$@"

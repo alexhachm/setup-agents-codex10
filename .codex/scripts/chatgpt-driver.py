@@ -109,8 +109,6 @@ MAX_FOLLOW_UPS = 3
 POOL_MIN_TABS = 5
 POOL_MAX_TABS = 10
 POOL_RESIZE_INTERVAL_SEC = 30 * 60   # Pick new random target every ~30 min
-# Minimum time (seconds) a session must run before it can be reset early due to queue backlog
-SESSION_MIN_ACTIVE_SEC = 5 * 60      # 5 minutes — prevents hammering on fast-cycling sessions
 TAB_CLOSE_DELAY_MIN = 60             # Min seconds a completed tab lingers
 TAB_CLOSE_DELAY_MAX = 300            # Max seconds before tab closes
 TAB_OPEN_STAGGER = 3                 # Seconds between opening new tabs
@@ -206,13 +204,10 @@ class TabSlot:
         return f"<TabSlot {self.slot_id} state={self.state.value} item={getattr(self.item, 'get', lambda k, d=None: d)('id', None) if self.item else None}>"
 
 
-PROJECT_GITHUB_REPO = "alexhachm/setup-agents-codex10"
-
-
 def _discover_github_repo():
     """Discover the GitHub repo URL from git remote origin.
 
-    Returns 'owner/repo' string. Falls back to PROJECT_GITHUB_REPO if discovery fails.
+    Returns 'owner/repo' string or empty string if not discoverable.
     """
     try:
         result = subprocess.run(
@@ -221,18 +216,19 @@ def _discover_github_repo():
             cwd=str(PROJECT_DIR),
         )
         remote_url = result.stdout.strip()
-        if remote_url:
-            # HTTPS: https://github.com/owner/repo.git
-            m = re.match(r'https?://github\.com/([^/]+/[^/]+?)(?:\.git)?$', remote_url)
-            if m:
-                return m.group(1)
-            # SSH: git@github.com:owner/repo.git
-            m = re.match(r'git@github\.com:([^/]+/[^/.]+?)(?:\.git)?$', remote_url)
-            if m:
-                return m.group(1)
+        if not remote_url:
+            return ""
+        # HTTPS: https://github.com/owner/repo.git
+        m = re.match(r'https?://github\.com/([^/]+/[^/]+?)(?:\.git)?$', remote_url)
+        if m:
+            return m.group(1)
+        # SSH: git@github.com:owner/repo.git
+        m = re.match(r'git@github\.com:([^/]+/[^/.]+?)(?:\.git)?$', remote_url)
+        if m:
+            return m.group(1)
     except Exception as e:
         log.debug(f"GitHub repo discovery failed: {e}")
-    return PROJECT_GITHUB_REPO
+    return ""
 
 # Discover once at module load
 GITHUB_REPO = _discover_github_repo()
@@ -488,12 +484,14 @@ class BrowserManager:
         else:
             log.info(f"Using Linux Chrome with profile: {profile_path}")
 
-        # Use headless mode for normal operation; keep GUI for --setup (manual login)
-        _use_headless = "--setup" not in sys.argv
         start_kwargs = {
             "user_data_dir": profile_path,
             "sandbox": False,
-            "headless": _use_headless,
+            "browser_args": [
+                "--disable-background-timer-throttling",
+                "--disable-renderer-backgrounding",
+                "--disable-backgrounding-occluded-windows",
+            ],
         }
         if CHROME_BINARY:
             start_kwargs["browser_executable_path"] = CHROME_BINARY
@@ -607,24 +605,35 @@ _MONITOR_JS = """
             || document.querySelector('button[data-testid="stop-button"]')
         );
 
-        // Input readiness
+        // Input readiness — multiple selectors for ChatGPT UI variations
         const textarea = document.querySelector('textarea, [contenteditable="true"]');
         s.textareaEnabled = textarea ? !textarea.disabled : false;
-        s.sendButtonVisible = !!document.querySelector('button[data-testid="send-button"]');
+        s.sendButtonVisible = !!(
+            document.querySelector('button[data-testid="send-button"]')
+            || document.querySelector('button[data-testid="composer-send-button"]')
+            || document.querySelector('button[aria-label="Send prompt"]')
+            || document.querySelector('button[aria-label="Send"]')
+        );
+        // Broader input readiness: textarea present and not disabled
+        s.inputReady = s.sendButtonVisible || (s.textareaEnabled && !s.stopButtonVisible && !s.isStreaming);
 
         // Deep Research detection — DR uses an iframe, not assistant messages
-        const drIframe = document.querySelector('iframe[title*="deep-research"]');
+        const drIframe = document.querySelector(
+            'iframe[title*="deep-research"], iframe[title*="Deep Research"], '
+            + 'iframe[src*="deep_research"], iframe[src*="deep-research"]'
+        );
         s.deepResearchIframe = !!drIframe;
         if (drIframe) {
             s.deepResearchActive = true;
             // DR phases inferred from page state:
-            // - "working": iframe exists but send button absent (DR still processing)
-            // - "complete": iframe exists and send button reappears
-            s.deepResearchPhase = s.sendButtonVisible ? 'complete' : 'working';
+            // - "working": iframe exists but input not ready (DR still processing)
+            // - "complete": iframe exists and input becomes ready (user can type again)
+            s.deepResearchPhase = s.inputReady ? 'complete' : 'working';
             // Track iframe height as a rough progress indicator
             s.deepResearchIframeHeight = drIframe.offsetHeight || 0;
         } else {
-            // Fallback: check sidebar link or other indicators
+            // If no iframe found but input is ready and we have conversation turns,
+            // DR may have completed and the iframe was removed
             const drSidebar = document.querySelector('[data-testid*="deep-research"]');
             s.deepResearchActive = false;
             s.deepResearchPhase = 'none';
@@ -799,6 +808,7 @@ _MODE_CONFIG = {
     "standard": {
         "start_timeout": 45,
         "generation_timeout": 480,
+        "streaming_timeout": 180,
         "stability_duration": 6.0,
         "poll_interval": 1.5,
         "min_response_length": 20,
@@ -806,13 +816,15 @@ _MODE_CONFIG = {
     "thinking": {
         "start_timeout": 90,
         "generation_timeout": 900,
+        "streaming_timeout": 300,
         "stability_duration": 8.0,
         "poll_interval": 2.0,
-        "min_response_length": 50,
+        "min_response_length": 1,
     },
     "deep_research": {
         "start_timeout": 300,
-        "generation_timeout": 2400,
+        "generation_timeout": 3600,
+        "streaming_timeout": 1800,
         "stability_duration": 20.0,
         "poll_interval": 8.0,
         "min_response_length": 200,
@@ -837,10 +849,6 @@ class ResponseDetector:
         self.state = ResponseState.IDLE
         self._state_entered_at = time.time()
         self._last_log_state = None
-        # DR guard: set True once 300s have elapsed in STREAMING so that
-        # subsequent complete signals (after a COLLECTING→STREAMING revert)
-        # skip the time check and proceed directly to COLLECTING.
-        self._dr_wait_300s_done = False
 
     def _transition(self, new_state):
         if new_state != self.state:
@@ -904,10 +912,7 @@ class ResponseDetector:
             elif self.state == ResponseState.STABILIZING:
                 self._handle_stabilizing(s)
             elif self.state == ResponseState.COLLECTING:
-                result = await self._handle_collecting()
-                if result is not None:
-                    return result
-                # result is None → DR text too short, reverted to STREAMING
+                return await self._handle_collecting()
 
             # Check start timeout separately
             if (self.state == ResponseState.WAITING_FOR_START
@@ -947,6 +952,13 @@ class ResponseDetector:
         # Standard modes: check streaming indicators
         if self.mode != "deep_research":
             if self._is_streaming(s):
+                stream_timeout = self.config.get("streaming_timeout", 300)
+                if self._time_in_state() > stream_timeout:
+                    log.warning(
+                        "ResponseDetector: streaming timeout "
+                        f"({self._time_in_state():.1f}s) — forcing collection"
+                    )
+                    self._transition(ResponseState.COLLECTING)
                 return
             self._transition(ResponseState.STABILIZING)
             return
@@ -954,29 +966,31 @@ class ResponseDetector:
         # Deep Research mode: stay streaming while phase is "working"
         dr_phase = s.get("deepResearchPhase", "none")
         if dr_phase == "working":
+            # Fallback: if input is ready despite "working" phase, DR may have
+            # completed but iframe title selector didn't match the completion state
+            if s.get("inputReady", False) and self._time_in_state() > 60:
+                log.info("DR input ready while 'working' — treating as complete")
+                self._transition(ResponseState.COLLECTING)
             return  # Still processing — stay in STREAMING
 
         if dr_phase == "complete":
-            # Guard against premature Plan-phase completion (~37 s in).
-            # The Plan stub is only ~400 chars; the real report is 5000-20000.
-            # Require 300 s in STREAMING before accepting the "complete" signal.
-            # _dr_wait_300s_done is set once so post-revert checks still pass.
-            if not self._dr_wait_300s_done:
-                time_in_state = self._time_in_state()
-                if time_in_state < 300:
-                    log.info(
-                        f"DR phase=complete after {time_in_state:.0f}s in STREAMING; "
-                        "likely Plan stub — waiting for full report (need 300s)"
-                    )
-                    return  # Stay in STREAMING
-                self._dr_wait_300s_done = True
-            log.info("Deep Research complete (send button reappeared)")
+            log.info("Deep Research complete (input ready)")
             self._transition(ResponseState.COLLECTING)
             return
 
         # DR iframe gone but no completion — possible page nav, keep waiting
         if s.get("deepResearchIframe", False):
+            # Iframe present but phase unknown — if input is ready, treat as done
+            if s.get("inputReady", False) and self._time_in_state() > 60:
+                log.info("DR iframe present + input ready — treating as complete")
+                self._transition(ResponseState.COLLECTING)
             return  # Iframe still there, just unknown phase
+
+        # No iframe — DR may have completed and iframe was removed
+        if s.get("inputReady", False) and self._time_in_state() > 60:
+            log.info("DR iframe gone + input ready — DR likely completed")
+            self._transition(ResponseState.COLLECTING)
+            return
 
         # No iframe and no DR signals — something changed, move to stabilizing
         self._transition(ResponseState.STABILIZING)
@@ -1018,33 +1032,21 @@ class ResponseDetector:
                 self._transition(ResponseState.COLLECTING)
 
     async def _handle_collecting(self):
-        """COLLECTING: validate and return the response.
+        """COLLECTING: validate and return the response."""
+        self._transition(ResponseState.DONE)
 
-        Returns (success, text) on completion, or None if DR text is too short
-        and the state has been reverted to STREAMING for further waiting.
-        """
         # Final DOM stabilization
         await asyncio.sleep(2)
 
         # Deep Research: text is inside a cross-origin iframe, use copy button
         if self.mode == "deep_research":
             text = await self._collect_dr_text()
-            _DR_ACCEPT_MIN = 2000
-            if len(text.strip()) < _DR_ACCEPT_MIN:
-                log.warning(
-                    f"DR text only {len(text.strip())} chars (< {_DR_ACCEPT_MIN}); "
-                    "reverting to STREAMING to await full report"
-                )
-                self._transition(ResponseState.STREAMING)
-                return None  # Signal outer loop: not done yet, continue waiting
         else:
             try:
                 text = await self.monitor.get_last_text()
             except Exception as e:
-                self._transition(ResponseState.DONE)
                 return False, f"Failed to collect response: {e}"
 
-        self._transition(ResponseState.DONE)
         valid, reason = self._validate_response(text)
         if not valid:
             log.warning(f"Response validation failed: {reason}")
@@ -1191,6 +1193,40 @@ class ResponseDetector:
 
 # --- Model Selection ---
 
+def _coerce_eval_payload(value):
+    """Normalize nodriver evaluate() payloads into a dict."""
+    if isinstance(value, dict):
+        return value
+    if isinstance(value, str):
+        text = value.strip()
+        if not text:
+            return {}
+        if text.startswith("{") or text.startswith("["):
+            try:
+                parsed = json.loads(text)
+            except Exception:
+                parsed = None
+            if isinstance(parsed, dict):
+                return parsed
+            if isinstance(parsed, list):
+                return {"values": parsed}
+        return {"text": text}
+    if isinstance(value, list):
+        if len(value) == 1 and isinstance(value[0], dict):
+            return value[0]
+        if len(value) == 1 and isinstance(value[0], str):
+            return _coerce_eval_payload(value[0])
+        return {"values": value}
+    return {}
+
+
+def _looks_like_pro_option(text):
+    t = " ".join(str(text or "").lower().split())
+    if t in {"pro", "chatgpt pro", "pro thinking"}:
+        return True
+    return bool(re.fullmatch(r"o[13]-?pro", t))
+
+
 async def _get_current_model_label(page):
     """Read the model switcher button text to detect the current model."""
     try:
@@ -1210,17 +1246,603 @@ async def _get_current_model_label(page):
 async def _has_composer_pill(page, label):
     """Check if a composer pill (e.g. 'Pro') is already active."""
     try:
-        result = await page.evaluate(f"""
+        wanted = label.lower()
+        result = await page.evaluate(
+            f"""
             (() => {{
-                const pills = document.querySelectorAll('[class*="composer-pill"]');
-                for (const p of pills) {{
-                    if ((p.innerText || '').trim().toLowerCase() === '{label.lower()}') return true;
+                const wanted = {wanted!r};
+                const norm = (v) => String(v || '').replace(/\\s+/g, ' ').trim().toLowerCase();
+                const textboxCandidates = Array.from(
+                    document.querySelectorAll('#prompt-textarea, textarea, [contenteditable], [role="textbox"]')
+                );
+                const textarea = document.querySelector('#prompt-textarea')
+                    || textboxCandidates.find((el) => {{
+                    if (!el || !el.getClientRects || !el.getClientRects().length) return false;
+                    if (el.closest('aside, nav, [data-testid*="sidebar"]')) return false;
+                    const aria = norm(el.getAttribute && el.getAttribute('aria-label'));
+                    const placeholder = norm(el.getAttribute && el.getAttribute('placeholder'));
+                    if (aria.includes('search') || placeholder.includes('search')) return false;
+                    const rect = el.getBoundingClientRect();
+                    if (rect.width < 240) return false;
+                    return true;
+                }}) || null;
+                const roots = [];
+                if (textarea && textarea.closest('form')) roots.push(textarea.closest('form'));
+                const composer = document.querySelector('[id*="composer"], [class*="composer"]');
+                if (composer) roots.push(composer);
+                if (roots.length === 0) return false;
+
+                const seen = new Set();
+                for (const root of roots) {{
+                    if (!root || seen.has(root)) continue;
+                    seen.add(root);
+                    const nodes = root.querySelectorAll(
+                        '[class*="pill"], [data-testid*="pill"], '
+                        + 'button[aria-pressed="true"], [role="button"][aria-pressed="true"], '
+                        + 'button, [role="button"]'
+                    );
+                    for (const node of nodes) {{
+                        const text = norm(node.innerText || node.textContent || '');
+                        if (!text) continue;
+                        if (text !== wanted && text !== `chatgpt ${{wanted}}`) continue;
+                        {{
+                            const cls = norm(node.className || '');
+                            const dataTest = norm(node.getAttribute && node.getAttribute('data-testid'));
+                            const ariaPressed = node.getAttribute && node.getAttribute('aria-pressed') === 'true';
+                            const ariaSelected = node.getAttribute && node.getAttribute('aria-selected') === 'true';
+                            if (
+                                ariaPressed ||
+                                ariaSelected ||
+                                cls.includes('active') ||
+                                cls.includes('selected') ||
+                                cls.includes('pill') ||
+                                dataTest.includes('pill')
+                            ) {{
+                                return true;
+                            }}
+                        }}
+                    }}
                 }}
                 return false;
             }})()
-        """)
+            """
+        )
         return bool(result)
     except Exception:
+        return False
+
+
+async def _activate_pro_via_dropdown(page):
+    """Click the top-left 'ChatGPT' dropdown and select Pro thinking.
+
+    The current ChatGPT UI shows a 'ChatGPT' label with a dropdown icon in the
+    top-left corner.  Clicking it reveals model options including 'ChatGPT Pro'
+    or similar.  Returns True if Pro was successfully selected.
+    """
+    def _open_selector_js():
+        return """
+        (() => {
+            const isVisible = (el) => !!(el && el.isConnected && el.getClientRects().length);
+            const textOf = (el) => (el?.innerText || el?.textContent || '').replace(/\\s+/g, ' ').trim();
+            const interactiveSelector = 'button,[role="button"],[role="menuitem"],[role="option"],li,div[tabindex],a,label';
+            const norm = (s) => String(s || '').replace(/\\s+/g, ' ').trim().toLowerCase();
+            const pick = (el) => el ? {
+                tag: el.tagName,
+                text: textOf(el),
+                aria: el.getAttribute('aria-label'),
+                testid: el.getAttribute('data-testid'),
+                id: el.id || '',
+                className: String(el.className || ''),
+            } : null;
+            const clickLikeUser = (el) => {
+                if (!el) return false;
+                try { el.scrollIntoView({ block: 'center', inline: 'center' }); } catch (_err) {}
+                const dispatch = (Ctor, type) => {
+                    if (typeof Ctor !== 'function') return;
+                    try { el.dispatchEvent(new Ctor(type, { bubbles: true, cancelable: true })); } catch (_err) {}
+                };
+                dispatch(window.PointerEvent, 'pointerdown');
+                dispatch(window.MouseEvent, 'mousedown');
+                dispatch(window.PointerEvent, 'pointerup');
+                dispatch(window.MouseEvent, 'mouseup');
+                dispatch(window.MouseEvent, 'click');
+                try { el.click(); } catch (_err) {}
+                return true;
+            };
+            const visibleInteractive = (root = document) =>
+                [...root.querySelectorAll(interactiveSelector)].filter(isVisible);
+            const getBlob = (el) =>
+                [
+                    textOf(el),
+                    el.getAttribute?.('aria-label') || '',
+                    el.getAttribute?.('data-testid') || '',
+                    el.id || '',
+                    String(el.className || ''),
+                ].join(' ').replace(/\\s+/g, ' ').trim().toLowerCase();
+            const findInteractive = (patterns, root = document) =>
+                visibleInteractive(root).find((el) => {
+                    const blob = getBlob(el);
+                    return patterns.some((rx) => rx.test(blob));
+                });
+            const modelSelector =
+                document.querySelector('button[data-testid="model-switcher-dropdown-button"]')
+                || findInteractive([/model selector/, /\\bchatgpt\\b/, /\\bmodel\\b/]);
+            if (!modelSelector) return JSON.stringify({ ok: false, reason: 'no-model-selector' });
+            clickLikeUser(modelSelector);
+            return JSON.stringify({ ok: true, modelSelector: pick(modelSelector) });
+        })()
+        """
+
+    def _click_pro_js():
+        return """
+        (() => {
+            const isVisible = (el) => !!(el && el.isConnected && el.getClientRects().length);
+            const textOf = (el) => (el?.innerText || el?.textContent || '').replace(/\\s+/g, ' ').trim();
+            const interactiveSelector = 'button,[role="button"],[role="menuitem"],[role="option"],li,div[tabindex],a,label';
+            const norm = (s) => String(s || '').replace(/\\s+/g, ' ').trim().toLowerCase();
+            const pick = (el) => el ? {
+                tag: el.tagName,
+                text: textOf(el),
+                aria: el.getAttribute('aria-label'),
+                testid: el.getAttribute('data-testid'),
+                id: el.id || '',
+                className: String(el.className || ''),
+            } : null;
+            const clickLikeUser = (el) => {
+                if (!el) return false;
+                try { el.scrollIntoView({ block: 'center', inline: 'center' }); } catch (_err) {}
+                const dispatch = (Ctor, type) => {
+                    if (typeof Ctor !== 'function') return;
+                    try { el.dispatchEvent(new Ctor(type, { bubbles: true, cancelable: true })); } catch (_err) {}
+                };
+                dispatch(window.PointerEvent, 'pointerdown');
+                dispatch(window.MouseEvent, 'mousedown');
+                dispatch(window.PointerEvent, 'pointerup');
+                dispatch(window.MouseEvent, 'mouseup');
+                dispatch(window.MouseEvent, 'click');
+                try { el.click(); } catch (_err) {}
+                return true;
+            };
+            const visibleInteractive = (root = document) =>
+                [...root.querySelectorAll(interactiveSelector)].filter(isVisible);
+            const getBlob = (el) =>
+                [
+                    textOf(el),
+                    el.getAttribute?.('aria-label') || '',
+                    el.getAttribute?.('data-testid') || '',
+                    el.id || '',
+                    String(el.className || ''),
+                ].join(' ').replace(/\\s+/g, ' ').trim().toLowerCase();
+            const findInteractive = (patterns, root = document) =>
+                visibleInteractive(root).find((el) => {
+                    const blob = getBlob(el);
+                    return patterns.some((rx) => rx.test(blob));
+                });
+            const direct = document.querySelector('[data-testid="model-switcher-gpt-5-4-pro"]');
+            const fallback = visibleInteractive().find((el) => {
+                const rect = el.getBoundingClientRect();
+                if (!rect || rect.left > 720 || rect.top > 520) return false;
+                const text = norm(textOf(el));
+                const aria = norm(el.getAttribute('aria-label'));
+                const testid = norm(el.getAttribute('data-testid'));
+                const role = norm(el.getAttribute('role'));
+                const cls = norm(el.className || '');
+                const hint = `${text} ${aria} ${testid}`;
+                if (!hint) return false;
+                if (
+                    hint.includes('profile')
+                    || hint.includes('account')
+                    || hint.includes('settings')
+                    || hint.includes('open profile menu')
+                ) return false;
+                const inModelMenu = (
+                    testid.includes('model-switcher')
+                    || role.includes('menuitem')
+                    || role.includes('option')
+                    || cls.includes('__menu-item')
+                );
+                if (!inModelMenu) return false;
+                if (testid.includes('model-switcher-gpt-5-4-pro')) return true;
+                if (text === 'pro' || text.startsWith('pro ') || text.includes('chatgpt pro') || text.includes('proresearch')) return true;
+                return false;
+            });
+            const target = (direct && isVisible(direct)) ? direct : fallback;
+            if (!target) {
+                const visibleSample = visibleInteractive().slice(0, 20).map((el) => ({
+                    text: textOf(el),
+                    aria: el.getAttribute('aria-label'),
+                    testid: el.getAttribute('data-testid'),
+                    role: el.getAttribute('role'),
+                    left: Math.round(el.getBoundingClientRect().left),
+                    top: Math.round(el.getBoundingClientRect().top),
+                }));
+                return JSON.stringify({ ok: false, reason: 'no-pro-option', visibleSample });
+            }
+            clickLikeUser(target);
+            return JSON.stringify({ ok: true, pro: pick(target) });
+        })()
+        """
+
+    def _verify_js():
+        return """
+        (() => {
+            const isVisible = (el) => !!(el && el.isConnected && el.getClientRects().length);
+            const textOf = (el) => (el?.innerText || el?.textContent || '').replace(/\\s+/g, ' ').trim();
+            const norm = (s) => String(s || '').replace(/\\s+/g, ' ').trim().toLowerCase();
+            const currentLabel = textOf(document.querySelector('button[data-testid="model-switcher-dropdown-button"]'));
+            const hasComposerPro = [...document.querySelectorAll('button,[role="button"],span,div')]
+                .filter(isVisible)
+                .some((el) => {
+                    const cls = String(el.className || '');
+                    if (!cls.includes('__composer-pill')) return false;
+                    return /\\bpro\\b/.test(norm(textOf(el)));
+                });
+            return JSON.stringify({ ok: true, currentLabel, hasComposerPro });
+        })()
+        """
+
+    try:
+        opened = _coerce_eval_payload(await page.evaluate(_open_selector_js()))
+        if not opened.get("ok"):
+            log.warning(f"Could not open model selector: {opened}")
+            return False
+        log.info(f"Model selector clicked: {opened.get('modelSelector')}")
+        await asyncio.sleep(0.7)
+
+        pro_click = {}
+        for _ in range(40):
+            pro_click = _coerce_eval_payload(await page.evaluate(_click_pro_js()))
+            if pro_click.get("ok"):
+                break
+            await asyncio.sleep(0.15)
+        if not pro_click.get("ok"):
+            log.warning(f"Could not activate Pro via dropdown: {pro_click}")
+            try:
+                await page.evaluate("document.body.click()")
+            except Exception:
+                pass
+            return False
+
+        log.info(f"Pro option clicked: {pro_click.get('pro')}")
+        await asyncio.sleep(0.9)
+
+        verify = _coerce_eval_payload(await page.evaluate(_verify_js()))
+        label = await _get_current_model_label(page)
+        has_pill = await _has_composer_pill(page, "pro")
+        js_verified = bool(verify.get("hasComposerPro")) or "pro" in str(verify.get("currentLabel", "")).lower()
+        log.info(
+            "Pro verification: "
+            f"js_verified={js_verified} "
+            f"js_label='{verify.get('currentLabel', '')}' "
+            f"js_composer_pro={verify.get('hasComposerPro')} "
+            f"model_label='{label}' composer_pill={has_pill}"
+        )
+
+        try:
+            await page.evaluate("document.body.click()")
+        except Exception:
+            pass
+
+        if js_verified or "pro" in (label or "").lower() or has_pill:
+            log.info("Activated Pro via deterministic selector flow")
+            return True
+
+        log.warning("Pro click completed but final verification failed")
+        return False
+    except Exception as e:
+        log.warning(f"Pro dropdown activation failed: {e}")
+        try:
+            await page.evaluate("document.body.click()")
+        except Exception:
+            pass
+        return False
+
+
+# Extended thinking budget mapping: mode → desired thinking level
+_EXTENDED_THINKING_LEVELS = {
+    "thinking": "extended",
+    "deep_research": "extended",
+    "standard": None,
+}
+
+
+async def _configure_extended_thinking(page, mode):
+    """Configure the extended thinking dropdown that appears after Pro is activated.
+
+    Once Pro thinking is active, a dropdown appears in the textbox/composer area
+    that allows setting the extended thinking budget.  The level is determined by
+    the research mode/allocation.
+    """
+    desired_level = _EXTENDED_THINKING_LEVELS.get(mode)
+    if not desired_level:
+        return True  # No configuration needed
+
+    try:
+        log.info(f"Extended thinking target level for mode '{mode}': '{desired_level}'")
+
+        find_and_click_pill_js = """
+        (() => {
+            const isVisible = (el) => !!(el && el.isConnected && el.getClientRects().length);
+            const textOf = (el) => (el?.innerText || el?.textContent || '').replace(/\\s+/g, ' ').trim();
+            const norm = (s) => String(s || '').replace(/\\s+/g, ' ').trim().toLowerCase();
+            const interactiveSelector = 'button,[role="button"],[role="menuitem"],[role="option"],li,div[tabindex],a,label';
+            const visibleInteractive = (root = document) =>
+                [...root.querySelectorAll(interactiveSelector)].filter(isVisible);
+            const pick = (el) => el ? {
+                tag: el.tagName,
+                text: textOf(el),
+                aria: el.getAttribute('aria-label'),
+                testid: el.getAttribute('data-testid'),
+                id: el.id || '',
+                className: String(el.className || ''),
+            } : null;
+            const getBlob = (el) =>
+                [
+                    textOf(el),
+                    el.getAttribute?.('aria-label') || '',
+                    el.getAttribute?.('data-testid') || '',
+                    el.id || '',
+                    String(el.className || ''),
+                ].join(' ').replace(/\\s+/g, ' ').trim().toLowerCase();
+            const isRemoveButton = (el) => {
+                const aria = norm(el.getAttribute?.('aria-label') || '');
+                const cls = String(el.className || '');
+                return aria.includes('click to remove') || cls.includes('__composer-pill-remove');
+            };
+            const isComposerPill = (el) => {
+                const cls = String(el.className || '');
+                return cls.includes('__composer-pill') && !cls.includes('__composer-pill-remove');
+            };
+            const clickLikeUser = (el) => {
+                if (!el) return false;
+                try { el.scrollIntoView({ block: 'center', inline: 'center' }); } catch (_err) {}
+                const dispatch = (Ctor, type) => {
+                    if (typeof Ctor !== 'function') return;
+                    try { el.dispatchEvent(new Ctor(type, { bubbles: true, cancelable: true })); } catch (_err) {}
+                };
+                dispatch(window.PointerEvent, 'pointerdown');
+                dispatch(window.MouseEvent, 'mousedown');
+                dispatch(window.PointerEvent, 'pointerup');
+                dispatch(window.MouseEvent, 'mouseup');
+                dispatch(window.MouseEvent, 'click');
+                try { el.click(); } catch (_err) {}
+                return true;
+            };
+            const findInteractive = (patterns, root = document, reject = null) =>
+                visibleInteractive(root).find((el) => {
+                    if (reject && reject(el)) return false;
+                    const blob = getBlob(el);
+                    return patterns.some((rx) => rx.test(blob));
+                });
+            const effortPill =
+                [...document.querySelectorAll('button')].find((el) => {
+                    if (!isVisible(el) || isRemoveButton(el)) return false;
+                    if (!isComposerPill(el)) return false;
+                    const t = norm(textOf(el));
+                    return /\\bpro\\b|\\bextended\\b|\\bstandard\\b/.test(t);
+                })
+                || findInteractive(
+                    [/\\bextended pro\\b/, /\\bpro\\b/, /\\bstandard\\b/, /\\bextended\\b/],
+                    document,
+                    isRemoveButton
+                );
+            if (!effortPill) {
+                const nearby = visibleInteractive().slice(0, 25).map((el) => ({
+                    text: textOf(el),
+                    aria: el.getAttribute('aria-label'),
+                    testid: el.getAttribute('data-testid'),
+                    className: String(el.className || ''),
+                }));
+                return JSON.stringify({ ok: false, reason: 'no-effort-pill', nearby });
+            }
+            if (!effortPill.dataset.mac10EffortPill) {
+                effortPill.dataset.mac10EffortPill = String(Date.now()) + '-' + String(Math.floor(Math.random() * 10000));
+            }
+            clickLikeUser(effortPill);
+            return JSON.stringify({
+                ok: true,
+                marker: effortPill.dataset.mac10EffortPill,
+                effortPill: pick(effortPill),
+            });
+        })()
+        """
+
+        pill_payload = {}
+        for _ in range(50):
+            pill_payload = _coerce_eval_payload(await page.evaluate(find_and_click_pill_js))
+            if pill_payload.get("ok"):
+                break
+            await asyncio.sleep(0.15)
+        if not pill_payload.get("ok"):
+            log.warning(
+                "Extended thinking selection failed: "
+                f"reason='{pill_payload.get('reason')}' desired='{desired_level}' "
+                f"nearby={pill_payload.get('nearby')}"
+            )
+            return False
+
+        marker = str(pill_payload.get("marker") or "")
+        log.info(f"Extended thinking control clicked: effort_pill={pill_payload.get('effortPill')}")
+        await asyncio.sleep(0.5)
+
+        desired_json = json.dumps(desired_level)
+        marker_json = json.dumps(marker)
+        select_option_js = f"""
+        (() => {{
+            const desired = {desired_json};
+            const marker = {marker_json};
+            const isVisible = (el) => !!(el && el.isConnected && el.getClientRects().length);
+            const textOf = (el) => (el?.innerText || el?.textContent || '').replace(/\\s+/g, ' ').trim();
+            const norm = (s) => String(s || '').replace(/\\s+/g, ' ').trim().toLowerCase();
+            const pick = (el) => el ? {{
+                tag: el.tagName,
+                text: textOf(el),
+                aria: el.getAttribute('aria-label'),
+                testid: el.getAttribute('data-testid'),
+                id: el.id || '',
+                className: String(el.className || ''),
+            }} : null;
+            const getBlob = (el) =>
+                [
+                    textOf(el),
+                    el.getAttribute?.('aria-label') || '',
+                    el.getAttribute?.('data-testid') || '',
+                    el.id || '',
+                    String(el.className || ''),
+                ].join(' ').replace(/\\s+/g, ' ').trim().toLowerCase();
+            const clickLikeUser = (el) => {{
+                if (!el) return false;
+                try {{ el.scrollIntoView({{ block: 'center', inline: 'center' }}); }} catch (_err) {{}}
+                const dispatch = (Ctor, type) => {{
+                    if (typeof Ctor !== 'function') return;
+                    try {{ el.dispatchEvent(new Ctor(type, {{ bubbles: true, cancelable: true }})); }} catch (_err) {{}}
+                }};
+                dispatch(window.PointerEvent, 'pointerdown');
+                dispatch(window.MouseEvent, 'mousedown');
+                dispatch(window.PointerEvent, 'pointerup');
+                dispatch(window.MouseEvent, 'mouseup');
+                dispatch(window.MouseEvent, 'click');
+                try {{ el.click(); }} catch (_err) {{}}
+                return true;
+            }};
+            const getLeafMenuItems = (menu) =>
+                [
+                    ...menu.querySelectorAll('[role="menuitem"],[role="option"],button,[tabindex]'),
+                ].filter((el) => isVisible(el) && el !== menu && !el.matches('[role="menu"]'));
+            const findLeafMenuItem = (menu, patterns) =>
+                getLeafMenuItems(menu).find((el) => {{
+                    const blob = getBlob(el);
+                    return patterns.some((rx) => rx.test(blob));
+                }});
+
+            let effortPill = marker ? document.querySelector(`[data-mac10-effort-pill="${{marker}}"]`) : null;
+            if (!effortPill || !isVisible(effortPill)) {{
+                effortPill = [...document.querySelectorAll('button,[role="button"]')]
+                    .find((el) => isVisible(el) && /\\bpro\\b|\\bextended\\b|\\bstandard\\b/.test(norm(textOf(el))));
+            }}
+            if (!effortPill) {{
+                return JSON.stringify({{ ok: false, reason: 'missing-effort-pill' }});
+            }}
+
+            let effortMenu = null;
+            const menuId = effortPill.getAttribute('aria-controls');
+            if (menuId) {{
+                const controlled = document.getElementById(menuId);
+                if (controlled && isVisible(controlled)) effortMenu = controlled;
+            }}
+            if (!effortMenu) {{
+                const openMenus = [...document.querySelectorAll('[role="menu"],[role="listbox"],[data-state="open"]')]
+                    .filter(isVisible);
+                if (openMenus.length) effortMenu = openMenus[0];
+            }}
+            if (!effortMenu) {{
+                clickLikeUser(effortPill);
+                return JSON.stringify({{ ok: false, reason: 'menu-not-open', effortPill: pick(effortPill) }});
+            }}
+
+            const patterns = desired === 'extended'
+                ? [/^extended$/i, /\\bextended\\b/, /\\bextended pro\\b/]
+                : [/^standard$/i, /\\bstandard\\b/, /\\bstandard thinking\\b/];
+
+            const option = findLeafMenuItem(effortMenu, patterns);
+            const options = getLeafMenuItems(effortMenu).map((el) => ({{
+                text: textOf(el),
+                aria: el.getAttribute('aria-label'),
+                role: el.getAttribute('role'),
+                testid: el.getAttribute('data-testid'),
+                id: el.id || '',
+                className: String(el.className || ''),
+            }}));
+            if (!option) {{
+                return JSON.stringify({{
+                    ok: false,
+                    reason: 'no-desired-option',
+                    desired,
+                    effortPill: pick(effortPill),
+                    options,
+                }});
+            }}
+
+            clickLikeUser(option);
+            const pillText = textOf(effortPill);
+            return JSON.stringify({{
+                ok: true,
+                desired,
+                clicked: textOf(option),
+                effortPill: pick(effortPill),
+                pillText,
+                confirmed: norm(pillText).includes(desired),
+                options,
+            }});
+        }})()
+        """
+
+        level_selected = {}
+        for _ in range(50):
+            level_selected = _coerce_eval_payload(await page.evaluate(select_option_js))
+            if level_selected.get("ok"):
+                break
+            await asyncio.sleep(0.15)
+        if not level_selected.get("ok"):
+            log.warning(
+                "Extended thinking selection failed: "
+                f"reason='{level_selected.get('reason')}' desired='{desired_level}' "
+                f"effort_pill={level_selected.get('effortPill')} "
+                f"options={level_selected.get('options')}"
+            )
+            try:
+                await page.evaluate("document.body.click()")
+            except Exception:
+                pass
+            return False
+
+        log.info(
+            "Extended thinking option clicked: "
+            f"desired='{desired_level}' clicked='{level_selected.get('clicked', '')}' "
+            f"pill_text='{level_selected.get('pillText', '')}' "
+            f"confirmed={level_selected.get('confirmed')} "
+            f"effort_pill={level_selected.get('effortPill')}"
+        )
+        options = level_selected.get("options") or []
+        if options:
+            log.info(f"Extended thinking menu options seen: {options}")
+
+        await asyncio.sleep(0.5)
+        confirm_script = f"""
+        (() => {{
+            const desired = {desired_json};
+            const norm = (v) => String(v || '').replace(/\\s+/g, ' ').trim().toLowerCase();
+            const isVisible = (el) => !!(el && el.getClientRects && el.getClientRects().length);
+            const textOf = (el) => (el?.innerText || el?.textContent || '').replace(/\\s+/g, ' ').trim();
+            const labels = document.querySelectorAll('button, span, div, [role="button"]');
+            for (const el of labels) {{
+                if (!isVisible(el)) continue;
+                const text = norm(textOf(el));
+                if (!text) continue;
+                const cls = String(el.className || '');
+                if (cls.includes('__composer-pill') && text.includes(desired)) return text;
+            }}
+            return '';
+        }})()
+        """
+        confirm = await page.evaluate(confirm_script)
+        if confirm:
+            log.info(f"Composer thinking label after configuration: '{confirm}'")
+            return True
+        if level_selected.get("confirmed"):
+            log.info("Extended thinking confirmed from effort pill text")
+            return True
+        log.warning(
+            f"Extended thinking post-check failed: desired='{desired_level}' "
+            f"pill_text='{level_selected.get('pillText', '')}'"
+        )
+        return False
+    except Exception as e:
+        log.warning(f"Extended thinking configuration failed: {e}")
+        try:
+            await page.evaluate("document.body.click()")
+        except Exception:
+            pass
         return False
 
 
@@ -1229,78 +1851,68 @@ async def select_model(page, mode):
 
     Pure function — operates on a given page. Caller tracks model state.
 
-    - standard: select GPT-5.4 Pro (or highest available Pro model)
-    - thinking: verify Pro pill is active in composer (thinking is built-in)
-    - deep_research: click Deep Research in the model switcher sidebar
+    - standard: default model (no action needed on fresh chat)
+    - thinking: activate Pro thinking via top-left dropdown, then configure
+      extended thinking budget in the composer area
+    - deep_research: click Deep Research in the model switcher
     """
     if mode == "standard":
-        # Select GPT-5.4 Pro (or highest available Pro model)
-        current_label = await _get_current_model_label(page)
-        log.info(f"Current model label (standard): '{current_label}'")
-        # Already on a Pro/5.4 model — nothing to do
-        if "5.4" in current_label or ("pro" in current_label.lower() and "deep" not in current_label.lower()):
-            log.info("Already on Pro model — standard mode ready")
-            return True
-        # Try to select GPT-5.4 Pro via the model switcher
-        try:
-            model_btn = await _find_model_button(page)
-            if model_btn:
-                await model_btn.click()
-                await asyncio.sleep(1)
-                # Prefer "GPT-5.4 Pro" exact match, then any "5.4 Pro", then "Pro"
-                for label_text in ("GPT-5.4 Pro", "5.4 Pro", "gpt-5.4-pro", "Pro"):
-                    try:
-                        option = await page.find(f"text={label_text}", timeout=3)
-                        if option:
-                            await option.click()
-                            await random_delay()
-                            new_label = await _get_current_model_label(page)
-                            log.info(f"Selected model '{label_text}' → label now: '{new_label}'")
-                            return True
-                    except Exception:
-                        continue
-                # Close switcher — could not find Pro
-                await page.evaluate("document.body.click()")
-                log.warning("Could not find GPT-5.4 Pro in model switcher — using current default")
-        except Exception as e:
-            log.warning(f"Standard model selection failed: {e}")
-        # Proceed with whatever model is currently active
         return True
 
     current_label = await _get_current_model_label(page)
     log.info(f"Current model label: '{current_label}'")
 
     if mode == "thinking":
-        # Pro model includes extended thinking — just verify it's active
-        if "pro" in current_label.lower() or await _has_composer_pill(page, "Pro"):
-            log.info("Pro model active in composer — thinking/extended reasoning included")
-            return True
+        # Check if already on a reasoning/Pro model
+        label_lower = current_label.lower()
+        if any(k in label_lower for k in ("pro", "o1", "o3", "reason")):
+            log.info(f"Reasoning model active: '{current_label}'")
+            if await _configure_extended_thinking(page, mode):
+                return True
+            log.warning("Reasoning model active but extended-thinking selection failed")
+            return False
+        has_pro_pill = await _has_composer_pill(page, "Pro")
+        if has_pro_pill:
+            log.info("Pro pill detected in composer")
+            if "pro" in label_lower:
+                if await _configure_extended_thinking(page, mode):
+                    return True
+                log.warning("Pro label detected but extended-thinking selection failed")
+                return False
+            log.info("Model label does not confirm Pro; enforcing dropdown Pro selection")
 
-        # Not Pro — try adding the Pro pill via the composer plus button
-        log.info("Pro not detected — attempting to add Pro pill")
+        # Strategy 1: Click the top-left "ChatGPT" dropdown and select Pro
+        log.info("Pro not detected — trying top-left ChatGPT dropdown")
+        if await _activate_pro_via_dropdown(page):
+            if await _configure_extended_thinking(page, mode):
+                return True
+            log.warning("Pro activated but extended-thinking selection failed")
+            return False
+
+        # Strategy 2: Try composer plus button (legacy approach)
         try:
             plus_btn = await page.find('button[data-testid="composer-plus-btn"]', timeout=3)
             if plus_btn:
                 await plus_btn.click()
                 await random_delay()
-                # Look for Pro option in the menu
                 target = await page.find("text=Pro", timeout=3)
                 if target:
                     await target.click()
                     await random_delay()
-                    log.info("Added Pro pill — thinking mode ready")
-                    return True
-                # Close menu
+                    log.info("Added Pro pill via composer plus button")
+                    if await _configure_extended_thinking(page, mode):
+                        return True
+                    log.warning("Composer plus added Pro but extended-thinking selection failed")
+                    return False
                 await page.evaluate("document.body.click()")
         except Exception as e:
-            log.warning(f"Pro pill activation failed: {e}")
+            log.warning(f"Composer plus button approach failed: {e}")
 
-        # Fallback: proceed anyway — the prompt template encourages reasoning
-        log.info("Could not activate Pro explicitly — relying on prompt template")
-        return True
+        log.warning("Could not activate Pro + extended thinking explicitly")
+        return False
 
     if mode == "deep_research":
-        # Deep Research is a sidebar link — open sidebar via model switcher, then click it
+        # Deep Research is a sidebar link — click it to navigate to DR page
         try:
             # First try direct testid (works if sidebar is already open)
             try:
@@ -1313,7 +1925,7 @@ async def select_model(page, mode):
             except Exception:
                 pass
 
-            # Open sidebar via model switcher button
+            # Open sidebar via model switcher button, then click DR link
             model_btn = await _find_model_button(page)
             if model_btn:
                 await model_btn.click()
@@ -1332,6 +1944,15 @@ async def select_model(page, mode):
         except Exception as e:
             log.warning(f"Deep research switch failed: {e}")
 
+        # Fallback: navigate directly to deep research URL
+        try:
+            await page.get("https://chatgpt.com/deep-research")
+            await asyncio.sleep(3)
+            log.info("Switched to Deep Research mode (direct navigation)")
+            return True
+        except Exception as e:
+            log.warning(f"Deep research direct navigation failed: {e}")
+
         log.warning("Could not switch to deep_research mode")
         return False
 
@@ -1349,7 +1970,19 @@ async def _find_model_button(page):
         except Exception:
             continue
     try:
-        return await page.find('button[aria-label^="Model selector"]', timeout=3)
+        btn = await page.find('button[aria-label^="Model selector"]', timeout=3)
+        if btn:
+            return btn
+    except Exception:
+        pass
+    try:
+        btn = await page.find('button[aria-label*="Model"]', timeout=3)
+        if btn:
+            return btn
+    except Exception:
+        pass
+    try:
+        return await page.find("text=ChatGPT", timeout=3)
     except Exception:
         return None
 
@@ -1448,6 +2081,19 @@ async def send_message_in_chat(page, monitor, prompt, mode="standard"):
 
     detector = ResponseDetector(monitor, mode=mode, initial_msg_count=initial_msg_count)
     success, text = await detector.wait_for_response()
+    if not success and text == "Response start timeout":
+        log.warning("No response start detected after send; retrying send once")
+        try:
+            retry_btn = await page.find('button[data-testid="send-button"]', timeout=2)
+            if retry_btn:
+                await retry_btn.click()
+            else:
+                await textarea.send_keys("\n")
+            await random_delay()
+            detector = ResponseDetector(monitor, mode=mode, initial_msg_count=initial_msg_count)
+            success, text = await detector.wait_for_response()
+        except Exception as retry_err:
+            log.warning(f"Retry send after start-timeout failed: {retry_err}")
 
     if success:
         return {"success": True, "text": text}
@@ -1514,9 +2160,6 @@ class TabPool:
         self._next_slot_id = 0
         self._focus_lock = asyncio.Lock()   # safety net for follow-ups
         self._shutdown = False
-        self._lifecycle_tasks = set()       # track per-item async tasks
-        # Browser-death detection
-        self._consecutive_open_failures = 0
         # Session state
         self._session_n = 0
         self._session_dispatched = 0
@@ -1560,24 +2203,11 @@ class TabPool:
             asyncio.create_task(self._health_loop(), name="health"),
         ]
         try:
-            # return_exceptions=True: individual task crashes don't kill the pool
-            results = await asyncio.gather(*tasks, return_exceptions=True)
-            for result in results:
-                if isinstance(result, Exception) and not isinstance(
-                    result, (asyncio.CancelledError, KeyboardInterrupt)
-                ):
-                    log.error(f"Pool task raised unhandled exception: {result}")
+            await asyncio.gather(*tasks)
         except (KeyboardInterrupt, asyncio.CancelledError):
             self._shutdown = True
             for t in tasks:
                 t.cancel()
-
-        # Wait for any in-flight lifecycle tasks so items aren't left in_progress
-        if self._lifecycle_tasks:
-            log.info(
-                f"Waiting for {len(self._lifecycle_tasks)} in-flight lifecycle task(s) to finish..."
-            )
-            await asyncio.gather(*list(self._lifecycle_tasks), return_exceptions=True)
 
     # --- Tab Helpers ---
 
@@ -1630,21 +2260,8 @@ class TabPool:
         while not self._shutdown:
             update_health("polling")
 
-            # Session exhausted — reset early if queue has waiting items, else idle
+            # Session exhausted — idle until session timer resets
             if self._session_dispatched >= self._session_n:
-                session_age = time.monotonic() - self._session_start_time
-                if session_age >= SESSION_MIN_ACTIVE_SEC:
-                    # Check if there are items waiting before paying the poll cost
-                    next_item = get_next_queued()
-                    if next_item:
-                        log.info(
-                            f"Session N={self._session_n} exhausted after {session_age:.0f}s "
-                            f"but queue has items — resetting session early"
-                        )
-                        self._start_new_session()
-                        # Put item back — we'll pick it up on next loop iteration
-                        # (get_next_queued is read-only / peek; no side effects)
-                        continue
                 await asyncio.sleep(POLL_INTERVAL_SEC)
                 continue
 
@@ -1665,23 +2282,11 @@ class TabPool:
             # Open a fresh tab for this item
             slot = await self._open_tab()
             if slot.state != TabSlotState.IDLE:
-                self._consecutive_open_failures += 1
-                log.error(
-                    f"Slot {slot.slot_id}: open failed, failing item #{item_id} "
-                    f"(consecutive failures: {self._consecutive_open_failures})"
-                )
+                log.error(f"Slot {slot.slot_id}: open failed, failing item #{item_id}")
                 run_codex10("research-fail", str(item_id), "Tab open failed")
                 if slot in self.slots:
                     self.slots.remove(slot)
-                if self._consecutive_open_failures >= 3:
-                    log.error(
-                        f"Browser death detected: {self._consecutive_open_failures} consecutive "
-                        f"tab-open failures. Shutting down so research-sentinel.sh can restart."
-                    )
-                    self._shutdown = True
-                    break
                 continue
-            self._consecutive_open_failures = 0
 
             slot.item = item
             slot.composed = compose_prompt(item)
@@ -1704,12 +2309,10 @@ class TabPool:
                 continue
 
             # Message sent — hand off to async collector for wait/ingest
-            t = asyncio.create_task(
+            asyncio.create_task(
                 self._collect_lifecycle(slot),
                 name=f"collect-{slot.slot_id}-item-{item_id}",
             )
-            self._lifecycle_tasks.add(t)
-            t.add_done_callback(self._lifecycle_tasks.discard)
 
             # Human-like pause before dispatching next item
             await asyncio.sleep(random.uniform(3, 8))
@@ -1728,6 +2331,8 @@ class TabPool:
             if slot.follow_up_round == 0:
                 if not await select_model_for_slot(slot, mode):
                     log.warning(f"Slot {slot.slot_id}: model switch to {mode} failed")
+                    if mode != "standard":
+                        return {"success": False, "error": f"Model switch to {mode} failed"}
 
             try:
                 await slot.monitor.get_state()
@@ -2078,8 +2683,9 @@ async def main_loop():
     update_health("starting")
 
     # Recover any items left in_progress from a previous crash.
-    # Items stuck >30 min are requeued (up to 3 attempts); beyond that they fail permanently.
-    output, _rc = run_codex10("research-requeue-stale", "30")
+    # Age=0 means requeue ALL in_progress items unconditionally — since this
+    # is a single-instance process, any in_progress items are from a dead session.
+    output, _rc = run_codex10("research-requeue-stale", "0")
     if output:
         log.info(f"Startup stale requeue: {output.strip()[:200]}")
 

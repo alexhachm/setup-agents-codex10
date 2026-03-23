@@ -1,0 +1,17 @@
+2026/03/17-00:42:14.342 72ec Creating DB C:\Users\Owner\Desktop\setup-agents-codex10\.codex\state\chatgpt-profile\Profile 1\Local Storage\leveldb since it was missing.
+2026/03/17-00:42:14.403 72ec Reusing MANIFEST C:\Users\Owner\Desktop\setup-agents-codex10\.codex\state\chatgpt-profile\Profile 1\Local Storage\leveldb/MANIFEST-000001
+2026/03/17-00:43:07.330 80d8 Level-0 table #5: started
+2026/03/17-00:43:07.335 80d8 Level-0 table #5: 65506 bytes OK
+2026/03/17-00:43:07.339 80d8 Delete type=0 #3
+2026/03/17-00:46:50.195 80d8 Level-0 table #7: started
+2026/03/17-00:46:50.203 80d8 Level-0 table #7: 501740 bytes OK
+2026/03/17-00:46:50.207 80d8 Delete type=0 #4
+2026/03/17-01:47:49.377 72ec Level-0 table #9: started
+2026/03/17-01:47:49.383 72ec Level-0 table #9: 21534 bytes OK
+2026/03/17-01:47:49.387 72ec Delete type=0 #6
+2026/03/17-02:39:53.709 80d8 Level-0 table #11: started
+2026/03/17-02:39:53.715 80d8 Level-0 table #11: 13702 bytes OK
+2026/03/17-02:39:53.720 80d8 Delete type=0 #8
+2026/03/17-02:46:39.498 72ec Level-0 table #13: started
+2026/03/17-02:46:39.507 72ec Level-0 table #13: 433053 bytes OK
+2026/03/17-02:46:39.510 72ec Delete type=0 #10

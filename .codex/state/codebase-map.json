@@ -1,0 +1,85 @@
+{
+  "scanned_at": "2026-03-23T08:28:00.000Z",
+  "domains": {
+    "coordinator-core": [
+      "coordinator/src/index.js",
+      "coordinator/src/db.js",
+      "coordinator/src/schema.sql"
+    ],
+    "coordinator-routing": [
+      "coordinator/src/cli-server.js",
+      "coordinator/src/allocator.js",
+      "coordinator/src/merger.js",
+      "coordinator/src/watchdog.js"
+    ],
+    "coordinator-surface": [
+      "coordinator/src/web-server.js",
+      "coordinator/src/hub.js",
+      "coordinator/bin/mac10"
+    ],
+    "coordinator-runtime": [
+      "coordinator/src/tmux.js",
+      "coordinator/src/instance-registry.js",
+      "coordinator/src/overlay.js",
+      "coordinator/src/recovery.js"
+    ],
+    "coordinator-research": [
+      "coordinator/src/research-queue.js"
+    ],
+    "dashboard-ui": [
+      "gui/public/index.html",
+      "gui/public/app.js",
+      "gui/public/popout.html",
+      "gui/public/popout.js",
+      "gui/public/styles.css"
+    ],
+    "orchestration-scripts": [
+      ".codex/scripts/",
+      ".claude/scripts/",
+      "scripts/"
+    ],
+    "research-pipeline": [
+      ".codex/scripts/chatgpt-driver.py",
+      ".codex/scripts/compose-research-prompt.py",
+      ".codex/scripts/ingest-research.py",
+      ".codex/scripts/research-gaps.sh",
+      ".codex/scripts/research-sentinel.sh"
+    ]
+  },
+  "coupling_hotspots": [
+    [
+      "coordinator/src/cli-server.js",
+      "coordinator/src/db.js"
+    ],
+    [
+      "coordinator/src/watchdog.js",
+      "coordinator/src/db.js"
+    ],
+    [
+      "coordinator/src/merger.js",
+      "coordinator/src/db.js"
+    ],
+    [
+      "coordinator/src/web-server.js",
+      "coordinator/src/db.js"
+    ]
+  ],
+  "large_files": [
+    "coordinator/src/cli-server.js",
+    "coordinator/src/web-server.js",
+    "coordinator/src/db.js",
+    "coordinator/src/watchdog.js",
+    "coordinator/src/merger.js",
+    ".codex/scripts/chatgpt-driver.py"
+  ],
+  "launch_commands": {
+    "build": null,
+    "test": "cd coordinator && npm test",
+    "lint": null,
+    "dev": "node coordinator/src/index.js"
+  },
+  "entry_points": [
+    "coordinator/src/index.js",
+    "coordinator/bin/mac10"
+  ]
+}

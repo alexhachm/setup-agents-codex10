@@ -1,0 +1,1 @@
+../../scripts/worker-sentinel.sh
