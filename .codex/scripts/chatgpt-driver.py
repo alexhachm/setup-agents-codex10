@@ -1912,72 +1912,46 @@ async def select_model(page, mode):
         return False
 
     if mode == "deep_research":
-        # Strategy 1: Try the top-left dropdown approach (new UI)
+        # Deep Research is a sidebar link — click it to navigate to DR page
         try:
+            # First try direct testid (works if sidebar is already open)
+            try:
+                dr_link = await page.find('a[data-testid="deep-research-sidebar-item"]', timeout=3)
+                if dr_link:
+                    await dr_link.click()
+                    await asyncio.sleep(3)
+                    log.info("Switched to Deep Research mode (sidebar already open)")
+                    return True
+            except Exception:
+                pass
+
+            # Open sidebar via model switcher button, then click DR link
             model_btn = await _find_model_button(page)
-            if not model_btn:
-                # Try broader search for the ChatGPT dropdown
-                model_btn = await page.evaluate("""
-                    (() => {
-                        for (const btn of document.querySelectorAll('button')) {
-                            if ((btn.innerText || '').trim().toLowerCase().includes('chatgpt')) {
-                                btn.click();
-                                return true;
-                            }
-                        }
-                        return false;
-                    })()
-                """)
-                if model_btn:
-                    await asyncio.sleep(1.5)
-            else:
+            if model_btn:
                 await model_btn.click()
-                await asyncio.sleep(1.5)
-
-            # Look for Deep Research in the dropdown/sidebar
-            dr_clicked = await page.evaluate("""
-                (() => {
-                    const selectors = [
-                        'a[data-testid*="deep-research"]',
-                        '[role="option"]', '[role="menuitem"]', '[role="menuitemradio"]',
-                        'a', 'button', 'div[tabindex]', 'li',
-                    ];
-                    const seen = new Set();
-                    for (const sel of selectors) {
-                        for (const el of document.querySelectorAll(sel)) {
-                            if (seen.has(el)) continue;
-                            seen.add(el);
-                            const text = (el.innerText || '').trim().toLowerCase();
-                            if (text.includes('deep research') || text.includes('deep_research')) {
-                                el.click();
-                                return text;
-                            }
-                        }
-                    }
-                    return null;
-                })()
-            """)
-
-            if dr_clicked:
-                log.info(f"Switched to Deep Research via dropdown: '{dr_clicked}'")
-                await asyncio.sleep(3)
-                return True
-
-            # Close dropdown
-            await page.evaluate("document.body.click()")
+                await asyncio.sleep(1)
+                try:
+                    dr_link = await page.find('a[data-testid="deep-research-sidebar-item"]', timeout=5)
+                    if dr_link:
+                        await dr_link.click()
+                        await asyncio.sleep(3)
+                        log.info("Switched to Deep Research mode")
+                        return True
+                except Exception:
+                    pass
+                # Close sidebar
+                await page.evaluate("document.body.click()")
         except Exception as e:
-            log.warning(f"Deep research dropdown switch failed: {e}")
+            log.warning(f"Deep research switch failed: {e}")
 
-        # Strategy 2: Legacy direct testid approach
+        # Fallback: navigate directly to deep research URL
         try:
-            dr_link = await page.find('a[data-testid="deep-research-sidebar-item"]', timeout=3)
-            if dr_link:
-                await dr_link.click()
-                await asyncio.sleep(3)
-                log.info("Switched to Deep Research mode (legacy selector)")
-                return True
-        except Exception:
-            pass
+            await page.get("https://chatgpt.com/deep-research")
+            await asyncio.sleep(3)
+            log.info("Switched to Deep Research mode (direct navigation)")
+            return True
+        except Exception as e:
+            log.warning(f"Deep research direct navigation failed: {e}")
 
         log.warning("Could not switch to deep_research mode")
         return False
