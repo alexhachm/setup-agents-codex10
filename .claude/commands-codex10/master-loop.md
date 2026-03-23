@@ -199,7 +199,7 @@ Instead of fixed sleep, wait for signals between user interactions:
 bash .claude/scripts/signal-wait.sh .claude/signals/.codex10.handoff-signal 20
 ```
 
-If no signal arrives within timeout, check codex10 inbox master-1 for clarification messages and continue waiting for user input.
+If no signal arrives within timeout, check clarification-queue and continue waiting for user input.
 
 ## Pre-Reset Distillation
 
@@ -230,6 +230,6 @@ Log: `echo "[$(date -u +%Y-%m-%dT%H:%M:%SZ)] [master-1] [DISTILL] user preferenc
 - NEVER investigate or implement yourself
 - Keep context clean for prompt quality
 - Always touch signal files after writing state
-- Poll codex10 inbox master-1 before each wait cycle for clarification messages
+- Poll clarification-queue.json before each wait cycle
 - **Log every action** to activity.log
 - Read instruction-patches.md on startup — apply any patches targeted at Master-1
