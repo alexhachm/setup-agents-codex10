@@ -1066,7 +1066,12 @@ async function main() {
         break;
 
       case 'tier1-complete': {
-        const tier1Result = argv[2] === '-' ? fs.readFileSync(0, 'utf8').trim() : argv.slice(2).join(' ');
+        if (!argv[1]) {
+          console.error('Usage: mac10 tier1-complete <request_id> [result|-]');
+          process.exit(1);
+        }
+        const readResultFromStdin = argv.length === 3 && argv[2] === '-';
+        const tier1Result = readResultFromStdin ? fs.readFileSync(0, 'utf8') : argv.slice(2).join(' ');
         result = await send(socketPath, 'tier1-complete', {
           request_id: argv[1],
           result: tier1Result,
@@ -2009,7 +2014,7 @@ USER:
 ARCHITECT:
   triage <request_id> <tier> [reasoning]
   create-task <json>             Create task (JSON from stdin with -)
-  tier1-complete <request_id> [result]
+  tier1-complete <request_id> [result|-]
   ask-clarification <request_id> <question>
   inbox <recipient> [--block] [--peek] [--timeout=ms] [--type=message_type] [--request-id=request_id]
                                 canonical recipient: allocator (master-3 alias supported)

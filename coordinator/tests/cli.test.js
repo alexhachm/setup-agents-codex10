@@ -7,7 +7,7 @@ const fs = require('fs');
 const os = require('os');
 const net = require('net');
 const http = require('http');
-const { execFile, execFileSync } = require('child_process');
+const { execFile, execFileSync, spawn } = require('child_process');
 
 const db = require('../src/db');
 const cliServer = require('../src/cli-server');
@@ -151,6 +151,33 @@ function runMac10Cli(args) {
         stderr,
       });
     });
+  });
+}
+
+function runMac10CliWithStdin(args, stdinPayload) {
+  const cliPath = path.join(__dirname, '..', 'bin', 'mac10');
+  return new Promise((resolve) => {
+    const child = spawn(process.execPath, [cliPath, '--project', tmpDir, ...args], {
+      stdio: ['pipe', 'pipe', 'pipe'],
+    });
+    let stdout = '';
+    let stderr = '';
+    child.stdout.setEncoding('utf8');
+    child.stderr.setEncoding('utf8');
+    child.stdout.on('data', (chunk) => {
+      stdout += chunk;
+    });
+    child.stderr.on('data', (chunk) => {
+      stderr += chunk;
+    });
+    child.on('close', (code) => {
+      resolve({
+        status: Number.isInteger(code) ? code : 1,
+        stdout,
+        stderr,
+      });
+    });
+    child.stdin.end(stdinPayload);
   });
 }
 
@@ -591,6 +618,35 @@ describe('CLI Server', () => {
 
     const task = db.getTask(result.task_id);
     assert.strictEqual(task.status, 'ready'); // no deps → auto-ready
+  });
+
+  it('should read tier1-complete payload from stdin when result arg is a lone dash', async () => {
+    const reqResult = await sendCommand('request', { description: 'Tier 1 completion via stdin payload' });
+    assert.strictEqual(reqResult.ok, true);
+
+    const stdinPayload = '  Leading spaces preserved\nSecond line\n';
+    const cliResult = await runMac10CliWithStdin(['tier1-complete', reqResult.request_id, '-'], stdinPayload);
+    assert.strictEqual(cliResult.status, 0, cliResult.stderr);
+    assert.strictEqual(cliResult.stderr, '');
+    assert.match(cliResult.stdout, /Tier 1 completed\./);
+
+    const request = db.getRequest(reqResult.request_id);
+    assert.strictEqual(request.status, 'completed');
+    assert.strictEqual(request.result, stdinPayload);
+  });
+
+  it('should treat tier1-complete dash as a literal when additional result tokens are present', async () => {
+    const reqResult = await sendCommand('request', { description: 'Tier 1 completion literal dash payload' });
+    assert.strictEqual(reqResult.ok, true);
+
+    const cliResult = await runMac10Cli(['tier1-complete', reqResult.request_id, '-', 'literal', 'payload']);
+    assert.strictEqual(cliResult.status, 0, cliResult.stderr);
+    assert.strictEqual(cliResult.stderr, '');
+    assert.match(cliResult.stdout, /Tier 1 completed\./);
+
+    const request = db.getRequest(reqResult.request_id);
+    assert.strictEqual(request.status, 'completed');
+    assert.strictEqual(request.result, '- literal payload');
   });
 
   it('should reject create-task with depends_on containing an object', async () => {
