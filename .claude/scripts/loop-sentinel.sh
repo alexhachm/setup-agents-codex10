@@ -1,1 +1,0 @@
-../../scripts/loop-sentinel.sh

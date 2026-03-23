@@ -1,1 +1,0 @@
-../../scripts/state-lock.sh

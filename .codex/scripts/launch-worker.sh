@@ -1,1 +1,0 @@
-../../scripts/launch-worker.sh
