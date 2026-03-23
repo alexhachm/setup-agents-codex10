@@ -12,6 +12,8 @@ CREATE TABLE IF NOT EXISTS requests (
   tier INTEGER,  -- 1, 2, or 3 (set after triage)
   status TEXT NOT NULL DEFAULT 'pending'
     CHECK (status IN ('pending','triaging','executing_tier1','decomposed','in_progress','integrating','completed','failed')),
+  previous_status TEXT,  -- status before the most recent transition (observability)
+  status_cause TEXT,     -- reason for the most recent status transition (observability)
   created_at TEXT NOT NULL DEFAULT (datetime('now')),
   updated_at TEXT NOT NULL DEFAULT (datetime('now')),
   completed_at TEXT,
@@ -37,15 +39,255 @@ CREATE TABLE IF NOT EXISTS tasks (
   branch TEXT,
   validation TEXT,  -- JSON: what checks to run
   overlap_with TEXT,  -- JSON array of task IDs sharing files
-  routing_class TEXT, -- assigned routing class at dispatch time (xhigh/high/mid/spark/mini)
-  routed_model TEXT,  -- model selected at dispatch time
-  reasoning_effort TEXT, -- reasoning effort selected at dispatch time
+  routing_class TEXT,
+  routed_model TEXT,
+  model_source TEXT,
+  reasoning_effort TEXT,
+  browser_offload_status TEXT NOT NULL DEFAULT 'not_requested'
+    CHECK (browser_offload_status IN (
+      'not_requested',
+      'requested',
+      'queued',
+      'launching',
+      'attached',
+      'running',
+      'awaiting_callback',
+      'completed',
+      'failed',
+      'cancelled'
+    )),
+  browser_session_id TEXT,
+  browser_channel TEXT,
+  browser_offload_payload TEXT,
+  browser_offload_result TEXT,
+  browser_offload_error TEXT,
+  browser_offload_updated_at TEXT,
+  usage_model TEXT,
+  usage_payload_json TEXT,
+  usage_input_tokens INTEGER,
+  usage_output_tokens INTEGER,
+  usage_input_audio_tokens INTEGER,
+  usage_output_audio_tokens INTEGER,
+  usage_reasoning_tokens INTEGER,
+  usage_accepted_prediction_tokens INTEGER,
+  usage_rejected_prediction_tokens INTEGER,
+  usage_cached_tokens INTEGER,
+  usage_cache_creation_tokens INTEGER,
+  usage_cache_creation_ephemeral_5m_input_tokens INTEGER,
+  usage_cache_creation_ephemeral_1h_input_tokens INTEGER,
+  usage_total_tokens INTEGER,
+  usage_cost_usd REAL,
   created_at TEXT NOT NULL DEFAULT (datetime('now')),
   updated_at TEXT NOT NULL DEFAULT (datetime('now')),
   started_at TEXT,
   completed_at TEXT,
   result TEXT  -- outcome summary
 );
+
+-- Browser research batching: intents, staged plans, and per-intent fan-out
+CREATE TABLE IF NOT EXISTS research_intents (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  request_id TEXT REFERENCES requests(id),
+  task_id INTEGER REFERENCES tasks(id),
+  intent_type TEXT NOT NULL DEFAULT 'browser_research',
+  intent_payload TEXT NOT NULL,
+  dedupe_fingerprint TEXT NOT NULL,
+  priority_score REAL NOT NULL DEFAULT 500,
+  batch_size_cap INTEGER NOT NULL DEFAULT 5 CHECK (batch_size_cap > 0),
+  timeout_window_ms INTEGER NOT NULL DEFAULT 120000 CHECK (timeout_window_ms > 0),
+  status TEXT NOT NULL DEFAULT 'queued'
+    CHECK (status IN ('queued','planned','running','completed','partial_failed','failed','cancelled')),
+  latest_batch_id INTEGER REFERENCES research_batches(id),
+  failure_count INTEGER NOT NULL DEFAULT 0,
+  last_error TEXT,
+  created_at TEXT NOT NULL DEFAULT (datetime('now')),
+  updated_at TEXT NOT NULL DEFAULT (datetime('now')),
+  resolved_at TEXT
+);
+
+CREATE TABLE IF NOT EXISTS research_batches (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  planner_key TEXT NOT NULL DEFAULT 'default',
+  status TEXT NOT NULL DEFAULT 'planned'
+    CHECK (status IN ('planned','running','completed','partial_failed','failed','timed_out','cancelled')),
+  max_batch_size INTEGER NOT NULL CHECK (max_batch_size > 0),
+  timeout_window_ms INTEGER NOT NULL CHECK (timeout_window_ms > 0),
+  planned_intent_count INTEGER NOT NULL DEFAULT 0,
+  sequence_cursor TEXT NOT NULL,
+  last_error TEXT,
+  created_at TEXT NOT NULL DEFAULT (datetime('now')),
+  updated_at TEXT NOT NULL DEFAULT (datetime('now')),
+  started_at TEXT,
+  completed_at TEXT
+);
+
+CREATE TABLE IF NOT EXISTS research_batch_stages (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  batch_id INTEGER NOT NULL REFERENCES research_batches(id) ON DELETE CASCADE,
+  intent_id INTEGER NOT NULL REFERENCES research_intents(id) ON DELETE CASCADE,
+  stage_name TEXT NOT NULL DEFAULT 'intent_execution',
+  stage_order INTEGER NOT NULL DEFAULT 1,
+  execution_order INTEGER NOT NULL,
+  dedupe_fingerprint TEXT NOT NULL,
+  priority_score REAL NOT NULL DEFAULT 0,
+  timeout_window_ms INTEGER NOT NULL CHECK (timeout_window_ms > 0),
+  status TEXT NOT NULL DEFAULT 'planned'
+    CHECK (status IN ('planned','running','completed','partial_failed','failed','cancelled')),
+  failure_count INTEGER NOT NULL DEFAULT 0,
+  last_error TEXT,
+  created_at TEXT NOT NULL DEFAULT (datetime('now')),
+  updated_at TEXT NOT NULL DEFAULT (datetime('now')),
+  completed_at TEXT,
+  UNIQUE(batch_id, intent_id, stage_order)
+);
+
+CREATE TABLE IF NOT EXISTS research_intent_fanout (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  intent_id INTEGER NOT NULL REFERENCES research_intents(id) ON DELETE CASCADE,
+  fanout_key TEXT NOT NULL,
+  fanout_payload TEXT,
+  planned_batch_id INTEGER REFERENCES research_batches(id) ON DELETE SET NULL,
+  planned_stage_id INTEGER REFERENCES research_batch_stages(id) ON DELETE SET NULL,
+  status TEXT NOT NULL DEFAULT 'pending'
+    CHECK (status IN ('pending','planned','running','completed','partial_failed','failed','cancelled')),
+  attempt_count INTEGER NOT NULL DEFAULT 0,
+  last_error TEXT,
+  created_at TEXT NOT NULL DEFAULT (datetime('now')),
+  updated_at TEXT NOT NULL DEFAULT (datetime('now')),
+  completed_at TEXT,
+  UNIQUE(intent_id, fanout_key)
+);
+
+-- Project memory snapshots and insight artifacts
+CREATE TABLE IF NOT EXISTS project_memory_snapshots (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  project_context_key TEXT NOT NULL,
+  snapshot_version INTEGER NOT NULL CHECK (snapshot_version > 0),
+  iteration INTEGER NOT NULL DEFAULT 1 CHECK (iteration > 0),
+  parent_snapshot_id INTEGER REFERENCES project_memory_snapshots(id) ON DELETE SET NULL,
+  snapshot_payload TEXT NOT NULL,
+  dedupe_fingerprint TEXT NOT NULL,
+  relevance_score REAL NOT NULL DEFAULT 0,
+  request_id TEXT REFERENCES requests(id),
+  task_id INTEGER REFERENCES tasks(id),
+  run_id TEXT,
+  source TEXT,
+  confidence_score REAL CHECK (confidence_score IS NULL OR (confidence_score >= 0 AND confidence_score <= 1)),
+  validation_status TEXT NOT NULL DEFAULT 'unvalidated'
+    CHECK (validation_status IN ('unvalidated','pending','validated','rejected','superseded')),
+  retention_policy TEXT NOT NULL DEFAULT 'retain',
+  retention_until TEXT,
+  governance_metadata TEXT,
+  created_at TEXT NOT NULL DEFAULT (datetime('now')),
+  UNIQUE(project_context_key, snapshot_version)
+);
+
+CREATE TABLE IF NOT EXISTS project_memory_snapshot_index (
+  project_context_key TEXT PRIMARY KEY,
+  latest_snapshot_id INTEGER NOT NULL REFERENCES project_memory_snapshots(id) ON DELETE CASCADE,
+  latest_snapshot_version INTEGER NOT NULL CHECK (latest_snapshot_version > 0),
+  latest_iteration INTEGER NOT NULL DEFAULT 1 CHECK (latest_iteration > 0),
+  latest_snapshot_created_at TEXT NOT NULL,
+  updated_at TEXT NOT NULL DEFAULT (datetime('now'))
+);
+
+CREATE TABLE IF NOT EXISTS insight_artifacts (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  project_context_key TEXT NOT NULL,
+  snapshot_id INTEGER REFERENCES project_memory_snapshots(id) ON DELETE SET NULL,
+  artifact_type TEXT NOT NULL DEFAULT 'research_insight',
+  artifact_key TEXT,
+  artifact_version INTEGER NOT NULL DEFAULT 1 CHECK (artifact_version > 0),
+  artifact_payload TEXT NOT NULL,
+  dedupe_fingerprint TEXT NOT NULL,
+  relevance_score REAL NOT NULL DEFAULT 0,
+  request_id TEXT REFERENCES requests(id),
+  task_id INTEGER REFERENCES tasks(id),
+  run_id TEXT,
+  source TEXT,
+  confidence_score REAL CHECK (confidence_score IS NULL OR (confidence_score >= 0 AND confidence_score <= 1)),
+  validation_status TEXT NOT NULL DEFAULT 'unvalidated'
+    CHECK (validation_status IN ('unvalidated','pending','validated','rejected','superseded')),
+  retention_policy TEXT NOT NULL DEFAULT 'retain',
+  retention_until TEXT,
+  governance_metadata TEXT,
+  created_at TEXT NOT NULL DEFAULT (datetime('now')),
+  updated_at TEXT NOT NULL DEFAULT (datetime('now')),
+  UNIQUE(project_context_key, artifact_type, dedupe_fingerprint, artifact_version)
+);
+
+CREATE TABLE IF NOT EXISTS project_memory_lineage_links (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  snapshot_id INTEGER REFERENCES project_memory_snapshots(id) ON DELETE CASCADE,
+  insight_artifact_id INTEGER REFERENCES insight_artifacts(id) ON DELETE CASCADE,
+  request_id TEXT REFERENCES requests(id),
+  task_id INTEGER REFERENCES tasks(id),
+  run_id TEXT,
+  lineage_type TEXT NOT NULL DEFAULT 'origin'
+    CHECK (lineage_type IN ('origin','derived_from','supports','supersedes','validated_by','consumed_by')),
+  metadata TEXT,
+  created_at TEXT NOT NULL DEFAULT (datetime('now')),
+  CHECK (snapshot_id IS NOT NULL OR insight_artifact_id IS NOT NULL)
+);
+
+-- Browser research offload: sessions, jobs, and callback events
+CREATE TABLE IF NOT EXISTS browser_sessions (
+  id TEXT PRIMARY KEY,  -- opaque session identifier
+  owner TEXT NOT NULL,  -- 'worker-N', 'architect', 'coordinator', etc.
+  status TEXT NOT NULL DEFAULT 'initializing'
+    CHECK (status IN ('initializing','active','idle','expiring','expired','terminated')),
+  auth_token TEXT,
+  session_token TEXT,
+  auth_expires_at TEXT,
+  session_expires_at TEXT,
+  safety_policy TEXT NOT NULL DEFAULT 'standard'
+    CHECK (safety_policy IN ('standard','restricted','permissive')),
+  safety_policy_state TEXT,  -- JSON: policy evaluation results
+  task_id INTEGER REFERENCES tasks(id),
+  request_id TEXT REFERENCES requests(id),
+  metadata TEXT,  -- JSON: extra session metadata
+  created_at TEXT NOT NULL DEFAULT (datetime('now')),
+  updated_at TEXT NOT NULL DEFAULT (datetime('now')),
+  terminated_at TEXT
+);
+
+CREATE TABLE IF NOT EXISTS browser_research_jobs (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  session_id TEXT REFERENCES browser_sessions(id),
+  task_id INTEGER REFERENCES tasks(id),
+  request_id TEXT REFERENCES requests(id),
+  job_type TEXT NOT NULL DEFAULT 'research'
+    CHECK (job_type IN ('research','navigation','extraction')),
+  query TEXT NOT NULL,
+  status TEXT NOT NULL DEFAULT 'pending'
+    CHECK (status IN ('pending','queued','running','awaiting_callback','completed','failed','cancelled')),
+  result_payload TEXT,  -- JSON: normalized result storage
+  error TEXT,
+  attempt_count INTEGER NOT NULL DEFAULT 0,
+  created_at TEXT NOT NULL DEFAULT (datetime('now')),
+  updated_at TEXT NOT NULL DEFAULT (datetime('now')),
+  started_at TEXT,
+  completed_at TEXT
+);
+
+CREATE TABLE IF NOT EXISTS browser_callback_events (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,  -- id doubles as cursor position
+  job_id INTEGER NOT NULL REFERENCES browser_research_jobs(id),
+  session_id TEXT REFERENCES browser_sessions(id),
+  event_type TEXT NOT NULL
+    CHECK (event_type IN ('result','progress','error','heartbeat')),
+  event_payload TEXT NOT NULL DEFAULT '{}',  -- JSON
+  created_at TEXT NOT NULL DEFAULT (datetime('now'))
+);
+
+-- Indexes for browser offload tables
+CREATE INDEX IF NOT EXISTS idx_browser_sessions_owner ON browser_sessions(owner, status);
+CREATE INDEX IF NOT EXISTS idx_browser_sessions_task ON browser_sessions(task_id) WHERE task_id IS NOT NULL;
+CREATE INDEX IF NOT EXISTS idx_browser_research_jobs_session ON browser_research_jobs(session_id, status);
+CREATE INDEX IF NOT EXISTS idx_browser_research_jobs_task ON browser_research_jobs(task_id) WHERE task_id IS NOT NULL;
+CREATE INDEX IF NOT EXISTS idx_browser_research_jobs_status ON browser_research_jobs(status, created_at ASC, id ASC);
+CREATE INDEX IF NOT EXISTS idx_browser_callback_events_job ON browser_callback_events(job_id, id ASC);
+CREATE INDEX IF NOT EXISTS idx_browser_callback_events_cursor ON browser_callback_events(job_id, id ASC, event_type);
 
 -- Workers (replaces worker-status.json)
 CREATE TABLE IF NOT EXISTS workers (
@@ -60,6 +302,7 @@ CREATE TABLE IF NOT EXISTS workers (
   pid INTEGER,
   current_task_id INTEGER REFERENCES tasks(id),
   claimed_by TEXT,  -- 'architect' or NULL; prevents allocator race
+  claimed_at TEXT,
   last_heartbeat TEXT,
   launched_at TEXT,
   tasks_completed INTEGER NOT NULL DEFAULT 0,
@@ -90,7 +333,44 @@ CREATE TABLE IF NOT EXISTS merge_queue (
   updated_at TEXT NOT NULL DEFAULT (datetime('now')),
   completion_checkpoint TEXT,
   merged_at TEXT,
-  error TEXT
+  error TEXT,
+  head_sha TEXT,
+  worker_id INTEGER,
+  failure_class TEXT
+    CHECK (failure_class IS NULL OR failure_class IN (
+      'branch_identity_mismatch',
+      'worktree_missing',
+      'worktree_dirty',
+      'remote_branch_missing',
+      'remote_diverged',
+      'gh_auth_or_network',
+      'textual_merge_conflict',
+      'validation_conflict'
+    )),
+  retry_count INTEGER NOT NULL DEFAULT 0,
+  fingerprint TEXT,
+  last_fingerprint_at TEXT
+);
+
+-- Circuit breaker for merge failures (deduplicates and suppresses repeat failures)
+CREATE TABLE IF NOT EXISTS merge_circuit_breaker (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  merge_queue_id INTEGER REFERENCES merge_queue(id) ON DELETE SET NULL,
+  fingerprint TEXT NOT NULL,  -- composite: pr_number+head_branch+head_sha+target_sha+failure_class+normalized_error
+  failure_count INTEGER NOT NULL DEFAULT 1,
+  tripped INTEGER NOT NULL DEFAULT 0,  -- 1 = suppressed, 0 = active
+  first_seen_at TEXT NOT NULL DEFAULT (datetime('now')),
+  last_seen_at TEXT NOT NULL DEFAULT (datetime('now')),
+  UNIQUE(fingerprint)
+);
+
+-- Merge operation metrics (atomic counters)
+CREATE TABLE IF NOT EXISTS merge_metrics (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  metric_name TEXT NOT NULL,
+  metric_value INTEGER NOT NULL DEFAULT 0,
+  updated_at TEXT NOT NULL DEFAULT (datetime('now')),
+  UNIQUE(metric_name)
 );
 
 -- Activity log (replaces activity.log)
@@ -115,6 +395,10 @@ CREATE TABLE IF NOT EXISTS presets (
   project_dir TEXT NOT NULL,
   github_repo TEXT NOT NULL DEFAULT '',
   num_workers INTEGER NOT NULL DEFAULT 4,
+  provider TEXT,        -- optional: 'anthropic', 'openai', etc.
+  fast_model TEXT,      -- optional: model for fast/tier1 tasks
+  deep_model TEXT,      -- optional: model for deep/tier3 tasks
+  economy_model TEXT,   -- optional: model for economy tasks
   created_at TEXT NOT NULL DEFAULT (datetime('now')),
   updated_at TEXT NOT NULL DEFAULT (datetime('now'))
 );
@@ -141,6 +425,7 @@ CREATE TABLE IF NOT EXISTS loops (
     CHECK (status IN ('active','paused','stopped','failed')),
   iteration_count INTEGER NOT NULL DEFAULT 0,
   last_checkpoint TEXT,
+  namespace TEXT,
   tmux_session TEXT,
   tmux_window TEXT,
   pid INTEGER,
@@ -155,11 +440,51 @@ CREATE INDEX IF NOT EXISTS idx_tasks_status ON tasks(status);
 CREATE INDEX IF NOT EXISTS idx_tasks_request ON tasks(request_id);
 CREATE INDEX IF NOT EXISTS idx_tasks_assigned ON tasks(assigned_to);
 CREATE INDEX IF NOT EXISTS idx_tasks_request_status ON tasks(request_id, status);
+CREATE INDEX IF NOT EXISTS idx_research_intents_status_score
+  ON research_intents(status, priority_score DESC, created_at ASC, id ASC);
+CREATE INDEX IF NOT EXISTS idx_research_intents_active_dedupe
+  ON research_intents(dedupe_fingerprint, intent_type)
+  WHERE status IN ('queued','planned','running','partial_failed');
+CREATE INDEX IF NOT EXISTS idx_research_batches_status
+  ON research_batches(status, created_at ASC, id ASC);
+CREATE INDEX IF NOT EXISTS idx_research_batch_stages_batch_status
+  ON research_batch_stages(batch_id, status, execution_order ASC, id ASC);
+CREATE INDEX IF NOT EXISTS idx_research_batch_stages_execution
+  ON research_batch_stages(status, execution_order ASC, id ASC);
+CREATE INDEX IF NOT EXISTS idx_research_intent_fanout_intent_status
+  ON research_intent_fanout(intent_id, status, fanout_key);
+CREATE INDEX IF NOT EXISTS idx_research_intent_fanout_retry
+  ON research_intent_fanout(status, updated_at ASC, id ASC)
+  WHERE status IN ('partial_failed','failed');
+CREATE INDEX IF NOT EXISTS idx_project_memory_snapshots_context_version
+  ON project_memory_snapshots(project_context_key, snapshot_version DESC, created_at DESC, id DESC);
+CREATE INDEX IF NOT EXISTS idx_project_memory_snapshots_dedupe
+  ON project_memory_snapshots(project_context_key, dedupe_fingerprint);
+CREATE INDEX IF NOT EXISTS idx_project_memory_snapshots_lineage
+  ON project_memory_snapshots(request_id, task_id, run_id);
+CREATE INDEX IF NOT EXISTS idx_insight_artifacts_context_relevance
+  ON insight_artifacts(project_context_key, relevance_score DESC, created_at DESC, id DESC);
+CREATE INDEX IF NOT EXISTS idx_insight_artifacts_dedupe
+  ON insight_artifacts(project_context_key, artifact_type, dedupe_fingerprint, artifact_version DESC);
+CREATE INDEX IF NOT EXISTS idx_insight_artifacts_lineage
+  ON insight_artifacts(request_id, task_id, run_id, validation_status);
+CREATE INDEX IF NOT EXISTS idx_project_memory_lineage_snapshot
+  ON project_memory_lineage_links(snapshot_id, created_at DESC, id DESC)
+  WHERE snapshot_id IS NOT NULL;
+CREATE INDEX IF NOT EXISTS idx_project_memory_lineage_insight
+  ON project_memory_lineage_links(insight_artifact_id, created_at DESC, id DESC)
+  WHERE insight_artifact_id IS NOT NULL;
+CREATE INDEX IF NOT EXISTS idx_project_memory_lineage_request_task_run
+  ON project_memory_lineage_links(request_id, task_id, run_id, lineage_type);
 CREATE INDEX IF NOT EXISTS idx_mail_recipient ON mail(recipient, consumed);
 CREATE INDEX IF NOT EXISTS idx_mail_type ON mail(type);
 CREATE INDEX IF NOT EXISTS idx_mail_created ON mail(created_at);
 CREATE INDEX IF NOT EXISTS idx_merge_queue_status ON merge_queue(status);
 CREATE INDEX IF NOT EXISTS idx_merge_queue_request ON merge_queue(request_id, status);
+CREATE INDEX IF NOT EXISTS idx_merge_queue_fingerprint ON merge_queue(fingerprint) WHERE fingerprint IS NOT NULL;
+CREATE INDEX IF NOT EXISTS idx_merge_circuit_breaker_fingerprint ON merge_circuit_breaker(fingerprint);
+CREATE INDEX IF NOT EXISTS idx_merge_circuit_breaker_tripped ON merge_circuit_breaker(tripped, last_seen_at DESC);
+CREATE INDEX IF NOT EXISTS idx_merge_metrics_name ON merge_metrics(metric_name);
 CREATE INDEX IF NOT EXISTS idx_activity_actor ON activity_log(actor);
 CREATE INDEX IF NOT EXISTS idx_activity_created ON activity_log(created_at);
 CREATE INDEX IF NOT EXISTS idx_workers_status ON workers(status);
@@ -176,14 +501,10 @@ INSERT OR IGNORE INTO config (key, value) VALUES
   ('heartbeat_timeout_s', '60'),
   ('watchdog_interval_ms', '10000'),
   ('allocator_interval_ms', '2000'),
-  ('prioritize_assignment_over_merge', 'true'),
-  ('low_effort_worker_direct_merge', 'true'),
-  ('low_effort_worker_direct_merge_allow_overlap', 'false'),
-  ('loop_request_quality_gate', 'true'),
-  ('loop_request_min_description_chars', '220'),
-  ('loop_request_min_interval_sec', '600'),
-  ('loop_request_max_per_hour', '4'),
-  ('loop_request_similarity_threshold', '0.82'),
+  ('research_planner_interval_ms', '5000'),
+  ('research_batch_max_size', '5'),
+  ('research_batch_timeout_ms', '120000'),
+  ('research_batch_candidate_limit', '200'),
   ('merge_validation', 'true'),
   ('project_dir', ''),
   ('coordinator_version', '1.0.0');
