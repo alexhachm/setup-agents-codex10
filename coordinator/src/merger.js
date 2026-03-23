@@ -202,6 +202,33 @@ function completeRequestIfTransition(requestId, result) {
   return true;
 }
 
+function failRequestIfTransition(requestId, error, terminalMerges = []) {
+  const completionTimestamp = new Date().toISOString();
+  const updateResult = db.getDb().prepare(`
+    UPDATE requests
+    SET status = 'failed',
+        completed_at = ?,
+        result = ?,
+        updated_at = datetime('now')
+    WHERE id = ?
+      AND status NOT IN ('completed', 'failed')
+  `).run(completionTimestamp, error, requestId);
+
+  if (updateResult.changes === 0) {
+    return false;
+  }
+
+  db.sendMail('master-1', 'request_failed', { request_id: requestId, error });
+  db.log('coordinator', 'request_failed', {
+    request_id: requestId,
+    error,
+    blocking_merge_ids: terminalMerges.map((row) => row.id),
+    blocking_statuses: terminalMerges.map((row) => row.status),
+  });
+  insightIngestion.ingestMergeEvent('request_failed', { request_id: requestId, error });
+  return true;
+}
+
 function start(projectDir) {
   // Merger is triggered by task completions, but also runs periodic checks
   mergerIntervalId = setInterval(() => {
@@ -250,24 +277,35 @@ function onTaskCompleted(taskId) {
       return; // Let merger retry — don't complete yet
     }
 
+    const terminalMerges = db.getDb().prepare(
+      "SELECT id, status, branch, error FROM merge_queue WHERE request_id = ? AND status IN ('failed', 'conflict')"
+    ).all(task.request_id);
+
+    if (terminalMerges.length > 0) {
+      const mergeSummary = terminalMerges.map((row) => {
+        const branch = row.branch || `merge#${row.id}`;
+        const detail = row.error ? ` (${String(row.error).slice(0, 120)})` : '';
+        return `${branch}: ${row.status}${detail}`;
+      }).join('; ');
+      const error = `Request blocked by non-recoverable merge failures: ${mergeSummary}`;
+      const transitionedToFailed = failRequestIfTransition(task.request_id, error, terminalMerges);
+      db.log('coordinator', 'request_completion_blocked_by_merge', {
+        request_id: task.request_id,
+        blocking_statuses: terminalMerges.map((row) => row.status),
+        blocking_merge_ids: terminalMerges.map((row) => row.id),
+        transitioned_to_failed: transitionedToFailed,
+      });
+      return;
+    }
+
     // Completion is blocked by any non-merged merge queue row for this request.
     const unresolvedMerges = db.getDb().prepare(
-      "SELECT id, status FROM merge_queue WHERE request_id = ? AND status IN ('pending', 'ready', 'merging', 'conflict', 'failed')"
+      "SELECT id, status FROM merge_queue WHERE request_id = ? AND status IN ('pending', 'ready', 'merging')"
     ).all(task.request_id);
 
     if (unresolvedMerges.length > 0) {
       db.updateRequest(task.request_id, { status: 'integrating' });
-
-      const hasTerminalFailure = unresolvedMerges.some((row) => row.status === 'failed' || row.status === 'conflict');
-      if (hasTerminalFailure) {
-        db.log('coordinator', 'request_completion_blocked_by_merge', {
-          request_id: task.request_id,
-          blocking_statuses: unresolvedMerges.map((row) => row.status),
-          blocking_merge_ids: unresolvedMerges.map((row) => row.id),
-        });
-      } else {
-        db.log('coordinator', 'request_ready_for_merge', { request_id: task.request_id });
-      }
+      db.log('coordinator', 'request_ready_for_merge', { request_id: task.request_id });
       return;
     }
 

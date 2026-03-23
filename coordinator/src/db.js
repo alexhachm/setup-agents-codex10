@@ -3546,16 +3546,36 @@ function enqueueMerge({ request_id, task_id, pr_url, branch, priority, completio
   const normalizedPriority = Number.isInteger(priority) ? priority : 0;
   const parsedCheckpoint = parseCompletedTaskCursor(completion_checkpoint);
   const normalizedCheckpoint = parsedCheckpoint ? parsedCheckpoint.cursor : null;
-  // Atomic dedup+insert scoped to request + PR identity ownership.
-  // A request can refresh the same PR+branch entry across follow-up tasks.
+  const normalizedPrUrl = typeof pr_url === 'string' ? pr_url.trim() : '';
+  const hasPrUrl = normalizedPrUrl.length > 0;
+  const storedPrUrl = hasPrUrl ? normalizedPrUrl : '';
+  // Atomic dedup+insert scoped to request + branch + PR identity.
+  // When PR URL is empty, preserve branch-only dedupe behavior.
   const result = getDb().prepare(`
     INSERT INTO merge_queue (request_id, task_id, pr_url, branch, priority, completion_checkpoint)
     SELECT ?, ?, ?, ?, ?, ?
     WHERE NOT EXISTS (
       SELECT 1 FROM merge_queue
-      WHERE request_id = ? AND pr_url = ? AND branch = ?
+      WHERE request_id = ?
+        AND branch = ?
+        AND (
+          (? = 1 AND COALESCE(pr_url, '') = ?)
+          OR (? = 0 AND COALESCE(pr_url, '') = '')
+        )
     )
-  `).run(request_id, task_id, pr_url, branch, normalizedPriority, normalizedCheckpoint, request_id, pr_url, branch);
+  `).run(
+    request_id,
+    task_id,
+    storedPrUrl,
+    branch,
+    normalizedPriority,
+    normalizedCheckpoint,
+    request_id,
+    branch,
+    hasPrUrl ? 1 : 0,
+    normalizedPrUrl,
+    hasPrUrl ? 1 : 0
+  );
   return {
     inserted: result.changes > 0,
     changes: result.changes,
