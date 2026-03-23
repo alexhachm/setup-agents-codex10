@@ -38,7 +38,7 @@ If the task involves a topic with a research rollup, check:
 Determine your worker ID from the git branch (`agent-N` → worker N).
 
 ```bash
-WORKER_ID=$(git branch --show-current | sed 's/agent-//')
+WORKER_ID=$(git branch --show-current | sed 's/^agent-\([0-9]*\).*/\1/')
 ```
 
 Fetch your assigned task:

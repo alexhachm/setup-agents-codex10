@@ -38,7 +38,7 @@ If the task involves a topic with a research rollup, check:
 Determine your worker ID from the git branch (`agent-N` → worker N).
 
 ```bash
-WORKER_ID=$(git branch --show-current | sed 's/agent-//')
+WORKER_ID=$(git branch --show-current | sed 's/^agent-\([0-9]*\).*/\1/')
 ```
 
 Fetch your assigned task:
@@ -70,10 +70,15 @@ Mark the task as started:
 **MANDATORY** — prevents regression from stale code:
 
 ```bash
-git fetch origin && git rebase origin/main
+if git remote get-url origin >/dev/null 2>&1; then
+  git fetch origin
+  BASE_BRANCH="$(git symbolic-ref --short refs/remotes/origin/HEAD 2>/dev/null | sed 's@^origin/@@' || true)"
+  BASE_BRANCH="${BASE_BRANCH:-main}"
+  git rebase "origin/$BASE_BRANCH"
+fi
 ```
 
-On conflict: `git rebase --abort && git reset --hard origin/main`
+On conflict during rebase: `git rebase --abort` and either retry against the correct base branch or fail the task with a clear explanation.
 
 ## Step 5: Do the Work
 
@@ -91,55 +96,45 @@ On conflict: `git rebase --abort && git reset --hard origin/main`
    Boundary: queue only external intelligence (docs/benchmarks/comparisons). Do not queue repo-internal code-reading questions.
    Do NOT wait for the result. Continue with available knowledge. The research will be available for the next session.
 4. **Plan** your approach (for 5+ file changes, spawn a `code-architect` subagent for a review)
-4. **Implement** the changes described in the task
-4. **Send heartbeats** every 30 seconds during long work:
+5. **Implement** the changes described in the task
+6. **Send heartbeats** every 30 seconds during long work:
    ```bash
    ./.codex/scripts/codex10 heartbeat $WORKER_ID
    ```
-5. **Self-verify**: run the build/test commands from the task's validation field
+7. **Self-verify**: run the build/test commands from the task's validation field
 
 ## Step 6: Validate
 
-Validation depends on the task tier:
+Run the task's `validation` command when one is provided.
 
-| Tier | Validation |
-|------|-----------|
-| Tier 2 | Spawn `build-validator` subagent only |
-| Tier 3 | Spawn `build-validator` subagent, THEN spawn `verify-app` subagent |
+If the task has no explicit validation command, run the smallest relevant local check for the files you changed:
+- existing `npm test` / `npm run build` / `npm run lint` scripts when present
+- targeted runtime checks for simple modules (for example `node -e "const {answer}=require('./app'); if (answer() !== 42) process.exit(1)"`)
 
-- If `build-validator` reports `VALIDATION_FAILED` → fix the issue and re-validate
-- If `verify-app` reports `VERIFICATION_FAILED` → fix the issue and re-validate
-- Only proceed to shipping when all applicable validators pass
+Do not search for helper slash-commands like `build-validator` or `verify-app` unless they actually exist in the repo.
+Only proceed to shipping when your validation passes.
 
 ## Step 7: Ship
 
-### 7a: Commit, Push, and Create PR
-
-Run `/commit-push-pr` to create the PR.
-
-### 7b: Merge Prep
-
-Send a heartbeat, then spawn the `merge-prep` subagent to ensure the PR is mergeable:
-
-```bash
-./.codex/scripts/codex10 heartbeat $WORKER_ID
-```
-
-Spawn the `merge-prep` subagent (economy model). It will rebase onto main, force-push, and verify mergeability.
-
-- If `MERGE_PREP_PASSED` → proceed to Step 8
-- If `MERGE_PREP_FAILED` → you have full context of your changes. Fix the issue yourself (resolve conflicts, adjust code), then re-spawn `merge-prep`
-- If second `MERGE_PREP_FAILED` → fail the task and exit:
-  ```bash
-  ./.codex/scripts/codex10 fail-task $WORKER_ID $TASK_ID "merge-prep failed twice: <error>"
-  ```
-  Do NOT call `complete-task`. Go directly to **Phase: Budget/Reset Exit**.
+1. Commit your changes on the assigned worker branch:
+   ```bash
+   git add -A
+   git commit -m "<brief task summary>"
+   ```
+2. If `origin` exists, push the branch and create or reuse a PR when practical.
+3. If no remote exists, skip push/PR creation. The coordinator can integrate the committed worker branch locally.
+4. Send a heartbeat before reporting completion if the task took a while:
+   ```bash
+   ./.codex/scripts/codex10 heartbeat $WORKER_ID
+   ```
 
 ## Step 8: Report Completion
 
-After the PR is created:
+After shipping:
 
 ```bash
+PR_URL="${PR_URL:-no-pr-no-remote}"
+BRANCH="$(git branch --show-current)"
 ./.codex/scripts/codex10 complete-task $WORKER_ID $TASK_ID "$PR_URL" "$BRANCH" "Brief result summary"
 ```
 
