@@ -1839,24 +1839,141 @@ describe('CLI Server', () => {
     }
   });
 
+  it('should preserve unknown nested usage detail keys in usage_payload_json while keeping canonical usage mappings', async () => {
+    db.registerWorker(1, '/wt-1', 'agent-1');
+    db.registerWorker(2, '/wt-2', 'agent-2');
+    const reqId = db.createRequest('Nested usage detail passthrough');
+    const completeTaskId = db.createTask({ request_id: reqId, subject: 'Complete nested usage details', description: 'Preserve unknown nested usage detail keys on complete-task' });
+    const failTaskId = db.createTask({ request_id: reqId, subject: 'Fail nested usage details', description: 'Preserve unknown nested usage detail keys on fail-task' });
+    db.updateTask(completeTaskId, { status: 'assigned', assigned_to: 1 });
+    db.updateTask(failTaskId, { status: 'assigned', assigned_to: 2 });
+    db.updateWorker(1, { status: 'assigned', current_task_id: completeTaskId });
+    db.updateWorker(2, { status: 'assigned', current_task_id: failTaskId });
+
+    const completeUsage = {
+      model: 'gpt-5-codex',
+      prompt_tokens: 120,
+      completion_tokens: 30,
+      input_tokens_details: { cached_tokens: 50, audio_tokens: 11, provider_cached_bonus_tokens: 7 },
+      prompt_tokens_details: { cached_tokens: 50, audio_tokens: 11, prompt_detail_extra_tokens: 8 },
+      completion_tokens_details: {
+        reasoning_tokens: 13,
+        audio_tokens: 5,
+        accepted_prediction_tokens: 3,
+        rejected_prediction_tokens: 2,
+        completion_detail_extra_tokens: 9,
+      },
+      output_tokens_details: { reasoning_tokens: 13, audio_tokens: 5, output_detail_extra_tokens: 6 },
+      cache_creation: {
+        ephemeral_5m_input_tokens: 4,
+        ephemeral_1h_input_tokens: 9,
+        cache_creation_unknown_tokens: 12,
+      },
+      total_tokens: 150,
+      cost_usd: 0.015,
+    };
+    const failUsage = {
+      model: 'gpt-5-codex',
+      prompt_tokens: 95,
+      completion_tokens: 22,
+      input_tokens_details: { cached_tokens: 33, audio_tokens: 10, input_detail_extra_tokens: 4 },
+      prompt_tokens_details: { cached_tokens: 33, audio_tokens: 10, prompt_detail_extra_tokens: 5 },
+      completion_tokens_details: {
+        reasoning_tokens: 8,
+        audio_tokens: 2,
+        accepted_prediction_tokens: 1,
+        rejected_prediction_tokens: 0,
+        completion_detail_extra_tokens: 3,
+      },
+      output_tokens_details: { reasoning_tokens: 8, audio_tokens: 2, output_detail_extra_tokens: 1 },
+      cache_creation: {
+        ephemeral_5m_input_tokens: 7,
+        cache_creation_unknown_tokens: 21,
+      },
+      total_tokens: 117,
+      cost_usd: 0.0117,
+    };
+
+    const completeResult = await sendCommand('complete-task', {
+      worker_id: '1',
+      task_id: String(completeTaskId),
+      result: 'Complete nested usage details',
+      usage: completeUsage,
+    });
+    assert.strictEqual(completeResult.ok, true);
+
+    await runMac10Command([
+      'fail-task',
+      '2',
+      String(failTaskId),
+      'Fail nested usage details',
+      '--usage',
+      JSON.stringify(failUsage),
+    ], tmpDir);
+
+    const completedTask = db.getTask(completeTaskId);
+    const failedTask = db.getTask(failTaskId);
+    assert.strictEqual(completedTask.status, 'completed');
+    assert.strictEqual(failedTask.status, 'failed');
+
+    assert.strictEqual(completedTask.usage_input_tokens, 120);
+    assert.strictEqual(completedTask.usage_output_tokens, 30);
+    assert.strictEqual(completedTask.usage_cached_tokens, 50);
+    assert.strictEqual(completedTask.usage_input_audio_tokens, 11);
+    assert.strictEqual(completedTask.usage_reasoning_tokens, 13);
+    assert.strictEqual(completedTask.usage_output_audio_tokens, 5);
+    assert.strictEqual(completedTask.usage_accepted_prediction_tokens, 3);
+    assert.strictEqual(completedTask.usage_rejected_prediction_tokens, 2);
+    assert.strictEqual(completedTask.usage_cache_creation_tokens, 13);
+    if (Object.prototype.hasOwnProperty.call(completedTask, 'usage_cache_creation_ephemeral_5m_input_tokens')) {
+      assert.strictEqual(completedTask.usage_cache_creation_ephemeral_5m_input_tokens, 4);
+      assert.strictEqual(completedTask.usage_cache_creation_ephemeral_1h_input_tokens, 9);
+    }
+
+    assert.strictEqual(failedTask.usage_input_tokens, 95);
+    assert.strictEqual(failedTask.usage_output_tokens, 22);
+    assert.strictEqual(failedTask.usage_cached_tokens, 33);
+    assert.strictEqual(failedTask.usage_input_audio_tokens, 10);
+    assert.strictEqual(failedTask.usage_reasoning_tokens, 8);
+    assert.strictEqual(failedTask.usage_output_audio_tokens, 2);
+    assert.strictEqual(failedTask.usage_accepted_prediction_tokens, 1);
+    assert.strictEqual(failedTask.usage_rejected_prediction_tokens, 0);
+    assert.strictEqual(failedTask.usage_cache_creation_tokens, 7);
+    if (Object.prototype.hasOwnProperty.call(failedTask, 'usage_cache_creation_ephemeral_5m_input_tokens')) {
+      assert.strictEqual(failedTask.usage_cache_creation_ephemeral_5m_input_tokens, 7);
+      assert.strictEqual(failedTask.usage_cache_creation_ephemeral_1h_input_tokens, null);
+    }
+
+    const completedPayload = JSON.parse(completedTask.usage_payload_json);
+    const failedPayload = JSON.parse(failedTask.usage_payload_json);
+
+    assert.deepStrictEqual(completedPayload.input_tokens_details, { provider_cached_bonus_tokens: 7 });
+    assert.deepStrictEqual(completedPayload.prompt_tokens_details, { prompt_detail_extra_tokens: 8 });
+    assert.deepStrictEqual(completedPayload.completion_tokens_details, { completion_detail_extra_tokens: 9 });
+    assert.deepStrictEqual(completedPayload.output_tokens_details, { output_detail_extra_tokens: 6 });
+    assert.deepStrictEqual(completedPayload.cache_creation, { cache_creation_unknown_tokens: 12 });
+
+    assert.deepStrictEqual(failedPayload.input_tokens_details, { input_detail_extra_tokens: 4 });
+    assert.deepStrictEqual(failedPayload.prompt_tokens_details, { prompt_detail_extra_tokens: 5 });
+    assert.deepStrictEqual(failedPayload.completion_tokens_details, { completion_detail_extra_tokens: 3 });
+    assert.deepStrictEqual(failedPayload.output_tokens_details, { output_detail_extra_tokens: 1 });
+    assert.deepStrictEqual(failedPayload.cache_creation, { cache_creation_unknown_tokens: 21 });
+  });
+
   it('should reject invalid Anthropic cache_creation object alias values for complete-task and fail-task', async () => {
     db.registerWorker(1, '/wt-1', 'agent-1');
     db.registerWorker(2, '/wt-2', 'agent-2');
     db.registerWorker(3, '/wt-3', 'agent-3');
-    db.registerWorker(4, '/wt-4', 'agent-4');
     const reqId = db.createRequest('Anthropic cache_creation object validation');
     const completeNonIntegerTaskId = db.createTask({ request_id: reqId, subject: 'Complete non-integer cache object', description: 'Should reject non-integer cache_creation nested token value' });
     const failNegativeTaskId = db.createTask({ request_id: reqId, subject: 'Fail negative cache object', description: 'Should reject negative cache_creation nested token value' });
-    const completeUnsupportedNestedTaskId = db.createTask({ request_id: reqId, subject: 'Complete unsupported cache object key', description: 'Should reject unsupported cache_creation nested key' });
     const failCliNonObjectTaskId = db.createTask({ request_id: reqId, subject: 'Fail non-object cache object alias', description: 'Should reject non-object cache_creation CLI payload' });
     db.updateTask(completeNonIntegerTaskId, { status: 'assigned', assigned_to: 1 });
     db.updateTask(failNegativeTaskId, { status: 'assigned', assigned_to: 2 });
-    db.updateTask(completeUnsupportedNestedTaskId, { status: 'assigned', assigned_to: 3 });
-    db.updateTask(failCliNonObjectTaskId, { status: 'assigned', assigned_to: 4 });
+    db.updateTask(failCliNonObjectTaskId, { status: 'assigned', assigned_to: 3 });
     db.updateWorker(1, { status: 'assigned', current_task_id: completeNonIntegerTaskId });
     db.updateWorker(2, { status: 'assigned', current_task_id: failNegativeTaskId });
-    db.updateWorker(3, { status: 'assigned', current_task_id: completeUnsupportedNestedTaskId });
-    db.updateWorker(4, { status: 'assigned', current_task_id: failCliNonObjectTaskId });
+    db.updateWorker(3, { status: 'assigned', current_task_id: failCliNonObjectTaskId });
 
     const nonIntegerResult = await sendCommand('complete-task', {
       worker_id: '1',
@@ -1885,24 +2002,10 @@ describe('CLI Server', () => {
     assert.match(negativeResult.error, /usage\.cache_creation\.ephemeral_1h_input_tokens" must be >= 0/);
     assert.strictEqual(db.getTask(failNegativeTaskId).status, 'assigned');
 
-    const unsupportedNestedResult = await sendCommand('complete-task', {
-      worker_id: '3',
-      task_id: String(completeUnsupportedNestedTaskId),
-      usage: {
-        cache_creation: {
-          ephemeral_5m_input_tokens: 2,
-          bogus_nested: 3,
-        },
-      },
-    });
-    assert.ok(unsupportedNestedResult.error);
-    assert.match(unsupportedNestedResult.error, /usage\.cache_creation" contains unsupported keys: bogus_nested/);
-    assert.strictEqual(db.getTask(completeUnsupportedNestedTaskId).status, 'assigned');
-
     await assert.rejects(
       () => runMac10Command([
         'fail-task',
-        '4',
+        '3',
         String(failCliNonObjectTaskId),
         'CLI non-object cache object alias',
         '--usage',
