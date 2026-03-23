@@ -139,20 +139,14 @@ if [ -d "$LEGACY_DIR" ] && [ ! -e "$CODEX_DIR" ]; then
   echo "  Migrated existing .claude directory to .codex."
 fi
 
-# Ensure .claude symlink exists for Claude CLI compatibility.
-# Claude auto-discovers settings from .claude/ — without this symlink,
-# hooks, permissions, and commands are invisible to Claude agents.
-if [ -d "$CODEX_DIR" ] && [ ! -e "$LEGACY_DIR" ]; then
-  ln -s "$CODEX_DIR" "$LEGACY_DIR"
-  echo "  Created .claude -> .codex symlink for Claude CLI compatibility."
-elif [ -L "$LEGACY_DIR" ]; then
-  CURRENT_TARGET="$(readlink "$LEGACY_DIR" || true)"
-  if [ "$CURRENT_TARGET" != "$CODEX_DIR" ] && [ "$CURRENT_TARGET" != ".codex" ]; then
-    rm -f "$LEGACY_DIR"
-    ln -s "$CODEX_DIR" "$LEGACY_DIR"
-    echo "  Fixed .claude symlink -> .codex."
-  fi
+# Ensure .claude/ is a real directory for Claude CLI auto-discovery.
+# Claude CLI cannot follow directory symlinks to find settings.json,
+# commands, or hooks — .claude/ must be a real directory.
+if [ -L "$LEGACY_DIR" ]; then
+  rm -f "$LEGACY_DIR"
+  echo "  Removed stale .claude symlink (Claude CLI needs a real directory)."
 fi
+mkdir -p "$LEGACY_DIR"
 
 mkdir -p "$CODEX_DIR/commands"
 mkdir -p "$CODEX_DIR/commands-codex10"
@@ -515,6 +509,20 @@ else
   echo "WARNING: Coordinator not responsive — workers not registered"
   echo "  Run manually: $CODEX10_CLI register-worker <id> <worktree_path> <branch>"
 fi
+
+# --- Sync Claude CLI discovery files ---
+# Claude CLI reads settings, commands, and hooks from .claude/ (not .codex/).
+# Mirror the essential files so Claude agents find them.
+echo "  Syncing Claude CLI discovery files to .claude/..."
+mkdir -p "$LEGACY_DIR/commands" "$LEGACY_DIR/commands-codex10" "$LEGACY_DIR/hooks" "$LEGACY_DIR/scripts"
+[ -f "$SETTINGS_FILE" ] && cp "$SETTINGS_FILE" "$LEGACY_DIR/settings.json"
+for f in "$CODEX_DIR/commands/"*.md; do [ -f "$f" ] && cp "$f" "$LEGACY_DIR/commands/"; done
+for f in "$CODEX_DIR/commands-codex10/"*.md; do [ -f "$f" ] && cp "$f" "$LEGACY_DIR/commands-codex10/"; done
+for f in "$CODEX_DIR/hooks/"*.sh; do [ -f "$f" ] && cp "$f" "$LEGACY_DIR/hooks/"; done
+chmod +x "$LEGACY_DIR/hooks/"*.sh 2>/dev/null || true
+for f in "$CODEX_DIR/scripts/mac10" "$CODEX_DIR/scripts/codex10" "$CODEX_DIR/scripts/mac10-codex10"; do
+  [ -f "$f" ] && cp "$f" "$LEGACY_DIR/scripts/$(basename "$f")"
+done
 
 echo ""
 echo "========================================"

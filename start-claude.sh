@@ -82,6 +82,7 @@ mac10_setup_cli_wrappers
 mac10_create_worktrees
 mac10_add_trusted_directories
 mac10_write_provider_config
+mac10_sync_claude_dir
 mac10_start_coordinator
 mac10_start_research_driver
 mac10_launch_masters

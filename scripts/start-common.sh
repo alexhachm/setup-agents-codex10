@@ -170,19 +170,14 @@ mac10_setup_directories() {
     echo "  Migrated existing .claude directory to .codex."
   fi
 
-  # Ensure .claude symlink exists for Claude CLI compatibility.
-  if [ -d "$CODEX_DIR" ] && [ ! -e "$legacy_dir" ]; then
-    ln -s "$CODEX_DIR" "$legacy_dir"
-    echo "  Created .claude -> .codex symlink for Claude CLI compatibility."
-  elif [ -L "$legacy_dir" ]; then
-    local current_target
-    current_target="$(readlink "$legacy_dir" || true)"
-    if [ "$current_target" != "$CODEX_DIR" ] && [ "$current_target" != ".codex" ]; then
-      rm -f "$legacy_dir"
-      ln -s "$CODEX_DIR" "$legacy_dir"
-      echo "  Fixed .claude symlink -> .codex."
-    fi
+  # Ensure .claude/ is a real directory for Claude CLI auto-discovery.
+  # Claude CLI cannot follow directory symlinks to find settings.json,
+  # commands, or hooks — .claude/ must be a real directory.
+  if [ -L "$legacy_dir" ]; then
+    rm -f "$legacy_dir"
+    echo "  Removed stale .claude symlink (Claude CLI needs a real directory)."
   fi
+  mkdir -p "$legacy_dir"
 
   mkdir -p "$CODEX_DIR/commands"
   mkdir -p "$CODEX_DIR/commands-codex10"
@@ -644,6 +639,49 @@ mac10_start_research_driver() {
     tail -n 40 "$CODEX_DIR/logs/research-driver.log" 2>/dev/null || true
     rm -f "$driver_pid_file"
   fi
+}
+
+# ---------------------------------------------------------------------------
+# mac10_sync_claude_dir — Mirror discovery files from .codex/ to .claude/
+# ---------------------------------------------------------------------------
+mac10_sync_claude_dir() {
+  local claude_dir="$PROJECT_DIR/.claude"
+
+  # Only meaningful when using Claude as the provider.
+  if [ "${PROVIDER:-}" != "claude" ]; then
+    mac10_debug "sync_claude_dir skipped (provider=${PROVIDER:-unknown})"
+    return 0
+  fi
+
+  if [ -L "$claude_dir" ]; then
+    rm -f "$claude_dir"
+  fi
+  mkdir -p "$claude_dir/commands" "$claude_dir/commands-codex10" "$claude_dir/hooks" "$claude_dir/scripts"
+
+  # settings.json — Claude CLI reads permissions, hooks, trustedDirectories
+  [ -f "$CODEX_DIR/settings.json" ] && cp "$CODEX_DIR/settings.json" "$claude_dir/settings.json"
+
+  # Commands — Claude CLI registers these as slash-command skills
+  for f in "$CODEX_DIR/commands/"*.md; do
+    [ -f "$f" ] && cp "$f" "$claude_dir/commands/"
+  done
+  for f in "$CODEX_DIR/commands-codex10/"*.md; do
+    [ -f "$f" ] && cp "$f" "$claude_dir/commands-codex10/"
+  done
+
+  # Hooks
+  for f in "$CODEX_DIR/hooks/"*.sh; do
+    [ -f "$f" ] && cp "$f" "$claude_dir/hooks/"
+  done
+  chmod +x "$claude_dir/hooks/"*.sh 2>/dev/null || true
+
+  # CLI wrappers (mac10, codex10) so .claude/scripts/ matches .codex/scripts/
+  for f in "$CODEX_DIR/scripts/mac10" "$CODEX_DIR/scripts/codex10" "$CODEX_DIR/scripts/mac10-codex10"; do
+    [ -f "$f" ] && cp "$f" "$claude_dir/scripts/$(basename "$f")"
+  done
+
+  mac10_debug "sync_claude_dir done: settings, commands, hooks, scripts mirrored to $claude_dir"
+  echo "  Claude CLI discovery files synced to .claude/"
 }
 
 # ---------------------------------------------------------------------------
