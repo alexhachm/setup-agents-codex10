@@ -1,1 +1,0 @@
-../../scripts/provider-utils.sh
