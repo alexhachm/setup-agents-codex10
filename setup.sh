@@ -456,6 +456,7 @@ echo "  Global wrappers ready: $LOCAL_BIN_DIR/mac10, $LOCAL_BIN_DIR/mac10-codex1
 echo "[6/8] Creating $NUM_WORKERS worktrees..."
 
 WORKTREE_DIR="$PROJECT_DIR/.worktrees"
+CODEX_SOURCE_DIR="$PROJECT_DIR/.codex"
 mkdir -p "$WORKTREE_DIR"
 
 cd "$PROJECT_DIR"
@@ -466,16 +467,15 @@ for i in $(seq 1 "$NUM_WORKERS"); do
   BRANCH="agent-$i"
 
   if [ -d "$WT_PATH" ]; then
-    echo "  Worktree wt-$i already exists, skipping."
-    continue
+    echo "  Worktree wt-$i already exists, refreshing runtime files."
+  else
+    # Create branch if it doesn't exist
+    git branch "$BRANCH" "$MAIN_BRANCH" 2>/dev/null || true
+    git worktree add "$WT_PATH" "$BRANCH" 2>/dev/null || {
+      # Branch might already exist from a previous run
+      git worktree add "$WT_PATH" "$BRANCH" --force 2>/dev/null || true
+    }
   fi
-
-  # Create branch if it doesn't exist
-  git branch "$BRANCH" "$MAIN_BRANCH" 2>/dev/null || true
-  git worktree add "$WT_PATH" "$BRANCH" 2>/dev/null || {
-    # Branch might already exist from a previous run
-    git worktree add "$WT_PATH" "$BRANCH" --force 2>/dev/null || true
-  }
 
   # Copy CLAUDE.md for worker
   cp "$CLAUDE_DIR/worker-claude.md" "$WT_PATH/CLAUDE.md"
@@ -503,7 +503,21 @@ for i in $(seq 1 "$NUM_WORKERS"); do
   # Copy settings.json to worktree so hooks are active
   cp "$SETTINGS_FILE" "$WT_PATH/.claude/settings.json" 2>/dev/null || true
 
-  echo "  Created worktree wt-$i (branch: $BRANCH)"
+  # Ensure each worktree has a real .codex directory (never a symlink).
+  if [ -d "$CODEX_SOURCE_DIR" ]; then
+    if [ -L "$WT_PATH/.codex" ] || [ -d "$WT_PATH/.codex" ] || [ -e "$WT_PATH/.codex" ]; then
+      rm -rf "$WT_PATH/.codex"
+    fi
+    cp -a "$CODEX_SOURCE_DIR" "$WT_PATH/.codex"
+    if [ ! -d "$WT_PATH/.codex/knowledge" ]; then
+      echo "ERROR: failed to copy .codex/knowledge into $WT_PATH"
+      exit 1
+    fi
+  else
+    echo "  WARNING: $CODEX_SOURCE_DIR not found; skipped .codex copy for wt-$i"
+  fi
+
+  echo "  Worktree wt-$i ready (branch: $BRANCH)"
 done
 
 # --- Add trusted directories ---
