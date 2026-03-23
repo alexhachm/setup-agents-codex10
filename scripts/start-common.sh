@@ -354,6 +354,30 @@ start_research_sentinel() {
   echo "  Log: $project_dir/.codex/logs/research-sentinel.log"
 }
 
+ensure_worktree_codex_copies() {
+  local project_dir="$1"
+  local num_workers="${2:-4}"
+  local source_codex="$project_dir/.codex"
+  local i wt_path wt_codex
+
+  if [ ! -d "$source_codex" ]; then
+    echo "WARNING: .codex source directory not found at $source_codex (skip worktree sync)" >&2
+    return 0
+  fi
+
+  for i in $(seq 1 "$num_workers"); do
+    wt_path="$project_dir/.worktrees/wt-$i"
+    [ -d "$wt_path" ] || continue
+    wt_codex="$wt_path/.codex"
+
+    if [ -L "$wt_codex" ] || [ ! -d "$wt_codex/knowledge" ]; then
+      rm -rf "$wt_codex"
+      cp -a "$source_codex" "$wt_codex"
+      echo "  Refreshed $wt_codex"
+    fi
+  done
+}
+
 stop_services() {
   local project_dir="$1"
   local lock_file="$project_dir/.codex/state/research-driver.lock"
@@ -463,5 +487,6 @@ else
   MAC10_FORCE_PROVIDER="$PROVIDER" bash "$REPO_ROOT/setup.sh" "$PROJECT_DIR"
 fi
 
+ensure_worktree_codex_copies "$PROJECT_DIR" "${NUM_WORKERS:-4}"
 force_reset_research_runtime "$PROJECT_DIR"
 start_research_sentinel "$PROJECT_DIR"
