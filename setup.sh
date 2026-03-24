@@ -1,4 +1,5 @@
 #!/usr/bin/env bash
+# Tested multi-project isolation
 # mac10 setup — Single entry point installer
 # Usage: bash setup.sh /path/to/your-project [num_workers]
 set -euo pipefail
