@@ -1914,6 +1914,50 @@ function isMergeOwnershipCollisionReason(reason) {
   return reason === 'existing_pr_owned_by_other_request' || reason === 'duplicate_pr_owned_by_other_request';
 }
 
+/**
+ * Pre-queue overlap detection: check whether the files changed by a completing
+ * task overlap with files referenced by other pending/ready merge_queue entries.
+ * When overlap is detected the older entry is serialized behind the completing
+ * task by resetting it to 'pending' so the merge processor handles them in order.
+ */
+function preQueueOverlapCheck(taskId, changedFiles) {
+  if (!changedFiles || changedFiles.length === 0) return;
+
+  const normalize = (f) => String(f).replace(/^\.\//, '');
+  const normalizedChanged = changedFiles.map(normalize);
+
+  // Find other non-terminal merge_queue entries (exclude the task itself)
+  const entries = db.getDb().prepare(
+    "SELECT mq.id, mq.request_id, mq.task_id, mq.branch, mq.status, t.files " +
+    "FROM merge_queue mq LEFT JOIN tasks t ON t.id = mq.task_id " +
+    "WHERE mq.status IN ('pending', 'ready') AND mq.task_id != ?"
+  ).all(taskId);
+
+  for (const entry of entries) {
+    let entryFiles;
+    try {
+      entryFiles = entry.files ? JSON.parse(entry.files).map(normalize) : [];
+    } catch {
+      entryFiles = [];
+    }
+    if (entryFiles.length === 0) continue;
+
+    const shared = normalizedChanged.filter((f) => entryFiles.includes(f));
+    if (shared.length === 0) continue;
+
+    // Overlap detected — serialize by resetting the older entry to pending
+    db.updateMerge(entry.id, { status: 'pending', error: null });
+    db.incrementMetric('merge_queue_overlap_serializations');
+    db.log('coordinator', 'merge_queue_overlap_serialized', {
+      completing_task_id: taskId,
+      overlapping_merge_id: entry.id,
+      overlapping_task_id: entry.task_id,
+      overlapping_branch: entry.branch,
+      shared_files: shared,
+    });
+  }
+}
+
 function queueMergeWithRecovery({
   request_id,
   task_id,
@@ -2605,6 +2649,12 @@ function handleCommand(cmd, conn, handlers) {
           ...usageTaskFields,
         });
         const completedTask = db.getTask(task_id);
+        // Pre-queue overlap detection: serialize overlapping pending merge entries
+        if (completedTask) {
+          let changedFiles = [];
+          try { changedFiles = completedTask.files ? JSON.parse(completedTask.files) : []; } catch { changedFiles = []; }
+          preQueueOverlapCheck(task_id, changedFiles);
+        }
         // Enqueue merge if PR exists (must be a valid URL, not a status string like "already_merged")
         const queueBranch = sanitizeBranchName(resolvedBranch.branch || completedTask.branch || (worker && worker.branch) || '');
         let completionPrUrl = normalizedPrUrl;
@@ -4402,6 +4452,41 @@ function handleCommand(cmd, conn, handlers) {
           offset: args.offset || 0,
         });
         respond(conn, { ok: true, links });
+        break;
+      }
+
+      // === MERGE OBSERVABILITY commands ===
+      case 'merge-metrics': {
+        const metrics = db.getMetrics();
+        respond(conn, { ok: true, metrics });
+        break;
+      }
+
+      case 'merge-health': {
+        const healthRows = db.getDb().prepare(
+          "SELECT status, COUNT(*) as count FROM merge_queue GROUP BY status"
+        ).all();
+        const counts = {};
+        for (const row of healthRows) counts[row.status] = row.count;
+        const circuitBreakerTrips = db.getMetrics().circuit_breaker_trips || 0;
+        const selfHealAttempts = db.getMetrics().self_heal_attempts || 0;
+        const selfHealSuccesses = db.getMetrics().self_heal_successes || 0;
+        const reconciliations = db.getMetrics().merge_queue_reconciliations || 0;
+        respond(conn, {
+          ok: true,
+          health: {
+            pending: counts.pending || 0,
+            ready: counts.ready || 0,
+            merging: counts.merging || 0,
+            merged: counts.merged || 0,
+            conflict: counts.conflict || 0,
+            failed: counts.failed || 0,
+            circuit_breaker_trips: circuitBreakerTrips,
+            self_heal_attempts: selfHealAttempts,
+            self_heal_successes: selfHealSuccesses,
+            merge_queue_reconciliations: reconciliations,
+          },
+        });
         break;
       }
 

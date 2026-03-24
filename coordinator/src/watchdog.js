@@ -1,6 +1,8 @@
 'use strict';
 
 const crypto = require('crypto');
+const fs = require('fs');
+const { execFileSync } = require('child_process');
 const db = require('./db');
 const tmux = require('./tmux');
 const recovery = require('./recovery');
@@ -9,6 +11,7 @@ const insightIngestion = require('./insight-ingestion');
 let intervalId = null;
 let lastMailPurge = 0;
 let startupRecoverySweepPending = true;
+let tickCount = 0;
 // Track last escalation level per worker to avoid duplicate nudge/triage mails
 const lastEscalationLevel = new Map();
 // Track tmux pane output hash at Level 3 triage to detect active workers at Level 4
@@ -127,6 +130,7 @@ function start(projectDir) {
 function stop() {
   if (intervalId) { clearInterval(intervalId); intervalId = null; }
   startupRecoverySweepPending = true;
+  tickCount = 0;
   lastEscalationLevel.clear();
   lastOutputHash.clear();
 }
@@ -147,6 +151,7 @@ function runStartupRecoverySweep() {
 }
 
 function tick(projectDir) {
+  tickCount += 1;
   const workers = db.getAllWorkers();
   const now = Date.now();
 
@@ -256,6 +261,15 @@ function tick(projectDir) {
   // Monitor research batches for timeout recovery
   monitorResearchBatches(now);
 
+  // Autonomous reconciliation sweep (every 5th tick)
+  if (tickCount % 5 === 0) {
+    try {
+      reconcileMergeQueue(projectDir);
+    } catch (e) {
+      db.log('coordinator', 'reconcile_merge_queue_error', { error: e.message });
+    }
+  }
+
   // Periodic mail + log purge (once per hour)
   if (now - lastMailPurge > 3600000) {
     lastMailPurge = now;
@@ -280,6 +294,164 @@ function tick(projectDir) {
 function recoverStaleDecomposedRequests(source = 'watchdog_tick') {
   const repaired = db.recoverStaleDecomposedZeroTaskRequests({ source });
   return Array.isArray(repaired) ? repaired.length : 0;
+}
+
+/**
+ * Autonomous reconciliation sweep: audit non-terminal merge_queue entries and
+ * self-heal inconsistencies in worktree, branch, and remote branch state.
+ * Called every 5th watchdog tick.
+ */
+function reconcileMergeQueue(projectDir) {
+  const entries = db.getDb().prepare(
+    "SELECT mq.*, w.worktree_path FROM merge_queue mq " +
+    "LEFT JOIN tasks t ON t.id = mq.task_id " +
+    "LEFT JOIN workers w ON w.id = t.assigned_to " +
+    "WHERE mq.status IN ('pending', 'ready', 'merging', 'conflict')"
+  ).all();
+
+  if (entries.length === 0) return;
+
+  db.incrementMetric('merge_queue_reconciliations');
+  let selfHealAttempts = 0;
+  let selfHealSuccesses = 0;
+
+  for (const entry of entries) {
+    const worktreePath = entry.worktree_path || projectDir;
+
+    // 1. Check worktree exists
+    if (worktreePath && worktreePath !== projectDir && !fs.existsSync(worktreePath)) {
+      db.log('coordinator', 'reconcile_missing_worktree', {
+        merge_id: entry.id,
+        task_id: entry.task_id,
+        branch: entry.branch,
+        worktree_path: worktreePath,
+      });
+      selfHealAttempts++;
+      db.incrementMetric('self_heal_attempts');
+      db.incrementMetric('worktree_recreations');
+      // Mark as needing-repair by resetting to pending so merger can retry
+      if (entry.status !== 'pending') {
+        db.updateMerge(entry.id, { status: 'pending', error: null });
+        selfHealSuccesses++;
+        db.incrementMetric('self_heal_successes');
+      }
+      continue;
+    }
+
+    // 2. Check local branch matches entry.branch in the worktree
+    const checkDir = (worktreePath && fs.existsSync(worktreePath)) ? worktreePath : projectDir;
+    let localBranch = null;
+    try {
+      localBranch = execFileSync('git', ['branch', '--show-current'], {
+        cwd: checkDir,
+        encoding: 'utf8',
+        timeout: 5000,
+      }).trim();
+    } catch {
+      localBranch = null;
+    }
+
+    if (localBranch && localBranch !== entry.branch) {
+      // Branch mismatch — attempt to checkout correct branch
+      db.log('coordinator', 'reconcile_branch_mismatch', {
+        merge_id: entry.id,
+        task_id: entry.task_id,
+        expected_branch: entry.branch,
+        actual_branch: localBranch,
+        worktree_path: checkDir,
+      });
+      selfHealAttempts++;
+      db.incrementMetric('self_heal_attempts');
+      db.incrementMetric('branch_identity_mismatches');
+      try {
+        execFileSync('git', ['checkout', entry.branch], {
+          cwd: checkDir,
+          encoding: 'utf8',
+          timeout: 10000,
+        });
+        selfHealSuccesses++;
+        db.incrementMetric('self_heal_successes');
+        db.log('coordinator', 'reconcile_branch_corrected', {
+          merge_id: entry.id,
+          branch: entry.branch,
+        });
+      } catch (e) {
+        db.log('coordinator', 'reconcile_branch_checkout_failed', {
+          merge_id: entry.id,
+          branch: entry.branch,
+          error: e.message,
+        });
+      }
+    }
+
+    // 3. Check remote branch exists; if missing but local exists, push it
+    let remoteExists = false;
+    try {
+      const lsRemote = execFileSync('git', ['ls-remote', '--heads', 'origin', entry.branch], {
+        cwd: checkDir,
+        encoding: 'utf8',
+        timeout: 10000,
+      }).trim();
+      remoteExists = lsRemote.length > 0;
+    } catch {
+      remoteExists = false;
+    }
+
+    if (!remoteExists && entry.branch) {
+      // Remote branch missing — attempt to push local branch
+      selfHealAttempts++;
+      db.incrementMetric('self_heal_attempts');
+      try {
+        execFileSync('git', ['push', 'origin', `${entry.branch}:${entry.branch}`], {
+          cwd: checkDir,
+          encoding: 'utf8',
+          timeout: 30000,
+        });
+        selfHealSuccesses++;
+        db.incrementMetric('self_heal_successes');
+        db.log('coordinator', 'reconcile_pushed_missing_remote', {
+          merge_id: entry.id,
+          branch: entry.branch,
+        });
+      } catch (e) {
+        db.log('coordinator', 'reconcile_push_failed', {
+          merge_id: entry.id,
+          branch: entry.branch,
+          error: e.message,
+        });
+      }
+    }
+  }
+
+  // Reset retryable conflict entries for integrating requests
+  const integratingRequestIds = db.getDb().prepare(
+    "SELECT DISTINCT request_id FROM merge_queue WHERE status IN ('pending','ready','merging','conflict')"
+  ).all().map((r) => r.request_id);
+
+  for (const requestId of integratingRequestIds) {
+    const reqRow = db.getDb().prepare("SELECT status FROM requests WHERE id = ?").get(requestId);
+    if (!reqRow || reqRow.status !== 'integrating') continue;
+
+    const conflictEntries = db.getDb().prepare(
+      "SELECT id FROM merge_queue WHERE request_id = ? AND status = 'conflict'"
+    ).all(requestId);
+
+    for (const ce of conflictEntries) {
+      db.updateMerge(ce.id, { status: 'pending', error: null });
+      db.log('coordinator', 'reconcile_conflict_reset', {
+        merge_id: ce.id,
+        request_id: requestId,
+      });
+    }
+  }
+
+  if (selfHealAttempts > 0) {
+    db.log('coordinator', 'merge_queue_reconciliation_complete', {
+      entries_audited: entries.length,
+      self_heal_attempts: selfHealAttempts,
+      self_heal_successes: selfHealSuccesses,
+    });
+  }
 }
 
 function escalate(worker, staleSec, projectDir) {
@@ -934,6 +1106,7 @@ module.exports = {
   stop,
   tick,
   getThresholds,
+  reconcileMergeQueue,
   THRESHOLDS,
   LOOP_STALE_HEARTBEAT_SEC,
 };
