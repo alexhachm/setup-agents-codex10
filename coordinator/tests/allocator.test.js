@@ -356,6 +356,152 @@ describe('Request completion tracking', () => {
 });
 
 // ---------------------------------------------------------------------------
+// Allocator routing logic — worker selection and task availability
+// ---------------------------------------------------------------------------
+
+describe('Allocator routing logic', () => {
+  it('should count all idle workers in tasks_available payload', () => {
+    db.registerWorker(1, '/wt-1', 'agent-1');
+    db.registerWorker(2, '/wt-2', 'agent-2');
+    const reqId = db.createRequest('Multi-worker test');
+    const taskId = db.createTask({ request_id: reqId, subject: 'Task', description: 'Desc' });
+    db.updateTask(taskId, { status: 'ready' });
+
+    db.checkMail('allocator');
+    allocator.tick();
+
+    const mail = db.checkMail('allocator');
+    const available = mail.filter(m => m.type === 'tasks_available');
+    assert.strictEqual(available.length, 1);
+    assert.strictEqual(available[0].payload.idle_count, 2);
+    assert.strictEqual(available[0].payload.ready_count, 1);
+  });
+
+  it('should skip busy workers and only count idle ones', () => {
+    db.registerWorker(1, '/wt-1', 'agent-1');
+    db.registerWorker(2, '/wt-2', 'agent-2');
+    db.updateWorker(1, { status: 'busy' }); // worker 1 is busy, worker 2 is idle
+
+    const reqId = db.createRequest('Skip busy workers');
+    const taskId = db.createTask({ request_id: reqId, subject: 'Task', description: 'Desc' });
+    db.updateTask(taskId, { status: 'ready' });
+
+    db.checkMail('allocator');
+    allocator.tick();
+
+    const mail = db.checkMail('allocator');
+    const available = mail.filter(m => m.type === 'tasks_available');
+    assert.strictEqual(available.length, 1);
+    assert.strictEqual(available[0].payload.idle_count, 1, 'only the idle worker should be counted');
+  });
+
+  it('should not notify when all workers are busy', () => {
+    db.registerWorker(1, '/wt-1', 'agent-1');
+    db.registerWorker(2, '/wt-2', 'agent-2');
+    db.updateWorker(1, { status: 'busy' });
+    db.updateWorker(2, { status: 'busy' });
+
+    const reqId = db.createRequest('All busy');
+    const taskId = db.createTask({ request_id: reqId, subject: 'Task', description: 'Desc' });
+    db.updateTask(taskId, { status: 'ready' });
+
+    db.checkMail('allocator');
+    allocator.tick();
+
+    const mail = db.checkMail('allocator');
+    const available = mail.filter(m => m.type === 'tasks_available');
+    assert.strictEqual(available.length, 0, 'should not notify when all workers are busy');
+  });
+
+  it('should not notify when no workers are registered', () => {
+    const reqId = db.createRequest('No workers');
+    const taskId = db.createTask({ request_id: reqId, subject: 'Task', description: 'Desc' });
+    db.updateTask(taskId, { status: 'ready' });
+
+    db.checkMail('allocator');
+    allocator.tick();
+
+    const mail = db.checkMail('allocator');
+    const available = mail.filter(m => m.type === 'tasks_available');
+    assert.strictEqual(available.length, 0, 'should not notify when no workers exist');
+  });
+
+  it('should not notify when there are no ready tasks', () => {
+    db.registerWorker(1, '/wt-1', 'agent-1');
+    // No tasks created
+
+    db.checkMail('allocator');
+    allocator.tick();
+
+    const mail = db.checkMail('allocator');
+    const available = mail.filter(m => m.type === 'tasks_available');
+    assert.strictEqual(available.length, 0, 'should not notify when no ready tasks exist');
+  });
+
+  it('should reflect all ready tasks in ready_count', () => {
+    db.registerWorker(1, '/wt-1', 'agent-1');
+    const reqId = db.createRequest('Multiple tasks');
+    const t1 = db.createTask({ request_id: reqId, subject: 'Task 1', description: 'Desc' });
+    const t2 = db.createTask({ request_id: reqId, subject: 'Task 2', description: 'Desc' });
+    const t3 = db.createTask({ request_id: reqId, subject: 'Task 3', description: 'Desc' });
+    db.updateTask(t1, { status: 'ready' });
+    db.updateTask(t2, { status: 'ready' });
+    db.updateTask(t3, { status: 'ready' });
+
+    db.checkMail('allocator');
+    allocator.tick();
+
+    const mail = db.checkMail('allocator');
+    const available = mail.filter(m => m.type === 'tasks_available');
+    assert.strictEqual(available.length, 1);
+    assert.strictEqual(available[0].payload.ready_count, 3);
+    assert.strictEqual(available[0].payload.idle_count, 1);
+  });
+
+  it('should suppress duplicate tasks_available notifications within dedup window', () => {
+    db.registerWorker(1, '/wt-1', 'agent-1');
+    const reqId = db.createRequest('Dedup test');
+    const taskId = db.createTask({ request_id: reqId, subject: 'Task', description: 'Desc' });
+    db.updateTask(taskId, { status: 'ready' });
+
+    db.checkMail('allocator');
+
+    // First tick: sends notification
+    allocator.tick();
+    const mail1 = db.checkMail('allocator');
+    const available1 = mail1.filter(m => m.type === 'tasks_available');
+    assert.strictEqual(available1.length, 1, 'first tick should send notification');
+
+    // Second immediate tick: suppressed by dedup window (NOTIFY_DEDUP_MS = 10s)
+    allocator.tick();
+    const mail2 = db.checkMail('allocator');
+    const available2 = mail2.filter(m => m.type === 'tasks_available');
+    assert.strictEqual(available2.length, 0, 'duplicate notification within dedup window should be suppressed');
+  });
+
+  it('should treat a mix of busy and claimed workers as unavailable', () => {
+    db.registerWorker(1, '/wt-1', 'agent-1');
+    db.registerWorker(2, '/wt-2', 'agent-2');
+    db.registerWorker(3, '/wt-3', 'agent-3');
+    db.updateWorker(1, { status: 'busy' });
+    db.claimWorker(2, 'architect'); // claimed but idle
+    // worker 3 remains idle and unclaimed
+
+    const reqId = db.createRequest('Mix test');
+    const taskId = db.createTask({ request_id: reqId, subject: 'Task', description: 'Desc' });
+    db.updateTask(taskId, { status: 'ready' });
+
+    db.checkMail('allocator');
+    allocator.tick();
+
+    const mail = db.checkMail('allocator');
+    const available = mail.filter(m => m.type === 'tasks_available');
+    assert.strictEqual(available.length, 1);
+    assert.strictEqual(available[0].payload.idle_count, 1, 'only unclaimed idle worker should count');
+  });
+});
+
+// ---------------------------------------------------------------------------
 // Research batch availability signalling
 // ---------------------------------------------------------------------------
 
