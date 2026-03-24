@@ -173,15 +173,19 @@ function tick(projectDir) {
 
     // Skip workers just launched (grace period)
     if (worker.launched_at) {
-      const launchedAgo = (now - new Date(worker.launched_at).getTime()) / 1000;
-      if (launchedAgo < getThresholds().warn) continue;
+      const launchedAtMs = parseTimestampMs(worker.launched_at);
+      const launchedAgo = launchedAtMs !== null ? (now - launchedAtMs) / 1000 : null;
+      if (launchedAgo !== null && launchedAgo < getThresholds().warn) continue;
     }
 
     // Heartbeat freshness check
     if (worker.status === 'running' || worker.status === 'busy') {
       if (worker.last_heartbeat) {
-        const staleSec = (now - new Date(worker.last_heartbeat).getTime()) / 1000;
-        escalate(worker, staleSec, projectDir);
+        const lastHbMs = parseTimestampMs(worker.last_heartbeat);
+        if (lastHbMs !== null) {
+          const staleSec = (now - lastHbMs) / 1000;
+          escalate(worker, staleSec, projectDir);
+        }
       }
     } else if (worker.status === 'assigned') {
       // Escalate assigned workers through warn/nudge/triage using the freshest
@@ -202,8 +206,9 @@ function tick(projectDir) {
 
     // Check completed_task workers that haven't been reset
     if (worker.status === 'completed_task') {
-      const completedAgo = worker.last_heartbeat
-        ? (now - new Date(worker.last_heartbeat).getTime()) / 1000
+      const lastHbMs = worker.last_heartbeat ? parseTimestampMs(worker.last_heartbeat) : null;
+      const completedAgo = lastHbMs !== null
+        ? (now - lastHbMs) / 1000
         : getThresholds().terminate;
       if (completedAgo > 30) {
         // Reset to idle so allocator can reuse

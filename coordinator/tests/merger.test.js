@@ -1158,3 +1158,428 @@ describe('Merge cleanup regression: dedup and idempotency', () => {
     assert.strictEqual(getRequestCompletionLogCount(reqId), 1, 'request_completed log entry must appear exactly once');
   });
 });
+
+// --- Regression suite: merge conflict prevention system ---
+
+describe('Branch identity: findWorktreePath with task-suffixed branches', () => {
+  function setupCleanGitCli() {
+    const binDir = path.join(tmpDir, 'mock-bin-identity');
+    const commandLog = path.join(tmpDir, 'identity-cli.log');
+    fs.mkdirSync(binDir, { recursive: true });
+
+    const gitScript = [
+      '#!/usr/bin/env bash',
+      'set -eu',
+      `echo "git $*" >> "${commandLog}"`,
+      'if [ "$1" = "status" ] && [ "${2:-}" = "--porcelain" ]; then',
+      '  printf ""',
+      '  exit 0',
+      'fi',
+      'exit 0',
+    ].join('\n');
+    fs.writeFileSync(path.join(binDir, 'git'), gitScript, { mode: 0o755 });
+
+    process.env.PATH = `${binDir}${path.delimiter}${originalPath}`;
+    return { commandLog };
+  }
+
+  it('should resolve task-suffixed branch (agent-N-task-*) to worktree via DB', () => {
+    const { commandLog } = setupCleanGitCli();
+    const fakeWtPath = path.join(tmpDir, '.worktrees', 'wt-1');
+    fs.mkdirSync(fakeWtPath, { recursive: true });
+    db.registerWorker(1, fakeWtPath, 'agent-1-task-10');
+
+    const reqId = db.createRequest('Task-suffixed branch test');
+    const taskId = db.createTask({ request_id: reqId, subject: 'T1', description: 'D1' });
+    db.updateTask(taskId, { assigned_to: 1 });
+
+    const entry = {
+      id: 1,
+      request_id: reqId,
+      task_id: taskId,
+      pr_url: 'https://github.com/org/repo/pull/10',
+      branch: 'agent-1-task-10',
+      created_at: new Date().toISOString(),
+    };
+
+    const result = merger.tryRebase(entry, tmpDir);
+    assert.strictEqual(result.success, true, 'tryRebase should succeed for task-suffixed branch via DB path');
+
+    const lines = fs.readFileSync(commandLog, 'utf8').split('\n');
+    assert.ok(lines.some((l) => l.includes('rebase origin/main')), 'git rebase should have been called');
+  });
+
+  it('should resolve two task branches from the same worker to the same worktree', () => {
+    setupCleanGitCli();
+    const fakeWtPath = path.join(tmpDir, '.worktrees', 'wt-1');
+    fs.mkdirSync(fakeWtPath, { recursive: true });
+    db.registerWorker(1, fakeWtPath, 'agent-1');
+
+    const reqId = db.createRequest('Two-task-branch test');
+    const taskId10 = db.createTask({ request_id: reqId, subject: 'T10', description: 'D10' });
+    const taskId11 = db.createTask({ request_id: reqId, subject: 'T11', description: 'D11' });
+    db.updateTask(taskId10, { assigned_to: 1 });
+    db.updateTask(taskId11, { assigned_to: 1 });
+
+    const entry10 = {
+      id: 1, request_id: reqId, task_id: taskId10,
+      pr_url: 'https://github.com/org/repo/pull/10', branch: 'agent-1-task-10',
+      created_at: new Date().toISOString(),
+    };
+    const entry11 = {
+      id: 2, request_id: reqId, task_id: taskId11,
+      pr_url: 'https://github.com/org/repo/pull/11', branch: 'agent-1-task-11',
+      created_at: new Date().toISOString(),
+    };
+
+    assert.strictEqual(merger.tryRebase(entry10, tmpDir).success, true, 'agent-1-task-10 should succeed');
+    assert.strictEqual(merger.tryRebase(entry11, tmpDir).success, true, 'agent-1-task-11 should succeed');
+  });
+
+  it('should fall back to projectDir for task-suffixed branch with no DB assignment', () => {
+    setupCleanGitCli();
+    const reqId = db.createRequest('No-assignment fallback test');
+    const taskId = db.createTask({ request_id: reqId, subject: 'T1', description: 'D1' });
+    // Do NOT assign the task to a worker — DB path returns null
+    // The fallback regex ^agent-(\d+)$ does NOT match agent-1-task-99
+    // So findWorktreePath returns null and rebase falls back to projectDir
+
+    const entry = {
+      id: 1, request_id: reqId, task_id: taskId,
+      pr_url: 'https://github.com/org/repo/pull/99', branch: 'agent-1-task-99',
+      created_at: new Date().toISOString(),
+    };
+
+    const result = merger.tryRebase(entry, tmpDir);
+    assert.strictEqual(result.success, true, 'should fall back to projectDir when no worktree found');
+  });
+});
+
+describe('DB helpers: merge identity', () => {
+  function seedMergeEntry() {
+    const reqId = db.createRequest('Identity test');
+    const taskId = db.createTask({ request_id: reqId, subject: 'T1', description: 'D1' });
+    const { lastInsertRowid } = db.enqueueMerge({
+      request_id: reqId,
+      task_id: taskId,
+      pr_url: 'https://github.com/org/repo/pull/50',
+      branch: 'agent-1',
+    });
+    return lastInsertRowid;
+  }
+
+  it('should store and retrieve head_sha via updateMergeIdentity / getMergeIdentity', () => {
+    const mergeId = seedMergeEntry();
+    db.updateMergeIdentity(mergeId, { head_sha: 'abc123def456' });
+    const identity = db.getMergeIdentity(mergeId);
+    assert.ok(identity, 'getMergeIdentity should return a row');
+    assert.strictEqual(identity.head_sha, 'abc123def456');
+  });
+
+  it('should store worker_id via updateMergeIdentity', () => {
+    const mergeId = seedMergeEntry();
+    db.updateMergeIdentity(mergeId, { head_sha: 'sha-abc', worker_id: 3 });
+    const identity = db.getMergeIdentity(mergeId);
+    assert.strictEqual(identity.worker_id, 3);
+    assert.strictEqual(identity.head_sha, 'sha-abc');
+  });
+
+  it('should return null from getMergeIdentity for unknown merge id', () => {
+    const identity = db.getMergeIdentity(99999);
+    assert.strictEqual(identity, null);
+  });
+
+  it('should update head_sha when PR head changes (preflight identity update)', () => {
+    const mergeId = seedMergeEntry();
+    db.updateMergeIdentity(mergeId, { head_sha: 'old-sha' });
+    assert.strictEqual(db.getMergeIdentity(mergeId).head_sha, 'old-sha');
+
+    db.updateMergeIdentity(mergeId, { head_sha: 'new-sha' });
+    assert.strictEqual(db.getMergeIdentity(mergeId).head_sha, 'new-sha', 'head_sha should reflect updated value');
+  });
+});
+
+describe('DB helpers: failure classification', () => {
+  function seedMergeEntry(prSuffix = 60) {
+    const reqId = db.createRequest('Failure class test');
+    const taskId = db.createTask({ request_id: reqId, subject: 'T1', description: 'D1' });
+    const { lastInsertRowid } = db.enqueueMerge({
+      request_id: reqId, task_id: taskId,
+      pr_url: `https://github.com/org/repo/pull/${prSuffix}`,
+      branch: 'agent-1',
+    });
+    return lastInsertRowid;
+  }
+
+  const VALID_CLASSES = [
+    'branch_identity_mismatch',
+    'worktree_missing',
+    'worktree_dirty',
+    'remote_branch_missing',
+    'remote_diverged',
+    'gh_auth_or_network',
+    'textual_merge_conflict',
+    'validation_conflict',
+  ];
+
+  it('should accept all 8 valid failure classes via updateMergeFailureClass', () => {
+    for (let i = 0; i < VALID_CLASSES.length; i++) {
+      const mergeId = seedMergeEntry(200 + i);
+      assert.doesNotThrow(
+        () => db.updateMergeFailureClass(mergeId, VALID_CLASSES[i]),
+        `${VALID_CLASSES[i]} should be a valid failure class`
+      );
+      const identity = db.getMergeIdentity(mergeId);
+      assert.strictEqual(identity.failure_class, VALID_CLASSES[i]);
+    }
+  });
+
+  it('should reject an unknown failure class', () => {
+    const mergeId = seedMergeEntry(300);
+    assert.throws(
+      () => db.updateMergeFailureClass(mergeId, 'unknown_class'),
+      /Invalid failure_class/,
+      'invalid failure class should throw'
+    );
+  });
+
+  it('should store failure_class via recordFailure', () => {
+    const mergeId = seedMergeEntry(301);
+    db.recordFailure(mergeId, 'textual_merge_conflict', 'fp-textual-1', 'CONFLICT in file.js');
+    const identity = db.getMergeIdentity(mergeId);
+    assert.strictEqual(identity.failure_class, 'textual_merge_conflict');
+  });
+
+  it('should map CONFLICT error pattern to textual_merge_conflict class (via recordFailure)', () => {
+    const mergeId = seedMergeEntry(302);
+    db.recordFailure(mergeId, 'textual_merge_conflict', 'fp-conflict-2', 'CONFLICT in src/index.js');
+    assert.strictEqual(db.getMergeIdentity(mergeId).failure_class, 'textual_merge_conflict');
+  });
+
+  it('should accept remote_diverged class (force-with-lease rejection pattern)', () => {
+    const mergeId = seedMergeEntry(303);
+    assert.doesNotThrow(() =>
+      db.recordFailure(mergeId, 'remote_diverged', 'fp-diverged-1', 'rejected: remote already advanced')
+    );
+    assert.strictEqual(db.getMergeIdentity(mergeId).failure_class, 'remote_diverged');
+  });
+
+  it('should accept gh_auth_or_network class (gh auth error pattern)', () => {
+    const mergeId = seedMergeEntry(304);
+    assert.doesNotThrow(() =>
+      db.recordFailure(mergeId, 'gh_auth_or_network', 'fp-auth-1', 'gh: authentication required')
+    );
+    assert.strictEqual(db.getMergeIdentity(mergeId).failure_class, 'gh_auth_or_network');
+  });
+
+  it('should accept worktree_missing class', () => {
+    const mergeId = seedMergeEntry(305);
+    assert.doesNotThrow(() =>
+      db.recordFailure(mergeId, 'worktree_missing', 'fp-wt-missing-1', 'worktree not found')
+    );
+    assert.strictEqual(db.getMergeIdentity(mergeId).failure_class, 'worktree_missing');
+  });
+
+  it('should clear failure_class by setting null', () => {
+    const mergeId = seedMergeEntry(306);
+    db.updateMergeFailureClass(mergeId, 'worktree_dirty');
+    assert.strictEqual(db.getMergeIdentity(mergeId).failure_class, 'worktree_dirty');
+    db.updateMergeFailureClass(mergeId, null);
+    assert.strictEqual(db.getMergeIdentity(mergeId).failure_class, null);
+  });
+});
+
+describe('DB helpers: circuit breaker', () => {
+  function seedMergeEntry(prSuffix = 70) {
+    const reqId = db.createRequest('Circuit breaker test');
+    const taskId = db.createTask({ request_id: reqId, subject: 'T1', description: 'D1' });
+    const { lastInsertRowid } = db.enqueueMerge({
+      request_id: reqId, task_id: taskId,
+      pr_url: `https://github.com/org/repo/pull/${prSuffix}`,
+      branch: 'agent-1',
+    });
+    return lastInsertRowid;
+  }
+
+  it('should create a circuit breaker entry on first recordFailure call', () => {
+    const mergeId = seedMergeEntry(400);
+    const result = db.recordFailure(mergeId, 'textual_merge_conflict', 'fp-cb-1', 'CONFLICT');
+    assert.strictEqual(result.failure_count, 1);
+    assert.strictEqual(result.tripped, false);
+
+    const row = db.getMergeByFingerprint('fp-cb-1');
+    assert.ok(row, 'circuit breaker row should exist');
+    assert.strictEqual(row.fingerprint, 'fp-cb-1');
+    assert.strictEqual(row.failure_count, 1);
+    assert.strictEqual(row.tripped, 0);
+  });
+
+  it('should increment failure_count on second recordFailure with same fingerprint', () => {
+    const mergeId1 = seedMergeEntry(401);
+    const mergeId2 = seedMergeEntry(402);
+
+    db.recordFailure(mergeId1, 'textual_merge_conflict', 'fp-cb-2', 'CONFLICT round 1');
+    const result2 = db.recordFailure(mergeId2, 'textual_merge_conflict', 'fp-cb-2', 'CONFLICT round 2');
+
+    assert.strictEqual(result2.failure_count, 2, 'same fingerprint should increment failure_count to 2');
+  });
+
+  it('should keep different fingerprints independent', () => {
+    const mergeId1 = seedMergeEntry(403);
+    const mergeId2 = seedMergeEntry(404);
+
+    db.recordFailure(mergeId1, 'remote_diverged', 'fp-cb-3a', 'error A');
+    db.recordFailure(mergeId2, 'remote_diverged', 'fp-cb-3b', 'error B');
+
+    assert.strictEqual(db.getMergeByFingerprint('fp-cb-3a').failure_count, 1);
+    assert.strictEqual(db.getMergeByFingerprint('fp-cb-3b').failure_count, 1);
+  });
+
+  it('should reset failure_count and tripped via resetCircuitBreaker', () => {
+    const mergeId1 = seedMergeEntry(405);
+    const mergeId2 = seedMergeEntry(406);
+    db.recordFailure(mergeId1, 'gh_auth_or_network', 'fp-cb-4', 'auth error 1');
+    db.recordFailure(mergeId2, 'gh_auth_or_network', 'fp-cb-4', 'auth error 2');
+
+    const before = db.getMergeByFingerprint('fp-cb-4');
+    assert.strictEqual(before.failure_count, 2);
+
+    db.resetCircuitBreaker('fp-cb-4');
+
+    const after = db.getMergeByFingerprint('fp-cb-4');
+    assert.strictEqual(after.failure_count, 0);
+    assert.strictEqual(after.tripped, 0);
+  });
+
+  it('should return null from getMergeByFingerprint for unknown fingerprint', () => {
+    const result = db.getMergeByFingerprint('non-existent-fingerprint');
+    assert.strictEqual(result, null);
+  });
+
+  it('getOrCreateCircuitBreaker should create new entry if not exists', () => {
+    const mergeId = seedMergeEntry(407);
+    db.enqueueMerge({
+      request_id: db.createRequest('CBtest'),
+      task_id: db.createTask({ request_id: db.createRequest('CBtest2'), subject: 'T', description: 'D' }),
+      pr_url: 'https://github.com/org/repo/pull/408',
+      branch: 'agent-2',
+    });
+    const row = db.getOrCreateCircuitBreaker('fp-new-1');
+    assert.ok(row, 'should create a new circuit breaker row');
+    assert.strictEqual(row.fingerprint, 'fp-new-1');
+    assert.strictEqual(row.failure_count, 1);
+    assert.strictEqual(row.tripped, 0);
+    void mergeId; // suppress unused warning
+  });
+
+  it('getOrCreateCircuitBreaker should return existing entry if fingerprint exists', () => {
+    const mergeId = seedMergeEntry(409);
+    db.recordFailure(mergeId, 'worktree_missing', 'fp-existing-1', 'worktree gone');
+    const first = db.getMergeByFingerprint('fp-existing-1');
+    assert.strictEqual(first.failure_count, 1);
+
+    const second = db.getOrCreateCircuitBreaker('fp-existing-1');
+    assert.strictEqual(second.failure_count, 1, 'getOrCreateCircuitBreaker should not reset existing entry');
+  });
+
+  it('should trip breaker (failure_count = 2) then reset allows retry (changed head SHA)', () => {
+    const mergeId1 = seedMergeEntry(410);
+    const mergeId2 = seedMergeEntry(411);
+
+    // Simulate two failures with same fingerprint (same error + same PR state)
+    db.recordFailure(mergeId1, 'textual_merge_conflict', 'fp-trip-1', 'CONFLICT in file.js');
+    const r2 = db.recordFailure(mergeId2, 'textual_merge_conflict', 'fp-trip-1', 'CONFLICT in file.js');
+    assert.strictEqual(r2.failure_count, 2, 'breaker should show 2 failures');
+
+    // When PR head SHA changes → new fingerprint → breaker reset not needed
+    const mergeId3 = seedMergeEntry(412);
+    const r3 = db.recordFailure(mergeId3, 'textual_merge_conflict', 'fp-trip-NEW', 'CONFLICT in file.js');
+    assert.strictEqual(r3.failure_count, 1, 'changed fingerprint (new head SHA) should start fresh counter');
+  });
+});
+
+describe('DB helpers: metrics', () => {
+  it('should create metric on first incrementMetric call', () => {
+    db.incrementMetric('merges_attempted');
+    const metrics = db.getMetrics();
+    const found = metrics.find((m) => m.metric_name === 'merges_attempted');
+    assert.ok(found, 'metric should be created');
+    assert.strictEqual(found.metric_value, 1);
+  });
+
+  it('should increment metric value on subsequent calls', () => {
+    db.incrementMetric('merges_succeeded');
+    db.incrementMetric('merges_succeeded');
+    db.incrementMetric('merges_succeeded');
+    const metrics = db.getMetrics();
+    const found = metrics.find((m) => m.metric_name === 'merges_succeeded');
+    assert.ok(found, 'metric should exist');
+    assert.strictEqual(found.metric_value, 3);
+  });
+
+  it('should track multiple independent metrics', () => {
+    db.incrementMetric('metric_a');
+    db.incrementMetric('metric_b');
+    db.incrementMetric('metric_b');
+    const metrics = db.getMetrics();
+    const a = metrics.find((m) => m.metric_name === 'metric_a');
+    const b = metrics.find((m) => m.metric_name === 'metric_b');
+    assert.ok(a && b, 'both metrics should exist');
+    assert.strictEqual(a.metric_value, 1);
+    assert.strictEqual(b.metric_value, 2);
+  });
+
+  it('getMetrics should return empty array when no metrics exist', () => {
+    // fresh db from beforeEach — no metrics yet
+    const metrics = db.getMetrics();
+    assert.ok(Array.isArray(metrics), 'getMetrics should return an array');
+    assert.strictEqual(metrics.length, 0);
+  });
+});
+
+describe('Preflight: identity and self-heal behavior via DB', () => {
+  function seedMergeEntry(prSuffix = 80) {
+    const reqId = db.createRequest('Preflight test');
+    const taskId = db.createTask({ request_id: reqId, subject: 'T1', description: 'D1' });
+    const { lastInsertRowid } = db.enqueueMerge({
+      request_id: reqId, task_id: taskId,
+      pr_url: `https://github.com/org/repo/pull/${prSuffix}`,
+      branch: 'agent-1',
+    });
+    return lastInsertRowid;
+  }
+
+  it('should allow updating head_sha when PR head changes (preflight identity refresh)', () => {
+    const mergeId = seedMergeEntry(500);
+    // Simulate preflight: discovered head_sha does not match stored value
+    db.updateMergeIdentity(mergeId, { head_sha: 'stale-sha-aaa' });
+    assert.strictEqual(db.getMergeIdentity(mergeId).head_sha, 'stale-sha-aaa');
+
+    // Preflight detects mismatch and updates
+    db.updateMergeIdentity(mergeId, { head_sha: 'fresh-sha-bbb' });
+    assert.strictEqual(db.getMergeIdentity(mergeId).head_sha, 'fresh-sha-bbb', 'head_sha should be updated');
+  });
+
+  it('should store remote_branch_missing failure class for missing remote branch', () => {
+    const mergeId = seedMergeEntry(501);
+    assert.doesNotThrow(() =>
+      db.updateMergeFailureClass(mergeId, 'remote_branch_missing')
+    );
+    assert.strictEqual(db.getMergeIdentity(mergeId).failure_class, 'remote_branch_missing');
+  });
+
+  it('should have no failure_class for a fresh merge entry (all preflight checks pass)', () => {
+    const mergeId = seedMergeEntry(502);
+    const identity = db.getMergeIdentity(mergeId);
+    assert.ok(identity, 'entry should exist');
+    assert.strictEqual(identity.failure_class, null, 'fresh entry should have no failure_class');
+    assert.strictEqual(identity.retry_count, 0, 'fresh entry should have retry_count = 0');
+  });
+
+  it('should increment retry_count via recordFailure', () => {
+    const mergeId = seedMergeEntry(503);
+    db.recordFailure(mergeId, 'worktree_missing', 'fp-retry-1', 'wt not found');
+    const identity = db.getMergeIdentity(mergeId);
+    assert.strictEqual(identity.retry_count, 1, 'retry_count should be incremented by recordFailure');
+  });
+});

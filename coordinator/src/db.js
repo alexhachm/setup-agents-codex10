@@ -442,7 +442,10 @@ const VALID_COLUMNS = Object.freeze({
     'started_at', 'completed_at', 'result',
   ]),
   workers: new Set(['status', 'domain', 'worktree_path', 'branch', 'tmux_session', 'tmux_window', 'pid', 'current_task_id', 'claimed_by', 'claimed_at', 'last_heartbeat', 'launched_at', 'tasks_completed']),
-  merge_queue: new Set(['status', 'priority', 'completion_checkpoint', 'merged_at', 'error']),
+  merge_queue: new Set([
+    'status', 'priority', 'completion_checkpoint', 'merged_at', 'error',
+    'head_sha', 'worker_id', 'failure_class', 'retry_count', 'fingerprint', 'last_fingerprint_at',
+  ]),
   changes: new Set(['description', 'domain', 'file_path', 'function_name', 'tooltip', 'enabled', 'status']),
   loops: new Set(['prompt', 'status', 'iteration_count', 'last_checkpoint', 'namespace', 'tmux_session', 'tmux_window', 'pid', 'last_heartbeat', 'stopped_at']),
 });
@@ -475,6 +478,30 @@ function ensureMergeQueueColumns(database) {
   }
   database.exec("UPDATE merge_queue SET updated_at = COALESCE(updated_at, datetime('now')) WHERE updated_at IS NULL");
   database.exec("UPDATE merge_queue SET completion_checkpoint = COALESCE(completion_checkpoint, updated_at, datetime('now')) WHERE completion_checkpoint IS NULL");
+}
+
+function ensureMergeIdentityColumns(database) {
+  const mergeCols = database.prepare("PRAGMA table_info(merge_queue)").all().map((column) => column.name);
+  if (mergeCols.length === 0) return;
+
+  if (!mergeCols.includes('head_sha')) {
+    database.exec("ALTER TABLE merge_queue ADD COLUMN head_sha TEXT");
+  }
+  if (!mergeCols.includes('worker_id')) {
+    database.exec("ALTER TABLE merge_queue ADD COLUMN worker_id INTEGER");
+  }
+  if (!mergeCols.includes('failure_class')) {
+    database.exec("ALTER TABLE merge_queue ADD COLUMN failure_class TEXT");
+  }
+  if (!mergeCols.includes('retry_count')) {
+    database.exec("ALTER TABLE merge_queue ADD COLUMN retry_count INTEGER NOT NULL DEFAULT 0");
+  }
+  if (!mergeCols.includes('fingerprint')) {
+    database.exec("ALTER TABLE merge_queue ADD COLUMN fingerprint TEXT");
+  }
+  if (!mergeCols.includes('last_fingerprint_at')) {
+    database.exec("ALTER TABLE merge_queue ADD COLUMN last_fingerprint_at TEXT");
+  }
 }
 
 function ensureTaskRoutingTelemetryColumns(database) {
@@ -970,7 +997,10 @@ function init(projectDir) {
       db.exec("ALTER TABLE requests ADD COLUMN status_cause TEXT");
     }
   }
-  if (existingTables.includes('merge_queue')) ensureMergeQueueColumns(db);
+  if (existingTables.includes('merge_queue')) {
+    ensureMergeQueueColumns(db);
+    ensureMergeIdentityColumns(db);
+  }
   if (existingTables.includes('loops')) {
     const loopCols = db.prepare("PRAGMA table_info(loops)").all().map(c => c.name);
     if (!loopCols.includes('namespace')) {
@@ -983,6 +1013,7 @@ function init(projectDir) {
   const schema = fs.readFileSync(path.join(__dirname, 'schema.sql'), 'utf8');
   db.exec(schema);
   ensureMergeQueueColumns(db);
+  ensureMergeIdentityColumns(db);
   ensureTaskLivenessRecoveryColumns(db);
   ensureTaskRoutingTelemetryColumns(db);
   ensureTaskBrowserOffloadColumns(db);
@@ -3583,6 +3614,133 @@ function updateMerge(id, fields) {
   getDb().prepare(`UPDATE merge_queue SET ${sets.join(', ')} WHERE id = ?`).run(...vals);
 }
 
+// --- Merge identity, circuit breaker, and metrics ---
+
+const VALID_FAILURE_CLASSES = Object.freeze([
+  'branch_identity_mismatch',
+  'worktree_missing',
+  'worktree_dirty',
+  'remote_branch_missing',
+  'remote_diverged',
+  'gh_auth_or_network',
+  'textual_merge_conflict',
+  'validation_conflict',
+]);
+
+function updateMergeIdentity(mergeId, { head_sha, worker_id, head_branch }) {
+  const fields = {};
+  if (head_sha !== undefined && head_sha !== null) fields.head_sha = String(head_sha).trim() || null;
+  if (worker_id !== undefined && worker_id !== null) fields.worker_id = Number.parseInt(String(worker_id), 10) || null;
+  if (head_branch !== undefined && head_branch !== null) {
+    fields.branch = String(head_branch).trim() || null;
+  }
+  if (Object.keys(fields).length === 0) return;
+  validateColumns('merge_queue', fields);
+  const sets = [];
+  const vals = [];
+  for (const [k, v] of Object.entries(fields)) {
+    sets.push(`${k} = ?`);
+    vals.push(v);
+  }
+  sets.push("updated_at = datetime('now')");
+  vals.push(mergeId);
+  getDb().prepare(`UPDATE merge_queue SET ${sets.join(', ')} WHERE id = ?`).run(...vals);
+}
+
+function getMergeIdentity(mergeId) {
+  return getDb().prepare(
+    'SELECT id, request_id, task_id, pr_url, branch, head_sha, worker_id, failure_class, retry_count, fingerprint FROM merge_queue WHERE id = ?'
+  ).get(mergeId) || null;
+}
+
+function updateMergeFailureClass(mergeId, failureClass) {
+  if (failureClass !== null && !VALID_FAILURE_CLASSES.includes(failureClass)) {
+    throw new Error(`Invalid failure_class: ${failureClass}`);
+  }
+  getDb().prepare(
+    "UPDATE merge_queue SET failure_class = ?, updated_at = datetime('now') WHERE id = ?"
+  ).run(failureClass, mergeId);
+}
+
+function listRecoverableMerges(requestId) {
+  return getDb().prepare(`
+    SELECT mq.*
+    FROM merge_queue mq
+    LEFT JOIN merge_circuit_breaker mcb ON mcb.fingerprint = mq.fingerprint
+    WHERE mq.request_id = ?
+      AND mq.status IN ('pending', 'ready', 'conflict', 'failed')
+      AND (mcb.tripped IS NULL OR mcb.tripped = 0)
+    ORDER BY mq.priority DESC, mq.id ASC
+  `).all(requestId);
+}
+
+function getOrCreateCircuitBreaker(fingerprint) {
+  const existing = getDb().prepare(
+    'SELECT * FROM merge_circuit_breaker WHERE fingerprint = ?'
+  ).get(fingerprint);
+  if (existing) return existing;
+  getDb().prepare(
+    `INSERT OR IGNORE INTO merge_circuit_breaker (fingerprint, failure_count, tripped, first_seen_at, last_seen_at)
+     VALUES (?, 1, 0, datetime('now'), datetime('now'))`
+  ).run(fingerprint);
+  return getDb().prepare('SELECT * FROM merge_circuit_breaker WHERE fingerprint = ?').get(fingerprint);
+}
+
+function getMergeByFingerprint(fingerprint) {
+  return getDb().prepare(
+    'SELECT * FROM merge_circuit_breaker WHERE fingerprint = ?'
+  ).get(fingerprint) || null;
+}
+
+function recordFailure(mergeId, failureClass, fingerprint, normalizedError) {
+  if (failureClass !== null && !VALID_FAILURE_CLASSES.includes(failureClass)) {
+    throw new Error(`Invalid failure_class: ${failureClass}`);
+  }
+  const now = currentSqlTimestamp();
+
+  getDb().prepare(
+    `UPDATE merge_queue
+     SET failure_class = ?,
+         fingerprint = ?,
+         last_fingerprint_at = ?,
+         retry_count = retry_count + 1,
+         updated_at = datetime('now')
+     WHERE id = ?`
+  ).run(failureClass, fingerprint, now, mergeId);
+
+  getDb().prepare(
+    `INSERT INTO merge_circuit_breaker (merge_queue_id, fingerprint, failure_count, tripped, first_seen_at, last_seen_at)
+     VALUES (?, ?, 1, 0, ?, ?)
+     ON CONFLICT(fingerprint) DO UPDATE SET
+       failure_count = failure_count + 1,
+       last_seen_at = excluded.last_seen_at,
+       merge_queue_id = excluded.merge_queue_id`
+  ).run(mergeId, fingerprint, now, now);
+
+  const row = getDb().prepare('SELECT failure_count, tripped FROM merge_circuit_breaker WHERE fingerprint = ?').get(fingerprint);
+  return { tripped: row ? row.tripped === 1 : false, failure_count: row ? row.failure_count : 1 };
+}
+
+function resetCircuitBreaker(fingerprint) {
+  getDb().prepare(
+    `UPDATE merge_circuit_breaker SET failure_count = 0, tripped = 0, last_seen_at = datetime('now') WHERE fingerprint = ?`
+  ).run(fingerprint);
+}
+
+function incrementMetric(metricName) {
+  getDb().prepare(
+    `INSERT INTO merge_metrics (metric_name, metric_value, updated_at)
+     VALUES (?, 1, datetime('now'))
+     ON CONFLICT(metric_name) DO UPDATE SET
+       metric_value = metric_value + 1,
+       updated_at = datetime('now')`
+  ).run(metricName);
+}
+
+function getMetrics() {
+  return getDb().prepare('SELECT metric_name, metric_value, updated_at FROM merge_metrics ORDER BY metric_name ASC').all();
+}
+
 // --- Activity log ---
 
 function log(actor, action, details = {}) {
@@ -4243,6 +4401,10 @@ module.exports = {
   getUsageCostBurnRate, getRequestLatestCompletedTaskCursor, hasRequestCompletedTaskProgressSince,
   sendMail, checkMail, checkMailBlocking, purgeOldMail, purgeTerminalMerges,
   enqueueMerge, getNextMerge, updateMerge,
+  updateMergeIdentity, getMergeIdentity, updateMergeFailureClass,
+  getMergeByFingerprint, recordFailure, resetCircuitBreaker, getOrCreateCircuitBreaker,
+  incrementMetric, getMetrics,
+  listRecoverableMerges,
   log, getLog,
   getConfig, setConfig,
   savePreset, listPresets, getPreset, deletePreset,

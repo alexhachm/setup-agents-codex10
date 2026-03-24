@@ -333,7 +333,44 @@ CREATE TABLE IF NOT EXISTS merge_queue (
   updated_at TEXT NOT NULL DEFAULT (datetime('now')),
   completion_checkpoint TEXT,
   merged_at TEXT,
-  error TEXT
+  error TEXT,
+  head_sha TEXT,
+  worker_id INTEGER,
+  failure_class TEXT
+    CHECK (failure_class IS NULL OR failure_class IN (
+      'branch_identity_mismatch',
+      'worktree_missing',
+      'worktree_dirty',
+      'remote_branch_missing',
+      'remote_diverged',
+      'gh_auth_or_network',
+      'textual_merge_conflict',
+      'validation_conflict'
+    )),
+  retry_count INTEGER NOT NULL DEFAULT 0,
+  fingerprint TEXT,
+  last_fingerprint_at TEXT
+);
+
+-- Circuit breaker for merge failures (deduplicates and suppresses repeat failures)
+CREATE TABLE IF NOT EXISTS merge_circuit_breaker (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  merge_queue_id INTEGER REFERENCES merge_queue(id) ON DELETE SET NULL,
+  fingerprint TEXT NOT NULL,  -- composite: pr_number+head_branch+head_sha+target_sha+failure_class+normalized_error
+  failure_count INTEGER NOT NULL DEFAULT 1,
+  tripped INTEGER NOT NULL DEFAULT 0,  -- 1 = suppressed, 0 = active
+  first_seen_at TEXT NOT NULL DEFAULT (datetime('now')),
+  last_seen_at TEXT NOT NULL DEFAULT (datetime('now')),
+  UNIQUE(fingerprint)
+);
+
+-- Merge operation metrics (atomic counters)
+CREATE TABLE IF NOT EXISTS merge_metrics (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  metric_name TEXT NOT NULL,
+  metric_value INTEGER NOT NULL DEFAULT 0,
+  updated_at TEXT NOT NULL DEFAULT (datetime('now')),
+  UNIQUE(metric_name)
 );
 
 -- Activity log (replaces activity.log)
@@ -444,6 +481,10 @@ CREATE INDEX IF NOT EXISTS idx_mail_type ON mail(type);
 CREATE INDEX IF NOT EXISTS idx_mail_created ON mail(created_at);
 CREATE INDEX IF NOT EXISTS idx_merge_queue_status ON merge_queue(status);
 CREATE INDEX IF NOT EXISTS idx_merge_queue_request ON merge_queue(request_id, status);
+CREATE INDEX IF NOT EXISTS idx_merge_queue_fingerprint ON merge_queue(fingerprint) WHERE fingerprint IS NOT NULL;
+CREATE INDEX IF NOT EXISTS idx_merge_circuit_breaker_fingerprint ON merge_circuit_breaker(fingerprint);
+CREATE INDEX IF NOT EXISTS idx_merge_circuit_breaker_tripped ON merge_circuit_breaker(tripped, last_seen_at DESC);
+CREATE INDEX IF NOT EXISTS idx_merge_metrics_name ON merge_metrics(metric_name);
 CREATE INDEX IF NOT EXISTS idx_activity_actor ON activity_log(actor);
 CREATE INDEX IF NOT EXISTS idx_activity_created ON activity_log(created_at);
 CREATE INDEX IF NOT EXISTS idx_workers_status ON workers(status);
