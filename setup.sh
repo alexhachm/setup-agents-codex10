@@ -152,6 +152,20 @@ if ! gh auth status &>/dev/null; then
   exit 1
 fi
 
+# Optional: Xvfb for headless research driver (Chrome runs invisibly)
+if ! command -v xvfb-run &>/dev/null; then
+  echo "  WARNING: xvfb-run not found. Research driver will require a real display."
+  echo "  Install with: sudo apt-get install -y xvfb libxi6 libgconf-2-4 fonts-liberation libappindicator3-1 libnss3 libatk-bridge2.0-0 libgtk-3-0"
+fi
+
+# Optional: Playwright MCP for visual testing (non-blocking)
+if command -v npx &>/dev/null && npx @playwright/mcp@latest --help &>/dev/null 2>&1; then
+  echo "  Playwright MCP: available"
+else
+  echo "  WARNING: Playwright MCP not installed. Visual testing unavailable for tmux workers."
+  echo "  Install: npm install -g @playwright/mcp@latest && npx playwright install chromium"
+fi
+
 echo "  All checks passed."
 
 # --- Install coordinator ---
@@ -167,9 +181,20 @@ echo "  Dependencies installed."
 echo "[3/8] Setting up project directories..."
 
 CLAUDE_DIR="$PROJECT_DIR/.claude"
+
+# Helper: ensure a path is a directory (repair if it's a plain file from a prior corrupted run)
+ensure_is_directory() {
+  local p="$1"
+  if [ -e "$p" ] && [ ! -d "$p" ]; then
+    echo "  WARNING: $p exists as a file, replacing with directory"
+    rm -f "$p"
+  fi
+}
+
 mkdir -p "$CLAUDE_DIR/commands"
 mkdir -p "$CLAUDE_DIR/commands-codex10"
 mkdir -p "$CLAUDE_DIR/state"
+ensure_is_directory "$CLAUDE_DIR/knowledge"
 mkdir -p "$CLAUDE_DIR/knowledge/domain"
 mkdir -p "$CLAUDE_DIR/scripts"
 
@@ -317,6 +342,8 @@ CLAUDE_NAMESPACED="$CLAUDE_DIR/scripts/mac10-codex10"
 cat > "$MAC10_CLI" << 'WRAPPER'
 #!/usr/bin/env bash
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+# Derive project dir: scripts/ -> .claude/ -> project root
+PROJECT_ROOT="$(cd "$SCRIPT_DIR/../.." && pwd)"
 MAC10_BIN="PLACEHOLDER_MAC10_BIN"
 if [ ! -f "$MAC10_BIN" ]; then
   echo "ERROR: mac10 CLI not found at $MAC10_BIN" >&2
@@ -324,7 +351,7 @@ if [ ! -f "$MAC10_BIN" ]; then
   exit 1
 fi
 export MAC10_NAMESPACE="codex10"
-exec node "$MAC10_BIN" "$@"
+exec node "$MAC10_BIN" --project "$PROJECT_ROOT" "$@"
 WRAPPER
 # Substitute the actual path into the wrapper (quoted heredoc prevents expansion above)
 sed -i "s|PLACEHOLDER_MAC10_BIN|$MAC10_BIN|" "$MAC10_CLI"
@@ -338,6 +365,7 @@ chmod +x "$CODEX10_CLI"
 cat > "$MAC10_COMPAT" <<'WRAPPER'
 #!/usr/bin/env bash
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+PROJECT_ROOT="$(cd "$SCRIPT_DIR/../.." && pwd)"
 MAC10_BIN="PLACEHOLDER_MAC10_BIN"
 if [ ! -f "$MAC10_BIN" ]; then
   echo "ERROR: mac10 CLI not found at $MAC10_BIN" >&2
@@ -345,7 +373,7 @@ if [ ! -f "$MAC10_BIN" ]; then
   exit 1
 fi
 export MAC10_NAMESPACE="codex10"
-exec node "$MAC10_BIN" "$@"
+exec node "$MAC10_BIN" --project "$PROJECT_ROOT" "$@"
 WRAPPER
 sed -i "s|PLACEHOLDER_MAC10_BIN|$MAC10_BIN|" "$MAC10_COMPAT"
 chmod +x "$MAC10_COMPAT"
@@ -509,10 +537,9 @@ for i in $(seq 1 "$NUM_WORKERS"); do
       rm -rf "$WT_PATH/.codex"
     fi
     cp -a "$CODEX_SOURCE_DIR" "$WT_PATH/.codex"
-    if [ ! -d "$WT_PATH/.codex/knowledge" ]; then
-      echo "ERROR: failed to copy .codex/knowledge into $WT_PATH"
-      exit 1
-    fi
+    # Ensure knowledge dir exists even if the source .codex lacks one
+    ensure_is_directory "$WT_PATH/.codex/knowledge"
+    mkdir -p "$WT_PATH/.codex/knowledge"
   else
     echo "  WARNING: $CODEX_SOURCE_DIR not found; skipped .codex copy for wt-$i"
   fi
@@ -626,6 +653,10 @@ else
   echo "WARNING: Coordinator not responsive — workers not registered"
   echo "  Run manually: $CODEX10_CLI register-worker <id> <worktree_path> <branch>"
 fi
+
+# --- Clean stale agent processes from prior runs ---
+pkill -f "launch-agent.sh.*$(echo "$PROJECT_DIR" | sed 's/[[\.*^$()+?{|]/\\&/g')" 2>/dev/null || true
+sleep 1
 
 # --- Launch all 3 masters ---
 

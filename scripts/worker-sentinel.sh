@@ -14,6 +14,14 @@ if [ ! -d "$WORKTREE" ]; then
 fi
 cd "$WORKTREE"
 
+# Start Xvfb virtual display for headless Chromium (sandbox/Docker only)
+XVFB_PID=""
+if [ -n "${DISPLAY:-}" ] && command -v Xvfb &>/dev/null; then
+  Xvfb "${DISPLAY}" -screen 0 1280x720x24 -ac &>/dev/null &
+  XVFB_PID=$!
+  echo "[sentinel-$WORKER_ID] Xvfb started on ${DISPLAY} (PID: $XVFB_PID)"
+fi
+
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # shellcheck disable=SC1091
 . "$SCRIPT_DIR/provider-utils.sh"
@@ -122,6 +130,7 @@ start_heartbeat_loop() {
 
 cleanup() {
   stop_heartbeat_loop
+  [ -n "${XVFB_PID:-}" ] && kill "$XVFB_PID" 2>/dev/null || true
   echo "[sentinel-$WORKER_ID] Cleaning up..."
   reset_worker_with_context
 }

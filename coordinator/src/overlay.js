@@ -174,6 +174,23 @@ function buildTaskOverlay(task, worker, projectDir) {
     lines.push('');
   }
 
+  // Domain-aware visual testing hint for UI tasks
+  const uiDomains = ['frontend', 'ui', 'web', 'dashboard', 'gui', 'css', 'layout', 'design'];
+  const taskDomain = (task.domain || '').toLowerCase();
+  const hasUiDomain = uiDomains.some(d => taskDomain.includes(d));
+  const descLower = (task.description || '').toLowerCase();
+  const hasUiKeywords = /\b(ui|frontend|visual|layout|css|component|page|screen|dashboard|render|display)\b/.test(descLower);
+
+  if (hasUiDomain || hasUiKeywords) {
+    lines.push('## Visual Testing');
+    lines.push('');
+    lines.push('This task involves UI work. Use Playwright MCP tools to verify:');
+    lines.push('1. Start dev server → `browser_navigate` → `browser_snapshot` (DOM check)');
+    lines.push('2. Use `browser_take_screenshot` only if visual layout needs verification');
+    lines.push('3. Kill dev server before shipping');
+    lines.push('');
+  }
+
   // Add knowledge context if available
   const knowledgeDir = path.join(projectDir, '.claude', 'knowledge');
   let domainKnowledgePath = resolveDomainKnowledgePath(task.domain, knowledgeDir);
