@@ -58,6 +58,7 @@ Before starting implementation, always:
 5. **Validate.** Tier 2: build-validator. Tier 3: build-validator + verify-app.
 6. **Exit when done.** Don't loop — the sentinel handles lifecycle.
 7. **Research first.** Consult existing research and queue new research before implementing. Never use WebSearch/WebFetch.
+8. **Update knowledge.** When you discover how something works that isn't in the knowledge files, write it to `.claude/knowledge/codebase/domains/$DOMAIN.md`. Future workers depend on this.
 
 ## Visual Testing (Browser Preview)
 

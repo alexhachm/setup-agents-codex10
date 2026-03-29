@@ -1221,7 +1221,7 @@ describe('Watchdog stall recovery regression', () => {
 });
 
 describe('Stale integration watchdog recovery regression', () => {
-  it('merge stuck in merging for longer than MERGE_TIMEOUT_SEC should be promoted to conflict', () => {
+  it('merge stuck in merging is not promoted by watchdog (merger owns its own timeout)', () => {
     const reqId = db.createRequest('Feature');
     const taskId = db.createTask({ request_id: reqId, subject: 'T1', description: 'D1' });
     db.updateTask(taskId, { status: 'completed' });
@@ -1237,7 +1237,7 @@ describe('Stale integration watchdog recovery regression', () => {
     const entry = db.getNextMerge();
     assert.ok(entry, 'merge entry should exist');
 
-    // Force updated_at to > 5 minutes ago (MERGE_TIMEOUT_SEC = 300)
+    // Force updated_at to > 5 minutes ago — watchdog no longer promotes this
     const staleTs = new Date(Date.now() - 400 * 1000).toISOString();
     db.updateMerge(entry.id, { status: 'merging' });
     db.getDb().prepare("UPDATE merge_queue SET updated_at = ? WHERE id = ?").run(staleTs, entry.id);
@@ -1245,37 +1245,7 @@ describe('Stale integration watchdog recovery regression', () => {
     watchdog.tick(tmpDir);
 
     const entryAfter = db.getDb().prepare('SELECT status FROM merge_queue WHERE id = ?').get(entry.id);
-    assert.strictEqual(entryAfter.status, 'conflict', 'merge stuck in merging > 300s must be promoted to conflict');
-
-    const timeoutLogs = db.getLog(20, 'coordinator').filter((e) => e.action === 'merge_timeout');
-    assert.ok(timeoutLogs.length > 0, 'merge_timeout log entry must be emitted for operator visibility');
-  });
-
-  it('merge recently in merging state must NOT be promoted to conflict (false-conflict prevention)', () => {
-    const reqId = db.createRequest('Feature');
-    const taskId = db.createTask({ request_id: reqId, subject: 'T2', description: 'D2' });
-    db.updateTask(taskId, { status: 'completed' });
-    db.updateRequest(reqId, { status: 'integrating' });
-
-    db.enqueueMerge({
-      request_id: reqId,
-      task_id: taskId,
-      pr_url: 'https://github.com/org/repo/pull/401',
-      branch: 'agent-1',
-    });
-
-    const entry = db.getNextMerge();
-    assert.ok(entry, 'merge entry should exist');
-
-    // Put it in 'merging' with a recent updated_at (only 30s ago — well within the 300s window)
-    const recentTs = new Date(Date.now() - 30 * 1000).toISOString();
-    db.updateMerge(entry.id, { status: 'merging' });
-    db.getDb().prepare("UPDATE merge_queue SET updated_at = ? WHERE id = ?").run(recentTs, entry.id);
-
-    watchdog.tick(tmpDir);
-
-    const entryAfter = db.getDb().prepare('SELECT status FROM merge_queue WHERE id = ?').get(entry.id);
-    assert.strictEqual(entryAfter.status, 'merging', 'recently started merge must NOT be falsely promoted to conflict');
+    assert.strictEqual(entryAfter.status, 'merging', 'watchdog must not promote merging entries — merger handles its own timeout');
   });
 
   it('stale integrating request with no merges and old updated_at should be auto-completed (stale status drift recovery)', () => {

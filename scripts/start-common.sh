@@ -93,13 +93,15 @@ discover_cdp_port() {
     done < <(pgrep -P "$driver_pid" 2>/dev/null || true)
   fi
 
+  local profile_suffix
+  profile_suffix="$(_compute_profile_suffix "$project_dir")"
   while IFS= read -r args; do
     port="$(extract_remote_debugging_port "$args")"
     if [ -n "$port" ]; then
       printf '%s\n' "$port"
       return
     fi
-  done < <(ps -eo args= 2>/dev/null | grep -E '(chrome|chromium)' | grep 'chatgpt-codex-profile' || true)
+  done < <(ps -eo args= 2>/dev/null | grep -E '(chrome|chromium)' | grep "chatgpt-codex-profile-${profile_suffix}" || true)
 
   if [ -f "$log_file" ]; then
     port="$(grep -oE '127\.0\.0\.1:[0-9]{2,5}' "$log_file" | tail -n 1 | cut -d: -f2 || true)"
@@ -119,20 +121,34 @@ probe_cdp_port() {
   curl -fsS --connect-timeout 2 --max-time 3 "http://127.0.0.1:${port}/json/version" >/dev/null 2>&1
 }
 
+_compute_profile_suffix() {
+  local project_dir="$1"
+  printf '%s' "$project_dir" | sha256sum | cut -c1-12
+}
+
 kill_profile_chrome_processes() {
+  local project_dir="${1:-}"
+  local profile_pattern="chatgpt-codex-profile"
   local pid
+
+  # If a project dir is given, only kill Chrome for that project's profile
+  if [ -n "$project_dir" ]; then
+    local suffix
+    suffix="$(_compute_profile_suffix "$project_dir")"
+    profile_pattern="chatgpt-codex-profile-${suffix}"
+  fi
 
   while IFS= read -r pid; do
     [ -n "$pid" ] || continue
     kill "$pid" 2>/dev/null || true
-  done < <(ps -eo pid=,args= 2>/dev/null | awk '/(chrome|chromium)/ && /chatgpt-codex-profile/ {print $1}')
+  done < <(ps -eo pid=,args= 2>/dev/null | awk -v pat="$profile_pattern" '/(chrome|chromium)/ && index($0, pat) {print $1}')
 
   sleep 1
 
   while IFS= read -r pid; do
     [ -n "$pid" ] || continue
     kill -9 "$pid" 2>/dev/null || true
-  done < <(ps -eo pid=,args= 2>/dev/null | awk '/(chrome|chromium)/ && /chatgpt-codex-profile/ {print $1}')
+  done < <(ps -eo pid=,args= 2>/dev/null | awk -v pat="$profile_pattern" '/(chrome|chromium)/ && index($0, pat) {print $1}')
 }
 
 cleanup_stale_research_runtime() {
@@ -171,37 +187,13 @@ cleanup_stale_research_runtime() {
     kill -9 "$pid" 2>/dev/null || true
   done < <(pgrep -f "$project_dir/.codex/scripts/chatgpt-driver.py" 2>/dev/null || true)
 
-  kill_profile_chrome_processes
+  kill_profile_chrome_processes "$project_dir"
 
   rm -f "$driver_pid_file" "$lock_file"
   echo "  Removed stale lock file: $lock_file"
 }
 
-start_research_sentinel() {
-  local project_dir="$1"
-  local sentinel_script="$project_dir/.codex/scripts/research-sentinel.sh"
-  local sentinel_log="$project_dir/.codex/logs/research-sentinel.log"
-  local sentinel_pid_file="$project_dir/.codex/state/research-sentinel.pid"
-  local pid
-
-  if [ ! -x "$sentinel_script" ]; then
-    echo "ERROR: research sentinel not found or not executable: $sentinel_script" >&2
-    return 1
-  fi
-
-  pid="$(find_sentinel_pid "$project_dir")"
-  if is_pid_alive "$pid"; then
-    echo "  Research sentinel already running (PID $pid)."
-    printf '%s\n' "$pid" > "$sentinel_pid_file"
-    return 0
-  fi
-
-  mkdir -p "$(dirname "$sentinel_log")" "$(dirname "$sentinel_pid_file")"
-  nohup bash "$sentinel_script" "$project_dir" >> "$sentinel_log" 2>&1 < /dev/null &
-  pid=$!
-  printf '%s\n' "$pid" > "$sentinel_pid_file"
-  echo "  Research sentinel started (PID $pid)"
-}
+# start_research_sentinel: first definition removed — see canonical definition below
 
 read_research_health_status() {
   local health_file="$1"
@@ -320,12 +312,14 @@ force_reset_research_runtime() {
 
   echo "Force-clearing stale research runtime state..."
 
-  # Stop old sentinel first to prevent it from immediately respawning the driver.
-  kill_matching_processes "[r]esearch-sentinel.sh" "research sentinel"
-  kill_matching_processes "[c]hatgpt-driver.py" "research driver"
+  # Only kill sentinel/driver processes for THIS project (not global)
+  kill_matching_processes "$project_dir.*[r]esearch-sentinel.sh" "research sentinel"
+  kill_matching_processes "$project_dir.*[c]hatgpt-driver.py" "research driver"
 
-  # Driver Chrome processes are tied to the dedicated profile path.
-  kill_matching_processes "chatgpt-codex-profile" "driver Chrome/chromium"
+  # Driver Chrome processes are tied to the per-project profile path.
+  local profile_suffix
+  profile_suffix="$(_compute_profile_suffix "$project_dir")"
+  kill_matching_processes "chatgpt-codex-profile-${profile_suffix}" "driver Chrome/chromium"
 
   rm -f "$driver_lock_file" "$driver_pid_file" "$sentinel_pid_file"
   echo "  Cleared lock/PID files"
@@ -339,7 +333,10 @@ start_research_sentinel() {
   local sentinel_pid_file="$state_dir/research-sentinel.pid"
 
   if [ ! -f "$sentinel_script" ]; then
-    echo "WARNING: research sentinel script not found at $sentinel_script (skip startup)" >&2
+    sentinel_script="$project_dir/scripts/research-sentinel.sh"
+  fi
+  if [ ! -f "$sentinel_script" ]; then
+    echo "WARNING: research sentinel script not found (checked .codex/scripts/ and scripts/) (skip startup)" >&2
     return
   fi
 
@@ -370,18 +367,26 @@ ensure_worktree_codex_copies() {
     [ -d "$wt_path" ] || continue
     wt_codex="$wt_path/.codex"
 
-    if [ -L "$wt_codex" ] || [ ! -d "$wt_codex/knowledge" ]; then
+    if [ -L "$wt_codex" ] || [ ! -d "$wt_codex" ]; then
       rm -rf "$wt_codex"
       cp -a "$source_codex" "$wt_codex"
       echo "  Refreshed $wt_codex"
     fi
+    # Repair if knowledge is a file instead of a directory (corruption from prior run)
+    if [ -e "$wt_codex/knowledge" ] && [ ! -d "$wt_codex/knowledge" ]; then
+      rm -f "$wt_codex/knowledge"
+    fi
+    mkdir -p "$wt_codex/knowledge"
   done
 }
 
 stop_services() {
   local project_dir="$1"
   local lock_file="$project_dir/.codex/state/research-driver.lock"
-  local coordinator_cli="$project_dir/.codex/scripts/codex10"
+  local coordinator_cli="$project_dir/.claude/scripts/codex10"
+  if [ ! -x "$coordinator_cli" ]; then
+    coordinator_cli="$project_dir/.codex/scripts/codex10"
+  fi
 
   echo "Stopping mac10 services for project: $project_dir"
 
@@ -392,7 +397,7 @@ stop_services() {
     kill "$pid" 2>/dev/null || true
   done < <(pgrep -f "$project_dir/.codex/scripts/chatgpt-driver.py" 2>/dev/null || true)
 
-  kill_profile_chrome_processes
+  kill_profile_chrome_processes "$project_dir"
   rm -f "$lock_file"
 
   if [ -x "$coordinator_cli" ]; then

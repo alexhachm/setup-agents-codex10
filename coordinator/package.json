@@ -13,6 +13,7 @@
   "dependencies": {
     "better-sqlite3": "^12.6.2",
     "express": "^4.21.0",
+    "sandbox-agent": "^0.4.2",
     "ws": "^8.18.0"
   },
   "engines": {

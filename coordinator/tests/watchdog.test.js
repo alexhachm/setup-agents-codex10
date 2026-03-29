@@ -8,6 +8,7 @@ const os = require('os');
 
 const db = require('../src/db');
 const tmux = require('../src/tmux');
+const backend = require('../src/worker-backend');
 const { THRESHOLDS, LOOP_STALE_HEARTBEAT_SEC, tick, stop: watchdogStop } = require('../src/watchdog');
 
 let tmpDir;
@@ -161,12 +162,12 @@ describe('Heartbeat staleness', () => {
       last_heartbeat: staleTime,
     });
 
-    const originalIsPaneAlive = tmux.isPaneAlive;
-    tmux.isPaneAlive = (windowName) => windowName === 'worker-1';
+    const originalIsWorkerAlive = backend.isWorkerAlive;
+    backend.isWorkerAlive = (windowName) => windowName === 'worker-1';
     try {
       tick(tmpDir);
     } finally {
-      tmux.isPaneAlive = originalIsPaneAlive;
+      backend.isWorkerAlive = originalIsWorkerAlive;
     }
 
     const task = db.getTask(taskId);
@@ -243,15 +244,15 @@ describe('Bounded assignment recovery', () => {
       last_heartbeat: new Date(Date.now() - 10 * 1000).toISOString(),
     });
 
-    const originalIsTmuxAvailable = tmux.isTmuxAvailable;
-    const originalIsPaneAlive = tmux.isPaneAlive;
-    tmux.isTmuxAvailable = () => true;
-    tmux.isPaneAlive = () => false;
+    const originalIsAvailable = backend.isAvailable;
+    const originalIsWorkerAlive = backend.isWorkerAlive;
+    backend.isAvailable = () => true;
+    backend.isWorkerAlive = () => false;
     try {
       tick(tmpDir);
     } finally {
-      tmux.isTmuxAvailable = originalIsTmuxAvailable;
-      tmux.isPaneAlive = originalIsPaneAlive;
+      backend.isAvailable = originalIsAvailable;
+      backend.isWorkerAlive = originalIsWorkerAlive;
     }
 
     const task = db.getTask(taskId);
@@ -790,27 +791,6 @@ describe('Loop respawn namespace preservation', () => {
 });
 
 describe('Stale decomposed request recovery', () => {
-  it('recovers stale decomposed tier-3 requests with zero tasks', () => {
-    const requestId = db.createRequest('Tier-3 decomposition stalled before task creation');
-    db.updateRequest(requestId, { status: 'decomposed', tier: 3 });
-    db.getDb().prepare(
-      "UPDATE requests SET updated_at = datetime('now', '-3 minutes') WHERE id = ?"
-    ).run(requestId);
-
-    tick(tmpDir);
-
-    const request = db.getRequest(requestId);
-    assert.strictEqual(request.status, 'pending');
-
-    const recoveryLog = db.getLog(50, 'coordinator')
-      .filter((entry) => entry.action === 'stale_decomposed_request_recovered')
-      .map((entry) => JSON.parse(entry.details))
-      .find((entry) => entry.request_id === requestId);
-    assert.ok(recoveryLog);
-    assert.strictEqual(recoveryLog.source, 'watchdog_tick');
-    assert.ok(recoveryLog.stale_sec >= THRESHOLDS.triage);
-  });
-
   it('does not alter decomposed requests that already have tasks', () => {
     const requestId = db.createRequest('Tier-3 request with active decomposition tasks');
     db.updateRequest(requestId, { status: 'decomposed', tier: 3 });
@@ -838,13 +818,13 @@ describe('Stale decomposed request recovery', () => {
 });
 
 describe('Non-tmux worker liveness', () => {
-  it('does not reset freshly assigned worker when tmux is unavailable', () => {
+  it('does not reset freshly assigned worker when backend is unavailable', () => {
     db.registerWorker(1, '/wt-1', 'agent-1');
     const reqId = db.createRequest('Non-tmux fresh assign');
     const taskId = db.createTask({
       request_id: reqId,
       subject: 'Fresh assignment',
-      description: 'Just assigned — must not be reset without tmux',
+      description: 'Just assigned — must not be reset without backend',
     });
     db.updateTask(taskId, { status: 'assigned', assigned_to: 1 });
     db.updateWorker(1, {
@@ -854,12 +834,12 @@ describe('Non-tmux worker liveness', () => {
       last_heartbeat: new Date().toISOString(),
     });
 
-    const originalIsTmuxAvailable = tmux.isTmuxAvailable;
-    tmux.isTmuxAvailable = () => false;
+    const originalIsAvailable = backend.isAvailable;
+    backend.isAvailable = () => false;
     try {
       tick(tmpDir);
     } finally {
-      tmux.isTmuxAvailable = originalIsTmuxAvailable;
+      backend.isAvailable = originalIsAvailable;
     }
 
     const worker = db.getWorker(1);
@@ -867,7 +847,7 @@ describe('Non-tmux worker liveness', () => {
     assert.strictEqual(worker.current_task_id, taskId);
   });
 
-  it('does not reset running worker with recent heartbeat when tmux is unavailable', () => {
+  it('does not reset running worker with recent heartbeat when backend is unavailable', () => {
     db.registerWorker(1, '/wt-1', 'agent-1');
     const reqId = db.createRequest('Non-tmux running worker');
     const taskId = db.createTask({
@@ -883,12 +863,12 @@ describe('Non-tmux worker liveness', () => {
       last_heartbeat: new Date(Date.now() - 10 * 1000).toISOString(),
     });
 
-    const originalIsTmuxAvailable = tmux.isTmuxAvailable;
-    tmux.isTmuxAvailable = () => false;
+    const originalIsAvailable = backend.isAvailable;
+    backend.isAvailable = () => false;
     try {
       tick(tmpDir);
     } finally {
-      tmux.isTmuxAvailable = originalIsTmuxAvailable;
+      backend.isAvailable = originalIsAvailable;
     }
 
     const worker = db.getWorker(1);
@@ -896,7 +876,7 @@ describe('Non-tmux worker liveness', () => {
     assert.strictEqual(worker.current_task_id, taskId);
   });
 
-  it('recovers stale non-tmux worker via heartbeat-based paths', () => {
+  it('recovers stale worker via heartbeat-based paths when backend is unavailable', () => {
     db.registerWorker(1, '/wt-1', 'agent-1');
     const reqId = db.createRequest('Stale non-tmux worker');
     const taskId = db.createTask({
@@ -913,12 +893,12 @@ describe('Non-tmux worker liveness', () => {
       last_heartbeat: staleTime,
     });
 
-    const originalIsTmuxAvailable = tmux.isTmuxAvailable;
-    tmux.isTmuxAvailable = () => false;
+    const originalIsAvailable = backend.isAvailable;
+    backend.isAvailable = () => false;
     try {
       tick(tmpDir);
     } finally {
-      tmux.isTmuxAvailable = originalIsTmuxAvailable;
+      backend.isAvailable = originalIsAvailable;
     }
 
     const task = db.getTask(taskId);
@@ -932,13 +912,13 @@ describe('Non-tmux worker liveness', () => {
     assert.strictEqual(worker.current_task_id, null);
   });
 
-  it('preserves pane-death behavior when tmux is available', () => {
+  it('preserves worker-death behavior when backend is available', () => {
     db.registerWorker(1, '/wt-1', 'agent-1');
-    const reqId = db.createRequest('Tmux pane death');
+    const reqId = db.createRequest('Backend worker death');
     const taskId = db.createTask({
       request_id: reqId,
-      subject: 'Dead pane task',
-      description: 'Worker pane died — handleDeath must fire',
+      subject: 'Dead worker task',
+      description: 'Worker process died — handleDeath must fire',
     });
     db.updateTask(taskId, { status: 'in_progress', assigned_to: 1 });
     db.updateWorker(1, {
@@ -948,15 +928,15 @@ describe('Non-tmux worker liveness', () => {
       last_heartbeat: new Date(Date.now() - 10 * 1000).toISOString(),
     });
 
-    const originalIsTmuxAvailable = tmux.isTmuxAvailable;
-    const originalIsPaneAlive = tmux.isPaneAlive;
-    tmux.isTmuxAvailable = () => true;
-    tmux.isPaneAlive = () => false;
+    const originalIsAvailable = backend.isAvailable;
+    const originalIsWorkerAlive = backend.isWorkerAlive;
+    backend.isAvailable = () => true;
+    backend.isWorkerAlive = () => false;
     try {
       tick(tmpDir);
     } finally {
-      tmux.isTmuxAvailable = originalIsTmuxAvailable;
-      tmux.isPaneAlive = originalIsPaneAlive;
+      backend.isAvailable = originalIsAvailable;
+      backend.isWorkerAlive = originalIsWorkerAlive;
     }
 
     const worker = db.getWorker(1);
@@ -966,7 +946,7 @@ describe('Non-tmux worker liveness', () => {
     const deathLog = db.getLog(100, 'coordinator')
       .filter((entry) => entry.action === 'worker_death')
       .map((entry) => JSON.parse(entry.details))
-      .find((entry) => entry.worker_id === 1 && entry.reason === 'tmux_pane_dead');
+      .find((entry) => entry.worker_id === 1 && entry.reason === 'worker_process_dead');
     assert.ok(deathLog);
   });
 });
@@ -1084,58 +1064,14 @@ describe('Stale integration completion gating', () => {
   });
 });
 
-describe('Stale assigned worker escalation', () => {
-  it('escalates stale assigned worker with live pane through triage', () => {
-    db.registerWorker(1, '/wt-1', 'agent-1');
-    const reqId = db.createRequest('Stale assigned escalation');
-    const taskId = db.createTask({
-      request_id: reqId,
-      subject: 'Stale assigned task',
-      description: 'Should escalate through warn/nudge/triage when heartbeat is stale',
-    });
-    // Heartbeat between triage (120s) and terminate (180s)
-    const staleTime = new Date(Date.now() - 150 * 1000).toISOString();
-    const launchedTime = new Date(Date.now() - 300 * 1000).toISOString();
-    db.updateTask(taskId, { status: 'assigned', assigned_to: 1 });
-    db.updateWorker(1, {
-      status: 'assigned',
-      current_task_id: taskId,
-      launched_at: launchedTime,
-      last_heartbeat: staleTime,
-    });
-
-    const originalIsTmuxAvailable = tmux.isTmuxAvailable;
-    const originalIsPaneAlive = tmux.isPaneAlive;
-    tmux.isTmuxAvailable = () => true;
-    tmux.isPaneAlive = (windowName) => windowName === 'worker-1'; // pane alive
-    try {
-      tick(tmpDir);
-    } finally {
-      tmux.isTmuxAvailable = originalIsTmuxAvailable;
-      tmux.isPaneAlive = originalIsPaneAlive;
-    }
-
-    // Worker should NOT be reset by the escalation path — only warn/nudge/triage fires
-    const worker = db.getWorker(1);
-    assert.strictEqual(worker.status, 'assigned');
-    assert.strictEqual(worker.current_task_id, taskId);
-
-    // Triage-level escalation log should exist for this assigned worker
-    const triageLog = db.getLog(100, 'coordinator')
-      .filter((entry) => entry.action === 'watchdog_triage')
-      .map((entry) => JSON.parse(entry.details))
-      .find((entry) => entry.worker_id === 1);
-    assert.ok(triageLog, 'assigned worker with stale heartbeat and live pane should reach triage escalation');
-    assert.ok(triageLog.stale_sec >= THRESHOLDS.triage);
-  });
-
-  it('does not escalate freshly assigned workers within launch grace period', () => {
+describe('Stale assigned worker handling', () => {
+  it('does not terminate freshly assigned workers within launch grace period', () => {
     db.registerWorker(1, '/wt-1', 'agent-1');
     const reqId = db.createRequest('Fresh assigned no-escalation');
     const taskId = db.createTask({
       request_id: reqId,
       subject: 'Fresh assignment',
-      description: 'Just assigned — must not be escalated',
+      description: 'Just assigned — must not be terminated',
     });
     db.updateTask(taskId, { status: 'assigned', assigned_to: 1 });
     db.updateWorker(1, {
@@ -1145,358 +1081,55 @@ describe('Stale assigned worker escalation', () => {
       last_heartbeat: new Date(Date.now() - 10 * 1000).toISOString(),
     });
 
-    const originalIsTmuxAvailable = tmux.isTmuxAvailable;
-    tmux.isTmuxAvailable = () => false;
+    const originalIsAvailable = backend.isAvailable;
+    backend.isAvailable = () => false;
     try {
       tick(tmpDir);
     } finally {
-      tmux.isTmuxAvailable = originalIsTmuxAvailable;
+      backend.isAvailable = originalIsAvailable;
     }
 
-    const escalationLog = db.getLog(100, 'coordinator')
-      .filter((entry) => ['watchdog_warn', 'watchdog_nudge', 'watchdog_triage', 'watchdog_terminate'].includes(entry.action))
+    const terminateLog = db.getLog(100, 'coordinator')
+      .filter((entry) => entry.action === 'watchdog_terminate')
       .map((entry) => JSON.parse(entry.details))
       .find((entry) => entry.worker_id === 1);
-    assert.strictEqual(escalationLog, undefined, 'freshly assigned worker must not be escalated');
+    assert.strictEqual(terminateLog, undefined, 'freshly assigned worker must not be terminated');
 
     const worker = db.getWorker(1);
     assert.strictEqual(worker.status, 'assigned');
     assert.strictEqual(worker.current_task_id, taskId);
   });
-
-  it('uses launched_at as staleness fallback when last_heartbeat is absent', () => {
-    db.registerWorker(1, '/wt-1', 'agent-1');
-    const reqId = db.createRequest('Assigned worker no heartbeat');
-    const taskId = db.createTask({
-      request_id: reqId,
-      subject: 'Assigned no heartbeat',
-      description: 'Should use launched_at for staleness when last_heartbeat is absent',
-    });
-    // No last_heartbeat — launched_at used as fallback; between nudge (90s) and triage (120s)
-    const launchTime = new Date(Date.now() - 95 * 1000).toISOString();
-    db.updateTask(taskId, { status: 'assigned', assigned_to: 1 });
-    db.updateWorker(1, {
-      status: 'assigned',
-      current_task_id: taskId,
-      launched_at: launchTime,
-      last_heartbeat: null,
-    });
-
-    const originalIsTmuxAvailable = tmux.isTmuxAvailable;
-    tmux.isTmuxAvailable = () => false;
-    try {
-      tick(tmpDir);
-    } finally {
-      tmux.isTmuxAvailable = originalIsTmuxAvailable;
-    }
-
-    // Nudge-level escalation should fire based on launched_at fallback
-    const nudgeLog = db.getLog(100, 'coordinator')
-      .filter((entry) => entry.action === 'watchdog_nudge')
-      .map((entry) => JSON.parse(entry.details))
-      .find((entry) => entry.worker_id === 1);
-    assert.ok(nudgeLog, 'assigned worker should escalate via launched_at when last_heartbeat is absent');
-    assert.ok(nudgeLog.stale_sec >= THRESHOLDS.nudge);
-  });
-
-  it('running and busy workers escalate the same way as before the assigned change', () => {
-    db.registerWorker(1, '/wt-1', 'agent-1');
-    const reqId = db.createRequest('Running worker escalation unchanged');
-    const taskId = db.createTask({
-      request_id: reqId,
-      subject: 'Running task',
-      description: 'Running worker should still escalate via heartbeat',
-    });
-    const staleTime = new Date(Date.now() - 150 * 1000).toISOString();
-    db.updateTask(taskId, { status: 'in_progress', assigned_to: 1 });
-    db.updateWorker(1, {
-      status: 'running',
-      current_task_id: taskId,
-      launched_at: new Date(Date.now() - 300 * 1000).toISOString(),
-      last_heartbeat: staleTime,
-    });
-
-    const originalIsTmuxAvailable = tmux.isTmuxAvailable;
-    tmux.isTmuxAvailable = () => false;
-    try {
-      tick(tmpDir);
-    } finally {
-      tmux.isTmuxAvailable = originalIsTmuxAvailable;
-    }
-
-    const triageLog = db.getLog(100, 'coordinator')
-      .filter((entry) => entry.action === 'watchdog_triage')
-      .map((entry) => JSON.parse(entry.details))
-      .find((entry) => entry.worker_id === 1);
-    assert.ok(triageLog, 'running worker should still get triage escalation (behavior unchanged)');
-    assert.ok(triageLog.stale_sec >= THRESHOLDS.triage);
-  });
 });
 
-describe('Stale integration recovery', () => {
-  it('keeps failed merge requests recoverable while remediation is active or just queued', () => {
-    const requestId = db.createRequest('Failed merge remediation');
+describe('Stale integration recovery (simplified)', () => {
+  it('fails request immediately when terminal merges include failures', () => {
+    const requestId = db.createRequest('Failed merge simple');
     db.updateRequest(requestId, { status: 'integrating' });
 
-    const originalTaskId = db.createTask({
+    const taskId = db.createTask({
       request_id: requestId,
-      subject: 'Initial merge task',
-      description: 'Original implementation task',
+      subject: 'Merge task',
+      description: 'Original task',
       domain: 'coordinator-routing',
-      files: ['coordinator/src/watchdog.js'],
-      tier: 2,
     });
-    db.updateTask(originalTaskId, { status: 'completed' });
+    db.updateTask(taskId, { status: 'completed' });
 
     const enqueueResult = db.enqueueMerge({
       request_id: requestId,
-      task_id: originalTaskId,
+      task_id: taskId,
       pr_url: 'https://example.com/pr/1',
       branch: 'agent-4/failed-merge',
       priority: 0,
     });
     db.updateMerge(enqueueResult.lastInsertRowid, { status: 'failed', error: 'remote rejected' });
 
-    // Fresh merge failure: allocator grace window should keep request recoverable.
     tick(tmpDir);
-    let request = db.getRequest(requestId);
-    assert.ok(['integrating', 'in_progress'].includes(request.status));
-
-    // Simulate stale failure, then allocator queues a remediation task shortly after.
-    db.getDb().prepare("UPDATE merge_queue SET updated_at = datetime('now', '-11 minutes') WHERE id = ?").run(enqueueResult.lastInsertRowid);
-    const remediationTaskId = db.createTask({
-      request_id: requestId,
-      subject: 'Fix failed merge',
-      description: 'Allocator remediation task',
-      domain: 'coordinator-routing',
-      files: ['coordinator/src/watchdog.js'],
-      tier: 2,
-    });
-    db.updateTask(remediationTaskId, { status: 'in_progress' });
-
-    tick(tmpDir);
-    request = db.getRequest(requestId);
-    assert.ok(['integrating', 'in_progress'].includes(request.status));
-    assert.notStrictEqual(request.status, 'failed');
-
-    // Once remediation is terminal and merge still failed, watchdog can fail the request.
-    db.updateTask(remediationTaskId, { status: 'completed' });
-    tick(tmpDir);
-
-    request = db.getRequest(requestId);
+    const request = db.getRequest(requestId);
     assert.strictEqual(request.status, 'failed');
 
     const failureMail = db.checkMail('master-1', false).filter(
       (mail) => mail.type === 'request_failed' && mail.payload.request_id === requestId
     );
     assert.ok(failureMail.length >= 1);
-  });
-
-  it('sends per-merge allocator notifications with rich context for terminal failed merges', () => {
-    db.registerWorker(1, '/wt-1', 'agent-1');
-
-    const requestId = db.createRequest('Terminal merge failure notifications');
-    db.updateRequest(requestId, { status: 'integrating' });
-
-    const failedTaskAlphaId = db.createTask({
-      request_id: requestId,
-      subject: 'Fix alpha merge',
-      description: 'Alpha merge remediation',
-      domain: 'coordinator-routing',
-      files: ['coordinator/src/watchdog.js', 'coordinator/tests/watchdog.test.js'],
-      tier: 2,
-    });
-    db.updateTask(failedTaskAlphaId, { status: 'completed', assigned_to: 1 });
-
-    const mergedTaskId = db.createTask({
-      request_id: requestId,
-      subject: 'Already merged task',
-      description: 'Successful path',
-      domain: 'coordinator-routing',
-      files: ['coordinator/src/merger.js'],
-      tier: 2,
-    });
-    db.updateTask(mergedTaskId, { status: 'completed', assigned_to: 1 });
-
-    const failedTaskBetaId = db.createTask({
-      request_id: requestId,
-      subject: 'Fix beta merge',
-      description: 'Beta merge remediation',
-      domain: 'coordinator-routing',
-      files: ['coordinator/src/cli-server.js'],
-      tier: 3,
-    });
-    db.updateTask(failedTaskBetaId, { status: 'completed', assigned_to: 1 });
-
-    const failedMergeAlpha = db.enqueueMerge({
-      request_id: requestId,
-      task_id: failedTaskAlphaId,
-      pr_url: 'https://example.com/pr/alpha',
-      branch: 'agent-1/alpha-failed',
-      priority: 0,
-    });
-    const mergedMerge = db.enqueueMerge({
-      request_id: requestId,
-      task_id: mergedTaskId,
-      pr_url: 'https://example.com/pr/success',
-      branch: 'agent-2/merged',
-      priority: 0,
-    });
-    const failedMergeBeta = db.enqueueMerge({
-      request_id: requestId,
-      task_id: failedTaskBetaId,
-      pr_url: 'https://example.com/pr/beta',
-      branch: 'agent-3/beta-failed',
-      priority: 0,
-    });
-
-    db.updateMerge(failedMergeAlpha.lastInsertRowid, { status: 'failed', error: 'alpha checks failed' });
-    db.updateMerge(mergedMerge.lastInsertRowid, { status: 'merged', merged_at: new Date().toISOString() });
-    db.updateMerge(failedMergeBeta.lastInsertRowid, { status: 'failed', error: 'beta branch protection blocked' });
-
-    // Expire remediation grace so watchdog executes Case 4 terminal-failure handling.
-    db.getDb().prepare(
-      "UPDATE merge_queue SET updated_at = datetime('now', '-11 minutes') WHERE id IN (?, ?)"
-    ).run(failedMergeAlpha.lastInsertRowid, failedMergeBeta.lastInsertRowid);
-
-    tick(tmpDir);
-
-    const request = db.getRequest(requestId);
-    assert.strictEqual(request.status, 'failed');
-
-    const allocatorFailureMails = db.checkMail('allocator', false).filter(
-      (mail) => mail.type === 'merge_failed' && mail.payload.request_id === requestId
-    );
-    assert.strictEqual(allocatorFailureMails.length, 2);
-
-    const payloadByMergeId = new Map(
-      allocatorFailureMails.map((mail) => [mail.payload.merge_id, mail.payload])
-    );
-
-    const alphaPayload = payloadByMergeId.get(failedMergeAlpha.lastInsertRowid);
-    assert.ok(alphaPayload);
-    assert.strictEqual(alphaPayload.task_id, failedTaskAlphaId);
-    assert.strictEqual(alphaPayload.branch, 'agent-1/alpha-failed');
-    assert.strictEqual(alphaPayload.pr_url, 'https://example.com/pr/alpha');
-    assert.strictEqual(alphaPayload.error, 'alpha checks failed');
-    assert.deepStrictEqual(alphaPayload.original_task, {
-      subject: 'Fix alpha merge',
-      domain: 'coordinator-routing',
-      files: '["coordinator/src/watchdog.js","coordinator/tests/watchdog.test.js"]',
-      tier: 2,
-      assigned_to: 1,
-    });
-
-    const betaPayload = payloadByMergeId.get(failedMergeBeta.lastInsertRowid);
-    assert.ok(betaPayload);
-    assert.strictEqual(betaPayload.task_id, failedTaskBetaId);
-    assert.strictEqual(betaPayload.branch, 'agent-3/beta-failed');
-    assert.strictEqual(betaPayload.pr_url, 'https://example.com/pr/beta');
-    assert.strictEqual(betaPayload.error, 'beta branch protection blocked');
-    assert.deepStrictEqual(betaPayload.original_task, {
-      subject: 'Fix beta merge',
-      domain: 'coordinator-routing',
-      files: '["coordinator/src/cli-server.js"]',
-      tier: 3,
-      assigned_to: 1,
-    });
-  });
-});
-
-describe('functional_conflict merge recovery', () => {
-  it('should not fail integrating request with functional_conflict merge when active fix task exists', () => {
-    const reqId = db.createRequest('Feature with functional conflict');
-    const mainTaskId = db.createTask({
-      request_id: reqId,
-      subject: 'Main task',
-      description: 'Task that triggered functional conflict',
-    });
-    db.updateTask(mainTaskId, { status: 'completed' });
-    db.updateRequest(reqId, { status: 'integrating' });
-
-    // Merge with functional_conflict status (after fix: status=conflict, not failed)
-    const mergeRow = db.enqueueMerge({
-      request_id: reqId,
-      task_id: mainTaskId,
-      pr_url: 'https://github.com/org/repo/pull/300',
-      branch: 'agent-3',
-    });
-    db.updateMerge(mergeRow.lastInsertRowid, {
-      status: 'conflict',
-      error: 'functional_conflict: post-merge validation failed',
-    });
-    // Expire the conflict grace window so only the active-task guard can save us
-    db.getDb().prepare(
-      "UPDATE merge_queue SET updated_at = datetime('now', '-700 seconds') WHERE id = ?"
-    ).run(mergeRow.lastInsertRowid);
-
-    // Active fix task (non-terminal) — conflict-remediation in progress
-    const fixTaskId = db.createTask({
-      request_id: reqId,
-      subject: 'Fix functional conflict',
-      description: 'Resolve post-merge validation failure',
-    });
-    db.updateTask(fixTaskId, { status: 'ready' });
-
-    // Disable tmux so the watchdog tick doesn't try to manage workers
-    tmux.isTmuxAvailable = () => false;
-    tmux.isPaneAlive = () => false;
-
-    tick(tmpDir);
-
-    const requestAfter = db.getRequest(reqId);
-    assert.strictEqual(
-      requestAfter.status,
-      'integrating',
-      'Request should remain integrating while active fix task exists for functional_conflict merge'
-    );
-  });
-
-  it('should not fail integrating request when legacy failed merge has functional_conflict prefix and active fix task exists', () => {
-    // Guard: failed merges with functional_conflict: prefix are treated as conflict-type
-    // so active fix tasks prevent premature request failure (backward compat for legacy state)
-    const reqId = db.createRequest('Feature with legacy functional conflict');
-    const mainTaskId = db.createTask({
-      request_id: reqId,
-      subject: 'Main task',
-      description: 'Legacy functional conflict task',
-    });
-    db.updateTask(mainTaskId, { status: 'completed' });
-    db.updateRequest(reqId, { status: 'integrating' });
-
-    const mergeRow = db.enqueueMerge({
-      request_id: reqId,
-      task_id: mainTaskId,
-      pr_url: 'https://github.com/org/repo/pull/301',
-      branch: 'agent-3',
-    });
-    // Legacy state: functional_conflict stored as 'failed' (before the status fix)
-    db.updateMerge(mergeRow.lastInsertRowid, {
-      status: 'failed',
-      error: 'functional_conflict: build validation did not pass',
-    });
-    db.getDb().prepare(
-      "UPDATE merge_queue SET updated_at = datetime('now', '-700 seconds') WHERE id = ?"
-    ).run(mergeRow.lastInsertRowid);
-
-    // Active fix task
-    const fixTaskId = db.createTask({
-      request_id: reqId,
-      subject: 'Fix legacy conflict',
-      description: 'Resolve legacy functional_conflict',
-    });
-    db.updateTask(fixTaskId, { status: 'ready' });
-
-    tmux.isTmuxAvailable = () => false;
-    tmux.isPaneAlive = () => false;
-
-    tick(tmpDir);
-
-    const requestAfter = db.getRequest(reqId);
-    assert.strictEqual(
-      requestAfter.status,
-      'integrating',
-      'Request should remain integrating when legacy functional_conflict failed merge has active fix task'
-    );
   });
 });

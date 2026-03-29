@@ -6,7 +6,6 @@ const path = require('path');
 const crypto = require('crypto');
 const { execFileSync } = require('child_process');
 const db = require('./db');
-const researchQueue = require('./research-queue');
 let modelRouter = null;
 try {
   modelRouter = require('./model-router');
@@ -516,43 +515,17 @@ const COMMAND_SCHEMAS = {
   'loop-set-prompt':   { required: ['loop_id', 'prompt'], types: { loop_id: 'number', prompt: 'string' } },
   'loop-request':      { required: ['loop_id', 'description'], types: { loop_id: 'number', description: 'string' } },
   'loop-requests':     { required: ['loop_id'], types: { loop_id: 'number' } },
-  'research-intent-enqueue': {
-    required: ['intent_payload'],
-    types: { intent_payload: 'string', request_id: 'string', task_id: 'number', intent_type: 'string', priority: 'string', batch_size_cap: 'number', timeout_window_ms: 'number' },
-  },
-  'research-batch-plan': {
-    required: [],
-    types: { max_batch_size: 'number', timeout_window_ms: 'number', planner_key: 'string' },
-  },
-  'research-batch-status': {
-    required: ['batch_id'],
-    types: { batch_id: 'number' },
-  },
-  'research-batch-dispatch': {
-    required: ['stage_id'],
-    types: { stage_id: 'number' },
-  },
-  'research-batch-collect': {
-    required: ['stage_id', 'status'],
-    types: { stage_id: 'number', status: 'string', error: 'string' },
-  },
-  'research-complete': {
-    required: ['intent_id'],
-    types: { intent_id: 'number' },
-  },
-  'research-fail': {
-    required: ['intent_id', 'error'],
-    types: { intent_id: 'number', error: 'string' },
-  },
   'queue-research':      {
     required: ['topic', 'question'],
     types: { topic: 'string', question: 'string', mode: 'string', priority: 'string', context: 'string', source_agent: 'string', source_task_id: 'number' },
   },
   'research-status':     { required: [], types: { topic: 'string', status: 'string', limit: 'number' } },
-  'research-gaps':       { required: [], types: {} },
-  'research-next':       { required: [], types: {} },
   'research-requeue-stale': { required: [], types: { max_age_minutes: 'number' } },
   'research-start':      { required: ['id'], types: { id: 'number' } },
+  'research-complete':   { required: ['intent_id'], types: { intent_id: 'number', note_path: 'string' } },
+  'research-fail':       { required: ['intent_id'], types: { intent_id: 'number', error: 'string' } },
+  'research-next':       { required: [], types: {} },
+  'research-gaps':       { required: [], types: {} },
   'memory-snapshots': {
     required: [],
     types: {
@@ -2709,6 +2682,15 @@ function handleCommand(cmd, conn, handlers) {
           current_task_id: null,
           tasks_completed: tasksCompleted,
         });
+        // Auto-increment knowledge staleness counter on task completion
+        try {
+          const knowledgeMeta = require('./knowledge-metadata');
+          knowledgeMeta.incrementChanges(_projectDir || process.cwd(), completedTask.domain);
+        } catch (kmErr) {
+          db.log('coordinator', 'knowledge_metadata_increment_error', {
+            task_id, error: kmErr.message,
+          });
+        }
         if (completionPrUrl && completionPrUrl !== (pr_url || '')) {
           db.log('coordinator', 'complete_task_pr_url_normalized', {
             task_id,
@@ -4235,98 +4217,107 @@ function handleCommand(cmd, conn, handlers) {
         break;
       }
 
-      case 'research-intent-enqueue': {
-        const enqueuedIntent = db.enqueueResearchIntent({
-          request_id: args.request_id || null,
-          task_id: args.task_id || null,
-          intent_type: args.intent_type || 'browser_research',
-          intent_payload: args.intent_payload,
-          priority: args.priority || null,
-          batch_size_cap: args.batch_size_cap || null,
-          timeout_window_ms: args.timeout_window_ms || null,
+      case 'queue-research': {
+        const queued = db.queueResearch({
+          topic: args.topic,
+          question: args.question,
+          mode: args.mode || 'standard',
+          priority: args.priority || 'normal',
+          context: args.context || null,
+          source_agent: args.source_agent || null,
+          source_task_id: args.source_task_id || null,
         });
-        db.log('coordinator', 'research_intent_enqueued', {
-          intent_id: enqueuedIntent && enqueuedIntent.intent && enqueuedIntent.intent.id,
-          dedupe: enqueuedIntent && enqueuedIntent.deduped,
-        });
-        respond(conn, { ok: true, ...enqueuedIntent });
+        db.log('coordinator', 'research_queued', { id: queued.id, topic: queued.topic });
+        respond(conn, { ok: true, ...queued });
         break;
       }
 
-      case 'research-batch-plan': {
-        const batchPlan = db.materializeResearchBatchPlan({
-          planner_key: args.planner_key || 'default',
-          max_batch_size: args.max_batch_size || null,
-          timeout_window_ms: args.timeout_window_ms || null,
+      case 'research-status': {
+        const items = db.getResearchQueueItems({
+          topic: args.topic || null,
+          status: args.status || null,
+          limit: args.limit || 50,
         });
-        db.log('coordinator', 'research_batch_planned', {
-          batch_count: batchPlan.batch_count,
-          candidate_count: batchPlan.candidate_count,
-        });
-        respond(conn, { ok: true, ...batchPlan });
+        respond(conn, { ok: true, items, count: items.length });
         break;
       }
 
-      case 'research-batch-status': {
-        const statusBatch = db.getResearchBatch(args.batch_id);
-        if (!statusBatch) {
-          respond(conn, { ok: false, error: `Batch ${args.batch_id} not found` });
+      case 'research-requeue-stale': {
+        const requeued = db.requeueStaleResearch({
+          max_age_minutes: args.max_age_minutes || 60,
+        });
+        db.log('coordinator', 'research_requeued_stale', requeued);
+        respond(conn, { ok: true, ...requeued });
+        break;
+      }
+
+      case 'research-next': {
+        const nextItems = db.getResearchQueueItems({ status: 'queued', limit: 1 });
+        if (nextItems.length === 0) {
+          respond(conn, { ok: true, item: null });
+        } else {
+          respond(conn, { ok: true, item: nextItems[0] });
+        }
+        break;
+      }
+
+      case 'research-start': {
+        const started = db.startResearchItem(args.id);
+        if (!started) {
+          respond(conn, { ok: false, error: 'research item not in queued state' });
           break;
         }
-        const batchStages = db.listResearchBatchStages(args.batch_id);
-        const stageFanouts = {};
-        for (const stage of batchStages) {
-          stageFanouts[stage.id] = db.listResearchIntentFanout(stage.intent_id);
-        }
-        respond(conn, { ok: true, batch: statusBatch, stages: batchStages, fanouts: stageFanouts });
-        break;
-      }
-
-      case 'research-batch-dispatch': {
-        const dispatchResult = db.markResearchBatchStage({
-          stage_id: args.stage_id,
-          status: 'running',
-        });
-        db.log('coordinator', 'research_batch_stage_dispatched', { stage_id: args.stage_id });
-        respond(conn, { ok: true, ...dispatchResult });
-        break;
-      }
-
-      case 'research-batch-collect': {
-        const collectResult = db.markResearchBatchStage({
-          stage_id: args.stage_id,
-          status: args.status,
-          error: args.error || null,
-          completed_fanout_keys: args.completed_fanout_keys || [],
-          failed_fanout_keys: args.failed_fanout_keys || [],
-        });
-        db.log('coordinator', 'research_batch_stage_collected', {
-          stage_id: args.stage_id,
-          status: args.status,
-        });
-        respond(conn, { ok: true, ...collectResult });
+        db.log('coordinator', 'research_started', { id: args.id });
+        respond(conn, { ok: true });
         break;
       }
 
       case 'research-complete': {
-        const completeOk = researchQueue.markComplete(args.intent_id);
-        if (!completeOk) {
-          respond(conn, { ok: false, error: 'research item not in_progress' });
+        let resultText = null;
+        if (args.note_path) {
+          const fs = require('fs');
+          const path = require('path');
+          const projectDir = db.getConfig('project_dir') || process.cwd();
+          // Try: absolute, relative to cwd, then under .codex/knowledge/
+          const candidates = [
+            args.note_path,
+            path.resolve(projectDir, args.note_path),
+            path.resolve(projectDir, '.codex', 'knowledge', args.note_path),
+          ];
+          let found = false;
+          for (const p of candidates) {
+            try { resultText = fs.readFileSync(p, 'utf8'); found = true; break; } catch {}
+          }
+          if (!found) {
+            respond(conn, { ok: false, error: `Cannot read note_path: ${args.note_path} (tried ${candidates.length} locations)` });
+            break;
+          }
+        }
+        const completed = db.completeResearchItem(args.intent_id, resultText);
+        if (!completed) {
+          respond(conn, { ok: false, error: 'research item not in in_progress state' });
           break;
         }
-        db.log('coordinator', 'research_intent_completed', { intent_id: args.intent_id });
+        db.log('coordinator', 'research_completed', { id: args.intent_id });
         respond(conn, { ok: true });
         break;
       }
 
       case 'research-fail': {
-        const failOk = researchQueue.markFailed(args.intent_id, args.error);
-        if (!failOk) {
-          respond(conn, { ok: false, error: 'research item not in_progress' });
+        const failed = db.failResearchItem(args.intent_id, args.error || null);
+        if (!failed) {
+          respond(conn, { ok: false, error: 'research item not in in_progress state' });
           break;
         }
-        db.log('coordinator', 'research_intent_failed', { intent_id: args.intent_id, error: args.error });
+        db.log('coordinator', 'research_failed', { id: args.intent_id, error: args.error });
         respond(conn, { ok: true });
+        break;
+      }
+
+      case 'research-gaps': {
+        const items = db.getResearchQueueItems({ status: 'queued' });
+        const topics = [...new Set(items.map(i => i.topic))];
+        respond(conn, { ok: true, queued_count: items.length, topics });
         break;
       }
 
@@ -4402,6 +4393,33 @@ function handleCommand(cmd, conn, handlers) {
           offset: args.offset || 0,
         });
         respond(conn, { ok: true, links });
+        break;
+      }
+
+      // === KNOWLEDGE LAYER commands ===
+      case 'knowledge-status': {
+        const knowledgeMeta = require('./knowledge-metadata');
+        const status = knowledgeMeta.getKnowledgeStatus(_projectDir || process.cwd());
+        respond(conn, { ok: true, ...status });
+        break;
+      }
+      case 'knowledge-increment': {
+        const knowledgeMeta = require('./knowledge-metadata');
+        const domain = args.domain || null;
+        const workerPatch = args.worker_patch || args['worker-patch'] || false;
+        const projDir = _projectDir || process.cwd();
+        knowledgeMeta.incrementChanges(projDir, domain);
+        if (workerPatch) {
+          knowledgeMeta.incrementWorkerPatches(projDir, domain);
+        }
+        const meta = knowledgeMeta.getMetadata(projDir);
+        respond(conn, { ok: true, changes_since_index: meta.changes_since_index, domain });
+        break;
+      }
+      case 'knowledge-update-index-timestamp': {
+        const knowledgeMeta = require('./knowledge-metadata');
+        const meta = knowledgeMeta.updateIndexTimestamp(_projectDir || process.cwd());
+        respond(conn, { ok: true, last_indexed: meta.last_indexed });
         break;
       }
 

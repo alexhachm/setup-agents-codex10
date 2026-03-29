@@ -9,6 +9,7 @@ const watchdog = require('./watchdog');
 const merger = require('./merger');
 const webServer = require('./web-server');
 const tmux = require('./tmux');
+const backend = require('./worker-backend');
 const overlay = require('./overlay');
 const instanceRegistry = require('./instance-registry');
 
@@ -18,48 +19,7 @@ const namespace = process.env.MAC10_NAMESPACE || 'mac10';
 const stateDir = path.join(projectDir, '.claude', 'state');
 const pidFile = path.join(stateDir, namespace === 'mac10' ? 'mac10.pid' : `${namespace}.pid`);
 let ownsPidLock = false;
-let researchPlannerTimer = null;
-
-function resolveResearchPlannerIntervalMs() {
-  const raw = db.getConfig('research_planner_interval_ms');
-  const parsed = Number.parseInt(String(raw ?? '').trim(), 10);
-  if (!Number.isFinite(parsed) || parsed <= 0) return 5000;
-  return parsed;
-}
-
-function runResearchPlannerTick() {
-  try {
-    const plan = db.materializeResearchBatchPlan({});
-    if (plan.batch_count > 0) {
-      db.log('coordinator', 'research_batch_planner_tick', {
-        planner_key: plan.planner_key,
-        batch_count: plan.batch_count,
-        candidate_count: plan.candidate_count,
-        batch_ids: plan.batches.map((batch) => batch.batch_id),
-      });
-    }
-  } catch (error) {
-    const message = error instanceof Error ? error.message : String(error);
-    db.log('coordinator', 'research_batch_planner_error', { error: message });
-  }
-}
-
-function startResearchPlanner() {
-  if (researchPlannerTimer) return;
-  const intervalMs = resolveResearchPlannerIntervalMs();
-  researchPlannerTimer = setInterval(runResearchPlannerTick, intervalMs);
-  if (typeof researchPlannerTimer.unref === 'function') {
-    researchPlannerTimer.unref();
-  }
-  runResearchPlannerTick();
-  console.log(`Research planner running (${intervalMs}ms).`);
-}
-
-function stopResearchPlanner() {
-  if (!researchPlannerTimer) return;
-  clearInterval(researchPlannerTimer);
-  researchPlannerTimer = null;
-}
+let _registeredPort = null;
 
 function rebuildProjectMemorySnapshotIndexOnStartup() {
   try {
@@ -139,6 +99,7 @@ if (tmux.isAvailable()) {
 } else {
   console.log('tmux not available — workers will be spawned via Windows Terminal tabs.');
 }
+console.log(`Worker backend: ${backend.name} (available: ${backend.isAvailable()})`);
 
 // Start CLI server (Unix socket for mac10 commands)
 const handlers = {
@@ -146,40 +107,28 @@ const handlers = {
   onAssignTask: (task, worker) => {
     const worktreePath = worker.worktree_path || path.join(projectDir, '.worktrees', `wt-${worker.id}`);
 
-    // Sync knowledge files from main project to worktree before spawning
+    // Symlink knowledge files from main project into worktree (no stale copies)
     try {
       const srcKnowledge = path.join(projectDir, '.claude', 'knowledge');
       const dstKnowledge = path.join(worktreePath, '.claude', 'knowledge');
-      const fs = require('fs');
-      fs.mkdirSync(path.join(dstKnowledge, 'domain'), { recursive: true });
-      for (const f of fs.readdirSync(srcKnowledge)) {
-        const srcFile = path.join(srcKnowledge, f);
-        if (fs.statSync(srcFile).isFile()) {
-          fs.copyFileSync(srcFile, path.join(dstKnowledge, f));
-        }
+
+      // Validate source is a directory; repair if it's a plain file
+      if (fs.existsSync(srcKnowledge) && !fs.statSync(srcKnowledge).isDirectory()) {
+        fs.rmSync(srcKnowledge, { force: true });
+        fs.mkdirSync(srcKnowledge, { recursive: true });
       }
-      // Sync domain subdirectory (legacy layout)
-      const domainDir = path.join(srcKnowledge, 'domain');
-      if (fs.existsSync(domainDir)) {
-        for (const f of fs.readdirSync(domainDir)) {
-          fs.copyFileSync(path.join(domainDir, f), path.join(dstKnowledge, 'domain', f));
-        }
-      }
-      // Sync domains/ subdirectory (new layout: domains/<domain>/README.md)
-      const domainsDir = path.join(srcKnowledge, 'domains');
-      if (fs.existsSync(domainsDir)) {
-        for (const domainName of fs.readdirSync(domainsDir)) {
-          const srcDomainDir = path.join(domainsDir, domainName);
-          if (fs.statSync(srcDomainDir).isDirectory()) {
-            const dstDomainDir = path.join(dstKnowledge, 'domains', domainName);
-            fs.mkdirSync(dstDomainDir, { recursive: true });
-            for (const f of fs.readdirSync(srcDomainDir)) {
-              const srcFile = path.join(srcDomainDir, f);
-              if (fs.statSync(srcFile).isFile()) {
-                fs.copyFileSync(srcFile, path.join(dstDomainDir, f));
-              }
-            }
-          }
+
+      if (fs.existsSync(srcKnowledge)) {
+        // Skip if symlink already points to the correct target
+        const currentTarget = (() => {
+          try { return fs.readlinkSync(dstKnowledge); } catch { return null; }
+        })();
+        if (currentTarget !== srcKnowledge) {
+          // Remove existing target (stale copy or broken symlink) before linking
+          try { fs.rmSync(dstKnowledge, { recursive: true, force: true }); } catch {}
+          fs.mkdirSync(path.join(worktreePath, '.claude'), { recursive: true });
+          const symlinkType = process.platform === 'win32' ? 'junction' : 'dir';
+          fs.symlinkSync(srcKnowledge, dstKnowledge, symlinkType);
         }
       }
     } catch (e) {
@@ -193,23 +142,39 @@ const handlers = {
       db.log('coordinator', 'overlay_error', { worker_id: worker.id, error: e.message });
     }
 
+    // Detect new/uncovered domains and notify Master-1
+    try {
+      const knowledgeMeta = require('./knowledge-metadata');
+      const coverage = knowledgeMeta.getDomainCoverage(projectDir);
+      if (task.domain && !coverage.domains[task.domain]) {
+        db.sendMail('master-1', 'knowledge_gap_detected', {
+          domain: task.domain,
+          task_id: task.id,
+          message: `New domain "${task.domain}" has no codebase research. Consider running mac10 research-codebase.`,
+        });
+      }
+    } catch (e) {
+      db.log('coordinator', 'knowledge_gap_check_error', { worker_id: worker.id, error: e.message });
+    }
+
     const windowName = `worker-${worker.id}`;
 
-    if (tmux.isAvailable()) {
-      // WSL/Linux/macOS: spawn via tmux
-      if (tmux.hasWindow(windowName)) {
-        tmux.killWindow(windowName);
-      }
+    if (backend.isAvailable()) {
+      // Spawn worker via the active backend (tmux, docker, or sandbox)
       const sentinelPath = path.join(projectDir, '.claude', 'scripts', 'worker-sentinel.sh');
-      tmux.createWindow(
-        windowName,
-        `MAC10_NAMESPACE="${namespace}" bash "${sentinelPath}" ${worker.id} "${projectDir}"`,
-        worktreePath
-      );
-      db.updateWorker(worker.id, {
-        tmux_session: tmux.SESSION,
-        tmux_window: windowName,
-      });
+      const cmd = `MAC10_NAMESPACE="${namespace}" bash "${sentinelPath}" ${worker.id} "${projectDir}"`;
+      try {
+        backend.killWorker(windowName);
+        backend.createWorker(windowName, cmd, worktreePath, { MAC10_NAMESPACE: namespace });
+      } catch (e) {
+        db.log('coordinator', 'backend_spawn_error', { worker_id: worker.id, backend: backend.name, error: e.message });
+      }
+      if (backend.name === 'tmux') {
+        db.updateWorker(worker.id, {
+          tmux_session: tmux.SESSION,
+          tmux_window: windowName,
+        });
+      }
     } else {
       // Native Windows: spawn via launch-worker.sh (opens Windows Terminal tab)
       const launchScript = path.join(projectDir, '.claude', 'scripts', 'launch-worker.sh');
@@ -265,8 +230,8 @@ const handlers = {
 cliServer.start(projectDir, handlers);
 console.log('CLI server listening.');
 
-// Start allocator loop (every 2s)
-allocator.start(projectDir);
+// Start allocator loop (every 2s) — deterministic assignment with handler-based spawning
+allocator.start(projectDir, { onAssignTask: handlers.onAssignTask });
 console.log('Allocator running.');
 
 // Start watchdog loop (every 10s)
@@ -276,9 +241,6 @@ console.log('Watchdog running.');
 // Start merger (triggered + periodic)
 merger.start(projectDir);
 console.log('Merger running.');
-
-// Start browser research planner loop (quota-aware batching)
-startResearchPlanner();
 
 // Start web dashboard — single dashboard at port 3100 (or next free port)
 // All project coordinators register in the shared instance registry so the
@@ -291,6 +253,7 @@ startResearchPlanner();
   try {
     await webServer.start(projectDir, port, scriptDir, handlers);
     webServerBound = true;
+    _registeredPort = port;
     console.log(`Web dashboard: http://localhost:${port}`);
   } catch (err) {
     if (err.code === 'EADDRINUSE') {
@@ -320,7 +283,6 @@ startResearchPlanner();
     if (webServerBound) {
       instanceRegistry.deregister(port);
     }
-    stopResearchPlanner();
     allocator.stop();
     watchdog.stop();
     merger.stop();
@@ -361,7 +323,6 @@ startResearchPlanner();
 process.on('uncaughtException', (err) => {
   console.error('Uncaught exception:', err);
   try { db.log('coordinator', 'uncaught_exception', { error: err.message, stack: err.stack }); } catch {}
-  try { stopResearchPlanner(); } catch {}
   process.exit(1);
 });
 process.on('unhandledRejection', (reason) => {

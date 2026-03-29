@@ -39,6 +39,7 @@ CREATE TABLE IF NOT EXISTS tasks (
   branch TEXT,
   validation TEXT,  -- JSON: what checks to run
   overlap_with TEXT,  -- JSON array of task IDs sharing files
+  agent TEXT NOT NULL DEFAULT 'claude-code',  -- agent binary: claude-code, codex, opencode, amp
   routing_class TEXT,
   routed_model TEXT,
   model_source TEXT,
@@ -84,7 +85,35 @@ CREATE TABLE IF NOT EXISTS tasks (
   result TEXT  -- outcome summary
 );
 
--- Browser research batching: intents, staged plans, and per-intent fan-out
+-- Simple research queue (replaces the 4-table batch planning system)
+CREATE TABLE IF NOT EXISTS research_queue (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  topic TEXT NOT NULL,
+  question TEXT NOT NULL,
+  mode TEXT NOT NULL DEFAULT 'standard'
+    CHECK (mode IN ('standard','thinking','deep_research')),
+  priority TEXT NOT NULL DEFAULT 'normal'
+    CHECK (priority IN ('urgent','normal','low')),
+  status TEXT NOT NULL DEFAULT 'queued'
+    CHECK (status IN ('queued','in_progress','completed','failed')),
+  result TEXT,
+  source_agent TEXT,
+  source_task_id INTEGER REFERENCES tasks(id),
+  context TEXT,
+  failure_count INTEGER NOT NULL DEFAULT 0,
+  last_error TEXT,
+  created_at TEXT NOT NULL DEFAULT (datetime('now')),
+  updated_at TEXT NOT NULL DEFAULT (datetime('now')),
+  started_at TEXT,
+  completed_at TEXT
+);
+
+CREATE INDEX IF NOT EXISTS idx_research_queue_status
+  ON research_queue(status, priority, created_at ASC);
+CREATE INDEX IF NOT EXISTS idx_research_queue_topic
+  ON research_queue(topic, status);
+
+-- Legacy browser research batching tables (kept for backward compatibility)
 CREATE TABLE IF NOT EXISTS research_intents (
   id INTEGER PRIMARY KEY AUTOINCREMENT,
   request_id TEXT REFERENCES requests(id),
@@ -333,7 +362,8 @@ CREATE TABLE IF NOT EXISTS merge_queue (
   updated_at TEXT NOT NULL DEFAULT (datetime('now')),
   completion_checkpoint TEXT,
   merged_at TEXT,
-  error TEXT
+  error TEXT,
+  escalation_count INTEGER NOT NULL DEFAULT 0
 );
 
 -- Activity log (replaces activity.log)

@@ -1,0 +1,11 @@
+#!/usr/bin/env bash
+set -euo pipefail
+PROJECT_SCRIPTS="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+if [ -x "$PROJECT_SCRIPTS/codex10" ]; then
+  exec "$PROJECT_SCRIPTS/codex10" "$@"
+fi
+if [ -x "$PROJECT_SCRIPTS/mac10-codex10" ]; then
+  exec "$PROJECT_SCRIPTS/mac10-codex10" "$@"
+fi
+echo "ERROR: codex10 wrapper missing in $PROJECT_SCRIPTS" >&2
+exit 1

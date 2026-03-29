@@ -196,6 +196,7 @@ mkdir -p "$CLAUDE_DIR/commands-codex10"
 mkdir -p "$CLAUDE_DIR/state"
 ensure_is_directory "$CLAUDE_DIR/knowledge"
 mkdir -p "$CLAUDE_DIR/knowledge/domain"
+mkdir -p "$CLAUDE_DIR/knowledge/codebase/domains"
 mkdir -p "$CLAUDE_DIR/scripts"
 
 # --- Copy templates ---
@@ -512,6 +513,7 @@ for i in $(seq 1 "$NUM_WORKERS"); do
   # Link/copy knowledge, commands, agents, hooks to worktree
   mkdir -p "$WT_PATH/.claude/commands"
   mkdir -p "$WT_PATH/.claude/knowledge/domain"
+  mkdir -p "$WT_PATH/.claude/knowledge/codebase/domains"
   mkdir -p "$WT_PATH/.claude/scripts"
   mkdir -p "$WT_PATH/.claude/agents"
   mkdir -p "$WT_PATH/.claude/hooks"

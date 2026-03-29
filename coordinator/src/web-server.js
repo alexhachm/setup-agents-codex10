@@ -774,88 +774,30 @@ function listHydratedTasks(taskFilter = undefined, telemetry = null) {
 function buildBatchStatus() {
   try {
     const d = db.getDb();
-    const queueRow = d.prepare(
-      "SELECT COUNT(*) AS count FROM research_intents WHERE status IN ('queued','planned')"
+    const queuedRow = d.prepare(
+      "SELECT COUNT(*) AS count FROM research_queue WHERE status = 'queued'"
     ).get();
-    const inFlightBatchRow = d.prepare(
-      "SELECT COUNT(*) AS count FROM research_batches WHERE status = 'running'"
-    ).get();
-    const inFlightStageRow = d.prepare(
-      "SELECT COUNT(*) AS count FROM research_batch_stages WHERE status = 'running'"
-    ).get();
-    const partialRow = d.prepare(
-      "SELECT COUNT(*) AS count FROM research_intents WHERE status = 'partial_failed'"
+    const inProgressRow = d.prepare(
+      "SELECT COUNT(*) AS count FROM research_queue WHERE status = 'in_progress'"
     ).get();
     const failedRow = d.prepare(
-      "SELECT COUNT(*) AS count FROM research_intents WHERE status = 'failed'"
+      "SELECT COUNT(*) AS count FROM research_queue WHERE status = 'failed'"
     ).get();
     const completedRow = d.prepare(
-      "SELECT COUNT(*) AS count FROM research_intents WHERE status = 'completed'"
+      "SELECT COUNT(*) AS count FROM research_queue WHERE status = 'completed'"
     ).get();
-    const dedupeRow = d.prepare(`
-      SELECT
-        SUM(CASE WHEN action = 'research_intent_deduplicated' THEN 1 ELSE 0 END) AS dedupe_hits,
-        SUM(CASE WHEN action = 'research_intent_enqueued' THEN 1 ELSE 0 END) AS enqueued
-      FROM activity_log
-      WHERE actor = 'coordinator'
-        AND action IN ('research_intent_deduplicated', 'research_intent_enqueued')
-    `).get();
-    const dedupeHits = Number((dedupeRow && dedupeRow.dedupe_hits) || 0);
-    const enqueued = Number((dedupeRow && dedupeRow.enqueued) || 0);
-    const total = dedupeHits + enqueued;
-    const dedupeHitRatePct = total > 0 ? Math.round((dedupeHits / total) * 1000) / 10 : 0;
-    const recentBatches = d.prepare(`
-      SELECT id, status, max_batch_size, planned_intent_count,
-        created_at, started_at, completed_at, last_error,
-        CASE
-          WHEN started_at IS NOT NULL AND completed_at IS NOT NULL
-          THEN ROUND((julianday(completed_at) - julianday(started_at)) * 86400000)
-          ELSE NULL
-        END AS duration_ms
-      FROM research_batches
-      ORDER BY id DESC
-      LIMIT 20
-    `).all();
-    const fanoutByRequest = d.prepare(`
-      SELECT
-        ri.request_id,
-        COUNT(rif.id) AS total_fanout,
-        SUM(CASE WHEN rif.status = 'completed' THEN 1 ELSE 0 END) AS completed_fanout,
-        SUM(CASE WHEN rif.status IN ('failed','cancelled','partial_failed') THEN 1 ELSE 0 END) AS failed_fanout,
-        SUM(CASE WHEN rif.status IN ('pending','planned','running') THEN 1 ELSE 0 END) AS pending_fanout
-      FROM research_intents ri
-      JOIN research_intent_fanout rif ON rif.intent_id = ri.id
-      WHERE ri.request_id IS NOT NULL
-      GROUP BY ri.request_id
-      ORDER BY ri.request_id DESC
-      LIMIT 20
-    `).all();
     return {
-      queue_depth: Number((queueRow && queueRow.count) || 0),
-      in_flight_batches: Number((inFlightBatchRow && inFlightBatchRow.count) || 0),
-      in_flight_stages: Number((inFlightStageRow && inFlightStageRow.count) || 0),
-      partial_failure_count: Number((partialRow && partialRow.count) || 0),
+      queue_depth: Number((queuedRow && queuedRow.count) || 0),
+      in_progress: Number((inProgressRow && inProgressRow.count) || 0),
       failed_count: Number((failedRow && failedRow.count) || 0),
       completed_count: Number((completedRow && completedRow.count) || 0),
-      dedupe_hits: dedupeHits,
-      enqueued_count: enqueued,
-      dedupe_hit_rate_pct: dedupeHitRatePct,
-      recent_batches: recentBatches,
-      fanout_by_request: fanoutByRequest,
     };
   } catch {
     return {
       queue_depth: 0,
-      in_flight_batches: 0,
-      in_flight_stages: 0,
-      partial_failure_count: 0,
+      in_progress: 0,
       failed_count: 0,
       completed_count: 0,
-      dedupe_hits: 0,
-      enqueued_count: 0,
-      dedupe_hit_rate_pct: 0,
-      recent_batches: [],
-      fanout_by_request: [],
     };
   }
 }
@@ -2214,58 +2156,15 @@ function start(projectDir, port = 3100, scriptDir = null, handlers = {}) {
     }
   });
 
-  // --- Batch orchestration endpoints ---
+  // --- Research queue endpoints ---
 
   app.get('/api/batch/config', (req, res) => {
-    try {
-      res.json({
-        max_size: parseInt(db.getConfig('research_batch_max_size') || '5') || 5,
-        timeout_ms: parseInt(db.getConfig('research_batch_timeout_ms') || '120000') || 120000,
-        candidate_limit: parseInt(db.getConfig('research_batch_candidate_limit') || '200') || 200,
-        planner_interval_ms: parseInt(db.getConfig('research_planner_interval_ms') || '5000') || 5000,
-      });
-    } catch (e) {
-      res.status(500).json({ error: e.message });
-    }
+    // Simplified — batch config is no longer configurable
+    res.json({ message: 'Research uses simple queue — no batch config needed.' });
   });
 
   app.post('/api/batch/config', (req, res) => {
-    try {
-      const { max_size, timeout_ms, candidate_limit, planner_interval_ms } = req.body;
-      if (max_size !== undefined) {
-        const v = Number.parseInt(String(max_size), 10);
-        if (!Number.isInteger(v) || v < 1 || v > 100) {
-          return res.status(400).json({ ok: false, error: 'max_size must be an integer between 1 and 100' });
-        }
-        db.setConfig('research_batch_max_size', String(v));
-      }
-      if (timeout_ms !== undefined) {
-        const v = Number.parseInt(String(timeout_ms), 10);
-        if (!Number.isInteger(v) || v < 1000 || v > 3600000) {
-          return res.status(400).json({ ok: false, error: 'timeout_ms must be an integer between 1000 and 3600000' });
-        }
-        db.setConfig('research_batch_timeout_ms', String(v));
-      }
-      if (candidate_limit !== undefined) {
-        const v = Number.parseInt(String(candidate_limit), 10);
-        if (!Number.isInteger(v) || v < 1 || v > 5000) {
-          return res.status(400).json({ ok: false, error: 'candidate_limit must be an integer between 1 and 5000' });
-        }
-        db.setConfig('research_batch_candidate_limit', String(v));
-      }
-      if (planner_interval_ms !== undefined) {
-        const v = Number.parseInt(String(planner_interval_ms), 10);
-        if (!Number.isInteger(v) || v < 1000 || v > 300000) {
-          return res.status(400).json({ ok: false, error: 'planner_interval_ms must be an integer between 1000 and 300000' });
-        }
-        db.setConfig('research_planner_interval_ms', String(v));
-      }
-      db.log('gui', 'batch_config_updated', { max_size, timeout_ms, candidate_limit, planner_interval_ms });
-      broadcast({ type: 'batch_config_updated' });
-      res.json({ ok: true, message: 'Batch config saved.' });
-    } catch (e) {
-      res.status(500).json({ ok: false, error: e.message });
-    }
+    res.json({ ok: true, message: 'Research uses simple queue — batch config ignored.' });
   });
 
   app.get('/api/batch/status', (req, res) => {

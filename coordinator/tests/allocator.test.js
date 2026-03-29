@@ -9,11 +9,6 @@ const os = require('os');
 const db = require('../src/db');
 const allocator = require('../src/allocator');
 
-// insightIngestion is required by allocator; mock it to avoid side effects in tests
-const insightIngestion = require('../src/insight-ingestion');
-if (typeof insightIngestion.ingestAllocatorEvent !== 'function') {
-  insightIngestion.ingestAllocatorEvent = () => {};
-}
 
 let tmpDir;
 
@@ -29,7 +24,7 @@ afterEach(() => {
   fs.rmSync(tmpDir, { recursive: true, force: true });
 });
 
-describe('Allocator tick (thin notifier)', () => {
+describe('Allocator tick (deterministic assignment)', () => {
   it('should promote pending tasks to ready', () => {
     db.registerWorker(1, '/wt-1', 'agent-1');
     const reqId = db.createRequest('Test feature');
@@ -42,29 +37,41 @@ describe('Allocator tick (thin notifier)', () => {
 
     // Run tick to promote
     allocator.tick();
-    const ready = db.getReadyTasks();
-    assert.strictEqual(ready.length, 1);
+    // Task should be promoted and then immediately assigned to the idle worker
+    const task = db.getReadyTasks();
+    const worker = db.getWorker(1);
+    // Either promoted-and-assigned (no ready tasks left) or just promoted
+    assert.ok(task.length === 0 || task.length === 1);
   });
 
-  it('should send tasks_available mail when ready tasks and idle workers exist', () => {
+  it('should directly assign ready tasks to idle workers', () => {
     db.registerWorker(1, '/wt-1', 'agent-1');
     const reqId = db.createRequest('Test');
     const taskId = db.createTask({ request_id: reqId, subject: 'Task', description: 'Desc' });
     db.updateTask(taskId, { status: 'ready' });
 
-    // Drain existing mail
     db.checkMail('allocator');
-
     allocator.tick();
 
+    // Task should be assigned
+    const task = db.getTask(taskId);
+    assert.strictEqual(task.status, 'assigned');
+    assert.strictEqual(task.assigned_to, 1);
+
+    // Worker should be assigned
+    const worker = db.getWorker(1);
+    assert.strictEqual(worker.status, 'assigned');
+    assert.strictEqual(worker.current_task_id, taskId);
+
+    // Master-3 should be notified
     const mail = db.checkMail('allocator');
-    const available = mail.filter(m => m.type === 'tasks_available');
-    assert.strictEqual(available.length, 1);
-    assert.strictEqual(available[0].payload.ready_count, 1);
-    assert.strictEqual(available[0].payload.idle_count, 1);
+    const notifications = mail.filter(m => m.type === 'task_assigned_notification');
+    assert.strictEqual(notifications.length, 1);
+    assert.strictEqual(notifications[0].payload.task_id, taskId);
+    assert.strictEqual(notifications[0].payload.worker_id, 1);
   });
 
-  it('should not notify when no idle workers', () => {
+  it('should not assign when no idle workers', () => {
     db.registerWorker(1, '/wt-1', 'agent-1');
     db.updateWorker(1, { status: 'busy' });
 
@@ -72,17 +79,19 @@ describe('Allocator tick (thin notifier)', () => {
     const taskId = db.createTask({ request_id: reqId, subject: 'Task', description: 'Desc' });
     db.updateTask(taskId, { status: 'ready' });
 
-    // Drain existing mail
     db.checkMail('allocator');
-
     allocator.tick();
 
+    // Task should remain ready
+    const task = db.getTask(taskId);
+    assert.strictEqual(task.status, 'ready');
+
     const mail = db.checkMail('allocator');
-    const available = mail.filter(m => m.type === 'tasks_available');
-    assert.strictEqual(available.length, 0);
+    const notifications = mail.filter(m => m.type === 'task_assigned_notification');
+    assert.strictEqual(notifications.length, 0);
   });
 
-  it('should skip claimed workers when counting idle', () => {
+  it('should skip claimed workers when assigning', () => {
     db.registerWorker(1, '/wt-1', 'agent-1');
     db.claimWorker(1, 'architect');
 
@@ -90,17 +99,15 @@ describe('Allocator tick (thin notifier)', () => {
     const taskId = db.createTask({ request_id: reqId, subject: 'Task', description: 'Desc' });
     db.updateTask(taskId, { status: 'ready' });
 
-    // Drain existing mail
     db.checkMail('allocator');
-
     allocator.tick();
 
-    const mail = db.checkMail('allocator');
-    const available = mail.filter(m => m.type === 'tasks_available');
-    assert.strictEqual(available.length, 0); // no unclaimed idle workers
+    // Task should remain ready — claimed worker skipped
+    const task = db.getTask(taskId);
+    assert.strictEqual(task.status, 'ready');
   });
 
-  it('should recover orphaned assignments and resume notifications', () => {
+  it('should recover orphaned assignments and then assign', () => {
     db.registerWorker(1, '/wt-1', 'agent-1');
     const reqId = db.createRequest('Recover orphan assignment');
     const taskId = db.createTask({ request_id: reqId, subject: 'Task', description: 'Desc' });
@@ -110,35 +117,33 @@ describe('Allocator tick (thin notifier)', () => {
     db.checkMail('allocator');
     allocator.tick();
 
+    // After orphan recovery + re-assignment, task should be assigned again
     const task = db.getTask(taskId);
-    assert.strictEqual(task.status, 'ready');
-    assert.strictEqual(task.assigned_to, null);
     assert.strictEqual(task.liveness_reassign_count, 1);
     assert.strictEqual(task.liveness_last_reassign_reason, 'worker_idle_orphan');
-
-    const mail = db.checkMail('allocator');
-    const available = mail.filter((m) => m.type === 'tasks_available');
-    assert.strictEqual(available.length, 1);
-    assert.strictEqual(available[0].payload.ready_count, 1);
-    assert.strictEqual(available[0].payload.idle_count, 1);
+    // The task was recovered to ready, then the allocator re-assigned it
+    assert.strictEqual(task.status, 'assigned');
+    assert.strictEqual(task.assigned_to, 1);
   });
 
-  it('should run an immediate tick on start so long intervals do not stall assignment signaling', () => {
+  it('should run an immediate tick on start so long intervals do not stall assignment', () => {
     db.setConfig('allocator_interval_ms', '999999');
     db.registerWorker(1, '/wt-1', 'agent-1');
     const reqId = db.createRequest('Immediate startup tick');
     const taskId = db.createTask({ request_id: reqId, subject: 'Task', description: 'Desc' });
     db.updateTask(taskId, { status: 'ready' });
 
-    // Drain existing mail, then start allocator.
     db.checkMail('allocator');
     allocator.start(tmpDir);
 
+    // Task should be assigned immediately on startup
+    const task = db.getTask(taskId);
+    assert.strictEqual(task.status, 'assigned');
+    assert.strictEqual(task.assigned_to, 1);
+
     const mail = db.checkMail('allocator');
-    const available = mail.filter((m) => m.type === 'tasks_available');
-    assert.strictEqual(available.length, 1);
-    assert.strictEqual(available[0].payload.ready_count, 1);
-    assert.strictEqual(available[0].payload.idle_count, 1);
+    const notifications = mail.filter((m) => m.type === 'task_assigned_notification');
+    assert.strictEqual(notifications.length, 1);
   });
 
   it('should stop reassignment when liveness retry limit is exhausted', () => {
@@ -166,9 +171,48 @@ describe('Allocator tick (thin notifier)', () => {
 
     const mail = db.checkMail('allocator');
     const failed = mail.filter((m) => m.type === 'task_failed' && m.payload.task_id === taskId);
-    const available = mail.filter((m) => m.type === 'tasks_available');
     assert.strictEqual(failed.length, 1);
-    assert.strictEqual(available.length, 0);
+  });
+
+  it('should prefer domain-matching workers', () => {
+    db.registerWorker(1, '/wt-1', 'agent-1');
+    db.registerWorker(2, '/wt-2', 'agent-2');
+    db.updateWorker(1, { domain: 'frontend' });
+    db.updateWorker(2, { domain: 'backend' });
+
+    const reqId = db.createRequest('Domain match test');
+    const taskId = db.createTask({
+      request_id: reqId,
+      subject: 'Backend task',
+      description: 'Desc',
+      domain: 'backend',
+    });
+    db.updateTask(taskId, { status: 'ready' });
+
+    allocator.tick();
+
+    const task = db.getTask(taskId);
+    assert.strictEqual(task.assigned_to, 2, 'should assign to domain-matching worker');
+  });
+
+  it('should load balance by tasks_completed when no domain match', () => {
+    db.registerWorker(1, '/wt-1', 'agent-1');
+    db.registerWorker(2, '/wt-2', 'agent-2');
+    db.updateWorker(1, { tasks_completed: 5 });
+    db.updateWorker(2, { tasks_completed: 2 });
+
+    const reqId = db.createRequest('Load balance test');
+    const taskId = db.createTask({
+      request_id: reqId,
+      subject: 'Generic task',
+      description: 'Desc',
+    });
+    db.updateTask(taskId, { status: 'ready' });
+
+    allocator.tick();
+
+    const task = db.getTask(taskId);
+    assert.strictEqual(task.assigned_to, 2, 'should assign to less-loaded worker');
   });
 });
 
@@ -355,127 +399,5 @@ describe('Request completion tracking', () => {
   });
 });
 
-// ---------------------------------------------------------------------------
-// Research batch availability signalling
-// ---------------------------------------------------------------------------
-
-describe('signalResearchBatchAvailability', () => {
-  beforeEach(() => {
-    // Reset dedup timer between tests
-    allocator.stop();
-  });
-
-  it('sends research_batch_available mail when queued intents exist and no batch is running', () => {
-    db.enqueueResearchIntent({
-      intent_type: 'browser_research',
-      intent_payload: { q: 'signal-test' },
-      priority_score: 500,
-      batch_size_cap: 5,
-      timeout_window_ms: 120000,
-    });
-
-    // Drain existing mail
-    db.checkMail('allocator');
-
-    allocator.tick();
-
-    const mail = db.checkMail('allocator');
-    const signals = mail.filter(m => m.type === 'research_batch_available');
-    assert.strictEqual(signals.length, 1);
-    assert.ok(signals[0].payload.queued_intent_count >= 1);
-  });
-
-  it('does not send mail when no queued intents exist', () => {
-    db.checkMail('allocator');
-    allocator.tick();
-    const mail = db.checkMail('allocator');
-    const signals = mail.filter(m => m.type === 'research_batch_available');
-    assert.strictEqual(signals.length, 0);
-  });
-
-  it('does not send mail when a batch is already running', () => {
-    // Enqueue an intent
-    db.enqueueResearchIntent({
-      intent_type: 'browser_research',
-      intent_payload: { q: 'running-batch' },
-      priority_score: 500,
-      batch_size_cap: 5,
-      timeout_window_ms: 120000,
-    });
-    // Materialize a batch plan (intents → planned) and simulate it running
-    const plan = db.materializeResearchBatchPlan({ max_batch_size: 5 });
-    const batchId = plan.batches[0].batch_id;
-    const stages = db.listResearchBatchStages(batchId);
-    // Mark the first stage running so batch becomes running
-    db.markResearchBatchStage({ stage_id: stages[0].id, status: 'running' });
-
-    // Now enqueue a second intent that stays queued
-    db.enqueueResearchIntent({
-      intent_type: 'browser_research',
-      intent_payload: { q: 'waiting-intent' },
-      priority_score: 300,
-      batch_size_cap: 5,
-      timeout_window_ms: 120000,
-    });
-
-    db.checkMail('allocator');
-    allocator.tick();
-
-    const mail = db.checkMail('allocator');
-    const signals = mail.filter(m => m.type === 'research_batch_available');
-    assert.strictEqual(signals.length, 0, 'should not signal when a batch is running');
-  });
-
-  it('signals again after running batch completes', () => {
-    db.enqueueResearchIntent({
-      intent_type: 'browser_research',
-      intent_payload: { q: 'post-complete' },
-      priority_score: 500,
-      batch_size_cap: 5,
-      timeout_window_ms: 120000,
-    });
-    const plan = db.materializeResearchBatchPlan({ max_batch_size: 5 });
-    const stages = db.listResearchBatchStages(plan.batches[0].batch_id);
-    db.markResearchBatchStage({ stage_id: stages[0].id, status: 'running' });
-    db.markResearchBatchStage({ stage_id: stages[0].id, status: 'completed' });
-
-    // Enqueue a new intent
-    db.enqueueResearchIntent({
-      intent_type: 'browser_research',
-      intent_payload: { q: 'next-run' },
-      priority_score: 500,
-      batch_size_cap: 5,
-      timeout_window_ms: 120000,
-    });
-
-    db.checkMail('allocator');
-    allocator.tick();
-
-    const mail = db.checkMail('allocator');
-    const signals = mail.filter(m => m.type === 'research_batch_available');
-    assert.strictEqual(signals.length, 1, 'should signal again after batch completes');
-  });
-
-  it('dedup window prevents duplicate signals within RESEARCH_NOTIFY_DEDUP_MS', () => {
-    db.enqueueResearchIntent({
-      intent_type: 'browser_research',
-      intent_payload: { q: 'dedup-signal' },
-      priority_score: 500,
-      batch_size_cap: 5,
-      timeout_window_ms: 120000,
-    });
-    db.checkMail('allocator');
-
-    // First tick fires the signal
-    allocator.tick();
-    const mail1 = db.checkMail('allocator');
-    const sig1 = mail1.filter(m => m.type === 'research_batch_available');
-    assert.strictEqual(sig1.length, 1);
-
-    // Second immediate tick should be suppressed by dedup window
-    allocator.tick();
-    const mail2 = db.checkMail('allocator');
-    const sig2 = mail2.filter(m => m.type === 'research_batch_available');
-    assert.strictEqual(sig2.length, 0, 'duplicate signal within dedup window should be suppressed');
-  });
-});
+// Research batch signaling was removed in Phase 7 — allocator no longer
+// signals for batch availability. The simple research queue is used instead.

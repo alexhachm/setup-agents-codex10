@@ -37,11 +37,30 @@ This is the value-producing phase. Your goal: find concrete, actionable improvem
 1. Read knowledge files:
    - `.claude/knowledge/codebase-insights.md` — structure and patterns
    - `.claude/knowledge/loop-findings.md` — accumulated intelligence from previous iterations (if exists)
-2. Based on checkpoint's EXPLORED and REMAINING fields, explore areas not yet covered.
-3. On first iteration, do broad exploration to map the landscape.
-4. On subsequent iterations, go deeper into unexplored areas.
+2. Check existing research: scan `.codex/knowledge/research/topics/` for topics relevant to your prompt directive. Read `_rollup.md` files and recent notes. This is your first external knowledge source.
+   ```bash
+   ls .codex/knowledge/research/topics/ 2>/dev/null
+   ```
+3. Based on checkpoint's EXPLORED and REMAINING fields, explore areas not yet covered.
+4. On first iteration, do broad exploration to map the landscape.
+5. On subsequent iterations, go deeper into unexplored areas.
 5. **Track context budget**: increment ~500 per file/area explored. If budget >= 4000, stop researching and move to Phase 4.
-6. Focus on whatever the `prompt` directive says — it defines your scope entirely.
+6. If you identify knowledge gaps that external research could fill, queue research and wait for results:
+   ```bash
+   RESEARCH_OUTPUT=$(./.claude/scripts/codex10 queue-research "$TOPIC" "$QUESTION" --mode standard --priority urgent)
+   RESEARCH_ID=$(printf '%s' "$RESEARCH_OUTPUT" | grep -o '"id":[0-9]*' | head -1 | cut -d: -f2)
+   MAX_POLLS=20
+   for poll_i in $(seq 1 $MAX_POLLS); do
+     sleep 15
+     ./.claude/scripts/codex10 loop-heartbeat $MAC10_LOOP_ID
+     STATUS_OUTPUT=$(./.claude/scripts/codex10 research-status --topic "$TOPIC")
+     if printf '%s' "$STATUS_OUTPUT" | grep -q '"status":"completed"'; then break; fi
+     if printf '%s' "$STATUS_OUTPUT" | grep -q '"status":"failed"'; then break; fi
+   done
+   cat ".codex/knowledge/research/topics/$TOPIC/_rollup.md" 2>/dev/null
+   ```
+   Max wait 5 minutes. Read results before submitting requests. **Never use WebSearch or WebFetch.**
+7. Focus on whatever the `prompt` directive says — it defines your scope entirely.
 
 ### Research Quality
 

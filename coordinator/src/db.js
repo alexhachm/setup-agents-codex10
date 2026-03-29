@@ -423,6 +423,66 @@ function compareCompletedTaskCursors(left, right) {
   return 0;
 }
 
+// ── State transition guards (logging-only) ───────────────────────────────────
+// Each key maps a current status to the set of valid next statuses.
+// Invalid transitions are logged but NOT blocked (stabilization phase).
+
+const ALLOWED_TRANSITIONS = Object.freeze({
+  requests: {
+    pending:         new Set(['triaging', 'executing_tier1', 'decomposed', 'in_progress', 'completed', 'failed']),
+    triaging:        new Set(['executing_tier1', 'decomposed', 'pending', 'in_progress', 'failed']),
+    executing_tier1: new Set(['completed', 'failed', 'pending']),
+    decomposed:      new Set(['in_progress', 'integrating', 'pending', 'failed']),
+    in_progress:     new Set(['integrating', 'completed', 'failed']),
+    integrating:     new Set(['completed', 'failed', 'in_progress']),
+    completed:       new Set(['in_progress', 'pending']),   // re-open for remediation
+    failed:          new Set(['in_progress', 'integrating', 'pending']),
+  },
+  tasks: {
+    pending:     new Set(['ready', 'failed', 'blocked']),
+    ready:       new Set(['assigned', 'failed', 'pending', 'blocked']),
+    assigned:    new Set(['in_progress', 'completed', 'failed', 'ready']),
+    in_progress: new Set(['completed', 'failed', 'ready']),
+    completed:   new Set([]),  // terminal
+    failed:      new Set(['ready', 'pending']),  // retry
+    blocked:     new Set(['pending', 'ready', 'failed']),
+  },
+  merge_queue: {
+    pending:  new Set(['ready', 'merging', 'conflict', 'merged', 'failed']),
+    ready:    new Set(['merging', 'pending', 'failed']),
+    merging:  new Set(['merged', 'conflict', 'failed', 'pending']),
+    conflict: new Set(['pending', 'failed']),
+    merged:   new Set([]),  // terminal
+    failed:   new Set(['pending']),
+  },
+  workers: {
+    idle:           new Set(['assigned', 'running', 'busy']),
+    assigned:       new Set(['running', 'busy', 'idle', 'completed_task']),
+    running:        new Set(['idle', 'busy', 'completed_task', 'resetting']),
+    busy:           new Set(['idle', 'assigned', 'running', 'completed_task', 'resetting']),
+    completed_task: new Set(['idle', 'resetting']),
+    resetting:      new Set(['idle']),
+  },
+});
+
+function validateTransition(entity, id, currentStatus, newStatus) {
+  if (!currentStatus || !newStatus || currentStatus === newStatus) return;
+  const entityMap = ALLOWED_TRANSITIONS[entity];
+  if (!entityMap) return;
+  const allowed = entityMap[currentStatus];
+  if (!allowed) return; // unknown current status — skip guard
+  if (!allowed.has(newStatus)) {
+    try {
+      log('coordinator', 'invalid_state_transition', {
+        entity,
+        id,
+        from: currentStatus,
+        to: newStatus,
+      });
+    } catch {}
+  }
+}
+
 const VALID_COLUMNS = Object.freeze({
   requests: new Set(['description', 'tier', 'status', 'result', 'completed_at', 'loop_id', 'status_cause', 'previous_status']),
   tasks: new Set([
@@ -442,7 +502,7 @@ const VALID_COLUMNS = Object.freeze({
     'started_at', 'completed_at', 'result',
   ]),
   workers: new Set(['status', 'domain', 'worktree_path', 'branch', 'tmux_session', 'tmux_window', 'pid', 'current_task_id', 'claimed_by', 'claimed_at', 'last_heartbeat', 'launched_at', 'tasks_completed']),
-  merge_queue: new Set(['status', 'priority', 'completion_checkpoint', 'merged_at', 'error']),
+  merge_queue: new Set(['status', 'priority', 'completion_checkpoint', 'merged_at', 'error', 'escalation_count']),
   changes: new Set(['description', 'domain', 'file_path', 'function_name', 'tooltip', 'enabled', 'status']),
   loops: new Set(['prompt', 'status', 'iteration_count', 'last_checkpoint', 'namespace', 'tmux_session', 'tmux_window', 'pid', 'last_heartbeat', 'stopped_at']),
 });
@@ -466,6 +526,9 @@ function ensureMergeQueueColumns(database) {
   }
   if (!mergeCols.includes('completion_checkpoint')) {
     database.exec("ALTER TABLE merge_queue ADD COLUMN completion_checkpoint TEXT");
+  }
+  if (!mergeCols.includes('escalation_count')) {
+    database.exec("ALTER TABLE merge_queue ADD COLUMN escalation_count INTEGER NOT NULL DEFAULT 0");
   }
 
   if (mergeCols.includes('created_at')) {
@@ -1043,6 +1106,7 @@ function updateRequest(id, fields) {
   if (Object.prototype.hasOwnProperty.call(normalizedFields, 'status')) {
     const current = getDb().prepare('SELECT status FROM requests WHERE id = ?').get(id);
     const previousStatus = current && current.status ? current.status : null;
+    validateTransition('requests', id, previousStatus, normalizedFields.status);
     if (shouldClearRequestCompletionMetadata(previousStatus, normalizedFields.status)) {
       normalizedFields.completed_at = null;
       normalizedFields.result = null;
@@ -1093,6 +1157,10 @@ function getTask(id) {
 
 function updateTask(id, fields) {
   validateColumns('tasks', fields);
+  if (Object.prototype.hasOwnProperty.call(fields, 'status')) {
+    const current = getDb().prepare('SELECT status FROM tasks WHERE id = ?').get(id);
+    validateTransition('tasks', id, current && current.status, fields.status);
+  }
   const sets = [];
   const vals = [];
   for (const [k, v] of Object.entries(fields)) {
@@ -2088,6 +2156,70 @@ function upsertResearchIntentFanoutMappings(intentId, fanoutEntries) {
   }
 }
 
+// ── Simple research queue ────────────────────────────────────────────────────
+
+function queueResearch({ topic, question, mode, priority, context, source_agent, source_task_id }) {
+  const validModes = ['standard', 'thinking', 'deep_research'];
+  const validPriorities = ['urgent', 'normal', 'low'];
+  const m = validModes.includes(mode) ? mode : 'standard';
+  const p = validPriorities.includes(priority) ? priority : 'normal';
+  const result = getDb().prepare(`
+    INSERT INTO research_queue (topic, question, mode, priority, context, source_agent, source_task_id)
+    VALUES (?, ?, ?, ?, ?, ?, ?)
+  `).run(topic, question, m, p, context || null, source_agent || null, source_task_id || null);
+  return { id: result.lastInsertRowid, topic, question, mode: m, priority: p };
+}
+
+function getResearchQueueItems({ topic, status, limit } = {}) {
+  let sql = 'SELECT * FROM research_queue WHERE 1=1';
+  const params = [];
+  if (topic) { sql += ' AND topic = ?'; params.push(topic); }
+  if (status) { sql += ' AND status = ?'; params.push(status); }
+  sql += ' ORDER BY CASE priority WHEN \'urgent\' THEN 0 WHEN \'normal\' THEN 1 WHEN \'low\' THEN 2 END, created_at ASC';
+  if (limit) { sql += ' LIMIT ?'; params.push(limit); }
+  return getDb().prepare(sql).all(...params);
+}
+
+function requeueStaleResearch({ max_age_minutes } = {}) {
+  const ageMin = (max_age_minutes && max_age_minutes > 0) ? max_age_minutes : 60;
+  const result = getDb().prepare(`
+    UPDATE research_queue
+    SET status = 'queued', updated_at = datetime('now')
+    WHERE status = 'in_progress'
+      AND updated_at < datetime('now', '-' || ? || ' minutes')
+  `).run(ageMin);
+  return { requeued: result.changes };
+}
+
+function startResearchItem(id) {
+  const result = getDb().prepare(`
+    UPDATE research_queue
+    SET status = 'in_progress', started_at = datetime('now'), updated_at = datetime('now')
+    WHERE id = ? AND status = 'queued'
+  `).run(id);
+  return result.changes > 0;
+}
+
+function completeResearchItem(id, resultText) {
+  const result = getDb().prepare(`
+    UPDATE research_queue
+    SET status = 'completed', result = ?, completed_at = datetime('now'), updated_at = datetime('now')
+    WHERE id = ? AND status = 'in_progress'
+  `).run(resultText || null, id);
+  return result.changes > 0;
+}
+
+function failResearchItem(id, error) {
+  const result = getDb().prepare(`
+    UPDATE research_queue
+    SET status = 'failed', last_error = ?, failure_count = failure_count + 1, updated_at = datetime('now')
+    WHERE id = ? AND status = 'in_progress'
+  `).run(error || null, id);
+  return result.changes > 0;
+}
+
+// ── Legacy batch research functions (kept for backward compatibility) ────────
+
 function enqueueResearchIntent({
   request_id = null,
   task_id = null,
@@ -2951,6 +3083,10 @@ function getWorker(id) {
 
 function updateWorker(id, fields) {
   validateColumns('workers', fields);
+  if (Object.prototype.hasOwnProperty.call(fields, 'status')) {
+    const current = getDb().prepare('SELECT status FROM workers WHERE id = ?').get(id);
+    validateTransition('workers', id, current && current.status, fields.status);
+  }
   const sets = [];
   const vals = [];
   for (const [k, v] of Object.entries(fields)) {
@@ -3570,8 +3706,16 @@ function getNextMerge() {
   `).get();
 }
 
+function getMerge(id) {
+  return getDb().prepare('SELECT * FROM merge_queue WHERE id = ?').get(id);
+}
+
 function updateMerge(id, fields) {
   validateColumns('merge_queue', fields);
+  if (Object.prototype.hasOwnProperty.call(fields, 'status')) {
+    const current = getDb().prepare('SELECT status FROM merge_queue WHERE id = ?').get(id);
+    validateTransition('merge_queue', id, current && current.status, fields.status);
+  }
   const sets = [];
   const vals = [];
   for (const [k, v] of Object.entries(fields)) {
@@ -4233,6 +4377,7 @@ module.exports = {
   createProjectMemoryLineageLink,
   listProjectMemoryLineageLinks,
   rebuildProjectMemorySnapshotIndex,
+  queueResearch, getResearchQueueItems, requeueStaleResearch, startResearchItem, completeResearchItem, failResearchItem,
   enqueueResearchIntent, getResearchIntent, scoreResearchIntentCandidates, materializeResearchBatchPlan,
   getResearchBatch, listResearchBatchStages, listResearchIntentFanout, markResearchBatchStage,
   listTasks, getReadyTasks, checkAndPromoteTasks, replanTaskDependency,
@@ -4242,7 +4387,7 @@ module.exports = {
   reconcileRequestLifecycle, reconcileAllActiveRequests,
   getUsageCostBurnRate, getRequestLatestCompletedTaskCursor, hasRequestCompletedTaskProgressSince,
   sendMail, checkMail, checkMailBlocking, purgeOldMail, purgeTerminalMerges,
-  enqueueMerge, getNextMerge, updateMerge,
+  enqueueMerge, getMerge, getNextMerge, updateMerge,
   log, getLog,
   getConfig, setConfig,
   savePreset, listPresets, getPreset, deletePreset,
@@ -4254,4 +4399,5 @@ module.exports = {
   createBrowserSession, getBrowserSession, updateBrowserSession, transitionBrowserSession,
   createBrowserResearchJob, getBrowserResearchJob, updateBrowserResearchJob, transitionBrowserResearchJob,
   appendBrowserCallbackEvent, getBrowserCallbackEvents,
+  validateTransition, ALLOWED_TRANSITIONS,
 };

@@ -1,45 +1,33 @@
 'use strict';
 
-const crypto = require('crypto');
 const db = require('./db');
 const tmux = require('./tmux');
+const backend = require('./worker-backend');
 const recovery = require('./recovery');
 const insightIngestion = require('./insight-ingestion');
 
 let intervalId = null;
 let lastMailPurge = 0;
 let startupRecoverySweepPending = true;
-// Track last escalation level per worker to avoid duplicate nudge/triage mails
-const lastEscalationLevel = new Map();
-// Track tmux pane output hash at Level 3 triage to detect active workers at Level 4
-const lastOutputHash = new Map();
 
-// Default escalation thresholds (seconds since last heartbeat).
-const THRESHOLDS = Object.freeze({
-  warn: 60,
-  nudge: 90,
-  triage: 120,
-  terminate: 180,
-});
+const TERMINATE_THRESHOLD_SEC = 180;
 const LOOP_SENTINEL_HEARTBEAT_CADENCE_SEC = 30;
 const LOOP_STALE_HEARTBEAT_MISSED_BEATS = 12;
 const LOOP_STALE_HEARTBEAT_SEC =
   LOOP_SENTINEL_HEARTBEAT_CADENCE_SEC * LOOP_STALE_HEARTBEAT_MISSED_BEATS;
-const MERGE_TIMEOUT_SEC = 300;
-const MERGE_CONFLICT_GRACE_SEC = 600;
-const MERGE_TIMEOUT_ERROR = `Merge timed out after ${MERGE_TIMEOUT_SEC / 60} minutes`;
-const FUNCTIONAL_CONFLICT_ERROR_PREFIX = 'functional_conflict:';
 const SQLITE_DATETIME_PATTERN = /^(\d{4})-(\d{2})-(\d{2}) (\d{2}):(\d{2}):(\d{2})(?:\.(\d{1,3}))?$/;
 
-// Escalation thresholds (seconds since last heartbeat)
-// Override via DB config: watchdog_warn_sec, watchdog_nudge_sec, watchdog_triage_sec, watchdog_terminate_sec
-function getThresholds() {
-  return {
-    warn:      parseInt(db.getConfig('watchdog_warn_sec'))      || THRESHOLDS.warn,
-    nudge:     parseInt(db.getConfig('watchdog_nudge_sec'))     || THRESHOLDS.nudge,
-    triage:    parseInt(db.getConfig('watchdog_triage_sec'))    || THRESHOLDS.triage,
-    terminate: parseInt(db.getConfig('watchdog_terminate_sec')) || THRESHOLDS.terminate,
-  };
+// Keep THRESHOLDS for backward compatibility with tests that import it
+const THRESHOLDS = Object.freeze({
+  warn: 60,
+  nudge: 90,
+  triage: 120,
+  terminate: TERMINATE_THRESHOLD_SEC,
+});
+
+function getTerminateThresholdSec() {
+  const configured = parseInt(db.getConfig('watchdog_terminate_sec'));
+  return configured > 0 ? configured : TERMINATE_THRESHOLD_SEC;
 }
 
 function getLoopHeartbeatStaleThresholdSec() {
@@ -77,7 +65,6 @@ function parseTimestampMs(timestamp) {
     const parsed = Date.UTC(year, month - 1, day, hour, minute, second, millis);
     const parsedDate = new Date(parsed);
 
-    // Reject impossible dates/times (Date.UTC auto-normalizes overflows).
     if (
       parsedDate.getUTCFullYear() !== year ||
       parsedDate.getUTCMonth() !== month - 1 ||
@@ -127,21 +114,16 @@ function start(projectDir) {
 function stop() {
   if (intervalId) { clearInterval(intervalId); intervalId = null; }
   startupRecoverySweepPending = true;
-  lastEscalationLevel.clear();
-  lastOutputHash.clear();
 }
 
 function runStartupRecoverySweep() {
   if (!startupRecoverySweepPending) return;
-  const recoveredDecomposed = recoverStaleDecomposedRequests('startup_repair_sweep');
-  recoverFailedRequestsWithActiveRemediation('startup_repair_sweep');
   const repairedRequests = recoverStaleIntegrations(Date.now(), { source: 'startup_repair_sweep' });
   startupRecoverySweepPending = false;
-  if (repairedRequests > 0 || recoveredDecomposed > 0) {
+  if (repairedRequests > 0) {
     db.log('coordinator', 'integration_repair_sweep', {
       source: 'startup',
       repaired_requests: repairedRequests,
-      recovered_decomposed_requests: recoveredDecomposed,
     });
   }
 }
@@ -149,24 +131,18 @@ function runStartupRecoverySweep() {
 function tick(projectDir) {
   const workers = db.getAllWorkers();
   const now = Date.now();
+  const terminateThreshold = getTerminateThresholdSec();
 
   for (const worker of workers) {
-    // Skip idle workers and clear their escalation tracking
-    if (worker.status === 'idle') {
-      lastEscalationLevel.delete(worker.id);
-      lastOutputHash.delete(worker.id);
-      continue;
-    }
+    if (worker.status === 'idle') continue;
 
-    // ZFC death detection: check if tmux pane is actually alive.
-    // Non-tmux environments skip this branch and rely on heartbeat/launched_at staleness.
-    if (tmux.isTmuxAvailable()) {
+    // ZFC death detection: check if worker process is actually alive.
+    if (backend.isAvailable()) {
       const windowName = `worker-${worker.id}`;
-      const paneAlive = tmux.isPaneAlive(windowName);
+      const alive = backend.isWorkerAlive(windowName);
 
-      if (!paneAlive && worker.status !== 'idle' && worker.status !== 'completed_task') {
-        // Process died unexpectedly
-        handleDeath(worker, 'tmux_pane_dead');
+      if (!alive && worker.status !== 'idle' && worker.status !== 'completed_task') {
+        handleDeath(worker, 'worker_process_dead');
         continue;
       }
     }
@@ -174,39 +150,26 @@ function tick(projectDir) {
     // Skip workers just launched (grace period)
     if (worker.launched_at) {
       const launchedAgo = (now - new Date(worker.launched_at).getTime()) / 1000;
-      if (launchedAgo < getThresholds().warn) continue;
+      if (launchedAgo < terminateThreshold) continue;
     }
 
-    // Heartbeat freshness check
+    // Single-threshold heartbeat check for running/busy workers
     if (worker.status === 'running' || worker.status === 'busy') {
       if (worker.last_heartbeat) {
         const staleSec = (now - new Date(worker.last_heartbeat).getTime()) / 1000;
-        escalate(worker, staleSec, projectDir);
-      }
-    } else if (worker.status === 'assigned') {
-      // Escalate assigned workers through warn/nudge/triage using the freshest
-      // available timestamp (last_heartbeat → launched_at → created_at).
-      // Recovery at the terminate threshold is handled by recoverOrphanTasks
-      // below, preserving existing recovery semantics.
-      const freshestTs = worker.last_heartbeat || worker.launched_at || worker.created_at;
-      if (freshestTs) {
-        const staleSec = getAgeSeconds(now, freshestTs, {
-          worker_id: worker.id,
-          scope: 'assigned_heartbeat_freshness',
-        });
-        if (staleSec !== null && staleSec < getThresholds().terminate) {
-          escalate(worker, staleSec, projectDir);
+        if (staleSec >= terminateThreshold) {
+          checkAndTerminate(worker, staleSec);
         }
       }
     }
+    // Assigned workers are recovered by recoverOrphanTasks below
 
     // Check completed_task workers that haven't been reset
     if (worker.status === 'completed_task') {
       const completedAgo = worker.last_heartbeat
         ? (now - new Date(worker.last_heartbeat).getTime()) / 1000
-        : getThresholds().terminate;
+        : terminateThreshold;
       if (completedAgo > 30) {
-        // Reset to idle so allocator can reuse
         db.updateWorker(worker.id, { status: 'idle', current_task_id: null });
         db.log('coordinator', 'worker_auto_reset', { worker_id: worker.id });
       }
@@ -232,24 +195,22 @@ function tick(projectDir) {
     });
   }
 
-  // Keep failed requests visible to stale-integration recovery when remediation is active.
-  recoverFailedRequestsWithActiveRemediation('watchdog_tick');
+  // Requeue stale in_progress research items
+  try {
+    const requeued = db.requeueStaleResearch({ max_age_minutes: 30 });
+    if (requeued.requeued > 0) {
+      db.log('coordinator', 'research_stale_requeued', { count: requeued.requeued });
+    }
+  } catch {}
 
-  // Recover stale tier-3 decomposed requests that never produced tasks.
-  recoverStaleDecomposedRequests('watchdog_tick');
-
-  // Reconcile lifecycle invariants: clear stale terminal metadata, advance
-  // decomposed→in_progress when tasks exist, in_progress→integrating when all terminal.
+  // Reconcile lifecycle invariants
   db.reconcileAllActiveRequests();
 
-  // Recover stale integrations
+  // Recover stale integrations (Cases 1-2 only)
   recoverStaleIntegrations(now);
 
   // Monitor persistent loops
   monitorLoops(projectDir);
-
-  // Monitor research batches for timeout recovery
-  monitorResearchBatches(now);
 
   // Periodic mail + log purge (once per hour)
   if (now - lastMailPurge > 3600000) {
@@ -262,7 +223,6 @@ function tick(projectDir) {
     if (mergesPurged > 0) {
       db.log('coordinator', 'terminal_merges_purged', { count: mergesPurged });
     }
-    // Purge old activity log entries (>30 days)
     const logPurged = db.getDb().prepare(
       "DELETE FROM activity_log WHERE created_at < datetime('now', '-30 days')"
     ).run();
@@ -272,81 +232,28 @@ function tick(projectDir) {
   }
 }
 
-function recoverStaleDecomposedRequests(source = 'watchdog_tick') {
-  const repaired = db.recoverStaleDecomposedZeroTaskRequests({ source });
-  return Array.isArray(repaired) ? repaired.length : 0;
-}
-
-function escalate(worker, staleSec, projectDir) {
-  const THRESHOLDS = getThresholds();
+function checkAndTerminate(worker, staleSec) {
   const windowName = `worker-${worker.id}`;
-  const prevLevel = lastEscalationLevel.get(worker.id) || 0;
 
-  if (staleSec >= THRESHOLDS.terminate) {
-    // Level 4: Terminate and reassign
-    // Fresh-output guard: if tmux pane output has changed since Level 3 triage,
-    // the worker is still active despite the stale heartbeat — reset escalation
-    // to avoid unnecessary task reassignment churn.
-    if (tmux.isTmuxAvailable()) {
-      const currentOutput = tmux.capturePane(windowName, 20);
-      const currentHash = crypto.createHash('md5').update(currentOutput || '').digest('hex');
-      const prevHash = lastOutputHash.get(worker.id);
-      if (prevHash !== undefined && currentHash !== prevHash) {
-        lastEscalationLevel.delete(worker.id);
-        lastOutputHash.delete(worker.id);
-        db.log('coordinator', 'watchdog_terminate_aborted', {
-          worker_id: worker.id,
-          stale_sec: staleSec,
-          reason: 'fresh_output_detected',
-        });
-        return;
-      }
-      lastOutputHash.set(worker.id, currentHash);
+  // If worker process is alive, the worker is probably just not sending heartbeats — log and skip
+  if (backend.isAvailable()) {
+    const alive = backend.isWorkerAlive(windowName);
+    if (alive) {
+      db.log('coordinator', 'watchdog_stale_but_alive', {
+        worker_id: worker.id,
+        stale_sec: staleSec,
+      });
+      return;
     }
-    db.log('coordinator', 'watchdog_terminate', {
-      worker_id: worker.id,
-      stale_sec: staleSec,
-    });
-    tmux.killWindow(windowName);
-    handleDeath(worker, 'heartbeat_timeout');
-    lastEscalationLevel.delete(worker.id);
-    lastOutputHash.delete(worker.id);
-
-  } else if (staleSec >= THRESHOLDS.triage && prevLevel < 3) {
-    // Level 3: Triage — capture output, log for analysis (once per escalation)
-    lastEscalationLevel.set(worker.id, 3);
-    const output = tmux.capturePane(windowName, 20);
-    // Seed lastOutputHash so Level 4 (60s later) has a valid baseline to compare against.
-    // Without seeding here, prevHash is always undefined and the fresh-output guard is a no-op.
-    lastOutputHash.set(worker.id, crypto.createHash('md5').update(output || '').digest('hex'));
-    db.log('coordinator', 'watchdog_triage', {
-      worker_id: worker.id,
-      stale_sec: staleSec,
-      last_output: output.slice(-500),
-    });
-    db.sendMail(`worker-${worker.id}`, 'nudge', {
-      message: 'Heartbeat stale. Send heartbeat or complete task.',
-    });
-
-  } else if (staleSec >= THRESHOLDS.nudge && prevLevel < 2) {
-    // Level 2: Nudge — send reminder (once per escalation)
-    lastEscalationLevel.set(worker.id, 2);
-    db.sendMail(`worker-${worker.id}`, 'nudge', {
-      message: 'Heartbeat check — please report status.',
-    });
-    db.log('coordinator', 'watchdog_nudge', {
-      worker_id: worker.id,
-      stale_sec: staleSec,
-    });
-
-  } else if (staleSec >= THRESHOLDS.warn && prevLevel < 1) {
-    // Level 1: Warn — log only (once per escalation)
-    lastEscalationLevel.set(worker.id, 1);
-    db.log('coordinator', 'watchdog_warn', {
-      worker_id: worker.id,
-      stale_sec: staleSec,
-    });
   }
+
+  // Worker is dead (or no backend available) — terminate
+  db.log('coordinator', 'watchdog_terminate', {
+    worker_id: worker.id,
+    stale_sec: staleSec,
+  });
+  backend.killWorker(windowName);
+  handleDeath(worker, 'heartbeat_timeout');
 }
 
 function handleDeath(worker, reason) {
@@ -363,7 +270,6 @@ function handleDeath(worker, reason) {
     reason,
   });
 
-  // Reset worker
   db.updateWorker(worker.id, {
     status: 'idle',
     current_task_id: null,
@@ -386,13 +292,11 @@ function handleDeath(worker, reason) {
 }
 
 function checkWorkerFatigue() {
-  // Workers with 6+ completed tasks need a context reset
   const fatigued = db.getDb().prepare(
     "SELECT * FROM workers WHERE tasks_completed >= 6 AND status IN ('idle', 'completed_task')"
   ).all();
 
   for (const worker of fatigued) {
-    // Reset their counter and log it
     db.updateWorker(worker.id, { tasks_completed: 0 });
     db.log('coordinator', 'worker_fatigue_reset', {
       worker_id: worker.id,
@@ -407,8 +311,6 @@ function releaseStaleClaimsCheck(now) {
   ).all();
 
   for (const worker of claimedWorkers) {
-    // Claims expire by claimed_at age only. Missing claimed_at is treated as stale
-    // so malformed/legacy rows cannot wedge allocator ownership forever.
     if (!worker.claimed_at) {
       db.releaseWorker(worker.id);
       db.log('coordinator', 'stale_claim_released', {
@@ -434,63 +336,8 @@ function recoverOrphanTasks(source = 'watchdog_tick') {
     source,
     include_orphans: true,
     include_heartbeat_stale: true,
-    stale_threshold_sec: getThresholds().terminate,
+    stale_threshold_sec: getTerminateThresholdSec(),
   });
-}
-
-function hasActiveRemediationTasks(requestId) {
-  const activeTasks = db.listTasks({ request_id: requestId }).filter(
-    t => !['completed', 'failed'].includes(t.status)
-  );
-  return activeTasks.length > 0;
-}
-
-function getRequestReopenState(requestId) {
-  const row = db.getDb().prepare(
-    'SELECT COUNT(*) as count FROM merge_queue WHERE request_id = ?'
-  ).get(requestId);
-  const mergeQueueEntries = Number(row && row.count) || 0;
-  return {
-    status: mergeQueueEntries > 0 ? 'integrating' : 'in_progress',
-    merge_queue_entries: mergeQueueEntries,
-  };
-}
-
-function recoverFailedRequestsWithActiveRemediation(source = 'watchdog_tick') {
-  const failedRequests = db.getDb().prepare(
-    "SELECT id FROM requests WHERE status = 'failed'"
-  ).all();
-
-  for (const req of failedRequests) {
-    if (!hasActiveRemediationTasks(req.id)) continue;
-    const reopen = getRequestReopenState(req.id);
-    db.updateRequest(req.id, { status: reopen.status });
-    db.log('coordinator', 'request_reopened_for_active_remediation', {
-      request_id: req.id,
-      task_id: null,
-      worker_id: null,
-      trigger: 'watchdog-active-remediation',
-      source,
-      previous_status: 'failed',
-      reopened_status: reopen.status,
-      merge_queue_entries: reopen.merge_queue_entries,
-    });
-  }
-}
-
-function isWithinRemediationGraceWindow(now, requestId, merges, failureStatus, ageScope) {
-  const oldestFailureAgeSec = merges
-    .filter(m => m.status === failureStatus)
-    .reduce((oldest, m) => {
-      const ageSec = getAgeSeconds(now, m.updated_at || m.created_at, {
-        request_id: requestId,
-        merge_id: m.id,
-        scope: ageScope,
-      });
-      if (ageSec === null) return oldest;
-      return ageSec > oldest ? ageSec : oldest;
-    }, 0);
-  return oldestFailureAgeSec < MERGE_CONFLICT_GRACE_SEC;
 }
 
 function recoverStaleIntegrations(now, options = {}) {
@@ -517,14 +364,14 @@ function recoverStaleIntegrations(now, options = {}) {
       continue;
     }
 
-    // Case 1: No merge_queue entries and integrating > 15 minutes → complete (e.g. tier1 tasks)
+    // Case 1: No merge_queue entries and integrating > 15 minutes → complete
     if (merges.length === 0) {
       const integratingAge = getAgeSeconds(now, req.updated_at, {
         request_id: req.id,
         scope: 'integration_age',
       });
       if (integratingAge === null) continue;
-      if (integratingAge > 900) { // 15 minutes
+      if (integratingAge > 900) {
         db.updateRequest(req.id, {
           status: 'completed',
           completed_at: new Date().toISOString(),
@@ -542,68 +389,10 @@ function recoverStaleIntegrations(now, options = {}) {
       continue;
     }
 
-    // Check for merges stuck in 'merging' for > 5 minutes and route as recoverable conflicts.
-    // Use updated_at (when status changed to 'merging'), not created_at (when enqueued)
-    for (const m of merges) {
-      const statusAnchor = m.updated_at || m.created_at;
-      if (m.status === 'merging' && statusAnchor) {
-        const mergeAge = getAgeSeconds(now, statusAnchor, {
-          request_id: req.id,
-          merge_id: m.id,
-          scope: 'merge_age',
-        });
-        if (mergeAge === null) continue;
-        if (mergeAge > MERGE_TIMEOUT_SEC) {
-          const sourceTask = m.task_id ? db.getTask(m.task_id) : null;
-          const timeoutError = `Merge timeout promoted to conflict: ${m.branch || 'unknown-branch'} - ${MERGE_TIMEOUT_ERROR}`;
-          db.updateMerge(m.id, { status: 'conflict', error: MERGE_TIMEOUT_ERROR });
-          db.sendMail('allocator', 'merge_failed', {
-            request_id: req.id,
-            merge_id: m.id,
-            task_id: m.task_id,
-            branch: m.branch,
-            pr_url: m.pr_url,
-            status: 'conflict',
-            reason: 'merge_timeout_promoted',
-            subject: sourceTask ? sourceTask.subject : null,
-            domain: sourceTask ? sourceTask.domain : null,
-            files: sourceTask ? sourceTask.files : null,
-            tier: sourceTask ? sourceTask.tier : null,
-            assigned_to: sourceTask ? sourceTask.assigned_to : null,
-            original_task: sourceTask ? {
-              subject: sourceTask.subject,
-              domain: sourceTask.domain,
-              files: sourceTask.files,
-              tier: sourceTask.tier,
-              assigned_to: sourceTask.assigned_to,
-            } : null,
-            error: timeoutError,
-          });
-          db.log('coordinator', 'merge_timeout', {
-            merge_id: m.id,
-            request_id: req.id,
-            transitioned_to: 'conflict',
-            stale_sec: Math.round(mergeAge),
-          });
-        }
-      }
-    }
-
-    // Re-fetch merges after potential timeout updates
-    const freshMerges = db.getDb().prepare(
-      'SELECT * FROM merge_queue WHERE request_id = ?'
-    ).all(req.id);
-
-    // Guard: treat 'failed' merges with functional_conflict: error prefix as conflict-type
-    // so active fix tasks (conflict-remediation in progress) prevent premature request failure.
-    const hasConflicts = freshMerges.some(
-      m => m.status === 'conflict' ||
-           (m.status === 'failed' && typeof m.error === 'string' && m.error.startsWith(FUNCTIONAL_CONFLICT_ERROR_PREFIX))
-    );
-    const allTerminal = freshMerges.every(m => ['merged', 'conflict', 'failed'].includes(m.status));
+    const allTerminal = merges.every(m => ['merged', 'conflict', 'failed'].includes(m.status));
     if (!allTerminal) continue;
 
-    const allMerged = freshMerges.every(m => m.status === 'merged');
+    const allMerged = merges.every(m => m.status === 'merged');
 
     if (allMerged) {
       // Case 2: All merges succeeded — guard against non-terminal or failed sibling tasks
@@ -618,7 +407,7 @@ function recoverStaleIntegrations(now, options = {}) {
         });
         continue;
       }
-      const result = `All ${freshMerges.length} PR(s) merged successfully`;
+      const result = `All ${merges.length} PR(s) merged successfully`;
       db.updateRequest(req.id, {
         status: 'completed',
         completed_at: new Date().toISOString(),
@@ -633,75 +422,9 @@ function recoverStaleIntegrations(now, options = {}) {
         request_id: req.id,
         reason: 'all_merged',
       });
-    } else if (hasConflicts) {
-      // Case 3: Merge conflicts — auto-retry by resetting conflict merges to pending (up to 3 times)
-      // Check if there are active tasks that could be fix tasks from the allocator
-      if (hasActiveRemediationTasks(req.id)) {
-        // Fix tasks in progress — don't retry yet
-        continue;
-      }
-
-      // Give conflicts a grace period before attempting retry (don't retry brand new conflicts)
-      if (isWithinRemediationGraceWindow(now, req.id, freshMerges, 'conflict', 'conflict_age')) {
-        continue;
-      }
-
-      // Count previous auto-retries via activity_log
-      const MAX_MERGE_CONFLICT_RETRIES = 3;
-      const retryRow = db.getDb().prepare(
-        "SELECT COUNT(*) as count FROM activity_log WHERE action = 'merge_conflict_retry' AND json_extract(details, '$.request_id') = ?"
-      ).get(req.id);
-      const retryCount = Number(retryRow && retryRow.count) || 0;
-
-      const conflictMerges = freshMerges.filter(
-        m => m.status === 'conflict' ||
-             (m.status === 'failed' && typeof m.error === 'string' && m.error.startsWith(FUNCTIONAL_CONFLICT_ERROR_PREFIX))
-      );
-
-      if (retryCount < MAX_MERGE_CONFLICT_RETRIES) {
-        // Reset conflict merges to pending for automatic re-merge
-        for (const m of conflictMerges) {
-          db.updateMerge(m.id, { status: 'pending', error: null });
-        }
-        db.log('coordinator', 'merge_conflict_retry', {
-          request_id: req.id,
-          retry_number: retryCount + 1,
-          max_retries: MAX_MERGE_CONFLICT_RETRIES,
-          merge_ids: conflictMerges.map(m => m.id),
-        });
-        db.log('coordinator', 'stale_integration_recovered', {
-          request_id: req.id,
-          reason: 'merge_conflict_retry',
-          retry_number: retryCount + 1,
-        });
-      } else {
-        // Retry limit reached — fail the request
-        const failedMerges = freshMerges.filter(m => m.status !== 'merged');
-        const details = failedMerges.map(m => `${m.branch}: ${m.status}${m.error ? ' - ' + m.error.slice(0, 100) : ''}`).join('; ');
-        db.updateRequest(req.id, {
-          status: 'failed',
-          result: `Merge conflicts unresolved after ${MAX_MERGE_CONFLICT_RETRIES} retries: ${details}`,
-        });
-        db.sendMail('master-1', 'request_failed', {
-          request_id: req.id,
-          error: `Merge conflicts unresolved after ${MAX_MERGE_CONFLICT_RETRIES} retries: ${details}`,
-        });
-        db.log('coordinator', 'stale_integration_recovered', {
-          request_id: req.id,
-          reason: 'merge_conflict_retry_exhausted',
-          retries: retryCount,
-          details,
-        });
-      }
     } else {
-      // Case 4: All resolved but some failed (no conflicts) → mark request failed
-      if (hasActiveRemediationTasks(req.id)) {
-        continue;
-      }
-      if (isWithinRemediationGraceWindow(now, req.id, freshMerges, 'failed', 'merge_failure_age')) {
-        continue;
-      }
-      const failedMerges = freshMerges.filter(m => m.status !== 'merged');
+      // Cases 3-4 simplified: any terminal non-merged merges → fail the request, notify master-1
+      const failedMerges = merges.filter(m => m.status !== 'merged');
       const details = failedMerges.map(m => `${m.branch}: ${m.status}${m.error ? ' - ' + m.error.slice(0, 100) : ''}`).join('; ');
       db.updateRequest(req.id, {
         status: 'failed',
@@ -711,31 +434,6 @@ function recoverStaleIntegrations(now, options = {}) {
         request_id: req.id,
         error: `Merge failures: ${details}`,
       });
-      for (const failedMerge of failedMerges) {
-        const sourceTask = failedMerge.task_id ? db.getTask(failedMerge.task_id) : null;
-        db.sendMail('allocator', 'merge_failed', {
-          request_id: req.id,
-          merge_id: failedMerge.id,
-          task_id: failedMerge.task_id,
-          branch: failedMerge.branch,
-          pr_url: failedMerge.pr_url,
-          status: failedMerge.status,
-          reason: 'stale_integration_terminal_failure',
-          subject: sourceTask ? sourceTask.subject : null,
-          domain: sourceTask ? sourceTask.domain : null,
-          files: sourceTask ? sourceTask.files : null,
-          tier: sourceTask ? sourceTask.tier : null,
-          assigned_to: sourceTask ? sourceTask.assigned_to : null,
-          original_task: sourceTask ? {
-            subject: sourceTask.subject,
-            domain: sourceTask.domain,
-            files: sourceTask.files,
-            tier: sourceTask.tier,
-            assigned_to: sourceTask.assigned_to,
-          } : null,
-          error: failedMerge.error || `Merge failed: ${failedMerge.status}`,
-        });
-      }
       db.log('coordinator', 'stale_integration_recovered', {
         request_id: req.id,
         reason: 'merge_failures',
@@ -756,7 +454,6 @@ function respawnLoopSentinel(loop, projectDir, options = {}) {
   try {
     const ns = loop.namespace || process.env.MAC10_NAMESPACE || 'mac10';
     if (!loop.tmux_window) {
-      // Non-tmux: spawn via execFile (matches index.js non-tmux launch strategy)
       const { execFile } = require('child_process');
       const child = execFile('bash', [sentinelPath, String(loop.id), projectDir], {
         cwd: projectDir,
@@ -814,63 +511,6 @@ function respawnLoopSentinel(loop, projectDir, options = {}) {
   }
 }
 
-function monitorResearchBatches(now) {
-  let runningBatches;
-  try {
-    runningBatches = db.getDb().prepare(
-      "SELECT * FROM research_batches WHERE status = 'running'"
-    ).all();
-  } catch {
-    return; // research_batches table may not exist yet
-  }
-
-  for (const batch of runningBatches) {
-    const startedAt = batch.started_at || batch.updated_at;
-    if (!startedAt) continue;
-    const ageSec = getAgeSeconds(now, startedAt, {
-      batch_id: batch.id,
-      scope: 'research_batch_timeout',
-    });
-    if (ageSec === null) continue;
-    const timeoutSec = (Number(batch.timeout_window_ms) || 120000) / 1000;
-    if (ageSec <= timeoutSec) continue;
-
-    // Batch has exceeded its timeout — fail running/planned stages so intents can retry
-    let stages;
-    try {
-      stages = db.listResearchBatchStages(batch.id);
-    } catch {
-      continue;
-    }
-    const timeoutMsg = `Research batch timed out after ${Math.round(ageSec)}s (limit: ${timeoutSec}s)`;
-    for (const stage of stages) {
-      if (stage.status === 'running' || stage.status === 'planned') {
-        try {
-          db.markResearchBatchStage({
-            stage_id: stage.id,
-            status: 'partial_failed',
-            error: timeoutMsg,
-          });
-        } catch {
-          // Stage may already be in a terminal state
-        }
-      }
-    }
-    try {
-      db.getDb().prepare(
-        "UPDATE research_batches SET status = 'timed_out', last_error = ?, updated_at = strftime('%Y-%m-%d %H:%M:%f','now') WHERE id = ?"
-      ).run(timeoutMsg, batch.id);
-    } catch {
-      // Best-effort update
-    }
-    db.log('coordinator', 'research_batch_timeout', {
-      batch_id: batch.id,
-      age_sec: Math.round(ageSec),
-      timeout_sec: timeoutSec,
-    });
-  }
-}
-
 function monitorLoops(projectDir) {
   const loops = db.listLoops('active');
   const now = Date.now();
@@ -878,7 +518,6 @@ function monitorLoops(projectDir) {
 
   for (const loop of loops) {
     if (!loop.tmux_window) {
-      // Non-tmux loop: evaluate heartbeat age and relaunch if stale
       if (loop.last_heartbeat) {
         const staleSec = getAgeSeconds(now, loop.last_heartbeat, {
           loop_id: loop.id,
@@ -899,13 +538,11 @@ function monitorLoops(projectDir) {
     const paneAlive = tmux.isPaneAlive(loop.tmux_window);
 
     if (!paneAlive) {
-      // Sentinel died — respawn it
       db.log('coordinator', 'loop_sentinel_dead', { loop_id: loop.id, window: loop.tmux_window });
       respawnLoopSentinel(loop, projectDir, { reason: 'tmux_pane_dead', forceRestart: false });
       continue;
     }
 
-    // Stale heartbeat with a live pane means the sentinel is likely wedged; force restart.
     if (loop.last_heartbeat) {
       const staleSec = getAgeSeconds(now, loop.last_heartbeat, {
         loop_id: loop.id,
@@ -922,6 +559,16 @@ function monitorLoops(projectDir) {
       }
     }
   }
+}
+
+// getThresholds kept for backward compatibility
+function getThresholds() {
+  return {
+    warn: 60,
+    nudge: 90,
+    triage: 120,
+    terminate: getTerminateThresholdSec(),
+  };
 }
 
 module.exports = {

@@ -188,7 +188,9 @@ If you failed to complete the task:
 
 Update counters: `tasks_completed += 1`, `context_budget += 2000`
 
-## Step 9: Write Change Summary
+## Step 9: Write Change Summary & Update Knowledge
+
+### 9a. Change Summary
 
 Append a brief summary to `.claude/knowledge/change-summaries.md`:
 
@@ -198,6 +200,30 @@ Append a brief summary to `.claude/knowledge/change-summaries.md`:
 - Files: [list]
 - What changed: [1-2 sentences]
 - PR: [url]
+```
+
+### 9b. Update Domain Knowledge
+
+If you learned something new about how this domain works (a pattern, a gotcha,
+an integration point), append 2-3 lines to `.claude/knowledge/codebase/domains/$DOMAIN.md`:
+
+```markdown
+### [date] — [brief topic]
+[What you learned, 2-3 lines]
+```
+
+Only write if you have a genuine new finding. Don't repeat what's already there.
+
+### 9c. Increment Staleness Counter
+
+```bash
+./.claude/scripts/codex10 knowledge-increment --domain $DOMAIN
+```
+
+If you wrote to the domain file in 9b, add the worker-patch flag:
+
+```bash
+./.claude/scripts/codex10 knowledge-increment --domain $DOMAIN --worker-patch
 ```
 
 ## Step 10: Qualitative Self-Check
