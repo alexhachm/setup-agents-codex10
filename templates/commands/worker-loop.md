@@ -69,6 +69,51 @@ git fetch origin && git rebase origin/main
 
 On conflict: `git rebase --abort && git reset --hard origin/main`
 
+## Step 4.5: Consult Existing Research
+
+Before writing any code, check for existing research that may inform your implementation:
+
+1. List available research topics:
+   ```bash
+   ls .codex/knowledge/research/topics/ 2>/dev/null
+   ```
+2. For any topic relevant to your task domain or subject, read the `_rollup.md` and recent notes:
+   ```bash
+   cat ".codex/knowledge/research/topics/$TOPIC/_rollup.md" 2>/dev/null
+   ```
+3. Incorporate findings into your implementation plan — research results are your primary external knowledge source.
+
+## Step 4.6: Queue Research If Needed
+
+If you identify knowledge gaps after consulting existing research (e.g., unfamiliar API behavior, library usage, best practices):
+
+1. Queue research and capture the item ID:
+   ```bash
+   RESEARCH_OUTPUT=$(./.claude/scripts/codex10 queue-research "$TOPIC" "$QUESTION" --mode standard --priority urgent --source_task_id $TASK_ID)
+   RESEARCH_ID=$(printf '%s' "$RESEARCH_OUTPUT" | grep -o '"id":[0-9]*' | head -1 | cut -d: -f2)
+   ```
+2. Poll until completed or timeout (5 min = 20 iterations × 15s):
+   ```bash
+   MAX_POLLS=20
+   for poll_i in $(seq 1 $MAX_POLLS); do
+     sleep 15
+     ./.claude/scripts/codex10 heartbeat $WORKER_ID
+     STATUS_OUTPUT=$(./.claude/scripts/codex10 research-status --topic "$TOPIC")
+     if printf '%s' "$STATUS_OUTPUT" | grep -q '"status":"completed"'; then
+       break
+     fi
+     if printf '%s' "$STATUS_OUTPUT" | grep -q '"status":"failed"'; then
+       echo "Research failed for topic: $TOPIC"
+       break
+     fi
+   done
+   ```
+3. Read results:
+   ```bash
+   cat ".codex/knowledge/research/topics/$TOPIC/_rollup.md" 2>/dev/null
+   ```
+4. Max wait: 5 minutes for `standard`/`thinking` mode, 10 minutes (`MAX_POLLS=40`) for `deep_research`. If timeout, continue without results.
+
 ## Step 5: Do the Work
 
 1. **Read** the relevant files and understand the codebase context
@@ -79,6 +124,7 @@ On conflict: `git rebase --abort && git reset --hard origin/main`
    ./.claude/scripts/codex10 heartbeat $WORKER_ID
    ```
 5. **Self-verify**: run only explicit build/test/lint commands provided in the task details; if `validation` is shorthand like `tier2`/`tier3`, treat it as metadata (not a shell command) and never assume implicit `npm run build`
+6. **Mid-implementation research**: if during implementation you realize you need external information (API docs, library behavior, best practices), queue research using the same pattern as Step 4.6 — **never use WebSearch or WebFetch**
 
 ## Step 6: Validate
 
@@ -92,6 +138,31 @@ Validation depends on the task tier:
 - If `build-validator` reports `VALIDATION_FAILED` → fix the issue and re-validate
 - If `verify-app` reports `VERIFICATION_FAILED` → fix the issue and re-validate
 - Only proceed to shipping when all applicable validators pass
+
+### Visual Verification (UI Tasks Only)
+
+If your task involves UI/frontend work and a dev server is available:
+
+1. Start the dev server in background:
+   ```bash
+   npm run dev &
+   DEV_PID=$!
+   sleep 5
+   ```
+2. DOM snapshot first (lightweight, ~4k tokens):
+   ```bash
+   bash scripts/take-dom-snapshot.sh http://localhost:3000
+   ```
+3. Screenshot only if needed (heavyweight, ~50k tokens) — only when visual layout, spacing, or colors need verification:
+   ```bash
+   bash scripts/take-screenshot.sh http://localhost:3000 /tmp/verify.png
+   ```
+4. Clean up:
+   ```bash
+   kill $DEV_PID 2>/dev/null || true
+   ```
+
+Skip this section entirely for backend/API/config tasks.
 
 ## Step 7: Ship
 
@@ -117,7 +188,9 @@ If you failed to complete the task:
 
 Update counters: `tasks_completed += 1`, `context_budget += 2000`
 
-## Step 9: Write Change Summary
+## Step 9: Write Change Summary & Update Knowledge
+
+### 9a. Change Summary
 
 Append a brief summary to `.claude/knowledge/change-summaries.md`:
 
@@ -127,6 +200,30 @@ Append a brief summary to `.claude/knowledge/change-summaries.md`:
 - Files: [list]
 - What changed: [1-2 sentences]
 - PR: [url]
+```
+
+### 9b. Update Domain Knowledge
+
+If you learned something new about how this domain works (a pattern, a gotcha,
+an integration point), append 2-3 lines to `.claude/knowledge/codebase/domains/$DOMAIN.md`:
+
+```markdown
+### [date] — [brief topic]
+[What you learned, 2-3 lines]
+```
+
+Only write if you have a genuine new finding. Don't repeat what's already there.
+
+### 9c. Increment Staleness Counter
+
+```bash
+./.claude/scripts/codex10 knowledge-increment --domain $DOMAIN
+```
+
+If you wrote to the domain file in 9b, add the worker-patch flag:
+
+```bash
+./.claude/scripts/codex10 knowledge-increment --domain $DOMAIN --worker-patch
 ```
 
 ## Step 10: Qualitative Self-Check

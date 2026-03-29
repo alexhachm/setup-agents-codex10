@@ -1,0 +1,12 @@
+#!/usr/bin/env bash
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+# Derive project dir: scripts/ -> .claude/ -> project root
+PROJECT_ROOT="$(cd "$SCRIPT_DIR/../.." && pwd)"
+MAC10_BIN="/mnt/c/Users/Owner/Desktop/setup-agents-codex10/coordinator/bin/mac10"
+if [ ! -f "$MAC10_BIN" ]; then
+  echo "ERROR: mac10 CLI not found at $MAC10_BIN" >&2
+  echo "  Has the setup-agents repo moved? Re-run setup.sh to fix." >&2
+  exit 1
+fi
+export MAC10_NAMESPACE="codex10"
+exec node "$MAC10_BIN" --project "$PROJECT_ROOT" "$@"

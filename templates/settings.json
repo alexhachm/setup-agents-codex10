@@ -41,9 +41,21 @@
       "Skill(scan-codebase)",
       "Skill(master-loop)",
       "Skill(allocate-loop)",
-      "Skill(scan-codebase-allocator)"
+      "Skill(scan-codebase-allocator)",
+      "mcp__playwright__*",
+      "Bash(bash *take-screenshot*)",
+      "Bash(bash *take-dom-snapshot*)"
     ],
     "deny": []
+  },
+  "mcpServers": {
+    "playwright": {
+      "command": "npx",
+      "args": ["@playwright/mcp@latest", "--headless"],
+      "env": {
+        "DISPLAY": ":99"
+      }
+    }
   },
   "trustedDirectories": [],
   "skipDangerousModePermissionPrompt": true,

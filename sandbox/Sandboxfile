@@ -1,0 +1,45 @@
+name: mac10-workers
+
+sandboxes:
+  worker-base:
+    image: node:20
+    cpus: 2
+    memory: 2048
+    network:
+      allow:
+        - api.anthropic.com
+        - github.com
+        - api.openai.com
+        - registry.npmjs.org
+
+  worker-1:
+    from_snapshot: worker-base
+    volumes:
+      - ./.worktrees/wt-1:/workspace
+    secrets:
+      - ANTHROPIC_API_KEY
+      - OPENAI_API_KEY
+
+  worker-2:
+    from_snapshot: worker-base
+    volumes:
+      - ./.worktrees/wt-2:/workspace
+    secrets:
+      - ANTHROPIC_API_KEY
+      - OPENAI_API_KEY
+
+  worker-3:
+    from_snapshot: worker-base
+    volumes:
+      - ./.worktrees/wt-3:/workspace
+    secrets:
+      - ANTHROPIC_API_KEY
+      - OPENAI_API_KEY
+
+  worker-4:
+    from_snapshot: worker-base
+    volumes:
+      - ./.worktrees/wt-4:/workspace
+    secrets:
+      - ANTHROPIC_API_KEY
+      - OPENAI_API_KEY

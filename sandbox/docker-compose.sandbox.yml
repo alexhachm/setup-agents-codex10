@@ -1,0 +1,60 @@
+version: "3.8"
+
+services:
+  coordinator:
+    build:
+      context: ../coordinator
+      dockerfile: ../coordinator/Dockerfile
+    ports:
+      - "${MAC10_PORT:-3100}:3100"
+      - "${MAC10_CLI_PORT:-31000}:31000"
+    volumes:
+      - ../:/project:ro
+      - coordinator-state:/project/.claude/state
+    environment:
+      - MAC10_NAMESPACE=sandbox
+      - MAC10_WORKER_BACKEND=docker
+    healthcheck:
+      test: ["CMD", "node", "-e", "require('net').connect(3100).on('connect',()=>process.exit(0)).on('error',()=>process.exit(1))"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+
+  worker-1:
+    build:
+      context: ..
+      dockerfile: sandbox/Dockerfile.worker
+    shm_size: '2gb'
+    volumes:
+      - ../:/project
+    environment:
+      - WORKER_ID=1
+      - MAC10_NAMESPACE=sandbox
+      - MAC10_CLI_HOST=coordinator
+      - MAC10_CLI_PORT=31000
+      - DISPLAY=:99
+    depends_on:
+      coordinator:
+        condition: service_healthy
+    working_dir: /project
+
+  worker-2:
+    build:
+      context: ..
+      dockerfile: sandbox/Dockerfile.worker
+    shm_size: '2gb'
+    volumes:
+      - ../:/project
+    environment:
+      - WORKER_ID=2
+      - MAC10_NAMESPACE=sandbox
+      - MAC10_CLI_HOST=coordinator
+      - MAC10_CLI_PORT=31000
+      - DISPLAY=:99
+    depends_on:
+      coordinator:
+        condition: service_healthy
+    working_dir: /project
+
+volumes:
+  coordinator-state:

@@ -174,6 +174,23 @@ function buildTaskOverlay(task, worker, projectDir) {
     lines.push('');
   }
 
+  // Domain-aware visual testing hint for UI tasks
+  const uiDomains = ['frontend', 'ui', 'web', 'dashboard', 'gui', 'css', 'layout', 'design'];
+  const taskDomain = (task.domain || '').toLowerCase();
+  const hasUiDomain = uiDomains.some(d => taskDomain.includes(d));
+  const descLower = (task.description || '').toLowerCase();
+  const hasUiKeywords = /\b(ui|frontend|visual|layout|css|component|page|screen|dashboard|render|display)\b/.test(descLower);
+
+  if (hasUiDomain || hasUiKeywords) {
+    lines.push('## Visual Testing');
+    lines.push('');
+    lines.push('This task involves UI work. Verify visually after implementation:');
+    lines.push('1. Start dev server → `bash scripts/take-dom-snapshot.sh http://localhost:PORT` (DOM check)');
+    lines.push('2. `bash scripts/take-screenshot.sh http://localhost:PORT /tmp/verify.png` only if visual layout needs verification');
+    lines.push('3. Kill dev server before shipping');
+    lines.push('');
+  }
+
   // Add knowledge context if available
   const knowledgeDir = path.join(projectDir, '.claude', 'knowledge');
   let domainKnowledgePath = resolveDomainKnowledgePath(task.domain, knowledgeDir);
@@ -191,6 +208,91 @@ function buildTaskOverlay(task, worker, projectDir) {
       }
     } catch {}
   }
+
+  // Codebase Context — from new knowledge layer
+  const codebaseDomainPath = path.join(projectDir, '.claude', 'knowledge', 'codebase', 'domains',
+    isSafeDomainSlug(task.domain) ? `${task.domain}.md` : '__invalid__');
+  try {
+    if (isSafeDomainSlug(task.domain) && fs.existsSync(codebaseDomainPath)) {
+      const codebaseContent = fs.readFileSync(codebaseDomainPath, 'utf8').trim();
+      if (codebaseContent) {
+        const trimmedLines = codebaseContent.split('\n').slice(0, 10).join('\n');
+        lines.push('## Codebase Context');
+        lines.push('');
+        lines.push(trimmedLines);
+        lines.push('');
+      }
+    }
+  } catch {}
+
+  // Relevant Research — from research rollups
+  try {
+    const researchDir = path.join(projectDir, '.codex', 'knowledge', 'research', 'topics');
+    if (isSafeDomainSlug(task.domain) && fs.existsSync(researchDir)) {
+      const domainLower = (task.domain || '').toLowerCase();
+      for (const topic of fs.readdirSync(researchDir)) {
+        if (!topic.toLowerCase().includes(domainLower)) continue;
+        const rollupPath = path.join(researchDir, topic, '_rollup.md');
+        if (!fs.existsSync(rollupPath)) continue;
+        const rollupContent = fs.readFileSync(rollupPath, 'utf8').trim();
+        if (!rollupContent) continue;
+        // Extract "Current Recommended Approach" section or first 10 lines
+        const approachMatch = rollupContent.match(/## Current Recommended Approach[\s\S]*?(?=\n## |\n---|\n$|$)/);
+        const excerpt = approachMatch
+          ? approachMatch[0].split('\n').slice(0, 10).join('\n')
+          : rollupContent.split('\n').slice(0, 10).join('\n');
+        lines.push('## Relevant Research');
+        lines.push('');
+        lines.push(excerpt);
+        lines.push('');
+        break; // Only inject first matching topic
+      }
+    }
+  } catch {}
+
+  // Owner Intent
+  try {
+    const intentPath = path.join(projectDir, '.claude', 'knowledge', 'codebase', 'intent.md');
+    if (fs.existsSync(intentPath)) {
+      const intentContent = fs.readFileSync(intentPath, 'utf8').trim();
+      if (intentContent) {
+        const trimmedIntent = intentContent.split('\n').slice(0, 5).join('\n');
+        lines.push('## Owner Intent');
+        lines.push('');
+        lines.push(trimmedIntent);
+        lines.push('');
+      }
+    }
+  } catch {}
+
+  // Knowledge Gaps — warn workers about missing coverage
+  try {
+    const knowledgeMeta = require('./knowledge-metadata');
+    const gaps = [];
+    const domainCoverage = knowledgeMeta.getDomainCoverage(projectDir);
+    const meta = knowledgeMeta.getMetadata(projectDir);
+    const taskDomain = task.domain;
+
+    if (isSafeDomainSlug(taskDomain)) {
+      if (!domainCoverage.domains[taskDomain]) {
+        gaps.push(`No codebase research for domain "${taskDomain}". Document findings as you work.`);
+      }
+      const domainMeta = meta.domains && meta.domains[taskDomain];
+      if (domainMeta && domainMeta.changes_since_research > 10) {
+        gaps.push(`Domain knowledge may be stale (${domainMeta.changes_since_research} changes since last research).`);
+      }
+      if (domainMeta && domainMeta.worker_patches > 3) {
+        gaps.push(`Workers have patched this domain ${domainMeta.worker_patches} times — research coverage is inadequate.`);
+      }
+    }
+
+    if (gaps.length > 0) {
+      lines.push('## Knowledge Gaps');
+      lines.push('');
+      for (const gap of gaps) lines.push(`- ${gap}`);
+      lines.push('');
+    }
+  } catch {}
 
   // Add recent mistakes if any
   try {

@@ -10,6 +10,19 @@ cat .claude/docs/master-1-role.md
 cat .claude/knowledge/user-preferences.md
 ```
 
+### Check Knowledge Status
+
+Run the knowledge status check:
+```bash
+./.claude/scripts/codex10 knowledge-status
+```
+
+Review the output. If the codebase index is stale or domains are uncovered, inform the user:
+
+"Knowledge status: [summary]. Would you like to run `mac10 index` to refresh the codebase index?"
+
+Do NOT block on this — it's advisory. Continue to the main loop regardless.
+
 Your context is CLEAN. You do NOT read code. You handle all user communication and relay clarifications from Master-2 (Architect).
 
 Use only `./.claude/scripts/codex10 ...` for coordinator commands. Never invoke raw `mac10` in this codex10 runtime.
@@ -166,7 +179,18 @@ Report the **actual output** to the user. Format it clearly with worker states, 
 ./.claude/scripts/codex10 inbox master-1
 ```
 
-If there are messages (clarification questions from Master-2), surface to user and relay answer back:
+If there are messages, handle by type:
+
+- **clarification** messages (from Master-2): surface to user and relay answer back:
+```bash
+./.claude/scripts/codex10 clarify <request_id> "user's answer here"
+```
+
+- **knowledge_gap_detected** messages: surface to user:
+  "Worker encountered an unresearched domain: {domain}. Consider running `mac10 research-codebase`."
+  This is advisory — do not block on it.
+
+For clarifications, relay the answer back:
 ```bash
 ./.claude/scripts/codex10 clarify <request_id> "user's answer here"
 ```
@@ -199,7 +223,7 @@ Instead of fixed sleep, wait for signals between user interactions:
 bash .claude/scripts/signal-wait.sh .claude/signals/.codex10.handoff-signal 20
 ```
 
-If no signal arrives within timeout, check clarification-queue and continue waiting for user input.
+If no signal arrives within timeout, check codex10 inbox master-1 for clarification messages and continue waiting for user input.
 
 ## Pre-Reset Distillation
 
@@ -230,6 +254,6 @@ Log: `echo "[$(date -u +%Y-%m-%dT%H:%M:%SZ)] [master-1] [DISTILL] user preferenc
 - NEVER investigate or implement yourself
 - Keep context clean for prompt quality
 - Always touch signal files after writing state
-- Poll clarification-queue.json before each wait cycle
+- Poll codex10 inbox master-1 before each wait cycle for clarification messages
 - **Log every action** to activity.log
 - Read instruction-patches.md on startup — apply any patches targeted at Master-1
