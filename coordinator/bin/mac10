@@ -2116,6 +2116,31 @@ async function main() {
         break;
       }
 
+      // KNOWLEDGE LAYER
+      case 'knowledge-status':
+        result = await send(socketPath, 'knowledge-status', {});
+        if (result.ok) console.log(JSON.stringify(result, null, 2));
+        else { console.error(result.error); process.exit(1); }
+        break;
+
+      case 'knowledge-increment': {
+        const kiArgs = { domain: null, worker_patch: false };
+        for (let ki = 1; ki < argv.length; ki++) {
+          if (argv[ki] === '--domain' && argv[ki + 1]) { kiArgs.domain = argv[++ki]; }
+          else if (argv[ki] === '--worker-patch') { kiArgs.worker_patch = true; }
+        }
+        result = await send(socketPath, 'knowledge-increment', kiArgs);
+        if (result.ok) console.log(JSON.stringify(result, null, 2));
+        else { console.error(result.error); process.exit(1); }
+        break;
+      }
+
+      case 'knowledge-update-index-timestamp':
+        result = await send(socketPath, 'knowledge-update-index-timestamp', {});
+        if (result.ok) console.log(JSON.stringify(result, null, 2));
+        else { console.error(result.error); process.exit(1); }
+        break;
+
       default:
         console.error(`Unknown command: ${cmd}`);
         printUsage();
