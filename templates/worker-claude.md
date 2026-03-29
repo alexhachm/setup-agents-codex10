@@ -61,22 +61,21 @@ Before starting implementation, always:
 
 ## Visual Testing (Browser Preview)
 
-When Playwright MCP is available (sandbox/Docker workers), you have access to browser tools for verifying UI work:
+For UI/frontend tasks, verify your work visually using the platform scripts. These work across all providers and environments.
 
-### Available Tools
+### Commands
 
-- `browser_navigate` — Navigate to a URL
-- `browser_snapshot` — Get accessibility tree snapshot of the page (~4k tokens, DOM-first)
-- `browser_take_screenshot` — Capture a PNG screenshot (~50k tokens, use sparingly)
-- `browser_click` — Click an element by ref or coordinates
-- `browser_type` — Type text into a focused element
-- `browser_select_option` — Select an option from a dropdown
-- `browser_wait_for` — Wait for an element or condition
-- `browser_close` — Close the browser tab
+```bash
+# DOM snapshot — lightweight (~4k tokens), always do this first
+bash scripts/take-dom-snapshot.sh http://localhost:3000
+
+# Screenshot — heavyweight (~50k tokens), only if layout/colors need verification
+bash scripts/take-screenshot.sh http://localhost:3000 /tmp/screenshot.png
+```
 
 ### Protocol: DOM-First
 
-1. **Always** use `browser_snapshot` before `browser_take_screenshot` (10-50x cheaper)
+1. **Always** run `take-dom-snapshot.sh` before `take-screenshot.sh` (10-50x cheaper)
 2. Only take a screenshot if visual layout (spacing, colors, alignment) needs verification
 3. Max **5 screenshots per task** — each adds ~2000 to `context_budget`
 
@@ -89,14 +88,6 @@ When Playwright MCP is available (sandbox/Docker workers), you have access to br
 
 - Backend, API, config, or infrastructure tasks
 - Tasks with no visual component
-
-### Fallback (Non-MCP)
-
-If MCP tools are unavailable, use the standalone scripts:
-```bash
-bash scripts/take-dom-snapshot.sh http://localhost:3000
-bash scripts/take-screenshot.sh http://localhost:3000 /tmp/screenshot.png
-```
 
 ## Context Budget
 

@@ -149,22 +149,18 @@ If your task involves UI/frontend work and a dev server is available:
    DEV_PID=$!
    sleep 5
    ```
-2. Navigate to the local URL:
-   - Use `browser_navigate` with the local dev server URL (e.g., `http://localhost:3000`)
-3. Verify DOM structure:
-   - Use `browser_snapshot` to get the accessibility tree — confirms elements render correctly (~4k tokens)
-4. Screenshot only if needed:
-   - Use `browser_take_screenshot` only if visual layout (spacing, colors, alignment) needs verification (~50k tokens)
-5. Clean up:
+2. DOM snapshot first (lightweight, ~4k tokens):
+   ```bash
+   bash scripts/take-dom-snapshot.sh http://localhost:3000
+   ```
+3. Screenshot only if needed (heavyweight, ~50k tokens) — only when visual layout, spacing, or colors need verification:
+   ```bash
+   bash scripts/take-screenshot.sh http://localhost:3000 /tmp/verify.png
+   ```
+4. Clean up:
    ```bash
    kill $DEV_PID 2>/dev/null || true
    ```
-
-If Playwright MCP tools are unavailable, use fallback scripts:
-```bash
-bash scripts/take-dom-snapshot.sh http://localhost:3000
-bash scripts/take-screenshot.sh http://localhost:3000 /tmp/verify.png
-```
 
 Skip this section entirely for backend/API/config tasks.
 

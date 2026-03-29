@@ -184,9 +184,9 @@ function buildTaskOverlay(task, worker, projectDir) {
   if (hasUiDomain || hasUiKeywords) {
     lines.push('## Visual Testing');
     lines.push('');
-    lines.push('This task involves UI work. Use Playwright MCP tools to verify:');
-    lines.push('1. Start dev server → `browser_navigate` → `browser_snapshot` (DOM check)');
-    lines.push('2. Use `browser_take_screenshot` only if visual layout needs verification');
+    lines.push('This task involves UI work. Verify visually after implementation:');
+    lines.push('1. Start dev server → `bash scripts/take-dom-snapshot.sh http://localhost:PORT` (DOM check)');
+    lines.push('2. `bash scripts/take-screenshot.sh http://localhost:PORT /tmp/verify.png` only if visual layout needs verification');
     lines.push('3. Kill dev server before shipping');
     lines.push('');
   }

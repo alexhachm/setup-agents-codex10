@@ -1,10 +1,18 @@
 #!/usr/bin/env bash
-# take-dom-snapshot.sh — Standalone Playwright accessibility tree snapshot (non-MCP path)
+# take-dom-snapshot.sh — Platform visual testing: accessibility tree snapshot
 # Usage: bash scripts/take-dom-snapshot.sh <url>
-# Returns: accessibility tree text to stdout (much cheaper than screenshots)
+# Returns: accessibility tree JSON to stdout (~4k tokens, 10-50x cheaper than screenshots)
+# Works with any agent provider (Claude Code, Codex, etc.)
 set -euo pipefail
 
 URL="${1:?Usage: take-dom-snapshot.sh <url>}"
+
+# Auto-detect Playwright installation
+if ! node -e "require('playwright')" 2>/dev/null; then
+  echo "ERROR: Playwright not installed. Install with:" >&2
+  echo "  npm install -g playwright && npx playwright install chromium" >&2
+  exit 1
+fi
 
 node -e "
 const { chromium } = require('playwright');
