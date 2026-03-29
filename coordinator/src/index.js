@@ -7,11 +7,11 @@ const cliServer = require('./cli-server');
 const allocator = require('./allocator');
 const watchdog = require('./watchdog');
 const merger = require('./merger');
-const webServer = require('./web-server');
+// const webServer = require('./web-server');  // GUI disabled — outdated
 const tmux = require('./tmux');
 const backend = require('./worker-backend');
 const overlay = require('./overlay');
-const instanceRegistry = require('./instance-registry');
+// const instanceRegistry = require('./instance-registry');  // GUI disabled — outdated
 
 const projectDir = process.argv[2] || process.cwd();
 const scriptDir = process.env.MAC10_SCRIPT_DIR || path.resolve(__dirname, '..', '..');
@@ -19,7 +19,7 @@ const namespace = process.env.MAC10_NAMESPACE || 'mac10';
 const stateDir = path.join(projectDir, '.claude', 'state');
 const pidFile = path.join(stateDir, namespace === 'mac10' ? 'mac10.pid' : `${namespace}.pid`);
 let ownsPidLock = false;
-let _registeredPort = null;
+// let _registeredPort = null;  // GUI disabled
 
 function rebuildProjectMemorySnapshotIndexOnStartup() {
   try {
@@ -242,82 +242,43 @@ console.log('Watchdog running.');
 merger.start(projectDir);
 console.log('Merger running.');
 
-// Start web dashboard — single dashboard at port 3100 (or next free port)
-// All project coordinators register in the shared instance registry so the
-// dashboard at /api/instances can manage them all from one place.
-(async () => {
-  const port = parseInt(process.env.MAC10_PORT) || await instanceRegistry.acquirePort(3100);
+// --- GUI disabled (outdated) ---
+// Web dashboard and instance registry startup removed.
+// To re-enable, restore webServer.start() and instanceRegistry usage.
 
-  // Gate registration on successful port bind — a failed bind must not create a ghost entry.
-  let webServerBound = false;
-  try {
-    await webServer.start(projectDir, port, scriptDir, handlers);
-    webServerBound = true;
-    _registeredPort = port;
-    console.log(`Web dashboard: http://localhost:${port}`);
-  } catch (err) {
-    if (err.code === 'EADDRINUSE') {
-      console.error(`WARNING: Port ${port} already in use — web dashboard not started. Coordinator continues without GUI.`);
-    } else {
-      console.error(`Web server error: ${err.message}`);
-    }
-    db.log('coordinator', 'web_server_port_conflict', { port, error: err.message });
-  }
+function shutdown() {
+  console.log('Shutting down...');
+  allocator.stop();
+  watchdog.stop();
+  merger.stop();
+  cliServer.stop();
+  db.log('coordinator', 'stopped');
+  db.close();
+  releasePidLock();
+  process.exit(0);
+}
+process.on('SIGINT', shutdown);
+process.on('SIGTERM', shutdown);
 
-  if (webServerBound) {
-    instanceRegistry.register({
-      projectDir,
-      port,
-      pid: process.pid,
-      name: path.basename(projectDir),
-      namespace,
-      tmuxSession: tmux.SESSION,
-      startedAt: new Date().toISOString(),
-    });
-    console.log('Instance registered in shared registry.');
-  }
+db.log('coordinator', 'started', { project_dir: projectDir });
+console.log('mac10 coordinator ready.');
 
-  // Re-wire shutdown to know the port
-  function shutdown() {
-    console.log('Shutting down...');
-    if (webServerBound) {
-      instanceRegistry.deregister(port);
-    }
-    allocator.stop();
-    watchdog.stop();
-    merger.stop();
-    cliServer.stop();
-    webServer.stop();
-    db.log('coordinator', 'stopped');
-    db.close();
-    releasePidLock();
-    process.exit(0);
-  }
-  process.removeAllListeners('SIGINT');
-  process.removeAllListeners('SIGTERM');
-  process.on('SIGINT', shutdown);
-  process.on('SIGTERM', shutdown);
-
-  db.log('coordinator', 'started', { project_dir: projectDir, port });
-  console.log('mac10 coordinator ready.');
-
-  // Auto-launch Master-1 (Interface) so the user always has an interactive agent
-  if (tmux.isAvailable()) {
-    const masterWindowName = 'master-1';
-    if (!tmux.hasWindow(masterWindowName)) {
-      const launchAgentPath = path.join(scriptDir, 'scripts', 'launch-agent.sh');
-      if (fs.existsSync(launchAgentPath)) {
-        tmux.createWindow(
-          masterWindowName,
-          `MAC10_NAMESPACE="${namespace}" bash "${launchAgentPath}" "${projectDir}" sonnet /master-loop`,
-          projectDir
-        );
-        db.log('coordinator', 'master1_launched', { window: masterWindowName, namespace });
-        console.log('Master-1 (Interface) launched.');
-      }
+// Auto-launch Master-1 (Interface) so the user always has an interactive agent
+if (tmux.isAvailable()) {
+  const masterWindowName = 'master-1';
+  if (!tmux.hasWindow(masterWindowName)) {
+    const launchAgentPath = path.join(scriptDir, 'scripts', 'launch-agent.sh');
+    if (fs.existsSync(launchAgentPath)) {
+      tmux.createWindow(
+        masterWindowName,
+        `MAC10_NAMESPACE="${namespace}" bash "${launchAgentPath}" "${projectDir}" sonnet /master-loop`,
+        projectDir
+      );
+      db.log('coordinator', 'master1_launched', { window: masterWindowName, namespace });
+      console.log('Master-1 (Interface) launched.');
     }
   }
-})();
+}
 
 // Crash handlers — log and exit cleanly instead of dying silently
 process.on('uncaughtException', (err) => {
