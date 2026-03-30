@@ -2116,6 +2116,52 @@ async function main() {
         break;
       }
 
+      // SANDBOX
+      case 'sandbox-status':
+        result = await send(socketPath, 'sandbox-status', {});
+        if (result.ok) console.log(JSON.stringify(result, null, 2));
+        else { console.error(result.error); process.exit(1); }
+        break;
+
+      case 'sandbox-build':
+        console.log('Building sandbox Docker image (this may take a few minutes)...');
+        result = await send(socketPath, 'sandbox-build', {});
+        if (result.ok) console.log(JSON.stringify(result, null, 2));
+        else { console.error(result.error); process.exit(1); }
+        break;
+
+      case 'sandbox-cleanup':
+        result = await send(socketPath, 'sandbox-cleanup', {});
+        if (result.ok) console.log(JSON.stringify(result, null, 2));
+        else { console.error(result.error); process.exit(1); }
+        break;
+
+      case 'sandbox-toggle':
+        result = await send(socketPath, 'sandbox-toggle', {});
+        if (result.ok) console.log(JSON.stringify(result, null, 2));
+        else { console.error(result.error); process.exit(1); }
+        break;
+
+      // MICROVM (msb)
+      case 'msb-status':
+        result = await send(socketPath, 'msb-status', {});
+        if (result.ok) console.log(JSON.stringify(result, null, 2));
+        else { console.error(result.error); process.exit(1); }
+        break;
+
+      case 'msb-setup':
+        console.log('Setting up microsandbox (starting server, pulling image)...');
+        result = await send(socketPath, 'msb-setup', {});
+        if (result.ok) console.log(JSON.stringify(result, null, 2));
+        else { console.error(result.error); process.exit(1); }
+        break;
+
+      case 'msb-cleanup':
+        result = await send(socketPath, 'msb-cleanup', {});
+        if (result.ok) console.log(JSON.stringify(result, null, 2));
+        else { console.error(result.error); process.exit(1); }
+        break;
+
       // KNOWLEDGE LAYER
       case 'knowledge-status':
         result = await send(socketPath, 'knowledge-status', {});
@@ -2230,6 +2276,17 @@ MEMORY:
 CHANGES:
   log-change <desc> [--domain X] [--file Y] [--fn Z] [--tooltip T]
   list-changes [domain]          List all changes (optionally filter by domain)
+
+SANDBOX (Docker):
+  sandbox-status                 Show Docker availability and containers
+  sandbox-build                  Build (or rebuild) the sandbox Docker image
+  sandbox-cleanup                Stop all Docker sandbox containers
+  sandbox-toggle                 Toggle auto-isolation on/off (affects both Docker and msb)
+
+MICROVM (msb):
+  msb-status                     Show microsandbox install/server/sandbox status
+  msb-setup                      Start msb server and pull default image
+  msb-cleanup                    Stop all msb worker sandboxes
 
 SYSTEM:
   start [project_dir]            Start coordinator

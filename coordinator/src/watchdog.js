@@ -163,14 +163,28 @@ function tick(projectDir) {
       continue;
     }
 
-    // ZFC death detection: check if tmux pane is actually alive.
-    // Non-tmux environments skip this branch and rely on heartbeat/launched_at staleness.
-    if (tmux.isTmuxAvailable()) {
-      const windowName = `worker-${worker.id}`;
-      const paneAlive = tmux.isPaneAlive(windowName);
+    // ZFC death detection: check if the worker process is actually alive.
+    // Uses the correct backend (tmux vs docker) based on worker.backend column.
+    const workerBackend = worker.backend || 'tmux';
+    const windowName = `worker-${worker.id}`;
 
+    if (workerBackend === 'sandbox') {
+      const msbBe = require('./worker-backend').getBackend('sandbox');
+      const alive = msbBe && msbBe.isWorkerAlive(windowName);
+      if (!alive && worker.status !== 'idle' && worker.status !== 'completed_task') {
+        handleDeath(worker, 'msb_sandbox_dead');
+        continue;
+      }
+    } else if (workerBackend === 'docker') {
+      const dockerBe = require('./worker-backend').getBackend('docker');
+      const alive = dockerBe && dockerBe.isWorkerAlive(windowName);
+      if (!alive && worker.status !== 'idle' && worker.status !== 'completed_task') {
+        handleDeath(worker, 'docker_container_dead');
+        continue;
+      }
+    } else if (tmux.isTmuxAvailable()) {
+      const paneAlive = tmux.isPaneAlive(windowName);
       if (!paneAlive && worker.status !== 'idle' && worker.status !== 'completed_task') {
-        // Process died unexpectedly
         handleDeath(worker, 'tmux_pane_dead');
         continue;
       }
@@ -454,6 +468,36 @@ function reconcileMergeQueue(projectDir) {
   }
 }
 
+// Resolve the backend module for a worker
+function getWorkerBackendModule(worker) {
+  const workerBackend = worker.backend || 'tmux';
+  if (workerBackend === 'sandbox' || workerBackend === 'docker') {
+    return require('./worker-backend').getBackend(workerBackend);
+  }
+  return null; // tmux — use tmux module directly
+}
+
+// Capture output from the correct backend for a worker
+function captureWorkerOutput(worker, windowName, lines) {
+  const be = getWorkerBackendModule(worker);
+  if (be) return be.captureOutput(windowName, lines) || '';
+  return tmux.capturePane(windowName, lines);
+}
+
+// Kill a worker via the correct backend
+function killWorkerByBackend(worker, windowName) {
+  const be = getWorkerBackendModule(worker);
+  if (be) { be.killWorker(windowName); return; }
+  tmux.killWindow(windowName);
+}
+
+// Check if output capture is available for a worker's backend
+function canCaptureOutput(worker) {
+  const be = getWorkerBackendModule(worker);
+  if (be) return true;
+  return tmux.isTmuxAvailable();
+}
+
 function escalate(worker, staleSec, projectDir) {
   const THRESHOLDS = getThresholds();
   const windowName = `worker-${worker.id}`;
@@ -461,11 +505,11 @@ function escalate(worker, staleSec, projectDir) {
 
   if (staleSec >= THRESHOLDS.terminate) {
     // Level 4: Terminate and reassign
-    // Fresh-output guard: if tmux pane output has changed since Level 3 triage,
+    // Fresh-output guard: if output has changed since Level 3 triage,
     // the worker is still active despite the stale heartbeat — reset escalation
     // to avoid unnecessary task reassignment churn.
-    if (tmux.isTmuxAvailable()) {
-      const currentOutput = tmux.capturePane(windowName, 20);
+    if (canCaptureOutput(worker)) {
+      const currentOutput = captureWorkerOutput(worker, windowName, 20);
       const currentHash = crypto.createHash('md5').update(currentOutput || '').digest('hex');
       const prevHash = lastOutputHash.get(worker.id);
       if (prevHash !== undefined && currentHash !== prevHash) {
@@ -484,7 +528,7 @@ function escalate(worker, staleSec, projectDir) {
       worker_id: worker.id,
       stale_sec: staleSec,
     });
-    tmux.killWindow(windowName);
+    killWorkerByBackend(worker, windowName);
     handleDeath(worker, 'heartbeat_timeout');
     lastEscalationLevel.delete(worker.id);
     lastOutputHash.delete(worker.id);
@@ -492,9 +536,8 @@ function escalate(worker, staleSec, projectDir) {
   } else if (staleSec >= THRESHOLDS.triage && prevLevel < 3) {
     // Level 3: Triage — capture output, log for analysis (once per escalation)
     lastEscalationLevel.set(worker.id, 3);
-    const output = tmux.capturePane(windowName, 20);
+    const output = captureWorkerOutput(worker, windowName, 20);
     // Seed lastOutputHash so Level 4 (60s later) has a valid baseline to compare against.
-    // Without seeding here, prevHash is always undefined and the fresh-output guard is a no-op.
     lastOutputHash.set(worker.id, crypto.createHash('md5').update(output || '').digest('hex'));
     db.log('coordinator', 'watchdog_triage', {
       worker_id: worker.id,

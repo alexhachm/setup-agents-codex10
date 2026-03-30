@@ -413,8 +413,8 @@ const COMMAND_SCHEMAS = {
   'triage':            { required: ['request_id', 'tier'], types: { request_id: 'string', tier: 'number', reasoning: 'string' } },
   'create-task':       {
     required: ['request_id', 'subject', 'description'],
-    types: { request_id: 'string', subject: 'string', description: 'string', domain: 'string', priority: 'string', tier: 'number' },
-    allowed: ['request_id', 'subject', 'description', 'domain', 'files', 'priority', 'tier', 'depends_on', 'validation'],
+    types: { request_id: 'string', subject: 'string', description: 'string', domain: 'string', priority: 'string', tier: 'number', needs_sandbox: 'number' },
+    allowed: ['request_id', 'subject', 'description', 'domain', 'files', 'priority', 'tier', 'depends_on', 'validation', 'needs_sandbox'],
   },
   'tier1-complete':    { required: ['request_id', 'result'], types: { request_id: 'string', result: 'string' } },
   'ask-clarification': { required: ['request_id', 'question'], types: { request_id: 'string', question: 'string' } },
@@ -4478,6 +4478,71 @@ function handleCommand(cmd, conn, handlers) {
             merge_queue_reconciliations: reconciliations,
           },
         });
+        break;
+      }
+
+      // === SANDBOX commands ===
+      case 'sandbox-status': {
+        const sandboxManager = require('./sandbox-manager');
+        const status = sandboxManager.getStatus(_projectDir || process.cwd());
+        respond(conn, { ok: true, ...status });
+        break;
+      }
+      case 'sandbox-build': {
+        const sandboxManager = require('./sandbox-manager');
+        const projDir = _projectDir || process.cwd();
+        if (!sandboxManager.isDockerAvailable()) {
+          respond(conn, { error: 'Docker is not available on this system' });
+          break;
+        }
+        try {
+          sandboxManager.buildImage(projDir);
+          respond(conn, { ok: true, image: sandboxManager.DEFAULT_IMAGE_NAME, message: 'Image built successfully' });
+        } catch (e) {
+          respond(conn, { error: `Image build failed: ${e.message}` });
+        }
+        break;
+      }
+      case 'sandbox-cleanup': {
+        const sandboxManager = require('./sandbox-manager');
+        const stopped = sandboxManager.cleanupAll();
+        respond(conn, { ok: true, stopped });
+        break;
+      }
+      case 'sandbox-toggle': {
+        const current = db.getConfig('auto_sandbox_enabled');
+        const newValue = current === 'false' ? 'true' : 'false';
+        db.setConfig('auto_sandbox_enabled', newValue);
+        respond(conn, { ok: true, auto_sandbox_enabled: newValue === 'true' });
+        break;
+      }
+
+      // === MICROVM (msb) commands ===
+      case 'msb-status': {
+        const microvmManager = require('./microvm-manager');
+        const status = microvmManager.getStatus();
+        respond(conn, { ok: true, ...status });
+        break;
+      }
+      case 'msb-setup': {
+        const microvmManager = require('./microvm-manager');
+        if (!microvmManager.isMsbInstalled()) {
+          respond(conn, { error: 'msb CLI is not installed. Run: curl -sSL https://get.microsandbox.dev | sh' });
+          break;
+        }
+        try {
+          microvmManager.ensureReady();
+          microvmManager.pullImage();
+          respond(conn, { ok: true, message: 'msb server running, default image pulled' });
+        } catch (e) {
+          respond(conn, { error: `msb setup failed: ${e.message}` });
+        }
+        break;
+      }
+      case 'msb-cleanup': {
+        const microvmManager = require('./microvm-manager');
+        const stopped = microvmManager.cleanupAll();
+        respond(conn, { ok: true, stopped });
         break;
       }
 

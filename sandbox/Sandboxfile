@@ -1,45 +1,74 @@
 name: mac10-workers
 
 sandboxes:
-  worker-base:
+  worker-1:
     image: node:20
     cpus: 2
     memory: 2048
+    volumes:
+      - ./.worktrees/wt-1:/workspace
     network:
       allow:
         - api.anthropic.com
         - github.com
         - api.openai.com
         - registry.npmjs.org
-
-  worker-1:
-    from_snapshot: worker-base
-    volumes:
-      - ./.worktrees/wt-1:/workspace
     secrets:
       - ANTHROPIC_API_KEY
       - OPENAI_API_KEY
+    scripts:
+      start: bash /workspace/.claude/scripts/worker-sentinel.sh 1 /workspace
 
   worker-2:
-    from_snapshot: worker-base
+    image: node:20
+    cpus: 2
+    memory: 2048
     volumes:
       - ./.worktrees/wt-2:/workspace
+    network:
+      allow:
+        - api.anthropic.com
+        - github.com
+        - api.openai.com
+        - registry.npmjs.org
     secrets:
       - ANTHROPIC_API_KEY
       - OPENAI_API_KEY
+    scripts:
+      start: bash /workspace/.claude/scripts/worker-sentinel.sh 2 /workspace
 
   worker-3:
-    from_snapshot: worker-base
+    image: node:20
+    cpus: 2
+    memory: 2048
     volumes:
       - ./.worktrees/wt-3:/workspace
+    network:
+      allow:
+        - api.anthropic.com
+        - github.com
+        - api.openai.com
+        - registry.npmjs.org
     secrets:
       - ANTHROPIC_API_KEY
       - OPENAI_API_KEY
+    scripts:
+      start: bash /workspace/.claude/scripts/worker-sentinel.sh 3 /workspace
 
   worker-4:
-    from_snapshot: worker-base
+    image: node:20
+    cpus: 2
+    memory: 2048
     volumes:
       - ./.worktrees/wt-4:/workspace
+    network:
+      allow:
+        - api.anthropic.com
+        - github.com
+        - api.openai.com
+        - registry.npmjs.org
     secrets:
       - ANTHROPIC_API_KEY
       - OPENAI_API_KEY
+    scripts:
+      start: bash /workspace/.claude/scripts/worker-sentinel.sh 4 /workspace

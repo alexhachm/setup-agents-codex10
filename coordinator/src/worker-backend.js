@@ -162,7 +162,8 @@ const dockerBackend = {
 };
 
 // ---------------------------------------------------------------------------
-// Microsandbox backend (Phase 5)
+// Microsandbox backend — hardware-isolated microVMs via msb CLI
+// Docs: https://microsandbox.dev
 // ---------------------------------------------------------------------------
 
 const sandboxBackend = {
@@ -171,6 +172,7 @@ const sandboxBackend = {
   isAvailable() {
     try {
       const { execFileSync } = require('child_process');
+      // msb server must be running; --dev mode skips auth
       execFileSync('msb', ['server', 'status'], { encoding: 'utf8', timeout: 5000, stdio: 'pipe' });
       return true;
     } catch {
@@ -179,35 +181,46 @@ const sandboxBackend = {
   },
 
   createWorker(name, cmd, cwd, envVars) {
-    // Microsandbox SDK integration — requires the microsandbox npm package.
-    // Falls back to CLI if SDK is unavailable.
     const { execFileSync } = require('child_process');
-    const envArgs = [];
+
+    // Stop any existing sandbox with this name
+    try {
+      execFileSync('msb', ['stop', name], { encoding: 'utf8', timeout: 10000, stdio: 'pipe' });
+    } catch { /* may not exist */ }
+
+    const image = process.env.MAC10_WORKER_IMAGE || 'node:20';
+    const args = [
+      'run', image,
+      '--name', name,
+      '--cpus', '2',
+      '--memory', '2048',
+      '--volume', `${cwd}:/workspace`,
+    ];
+
     if (envVars && typeof envVars === 'object') {
       for (const [k, v] of Object.entries(envVars)) {
-        envArgs.push('--env', `${k}=${v}`);
+        args.push('--env', `${k}=${v}`);
       }
     }
-    const image = process.env.MAC10_WORKER_IMAGE || 'mac10-worker:latest';
-    execFileSync('msb', [
-      'sandbox', 'create', name,
-      '--image', image,
-      '--cpus', '2',
-      '--memory', '1024',
-      '--volume', `${cwd}:/workspace`,
-      ...envArgs,
-      '--', 'bash', '-c', cmd,
-    ], { encoding: 'utf8', timeout: 30000, stdio: 'pipe' });
+
+    // Network allow-list for API access
+    args.push('--net-allow', 'api.anthropic.com,github.com,api.openai.com,registry.npmjs.org');
+
+    // Execute the worker sentinel command inside the sandbox
+    args.push('--', 'bash', '-c', cmd);
+
+    execFileSync('msb', args, { encoding: 'utf8', timeout: 30000, stdio: 'pipe' });
   },
 
   isWorkerAlive(name) {
     try {
       const { execFileSync } = require('child_process');
-      const result = execFileSync(
-        'msb', ['sandbox', 'status', name],
+      // msb ps lists running sandboxes; check if our name appears
+      const out = execFileSync(
+        'msb', ['ps'],
         { encoding: 'utf8', timeout: 5000, stdio: 'pipe' }
       ).trim();
-      return result.includes('running');
+      return out.includes(name);
     } catch {
       return false;
     }
@@ -216,7 +229,7 @@ const sandboxBackend = {
   killWorker(name) {
     try {
       const { execFileSync } = require('child_process');
-      execFileSync('msb', ['sandbox', 'stop', name], { encoding: 'utf8', timeout: 10000, stdio: 'pipe' });
+      execFileSync('msb', ['stop', name], { encoding: 'utf8', timeout: 10000, stdio: 'pipe' });
     } catch { /* sandbox may not exist */ }
   },
 
@@ -224,17 +237,21 @@ const sandboxBackend = {
     try {
       const { execFileSync } = require('child_process');
       const out = execFileSync(
-        'msb', ['sandbox', 'list', '--format', 'name'],
+        'msb', ['ps'],
         { encoding: 'utf8', timeout: 5000, stdio: 'pipe' }
       ).trim();
-      return out ? out.split('\n').filter(n => n.startsWith('worker-')) : [];
+      if (!out) return [];
+      // Parse ps output — each line contains sandbox name
+      return out.split('\n')
+        .map(line => line.trim().split(/\s+/)[0])
+        .filter(n => n && n.startsWith('worker-'));
     } catch {
       return [];
     }
   },
 
-  getWorkerPid(name) {
-    // MicroVMs don't expose host PIDs — return null
+  getWorkerPid() {
+    // MicroVMs run separate kernels — no host PID exposure
     return null;
   },
 
@@ -242,7 +259,7 @@ const sandboxBackend = {
     try {
       const { execFileSync } = require('child_process');
       return execFileSync(
-        'msb', ['sandbox', 'logs', '--tail', String(lines), name],
+        'msb', ['log', name, '--tail', String(lines)],
         { encoding: 'utf8', timeout: 5000, stdio: 'pipe' }
       ).trim();
     } catch {
@@ -266,4 +283,11 @@ if (!activeBackend) {
   throw new Error(`Unknown worker backend: ${BACKEND}. Valid values: ${Object.keys(backends).join(', ')}`);
 }
 
+// Default export is the active backend (backward compatible)
 module.exports = activeBackend;
+
+// Expose individual backends for hybrid per-worker selection
+module.exports.getBackend = function(name) {
+  return backends[name] || null;
+};
+module.exports.backends = backends;
