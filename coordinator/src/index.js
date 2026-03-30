@@ -10,6 +10,7 @@ const merger = require('./merger');
 // const webServer = require('./web-server');  // GUI disabled — outdated
 const tmux = require('./tmux');
 const backend = require('./worker-backend');
+const sandboxManager = require('./sandbox-manager');
 const overlay = require('./overlay');
 // const instanceRegistry = require('./instance-registry');  // GUI disabled — outdated
 
@@ -100,6 +101,15 @@ if (tmux.isAvailable()) {
   console.log('tmux not available — workers will be spawned via Windows Terminal tabs.');
 }
 console.log(`Worker backend: ${backend.name} (available: ${backend.isAvailable()})`);
+console.log(`Docker available: ${sandboxManager.isDockerAvailable()} (preferred for all tasks)`);
+
+// Determine whether a task should use a sandboxed (Docker) environment.
+// Default: ALL tasks use Docker for proper isolation. Tmux is the fallback
+// only when Docker is unavailable or the user explicitly disables it.
+function shouldUseSandbox() {
+  if (db.getConfig('auto_sandbox_enabled') === 'false') return false;
+  return true;
+}
 
 // Start CLI server (Unix socket for mac10 commands)
 const handlers = {
@@ -158,22 +168,43 @@ const handlers = {
     }
 
     const windowName = `worker-${worker.id}`;
+    const sentinelPath = path.join(projectDir, '.claude', 'scripts', 'worker-sentinel.sh');
+    const cmd = `MAC10_NAMESPACE="${namespace}" bash "${sentinelPath}" ${worker.id} "${projectDir}"`;
 
-    if (backend.isAvailable()) {
-      // Spawn worker via the active backend (tmux, docker, or sandbox)
-      const sentinelPath = path.join(projectDir, '.claude', 'scripts', 'worker-sentinel.sh');
-      const cmd = `MAC10_NAMESPACE="${namespace}" bash "${sentinelPath}" ${worker.id} "${projectDir}"`;
+    // Docker-first: use Docker for isolation whenever available, fall back to tmux/native
+    const useDocker = shouldUseSandbox() && sandboxManager.isDockerAvailable();
+
+    if (useDocker) {
+      try {
+        sandboxManager.ensureReady(projectDir);
+        const dockerBackend = require('./worker-backend').getBackend('docker');
+        dockerBackend.killWorker(windowName);
+        dockerBackend.createWorker(windowName, cmd, worktreePath, { MAC10_NAMESPACE: namespace });
+        db.updateWorker(worker.id, { backend: 'docker' });
+        db.log('coordinator', 'worker_spawned_docker', { worker_id: worker.id, task_id: task.id });
+      } catch (e) {
+        // Docker failed — fall back to tmux
+        db.log('coordinator', 'docker_spawn_failed_fallback', { worker_id: worker.id, error: e.message });
+        if (backend.isAvailable()) {
+          backend.killWorker(windowName);
+          backend.createWorker(windowName, cmd, worktreePath, { MAC10_NAMESPACE: namespace });
+          db.updateWorker(worker.id, { backend: backend.name });
+          if (backend.name === 'tmux') {
+            db.updateWorker(worker.id, { tmux_session: tmux.SESSION, tmux_window: windowName });
+          }
+        }
+      }
+    } else if (backend.isAvailable()) {
+      // Tmux fallback (Docker unavailable or explicitly disabled)
       try {
         backend.killWorker(windowName);
         backend.createWorker(windowName, cmd, worktreePath, { MAC10_NAMESPACE: namespace });
       } catch (e) {
         db.log('coordinator', 'backend_spawn_error', { worker_id: worker.id, backend: backend.name, error: e.message });
       }
+      db.updateWorker(worker.id, { backend: backend.name });
       if (backend.name === 'tmux') {
-        db.updateWorker(worker.id, {
-          tmux_session: tmux.SESSION,
-          tmux_window: windowName,
-        });
+        db.updateWorker(worker.id, { tmux_session: tmux.SESSION, tmux_window: windowName });
       }
     } else {
       // Native Windows: spawn via launch-worker.sh (opens Windows Terminal tab)
