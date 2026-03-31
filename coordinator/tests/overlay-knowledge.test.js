@@ -313,4 +313,136 @@ describe('overlay-knowledge: validation section injection', () => {
     const result = overlay.buildTaskOverlay(task, makeWorker(), tmpDir);
     assert.ok(!result.includes('## Validation'));
   });
+
+  it('renders object validation with lint_cmd', () => {
+    const task = makeTask({ validation: JSON.stringify({ lint_cmd: 'npm run lint' }) });
+    const result = overlay.buildTaskOverlay(task, makeWorker(), tmpDir);
+    assert.ok(result.includes('## Validation'));
+    assert.ok(result.includes('Lint:'));
+    assert.ok(result.includes('npm run lint'));
+  });
+
+  it('renders object validation with custom array entries', () => {
+    const task = makeTask({ validation: JSON.stringify({ custom: ['./check.sh', './verify.sh'] }) });
+    const result = overlay.buildTaskOverlay(task, makeWorker(), tmpDir);
+    assert.ok(result.includes('Custom: ./check.sh'));
+    assert.ok(result.includes('Custom: ./verify.sh'));
+  });
+
+  it('renders object validation with custom scalar entry', () => {
+    const task = makeTask({ validation: JSON.stringify({ custom: './run-checks.sh' }) });
+    const result = overlay.buildTaskOverlay(task, makeWorker(), tmpDir);
+    assert.ok(result.includes('Custom: ./run-checks.sh'));
+  });
+
+  it('falls back to Payload when object has no known fields', () => {
+    const task = makeTask({ validation: JSON.stringify({ unknown_field: 'some-value' }) });
+    const result = overlay.buildTaskOverlay(task, makeWorker(), tmpDir);
+    assert.ok(result.includes('Payload:'));
+  });
+
+  it('omits validation section when validation is empty string', () => {
+    const task = makeTask({ validation: '   ' });
+    const result = overlay.buildTaskOverlay(task, makeWorker(), tmpDir);
+    assert.ok(!result.includes('## Validation'));
+  });
+
+  it('omits validation section when JSON array is empty', () => {
+    const task = makeTask({ validation: JSON.stringify([]) });
+    const result = overlay.buildTaskOverlay(task, makeWorker(), tmpDir);
+    assert.ok(!result.includes('## Validation'));
+  });
+});
+
+describe('overlay-knowledge: writeOverlay file output', () => {
+  let projectDir;
+  let worktreeDir;
+
+  before(() => {
+    projectDir = fs.mkdtempSync(path.join(os.tmpdir(), 'overlay-write-'));
+    worktreeDir = fs.mkdtempSync(path.join(os.tmpdir(), 'overlay-worktree-'));
+    fs.mkdirSync(path.join(projectDir, '.claude', 'knowledge'), { recursive: true });
+    fs.writeFileSync(path.join(projectDir, '.claude', 'knowledge', 'mistakes.md'), '', 'utf8');
+  });
+
+  after(() => {
+    fs.rmSync(projectDir, { recursive: true, force: true });
+    fs.rmSync(worktreeDir, { recursive: true, force: true });
+  });
+
+  it('writes CLAUDE.md and AGENTS.md in worktree_path', () => {
+    const task = makeTask({ subject: 'WriteOverlay Test' });
+    const worker = { id: 2, branch: 'agent-2', worktree_path: worktreeDir };
+    const agentsPath = overlay.writeOverlay(task, worker, projectDir);
+
+    assert.strictEqual(agentsPath, path.join(worktreeDir, 'AGENTS.md'));
+    assert.ok(fs.existsSync(path.join(worktreeDir, 'CLAUDE.md')), 'CLAUDE.md should be written');
+    assert.ok(fs.existsSync(path.join(worktreeDir, 'AGENTS.md')), 'AGENTS.md should be written');
+  });
+
+  it('CLAUDE.md and AGENTS.md have the same content', () => {
+    const task = makeTask({ subject: 'Same Content Test' });
+    const worker = { id: 2, branch: 'agent-2', worktree_path: worktreeDir };
+    overlay.writeOverlay(task, worker, projectDir);
+
+    const claude = fs.readFileSync(path.join(worktreeDir, 'CLAUDE.md'), 'utf8');
+    const agents = fs.readFileSync(path.join(worktreeDir, 'AGENTS.md'), 'utf8');
+    assert.strictEqual(claude, agents, 'CLAUDE.md and AGENTS.md must be identical');
+  });
+
+  it('content includes task subject', () => {
+    const task = makeTask({ subject: 'Unique Subject XYZ' });
+    const worker = { id: 2, branch: 'agent-2', worktree_path: worktreeDir };
+    overlay.writeOverlay(task, worker, projectDir);
+
+    const content = fs.readFileSync(path.join(worktreeDir, 'AGENTS.md'), 'utf8');
+    assert.ok(content.includes('Unique Subject XYZ'));
+  });
+
+  it('falls back to .worktrees/wt-<id> when worktree_path is absent', () => {
+    const task = makeTask();
+    const worker = { id: 7, branch: 'agent-7' };
+    const expectedDir = path.join(projectDir, '.worktrees', 'wt-7');
+
+    overlay.writeOverlay(task, worker, projectDir);
+
+    assert.ok(fs.existsSync(path.join(expectedDir, 'CLAUDE.md')), 'CLAUDE.md written to fallback path');
+    assert.ok(fs.existsSync(path.join(expectedDir, 'AGENTS.md')), 'AGENTS.md written to fallback path');
+  });
+});
+
+describe('overlay-knowledge: isSafeDomainSlug path traversal safety', () => {
+  it('rejects null and non-string inputs', () => {
+    const result = overlay.buildTaskOverlay(makeTask({ domain: null }), makeWorker(), os.tmpdir());
+    assert.ok(result.includes('**Domain:** unset'));
+  });
+
+  it('does not inject domain knowledge for path-traversal domain slugs', () => {
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'overlay-traversal-'));
+    try {
+      fs.mkdirSync(path.join(dir, '.claude', 'knowledge', 'domain'), { recursive: true });
+      fs.writeFileSync(path.join(dir, '.claude', 'knowledge', 'domain', 'secrets.md'), 'secret-content', 'utf8');
+
+      const task = makeTask({ domain: '../domain/secrets' });
+      const result = overlay.buildTaskOverlay(task, makeWorker(), dir);
+      assert.ok(!result.includes('secret-content'), 'path traversal domain should not inject file contents');
+      assert.ok(!result.includes('## Domain Knowledge'));
+    } finally {
+      fs.rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it('does not inject domain knowledge for domains containing slashes', () => {
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'overlay-slash-'));
+    try {
+      fs.mkdirSync(path.join(dir, '.claude', 'knowledge', 'domain'), { recursive: true });
+      fs.writeFileSync(path.join(dir, '.claude', 'knowledge', 'domain', 'etc.md'), 'etc-content', 'utf8');
+
+      const task = makeTask({ domain: 'foo/etc' });
+      const result = overlay.buildTaskOverlay(task, makeWorker(), dir);
+      assert.ok(!result.includes('etc-content'), 'slash in domain should be rejected');
+    } finally {
+      fs.rmSync(dir, { recursive: true, force: true });
+    }
+  });
 });
