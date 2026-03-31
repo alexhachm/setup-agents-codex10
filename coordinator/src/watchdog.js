@@ -832,10 +832,12 @@ function recoverStaleIntegrations(now, options = {}) {
     if (allMerged) {
       // Case 2: All merges succeeded — guard against non-terminal or failed sibling tasks
       const taskCompletion = db.checkRequestCompletion(req.id);
-      if (taskCompletion.total > 0 && taskCompletion.completed === 0) {
+      const allTasksTerminal = taskCompletion.total > 0 &&
+        (taskCompletion.completed + taskCompletion.failed >= taskCompletion.total);
+      if (taskCompletion.total > 0 && (!allTasksTerminal || taskCompletion.completed === 0)) {
         db.log('coordinator', 'stale_integration_gated', {
           request_id: req.id,
-          reason: 'no_completed_tasks',
+          reason: !allTasksTerminal ? 'non_terminal_tasks' : 'no_completed_tasks',
           total: taskCompletion.total,
           completed: taskCompletion.completed,
           failed: taskCompletion.failed,
