@@ -383,6 +383,42 @@ function processQueue(projectDir, mergeExecutor = attemptMerge) {
   }
 }
 
+function tryDirectGitMerge(entry, projectDir) {
+  db.log('coordinator', 'merge_tier3_gh_fallback_start', {
+    merge_id: entry.id,
+    branch: entry.branch,
+  });
+  try {
+    safeExec('git', ['fetch', 'origin'], projectDir);
+    safeExec('git', ['checkout', 'main'], projectDir);
+    safeExec(
+      'git',
+      ['merge', '--no-ff', entry.branch, '-m', `Merge branch ${entry.branch} into main (gh unavailable fallback)`],
+      projectDir
+    );
+    safeExec('git', ['push', 'origin', 'main'], projectDir);
+    // Restore worktree checkout
+    try {
+      safeExec('git', ['checkout', entry.branch], projectDir);
+    } catch {
+      // Non-fatal: best-effort restore
+    }
+    db.log('coordinator', 'merge_tier3_gh_fallback_success', {
+      merge_id: entry.id,
+      branch: entry.branch,
+    });
+    return { success: true };
+  } catch (e) {
+    try { safeExec('git', ['checkout', 'main'], projectDir); } catch {}
+    db.log('coordinator', 'merge_tier3_gh_fallback_failed', {
+      merge_id: entry.id,
+      branch: entry.branch,
+      error: e.message,
+    });
+    return { success: false, error: e.message };
+  }
+}
+
 function attemptMerge(entry, projectDir) {
   validateEntry(entry);
 
@@ -399,6 +435,7 @@ function attemptMerge(entry, projectDir) {
 
   // Tier 2: Auto-resolve (rebase and retry)
   const tier2 = tryRebase(entry, projectDir);
+  let retryResult = null;
   if (tier2.success) {
     // Post-rebase validation if overlapping tasks exist
     const postValidation = runOverlapValidation(entry, projectDir);
@@ -407,8 +444,18 @@ function attemptMerge(entry, projectDir) {
       return { success: false, functional_conflict: true, error: postValidation.error, tier: 'validation' };
     }
     // Rebase succeeded, try clean merge again
-    const retry = tryCleanMerge(entry, projectDir);
-    if (retry.success) return { success: true, tier: 2 };
+    retryResult = tryCleanMerge(entry, projectDir);
+    if (retryResult.success) return { success: true, tier: 2 };
+  }
+
+  // Tier 3: Direct git merge fallback when gh CLI is unavailable (ENOENT)
+  const ghMissing = tier1.ghMissing || (retryResult && retryResult.ghMissing);
+  if (ghMissing) {
+    const tier3 = tryDirectGitMerge(entry, projectDir);
+    if (tier3.success) return { success: true, tier: 3 };
+    // Tier 3 failed — fall through to escalate
+    escalateToAllocator(entry, tier3.error, false);
+    return { success: false, conflict: true, error: tier3.error, tier: 3 };
   }
 
   // Tiers 1 & 2 failed — escalate to allocator
@@ -723,6 +770,10 @@ function tryCleanMerge(entry, projectDir) {
     safeExec('gh', mergeArgs, projectDir);
     return { success: true };
   } catch (e) {
+    // Detect missing gh CLI (ENOENT) and propagate ghMissing flag
+    if (e.code === 'ENOENT' || (e.message && e.message.includes('ENOENT'))) {
+      return { success: false, ghMissing: true, error: e.message };
+    }
     // gh pr merge can fail on post-merge cleanup (e.g. branch deletion)
     // even though the PR was actually merged. Check the real state.
     if (isPrMerged(entry.pr_url, projectDir)) {
