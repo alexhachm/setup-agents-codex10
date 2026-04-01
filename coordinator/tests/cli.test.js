@@ -347,6 +347,16 @@ describe('CLI Server', () => {
     assert.ok(result.ts);
   });
 
+  it('should respond to health-check with uptime and worker info', async () => {
+    const result = await sendCommand('health-check', {});
+    assert.strictEqual(result.ok, true);
+    assert.ok(typeof result.uptime_ms === 'number' && result.uptime_ms >= 0, 'uptime_ms should be a non-negative number');
+    assert.ok(typeof result.uptime_human === 'string' && result.uptime_human.length > 0, 'uptime_human should be a non-empty string');
+    assert.ok(typeof result.worker_count === 'number', 'worker_count should be a number');
+    assert.ok(typeof result.idle_workers === 'number', 'idle_workers should be a number');
+    assert.ok(typeof result.active_tasks === 'number', 'active_tasks should be a number');
+  });
+
   it('should default npm_config_if_present to true when unset', async () => {
     const originalIfPresent = process.env.npm_config_if_present;
     try {
