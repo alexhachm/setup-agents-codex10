@@ -290,6 +290,20 @@ if (!modelRouter) {
 let server = null;
 let tcpServer = null;
 let _projectDir = null; // Set on start()
+let _serverStartedAt = null; // Set on start(), used by health-check
+
+function formatUptimeHuman(ms) {
+  if (ms == null || ms < 0) return 'unknown';
+  const totalSec = Math.floor(ms / 1000);
+  const h = Math.floor(totalSec / 3600);
+  const m = Math.floor((totalSec % 3600) / 60);
+  const s = totalSec % 60;
+  const parts = [];
+  if (h > 0) parts.push(`${h}h`);
+  if (m > 0) parts.push(`${m}m`);
+  parts.push(`${s}s`);
+  return parts.join(' ');
+}
 const NAMESPACE = process.env.MAC10_NAMESPACE || 'mac10';
 const WORKER_LIMIT_MIN = 1;
 const WORKER_LIMIT_MAX = 8;
@@ -492,6 +506,7 @@ const COMMAND_SCHEMAS = {
   'repair':            { required: [], types: {} },
   'purge-tasks':       { required: [], types: { status: 'string' } },
   'ping':              { required: [], types: {} },
+  'health-check':      { required: [], types: {} },
   'add-worker':        { required: [], types: {} },
   'merge-status':      { required: [], types: { request_id: 'string' } },
   'reset-worker':      { required: ['worker_id'], types: { worker_id: 'string' } },
@@ -2293,6 +2308,7 @@ function start(projectDir, handlers) {
   }
 
   _projectDir = projectDir;
+  _serverStartedAt = Date.now();
   const socketPath = getSocketPath(projectDir);
   const connHandler = createConnectionHandler(handlers);
 
@@ -3778,6 +3794,22 @@ function handleCommand(cmd, conn, handlers) {
 
       case 'ping': {
         respond(conn, { ok: true, ts: Date.now() });
+        break;
+      }
+
+      case 'health-check': {
+        const uptime_ms = db.coordinatorAgeMs(_serverStartedAt);
+        const allWorkers = db.getAllWorkers();
+        const idleWorkers = db.getIdleWorkers();
+        const activeTasks = db.listTasks({ status: 'assigned' });
+        respond(conn, {
+          ok: true,
+          uptime_ms,
+          uptime_human: formatUptimeHuman(uptime_ms),
+          worker_count: allWorkers.length,
+          idle_workers: idleWorkers.length,
+          active_tasks: activeTasks.length,
+        });
         break;
       }
 
