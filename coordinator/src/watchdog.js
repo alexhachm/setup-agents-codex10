@@ -241,7 +241,8 @@ function tick(projectDir) {
     }
   }
 
-  // Worker context fatigue: workers with 6+ completed tasks should reset
+  // Worker context fatigue: workers accumulate LLM context over many tasks; after 6+
+  // completed tasks their counter is reset here so the sentinel can restart them fresh.
   checkWorkerFatigue();
 
   // Stale claim cleanup: workers claimed but no task assigned for >2 minutes
