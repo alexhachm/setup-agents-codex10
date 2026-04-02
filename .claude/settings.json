@@ -51,7 +51,10 @@
   "mcpServers": {
     "playwright": {
       "command": "npx",
-      "args": ["@playwright/mcp@latest", "--headless"],
+      "args": [
+        "@playwright/mcp@latest",
+        "--headless"
+      ],
       "env": {
         "DISPLAY": ":99"
       }

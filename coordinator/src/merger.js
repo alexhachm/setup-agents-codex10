@@ -9,6 +9,7 @@ const insightIngestion = require('./insight-ingestion');
 const BRANCH_RE = /^[a-zA-Z0-9._\/-]+$/;
 const PR_URL_RE = /^https:\/\/github\.com\/[a-zA-Z0-9._-]+\/[a-zA-Z0-9._-]+\/pull\/\d+$/;
 const MERGE_TIMEOUT_ERROR_PREFIX = 'Merge timed out after';
+const WINDOWS_EXECUTABLE_EXTENSIONS = new Set(['.exe', '.cmd', '.bat', '.com']);
 
 function validateEntry(entry) {
   if (entry.branch && !BRANCH_RE.test(entry.branch)) {
@@ -19,11 +20,204 @@ function validateEntry(entry) {
   }
 }
 
+function getPathDirectories() {
+  const rawPath = process.env.PATH || '';
+  return rawPath
+    .split(path.delimiter)
+    .map((segment) => segment.trim())
+    .filter(Boolean);
+}
+
+function escapeBashArg(value) {
+  return `'${String(value).replace(/'/g, `'\\''`)}'`;
+}
+
+function toWslPath(inputPath) {
+  const resolved = path.resolve(inputPath).replace(/\\/g, '/');
+  const driveMatch = resolved.match(/^([A-Za-z]):\/(.*)$/);
+  if (driveMatch) {
+    return `/mnt/${driveMatch[1].toLowerCase()}/${driveMatch[2]}`;
+  }
+  return resolved;
+}
+
+function normalizePosixShellArg(value) {
+  if (typeof value !== 'string') return String(value);
+  if (/^[A-Za-z]:[\\/]/.test(value) || value.startsWith('\\\\')) {
+    return toWslPath(value);
+  }
+  return value;
+}
+
+function getShebang(filePath) {
+  try {
+    const fd = fs.openSync(filePath, 'r');
+    try {
+      const buffer = Buffer.alloc(256);
+      const bytesRead = fs.readSync(fd, buffer, 0, buffer.length, 0);
+      const firstLine = buffer.toString('utf8', 0, bytesRead).split(/\r?\n/, 1)[0].trim();
+      return firstLine.startsWith('#!') ? firstLine.slice(2).trim() : null;
+    } finally {
+      fs.closeSync(fd);
+    }
+  } catch {
+    return null;
+  }
+}
+
+function resolveCommandOnPath(commandName) {
+  const hasPathSegment = /[\\/]/.test(commandName);
+  const candidatePaths = [];
+
+  if (path.isAbsolute(commandName) || hasPathSegment) {
+    candidatePaths.push(commandName);
+  } else {
+    for (const dir of getPathDirectories()) {
+      candidatePaths.push(path.join(dir, commandName));
+    }
+  }
+
+  const pathext = process.platform === 'win32'
+    ? (process.env.PATHEXT || '.COM;.EXE;.BAT;.CMD')
+        .split(';')
+        .map((ext) => ext.trim().toLowerCase())
+        .filter(Boolean)
+    : [];
+
+  for (const candidate of candidatePaths) {
+    if (fs.existsSync(candidate) && fs.statSync(candidate).isFile()) {
+      return candidate;
+    }
+
+    if (process.platform !== 'win32') {
+      continue;
+    }
+
+    for (const ext of pathext) {
+      const extCandidate = `${candidate}${ext}`;
+      if (fs.existsSync(extCandidate) && fs.statSync(extCandidate).isFile()) {
+        return extCandidate;
+      }
+    }
+  }
+
+  return null;
+}
+
+function resolveWindowsPosixShell() {
+  const gitBashCandidates = [
+    'C:\\Program Files\\Git\\bin\\bash.exe',
+    'C:\\Program Files\\Git\\usr\\bin\\bash.exe',
+    'C:\\Program Files\\Git\\bin\\sh.exe',
+    'C:\\Program Files\\Git\\usr\\bin\\sh.exe',
+  ];
+  for (const candidate of gitBashCandidates) {
+    if (fs.existsSync(candidate)) {
+      return {
+        kind: candidate.toLowerCase().endsWith('sh.exe') ? 'sh' : 'bash',
+        file: candidate,
+      };
+    }
+  }
+
+  const bashPath = resolveCommandOnPath('bash');
+  if (bashPath) {
+    return { kind: 'bash', file: bashPath };
+  }
+
+  const shPath = resolveCommandOnPath('sh');
+  if (shPath) {
+    return { kind: 'sh', file: shPath };
+  }
+
+  const wslPath = resolveCommandOnPath('wsl.exe');
+  if (wslPath) {
+    return { kind: 'wsl', file: wslPath };
+  }
+
+  return null;
+}
+
+function buildPosixShellInvocation(command, cwd) {
+  if (process.platform !== 'win32') {
+    return { file: 'sh', args: ['-c', command], cwd };
+  }
+
+  const shell = resolveWindowsPosixShell();
+  if (!shell) {
+    return null;
+  }
+
+  if (shell.kind === 'wsl') {
+    return {
+      file: shell.file,
+      args: ['bash', '-lc', `cd ${escapeBashArg(toWslPath(cwd))} && ${command}`],
+      cwd,
+    };
+  }
+
+  return {
+    file: shell.file,
+    args: [shell.kind === 'bash' ? '-lc' : '-c', command],
+    cwd,
+  };
+}
+
+function resolveExecInvocation(file, args, cwd) {
+  if (process.platform !== 'win32') {
+    return { file, args, cwd };
+  }
+
+  const resolvedPath = resolveCommandOnPath(file);
+  if (!resolvedPath) {
+    return { file, args, cwd };
+  }
+
+  const ext = path.extname(resolvedPath).toLowerCase();
+  if (WINDOWS_EXECUTABLE_EXTENSIONS.has(ext)) {
+    return { file: resolvedPath, args, cwd };
+  }
+
+  const shebang = getShebang(resolvedPath);
+  if (shebang) {
+    const normalized = shebang.toLowerCase();
+    if (normalized.includes('bash') || normalized.includes('/sh') || normalized.endsWith(' sh')) {
+      const shell = resolveWindowsPosixShell();
+      const normalizeArg = shell && shell.kind === 'wsl'
+        ? (value) => normalizePosixShellArg(value)
+        : (value) => String(value);
+      const scriptCommand = [resolvedPath, ...args]
+        .map((value) => escapeBashArg(normalizeArg(value)))
+        .join(' ');
+      const posixShellInvocation = buildPosixShellInvocation(scriptCommand, cwd);
+      if (posixShellInvocation) {
+        return posixShellInvocation;
+      }
+    }
+  }
+
+  return { file: resolvedPath, args, cwd };
+}
+
 function safeExec(file, args, cwd) {
-  return execFileSync(file, args, { encoding: 'utf8', cwd, timeout: 60000 }).trim();
+  const invocation = resolveExecInvocation(file, args, cwd);
+  return execFileSync(invocation.file, invocation.args, {
+    encoding: 'utf8',
+    cwd: invocation.cwd,
+    timeout: 60000,
+  }).trim();
 }
 
 function safeShellExec(command, cwd) {
+  const posixShellInvocation = buildPosixShellInvocation(command, cwd);
+  if (posixShellInvocation) {
+    return execFileSync(posixShellInvocation.file, posixShellInvocation.args, {
+      encoding: 'utf8',
+      cwd: posixShellInvocation.cwd,
+      timeout: 60000,
+    }).trim();
+  }
+
   if (process.platform === 'win32') {
     return execFileSync('cmd.exe', ['/d', '/s', '/c', command], {
       encoding: 'utf8',
@@ -31,6 +225,7 @@ function safeShellExec(command, cwd) {
       timeout: 60000,
     }).trim();
   }
+
   return execFileSync('sh', ['-c', command], { encoding: 'utf8', cwd, timeout: 60000 }).trim();
 }
 
@@ -399,6 +594,7 @@ function attemptMerge(entry, projectDir) {
 
   // Tier 2: Auto-resolve (rebase and retry)
   const tier2 = tryRebase(entry, projectDir);
+  let retryResult = null;
   if (tier2.success) {
     // Post-rebase validation if overlapping tasks exist
     const postValidation = runOverlapValidation(entry, projectDir);
@@ -407,8 +603,17 @@ function attemptMerge(entry, projectDir) {
       return { success: false, functional_conflict: true, error: postValidation.error, tier: 'validation' };
     }
     // Rebase succeeded, try clean merge again
-    const retry = tryCleanMerge(entry, projectDir);
-    if (retry.success) return { success: true, tier: 2 };
+    retryResult = tryCleanMerge(entry, projectDir);
+    if (retryResult.success) return { success: true, tier: 2 };
+  }
+
+  // Tier 3: Direct git merge fallback when gh CLI is unavailable (ENOENT)
+  const ghMissing = tier1.ghMissing || (retryResult && retryResult.ghMissing);
+  if (ghMissing) {
+    const tier3 = tryDirectGitMerge(entry, projectDir);
+    if (tier3.success) return { success: true, tier: 3 };
+    escalateToAllocator(entry, tier3.error, false);
+    return { success: false, conflict: true, error: tier3.error, tier: 3 };
   }
 
   // Tiers 1 & 2 failed — escalate to allocator
@@ -733,6 +938,42 @@ function tryCleanMerge(entry, projectDir) {
       });
       return { success: true };
     }
+    // Detect missing gh CLI (ENOENT) and propagate ghMissing flag
+    if (e.code === 'ENOENT' || (e.message && e.message.includes('ENOENT'))) {
+      return { success: false, ghMissing: true, error: e.message };
+    }
+    return { success: false, error: e.message };
+  }
+}
+
+function tryDirectGitMerge(entry, projectDir) {
+  db.log('coordinator', 'merge_tier3_gh_fallback_start', {
+    merge_id: entry.id,
+    branch: entry.branch,
+  });
+  try {
+    safeExec('git', ['fetch', 'origin'], projectDir);
+    safeExec('git', ['checkout', 'main'], projectDir);
+    safeExec(
+      'git',
+      ['merge', '--no-ff', entry.branch, '-m', `Merge branch ${entry.branch} into main (gh unavailable fallback)`],
+      projectDir
+    );
+    safeExec('git', ['push', 'origin', 'main'], projectDir);
+    // Restore worktree checkout best-effort
+    try { safeExec('git', ['checkout', entry.branch], projectDir); } catch {}
+    db.log('coordinator', 'merge_tier3_gh_fallback_success', {
+      merge_id: entry.id,
+      branch: entry.branch,
+    });
+    return { success: true };
+  } catch (e) {
+    try { safeExec('git', ['checkout', 'main'], projectDir); } catch {}
+    db.log('coordinator', 'merge_tier3_gh_fallback_failed', {
+      merge_id: entry.id,
+      branch: entry.branch,
+      error: e.message,
+    });
     return { success: false, error: e.message };
   }
 }

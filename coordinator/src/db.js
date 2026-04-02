@@ -441,7 +441,7 @@ const VALID_COLUMNS = Object.freeze({
     'usage_total_tokens', 'usage_cost_usd',
     'started_at', 'completed_at', 'result',
   ]),
-  workers: new Set(['status', 'domain', 'worktree_path', 'branch', 'tmux_session', 'tmux_window', 'pid', 'current_task_id', 'claimed_by', 'claimed_at', 'last_heartbeat', 'launched_at', 'tasks_completed']),
+  workers: new Set(['status', 'domain', 'worktree_path', 'branch', 'tmux_session', 'tmux_window', 'pid', 'current_task_id', 'claimed_by', 'claimed_at', 'last_heartbeat', 'launched_at', 'tasks_completed', 'backend']),
   merge_queue: new Set([
     'status', 'priority', 'completion_checkpoint', 'merged_at', 'error',
     'head_sha', 'worker_id', 'failure_class', 'retry_count', 'fingerprint', 'last_fingerprint_at',
@@ -974,11 +974,17 @@ function init(projectDir) {
     }
     db.exec("UPDATE workers SET claimed_at = NULL WHERE claimed_by IS NULL AND claimed_at IS NOT NULL");
     db.exec("UPDATE workers SET claimed_at = COALESCE(claimed_at, datetime('now')) WHERE claimed_by IS NOT NULL");
+    if (!cols.includes('backend')) {
+      db.exec("ALTER TABLE workers ADD COLUMN backend TEXT NOT NULL DEFAULT 'tmux'");
+    }
   }
   if (existingTables.includes('tasks')) {
     const taskCols = db.prepare("PRAGMA table_info(tasks)").all().map(c => c.name);
     if (!taskCols.includes('overlap_with')) {
       db.exec("ALTER TABLE tasks ADD COLUMN overlap_with TEXT");
+    }
+    if (!taskCols.includes('needs_sandbox')) {
+      db.exec("ALTER TABLE tasks ADD COLUMN needs_sandbox INTEGER NOT NULL DEFAULT 0");
     }
     ensureTaskLivenessRecoveryColumns(db);
     ensureTaskRoutingTelemetryColumns(db);
@@ -1101,10 +1107,10 @@ function listRequests(status) {
 
 // --- Task helpers ---
 
-function createTask({ request_id, subject, description, domain, files, priority, tier, depends_on, validation }) {
+function createTask({ request_id, subject, description, domain, files, priority, tier, depends_on, validation, needs_sandbox }) {
   const result = getDb().prepare(`
-    INSERT INTO tasks (request_id, subject, description, domain, files, priority, tier, depends_on, validation)
-    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+    INSERT INTO tasks (request_id, subject, description, domain, files, priority, tier, depends_on, validation, needs_sandbox)
+    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
   `).run(
     request_id, subject, description,
     domain || null,
@@ -1112,7 +1118,8 @@ function createTask({ request_id, subject, description, domain, files, priority,
     priority || 'normal',
     tier || 3,
     depends_on ? JSON.stringify(depends_on) : null,
-    validation ? JSON.stringify(validation) : null
+    validation ? JSON.stringify(validation) : null,
+    needs_sandbox ? 1 : 0
   );
   log('coordinator', 'task_created', { task_id: result.lastInsertRowid, request_id, subject });
   return result.lastInsertRowid;
@@ -4376,6 +4383,253 @@ function reconcileAllActiveRequests() {
   return totalChanges;
 }
 
+// --- Research queue bridge functions (used by CLI commands) ---
+
+function getResearchQueueItems({ status = null, topic = null, limit = 50 } = {}) {
+  const d = getDb();
+  const conditions = [];
+  const params = [];
+  if (status) {
+    conditions.push('status = ?');
+    params.push(status);
+  }
+  if (topic) {
+    conditions.push("json_extract(intent_payload, '$.topic') = ?");
+    params.push(topic);
+  }
+  const where = conditions.length ? `WHERE ${conditions.join(' AND ')}` : '';
+  const sql = `
+    SELECT *, json_extract(intent_payload, '$.topic') AS topic,
+           json_extract(intent_payload, '$.question') AS question,
+           json_extract(intent_payload, '$.mode') AS mode
+    FROM research_intents
+    ${where}
+    ORDER BY priority_score DESC, created_at ASC, id ASC
+    LIMIT ?
+  `;
+  params.push(limit);
+  return d.prepare(sql).all(...params);
+}
+
+function startResearchItem(id) {
+  const now = currentSqlTimestamp();
+  const result = getDb().prepare(
+    "UPDATE research_intents SET status = 'running', updated_at = ? WHERE id = ? AND status = 'queued'"
+  ).run(now, id);
+  return result.changes > 0;
+}
+
+function completeResearchItem(intentId, resultText) {
+  const now = currentSqlTimestamp();
+  const result = getDb().prepare(
+    "UPDATE research_intents SET status = 'completed', resolved_at = ?, updated_at = ? WHERE id = ? AND status = 'running'"
+  ).run(now, now, intentId);
+  return result.changes > 0;
+}
+
+function failResearchItem(intentId, error) {
+  const now = currentSqlTimestamp();
+  const result = getDb().prepare(
+    "UPDATE research_intents SET status = 'failed', last_error = ?, failure_count = failure_count + 1, resolved_at = ?, updated_at = ? WHERE id = ? AND status = 'running'"
+  ).run(error || null, now, now, intentId);
+  return result.changes > 0;
+}
+
+function requeueFailedResearch({ topic = null, include_running = false } = {}) {
+  const d = getDb();
+  const now = currentSqlTimestamp();
+  const statuses = include_running ? ['failed', 'running'] : ['failed'];
+  const statusPlaceholders = buildSqlInClause(statuses);
+  const conditions = [`status IN (${statusPlaceholders})`];
+  const params = [...statuses];
+  if (topic) {
+    conditions.push("json_extract(intent_payload, '$.topic') = ?");
+    params.push(topic);
+  }
+  const where = conditions.join(' AND ');
+  const items = d.prepare(`SELECT id FROM research_intents WHERE ${where}`).all(...params);
+  const ids = items.map(r => r.id);
+  if (ids.length > 0) {
+    const placeholders = buildSqlInClause(ids);
+    d.prepare(
+      `UPDATE research_intents SET status = 'queued', failure_count = 0, last_error = NULL, resolved_at = NULL, updated_at = ? WHERE id IN (${placeholders})`
+    ).run(now, ...ids);
+  }
+  return { requeued_count: ids.length, ids };
+}
+
+function requeueStaleResearch({ max_age_minutes = 60 } = {}) {
+  const d = getDb();
+  const now = currentSqlTimestamp();
+  const stale = d.prepare(
+    "SELECT id FROM research_intents WHERE status = 'running' AND updated_at < datetime('now', '-' || ? || ' minutes')"
+  ).all(max_age_minutes);
+  const ids = stale.map(r => r.id);
+  if (ids.length > 0) {
+    const placeholders = buildSqlInClause(ids);
+    d.prepare(
+      `UPDATE research_intents SET status = 'queued', updated_at = ? WHERE id IN (${placeholders})`
+    ).run(now, ...ids);
+  }
+  return { requeued_count: ids.length, ids };
+}
+
+// --- Domain analysis functions ---
+
+function createDomainAnalysis(domain, sourceMapHash = null) {
+  const now = currentSqlTimestamp();
+  const result = getDb().prepare(`
+    INSERT INTO domain_analyses (domain, source_map_hash, created_at, updated_at)
+    VALUES (?, ?, ?, ?)
+  `).run(domain, sourceMapHash, now, now);
+  const id = Number(result.lastInsertRowid);
+  log('coordinator', 'domain_analysis_created', { id, domain });
+  return getDomainAnalysis(id);
+}
+
+function updateDomainAnalysis(id, updates) {
+  const d = getDb();
+  const now = currentSqlTimestamp();
+  const fields = [];
+  const params = [];
+  for (const [key, val] of Object.entries(updates)) {
+    if (['status', 'draft_payload', 'review_sheet', 'human_feedback', 'confidence_score', 'analyzed_files'].includes(key)) {
+      fields.push(`${key} = ?`);
+      params.push(val);
+    }
+  }
+  if (fields.length === 0) return getDomainAnalysis(id);
+  fields.push('updated_at = ?');
+  params.push(now);
+  params.push(id);
+  d.prepare(`UPDATE domain_analyses SET ${fields.join(', ')} WHERE id = ?`).run(...params);
+  return getDomainAnalysis(id);
+}
+
+function getDomainAnalysis(id) {
+  return getDb().prepare('SELECT * FROM domain_analyses WHERE id = ?').get(id) || null;
+}
+
+function getLatestDomainAnalysis(domain) {
+  return getDb().prepare(
+    'SELECT * FROM domain_analyses WHERE domain = ? ORDER BY created_at DESC LIMIT 1'
+  ).get(domain) || null;
+}
+
+function listDomainAnalyses({ domain = null, status = null, limit = 50 } = {}) {
+  const conditions = [];
+  const params = [];
+  if (domain) { conditions.push('domain = ?'); params.push(domain); }
+  if (status) { conditions.push('status = ?'); params.push(status); }
+  const where = conditions.length ? `WHERE ${conditions.join(' AND ')}` : '';
+  params.push(limit);
+  return getDb().prepare(
+    `SELECT * FROM domain_analyses ${where} ORDER BY created_at DESC LIMIT ?`
+  ).all(...params);
+}
+
+function approveDomainAnalysis(id, humanFeedback = null) {
+  const now = currentSqlTimestamp();
+  const d = getDb();
+  const result = d.prepare(`
+    UPDATE domain_analyses
+    SET status = 'approved', human_feedback = COALESCE(?, human_feedback), approved_at = ?, updated_at = ?
+    WHERE id = ? AND status = 'review_pending'
+  `).run(humanFeedback, now, now, id);
+  if (result.changes > 0) {
+    log('coordinator', 'domain_analysis_approved', { id, has_feedback: !!humanFeedback });
+  }
+  return result.changes > 0;
+}
+
+function rejectDomainAnalysis(id, humanFeedback = null) {
+  const now = currentSqlTimestamp();
+  const result = getDb().prepare(`
+    UPDATE domain_analyses
+    SET status = 'rejected', human_feedback = COALESCE(?, human_feedback), updated_at = ?
+    WHERE id = ? AND status = 'review_pending'
+  `).run(humanFeedback, now, id);
+  if (result.changes > 0) {
+    log('coordinator', 'domain_analysis_rejected', { id });
+  }
+  return result.changes > 0;
+}
+
+function getAuthoritativeFeedback(domain) {
+  return getDb().prepare(`
+    SELECT id, human_feedback, draft_payload, approved_at
+    FROM domain_analyses
+    WHERE domain = ? AND status = 'approved' AND human_feedback IS NOT NULL
+    ORDER BY approved_at ASC
+  `).all(domain);
+}
+
+// --- Extended research topic functions ---
+
+function createExtendedResearchTopic({ title, description, category = 'feature', discovery_source = null, loop_id = null, tags = null, research_intent_id = null } = {}) {
+  const now = currentSqlTimestamp();
+  const tagsJson = Array.isArray(tags) ? JSON.stringify(tags) : tags;
+  const result = getDb().prepare(`
+    INSERT INTO extended_research_topics (title, description, category, discovery_source, loop_id, research_intent_id, tags, created_at, updated_at)
+    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+  `).run(title, description, category, discovery_source, loop_id || null, research_intent_id || null, tagsJson, now, now);
+  const id = Number(result.lastInsertRowid);
+  log('coordinator', 'research_topic_created', { id, title, category, discovery_source });
+  return getExtendedResearchTopic(id);
+}
+
+function getExtendedResearchTopic(id) {
+  return getDb().prepare('SELECT * FROM extended_research_topics WHERE id = ?').get(id) || null;
+}
+
+function listExtendedResearchTopics({ review_status = null, category = null, loop_id = null, limit = 50, offset = 0 } = {}) {
+  const conditions = [];
+  const params = [];
+  if (review_status) { conditions.push('review_status = ?'); params.push(review_status); }
+  if (category) { conditions.push('category = ?'); params.push(category); }
+  if (loop_id != null) { conditions.push('loop_id = ?'); params.push(loop_id); }
+  const where = conditions.length ? `WHERE ${conditions.join(' AND ')}` : '';
+  params.push(limit, offset);
+  return getDb().prepare(
+    `SELECT * FROM extended_research_topics ${where} ORDER BY priority DESC, created_at ASC LIMIT ? OFFSET ?`
+  ).all(...params);
+}
+
+function reviewExtendedResearchTopic(id, reviewStatus, humanNotes = null) {
+  const now = currentSqlTimestamp();
+  const validStatuses = ['held', 'approved', 'rejected', 'in_progress', 'completed'];
+  if (!validStatuses.includes(reviewStatus)) return false;
+  const result = getDb().prepare(`
+    UPDATE extended_research_topics
+    SET review_status = ?, human_notes = COALESCE(?, human_notes), reviewed_at = ?, updated_at = ?
+    WHERE id = ?
+  `).run(reviewStatus, humanNotes, now, now, id);
+  if (result.changes > 0) {
+    log('coordinator', 'research_topic_reviewed', { id, review_status: reviewStatus });
+  }
+  return result.changes > 0;
+}
+
+// --- Combined review items ---
+
+function getPendingReviewItems({ limit = 20 } = {}) {
+  const d = getDb();
+  const domainReviews = d.prepare(`
+    SELECT id, domain AS title, 'domain_analysis' AS item_type, status, review_sheet, created_at
+    FROM domain_analyses WHERE status = 'review_pending'
+    ORDER BY created_at ASC
+  `).all();
+  const topicReviews = d.prepare(`
+    SELECT id, title, 'research_topic' AS item_type, review_status AS status, description AS review_sheet, created_at
+    FROM extended_research_topics WHERE review_status = 'discovered'
+    ORDER BY created_at ASC
+  `).all();
+  const combined = [...domainReviews, ...topicReviews]
+    .sort((a, b) => a.created_at.localeCompare(b.created_at))
+    .slice(0, limit);
+  return combined;
+}
+
 module.exports = {
   init, close, getDb,
   coordinatorAgeMs,
@@ -4392,6 +4646,7 @@ module.exports = {
   listProjectMemoryLineageLinks,
   rebuildProjectMemorySnapshotIndex,
   enqueueResearchIntent, getResearchIntent, scoreResearchIntentCandidates, materializeResearchBatchPlan,
+  getResearchQueueItems, startResearchItem, completeResearchItem, failResearchItem, requeueFailedResearch, requeueStaleResearch,
   getResearchBatch, listResearchBatchStages, listResearchIntentFanout, markResearchBatchStage,
   listTasks, getReadyTasks, checkAndPromoteTasks, replanTaskDependency,
   registerWorker, getWorker, updateWorker, getIdleWorkers, getAllWorkers, claimWorker, releaseWorker,
@@ -4416,4 +4671,8 @@ module.exports = {
   createBrowserSession, getBrowserSession, updateBrowserSession, transitionBrowserSession,
   createBrowserResearchJob, getBrowserResearchJob, updateBrowserResearchJob, transitionBrowserResearchJob,
   appendBrowserCallbackEvent, getBrowserCallbackEvents,
+  createDomainAnalysis, updateDomainAnalysis, getDomainAnalysis, getLatestDomainAnalysis,
+  listDomainAnalyses, approveDomainAnalysis, rejectDomainAnalysis, getAuthoritativeFeedback,
+  createExtendedResearchTopic, getExtendedResearchTopic, listExtendedResearchTopics, reviewExtendedResearchTopic,
+  getPendingReviewItems,
 };

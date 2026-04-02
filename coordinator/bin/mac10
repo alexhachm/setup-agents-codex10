@@ -173,6 +173,12 @@ function namespacedCandidates(baseName) {
 function findConnectionTarget() {
   if (process.env.MAC10_SOCKET) return process.env.MAC10_SOCKET;
 
+  // Direct TCP override (used by workers inside microVMs/containers)
+  if (process.env.MAC10_CLI_HOST && process.env.MAC10_CLI_PORT) {
+    const port = parseInt(process.env.MAC10_CLI_PORT, 10);
+    if (port > 0) return { host: process.env.MAC10_CLI_HOST, port };
+  }
+
   let dir = process.cwd();
   while (dir !== path.dirname(dir)) {
     const stateDir = path.join(dir, '.claude', 'state');
@@ -198,7 +204,7 @@ function findConnectionTarget() {
       const tcpFile = path.join(stateDir, name);
       if (fs.existsSync(tcpFile)) {
         const port = parseInt(fs.readFileSync(tcpFile, 'utf8').trim(), 10);
-        if (port > 0) return { host: '127.0.0.1', port };
+        if (port > 0) return { host: process.env.MAC10_CLI_HOST || '127.0.0.1', port };
       }
     }
 
@@ -2062,6 +2068,18 @@ async function main() {
         break;
       }
 
+      case 'research-retry-failed': {
+        const retryArgs = { topic: null, include_running: false };
+        for (let ri = 1; ri < argv.length; ri++) {
+          if (argv[ri] === '--topic' && argv[ri + 1]) { retryArgs.topic = argv[++ri]; }
+          else if (argv[ri] === '--include-running') { retryArgs.include_running = true; }
+        }
+        result = await send(socketPath, 'research-retry-failed', retryArgs);
+        if (result.ok) console.log(JSON.stringify(result, null, 2));
+        else { console.error(result.error); process.exit(1); }
+        break;
+      }
+
       case 'research-next': {
         result = await send(socketPath, 'research-next', {});
         if (result.ok) console.log(JSON.stringify(result, null, 2));
@@ -2186,6 +2204,111 @@ async function main() {
         if (result.ok) console.log(JSON.stringify(result, null, 2));
         else { console.error(result.error); process.exit(1); }
         break;
+
+      case 'fill-knowledge':
+        result = await send(socketPath, 'fill-knowledge', {});
+        if (result.ok) console.log(JSON.stringify(result, null, 2));
+        else { console.error(result.error); process.exit(1); }
+        break;
+
+      case 'analyze-domain': {
+        if (!argv[1]) { console.error('Usage: mac10 analyze-domain <domain>'); process.exit(1); }
+        result = await send(socketPath, 'analyze-domain', { domain: argv[1] });
+        if (result.ok) console.log(JSON.stringify(result, null, 2));
+        else { console.error(result.error); process.exit(1); }
+        break;
+      }
+      case 'domain-analysis': {
+        if (!argv[1]) { console.error('Usage: mac10 domain-analysis <id>'); process.exit(1); }
+        result = await send(socketPath, 'domain-analysis', { id: Number(argv[1]) });
+        if (result.ok) console.log(JSON.stringify(result, null, 2));
+        else { console.error(result.error); process.exit(1); }
+        break;
+      }
+      case 'domain-analyses': {
+        const daArgs = {};
+        for (let di = 1; di < argv.length; di++) {
+          if (argv[di] === '--domain' && argv[di + 1]) daArgs.domain = argv[++di];
+          else if (argv[di] === '--status' && argv[di + 1]) daArgs.status = argv[++di];
+          else if (argv[di] === '--limit' && argv[di + 1]) daArgs.limit = Number(argv[++di]);
+        }
+        result = await send(socketPath, 'domain-analyses', daArgs);
+        if (result.ok) console.log(JSON.stringify(result, null, 2));
+        else { console.error(result.error); process.exit(1); }
+        break;
+      }
+      case 'approve-domain': {
+        if (!argv[1]) { console.error('Usage: mac10 approve-domain <id> [feedback]'); process.exit(1); }
+        result = await send(socketPath, 'approve-domain', { id: Number(argv[1]), feedback: argv.slice(2).join(' ') || null });
+        if (result.ok) console.log(JSON.stringify(result, null, 2));
+        else { console.error(result.error); process.exit(1); }
+        break;
+      }
+      case 'reject-domain': {
+        if (!argv[1]) { console.error('Usage: mac10 reject-domain <id> [feedback]'); process.exit(1); }
+        result = await send(socketPath, 'reject-domain', { id: Number(argv[1]), feedback: argv.slice(2).join(' ') || null });
+        if (result.ok) console.log(JSON.stringify(result, null, 2));
+        else { console.error(result.error); process.exit(1); }
+        break;
+      }
+      case 'submit-domain-draft': {
+        if (!argv[1]) { console.error('Usage: mac10 submit-domain-draft <id> <review_sheet> [draft_payload] [analyzed_files]'); process.exit(1); }
+        result = await send(socketPath, 'submit-domain-draft', { id: Number(argv[1]), review_sheet: argv[2] || '', draft_payload: argv[3] || '', analyzed_files: argv[4] || '[]' });
+        if (result.ok) console.log(JSON.stringify(result, null, 2));
+        else { console.error(result.error); process.exit(1); }
+        break;
+      }
+      case 'create-research-topic': {
+        if (!argv[1] || !argv[2]) { console.error('Usage: mac10 create-research-topic <title> <description> [--category X] [--tags JSON]'); process.exit(1); }
+        const crtArgs = { title: argv[1], description: argv[2] };
+        for (let ci = 3; ci < argv.length; ci++) {
+          if (argv[ci] === '--category' && argv[ci + 1]) crtArgs.category = argv[++ci];
+          else if (argv[ci] === '--discovery-source' && argv[ci + 1]) crtArgs.discovery_source = argv[++ci];
+          else if (argv[ci] === '--loop-id' && argv[ci + 1]) crtArgs.loop_id = Number(argv[++ci]);
+          else if (argv[ci] === '--tags' && argv[ci + 1]) crtArgs.tags = argv[++ci];
+        }
+        result = await send(socketPath, 'create-research-topic', crtArgs);
+        if (result.ok) console.log(JSON.stringify(result, null, 2));
+        else { console.error(result.error); process.exit(1); }
+        break;
+      }
+      case 'research-topic': {
+        if (!argv[1]) { console.error('Usage: mac10 research-topic <id>'); process.exit(1); }
+        result = await send(socketPath, 'research-topic', { id: Number(argv[1]) });
+        if (result.ok) console.log(JSON.stringify(result, null, 2));
+        else { console.error(result.error); process.exit(1); }
+        break;
+      }
+      case 'research-topics': {
+        const rtArgs = {};
+        for (let ri = 1; ri < argv.length; ri++) {
+          if (argv[ri] === '--status' && argv[ri + 1]) rtArgs.review_status = argv[++ri];
+          else if (argv[ri] === '--category' && argv[ri + 1]) rtArgs.category = argv[++ri];
+          else if (argv[ri] === '--loop-id' && argv[ri + 1]) rtArgs.loop_id = Number(argv[++ri]);
+          else if (argv[ri] === '--limit' && argv[ri + 1]) rtArgs.limit = Number(argv[++ri]);
+        }
+        result = await send(socketPath, 'research-topics', rtArgs);
+        if (result.ok) console.log(JSON.stringify(result, null, 2));
+        else { console.error(result.error); process.exit(1); }
+        break;
+      }
+      case 'review-research-topic': {
+        if (!argv[1] || !argv[2]) { console.error('Usage: mac10 review-research-topic <id> <approved|held|rejected> [notes]'); process.exit(1); }
+        result = await send(socketPath, 'review-research-topic', { id: Number(argv[1]), review_status: argv[2], notes: argv.slice(3).join(' ') || null });
+        if (result.ok) console.log(JSON.stringify(result, null, 2));
+        else { console.error(result.error); process.exit(1); }
+        break;
+      }
+      case 'pending-reviews': {
+        const prArgs = {};
+        for (let pi = 1; pi < argv.length; pi++) {
+          if (argv[pi] === '--limit' && argv[pi + 1]) prArgs.limit = Number(argv[++pi]);
+        }
+        result = await send(socketPath, 'pending-reviews', prArgs);
+        if (result.ok) console.log(JSON.stringify(result, null, 2));
+        else { console.error(result.error); process.exit(1); }
+        break;
+      }
 
       default:
         console.error(`Unknown command: ${cmd}`);

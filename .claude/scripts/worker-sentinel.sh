@@ -6,13 +6,27 @@ export PATH="$HOME/bin:$HOME/.local/bin:$PATH"
 
 WORKER_ID="${1:?Usage: worker-sentinel.sh <worker_id> <project_dir>}"
 PROJECT_DIR="${2:?Usage: worker-sentinel.sh <worker_id> <project_dir>}"
-WORKTREE="$PROJECT_DIR/.worktrees/wt-$WORKER_ID"
+
+# In sandbox/microVM mode, /workspace IS the worktree (volume-mounted directly).
+if [ "${MAC10_SANDBOX:-}" = "1" ]; then
+  WORKTREE="$PROJECT_DIR"
+else
+  WORKTREE="$PROJECT_DIR/.worktrees/wt-$WORKER_ID"
+fi
 
 if [ ! -d "$WORKTREE" ]; then
   echo "[sentinel-$WORKER_ID] ERROR: Worktree not found: $WORKTREE" >&2
   exit 1
 fi
 cd "$WORKTREE"
+
+# Start Xvfb virtual display for headless Chromium (sandbox/Docker only)
+XVFB_PID=""
+if [ -n "${DISPLAY:-}" ] && command -v Xvfb &>/dev/null; then
+  Xvfb "${DISPLAY}" -screen 0 1280x720x24 -ac &>/dev/null &
+  XVFB_PID=$!
+  echo "[sentinel-$WORKER_ID] Xvfb started on ${DISPLAY} (PID: $XVFB_PID)"
+fi
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # shellcheck disable=SC1091
@@ -122,6 +136,7 @@ start_heartbeat_loop() {
 
 cleanup() {
   stop_heartbeat_loop
+  [ -n "${XVFB_PID:-}" ] && kill "$XVFB_PID" 2>/dev/null || true
   echo "[sentinel-$WORKER_ID] Cleaning up..."
   reset_worker_with_context
 }

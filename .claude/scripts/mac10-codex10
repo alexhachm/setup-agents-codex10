@@ -8,5 +8,5 @@ if [ ! -f "$MAC10_BIN" ]; then
   echo "  Has the setup-agents repo moved? Re-run setup.sh to fix." >&2
   exit 1
 fi
-export MAC10_NAMESPACE="codex10"
+export MAC10_NAMESPACE="codex10-setup-agents"
 exec node "$MAC10_BIN" --project "$PROJECT_ROOT" "$@"

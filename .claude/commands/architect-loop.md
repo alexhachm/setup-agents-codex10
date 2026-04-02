@@ -281,6 +281,8 @@ Go to Step 6.
    printf '%s\n' "$create_task_output"
    ```
    Repeat for each subtask; serialize dependencies by passing prior task IDs in `depends_on` (for example `["$task_id_a"]`).
+   For UI/frontend tasks that involve visual changes, add `"needs_sandbox":true` to the task payload JSON.
+   The coordinator will automatically provision a sandboxed environment with browser testing capabilities.
 6. Validate decomposition overlap via coordinator:
    ```bash
    ./.claude/scripts/codex10 check-overlaps <request_id>

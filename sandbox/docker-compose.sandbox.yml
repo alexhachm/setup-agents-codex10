@@ -12,7 +12,7 @@ services:
       - ../:/project:ro
       - coordinator-state:/project/.claude/state
     environment:
-      - MAC10_NAMESPACE=sandbox
+      - MAC10_NAMESPACE=${MAC10_NAMESPACE:-sandbox}
       - MAC10_WORKER_BACKEND=docker
     healthcheck:
       test: ["CMD", "node", "-e", "require('net').connect(3100).on('connect',()=>process.exit(0)).on('error',()=>process.exit(1))"]
@@ -29,9 +29,10 @@ services:
       - ../:/project
     environment:
       - WORKER_ID=1
-      - MAC10_NAMESPACE=sandbox
+      - MAC10_NAMESPACE=${MAC10_NAMESPACE:-sandbox}
       - MAC10_CLI_HOST=coordinator
-      - MAC10_CLI_PORT=31000
+      - MAC10_CLI_PORT=${MAC10_CLI_PORT:-31000}
+      - MAC10_SANDBOX=1
       - DISPLAY=:99
     depends_on:
       coordinator:
@@ -47,9 +48,10 @@ services:
       - ../:/project
     environment:
       - WORKER_ID=2
-      - MAC10_NAMESPACE=sandbox
+      - MAC10_NAMESPACE=${MAC10_NAMESPACE:-sandbox}
       - MAC10_CLI_HOST=coordinator
-      - MAC10_CLI_PORT=31000
+      - MAC10_CLI_PORT=${MAC10_CLI_PORT:-31000}
+      - MAC10_SANDBOX=1
       - DISPLAY=:99
     depends_on:
       coordinator:

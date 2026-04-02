@@ -12,6 +12,17 @@ let microvmManager;
 let db;
 let tmpDir;
 
+// The SANDBOXFILE path that the module will resolve
+const EXPECTED_SANDBOXFILE = path.resolve(__dirname, '../sandbox/Sandboxfile');
+
+// Helper: build msb status table output
+function statusTable(...rows) {
+  const header = 'SANDBOX         STATUS     PIDS            CPU          MEMORY       DISK';
+  const sep = '─'.repeat(80);
+  const dataLines = rows.map(([name, status]) => `${name.padEnd(16)}${status.padEnd(11)}-               -            -            -`);
+  return [header, sep, ...dataLines].join('\n');
+}
+
 function resetModules() {
   // Clear require cache for modules under test
   for (const key of Object.keys(require.cache)) {
@@ -104,10 +115,10 @@ describe('microvm-manager', () => {
   });
 
   describe('listSandboxes', () => {
-    it('parses msb ps output', () => {
+    it('parses msb status table output', () => {
       execFileSyncMock = mock.method(childProcess, 'execFileSync', (cmd, args) => {
-        if (cmd === 'msb' && args[0] === 'ps') {
-          return 'worker-1 running\nworker-2 running\nloop-1 running\n';
+        if (cmd === 'msb' && args[0] === 'status' && args[1] === '-f') {
+          return statusTable(['worker-1', 'RUNNING'], ['worker-2', 'RUNNING'], ['loop-1', 'RUNNING']);
         }
         return '';
       });
@@ -115,10 +126,10 @@ describe('microvm-manager', () => {
       const sandboxes = microvmManager.listSandboxes();
       assert.strictEqual(sandboxes.length, 3);
       assert.strictEqual(sandboxes[0].name, 'worker-1');
-      assert.strictEqual(sandboxes[0].status, 'running');
+      assert.strictEqual(sandboxes[0].status, 'RUNNING');
     });
 
-    it('returns empty array when msb ps fails', () => {
+    it('returns empty array when msb status fails', () => {
       execFileSyncMock = mock.method(childProcess, 'execFileSync', () => {
         throw new Error('not running');
       });
@@ -128,11 +139,27 @@ describe('microvm-manager', () => {
 
     it('returns empty array when no sandboxes exist', () => {
       execFileSyncMock = mock.method(childProcess, 'execFileSync', (cmd, args) => {
-        if (cmd === 'msb' && args[0] === 'ps') return '';
+        if (cmd === 'msb' && args[0] === 'status') return '';
         return '';
       });
       microvmManager = require('../src/microvm-manager');
       assert.deepStrictEqual(microvmManager.listSandboxes(), []);
+    });
+  });
+
+  describe('stopSandbox', () => {
+    it('calls msb down with sandboxfile', () => {
+      execFileSyncMock = mock.method(childProcess, 'execFileSync', (cmd, args) => {
+        if (cmd === 'msb') {
+          assert.strictEqual(args[0], 'down');
+          assert.strictEqual(args[1], 'worker-1');
+          assert.strictEqual(args[2], '-f');
+          // args[3] is the SANDBOXFILE path
+        }
+        return '';
+      });
+      microvmManager = require('../src/microvm-manager');
+      microvmManager.stopSandbox('worker-1');
     });
   });
 
@@ -152,7 +179,9 @@ describe('microvm-manager', () => {
       execFileSyncMock = mock.method(childProcess, 'execFileSync', (cmd, args) => {
         if (cmd === 'msb' && args[0] === '--version') return 'msb 0.3.4\n';
         if (cmd === 'msb' && args[0] === 'server') return 'running\n';
-        if (cmd === 'msb' && args[0] === 'ps') return 'worker-1 running\nworker-2 stopped\nloop-1 running\n';
+        if (cmd === 'msb' && args[0] === 'status') {
+          return statusTable(['worker-1', 'RUNNING'], ['worker-2', 'STOPPED'], ['loop-1', 'RUNNING']);
+        }
         return '';
       });
       microvmManager = require('../src/microvm-manager');

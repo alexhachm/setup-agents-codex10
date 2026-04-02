@@ -1,57 +1,51 @@
 # Allocation Learnings
+<!-- Updated 2026-04-01T15:21:00Z by Master-3 -->
 
-Owned by Master-3 (Allocator). Updated during pre-reset distillation.
-Budget: ~500 tokens max.
+## Worker Performance
+- All 4 workers operate in **coordinator** and **coordinator-routing** domains
+- worker-1: coordinator-routing domain, idle this session (no new tasks arrived)
+- worker-2: coordinator-routing domain, idle this session (no new tasks arrived)
+- worker-3: not present in this session
+- worker-4: not present in this session
 
-## Domain-Worker Pairings
+## Task Duration Actuals
+- Overlay injection / gap detection retries: ~2-5 min per task
+- FIX tasks (merge remediation): ~3-8 min
+- Merge conflict resolution tasks: 5-15+ min (Claude Code needs time to load context)
+- Context budget: ~50 per task assigned, ~10 per status check
+- worker_idle_orphan recovery tasks: 1 reassignment typical, works on 2nd try
+- Idle sessions (no tasks): context budget ~50/session; ~120 cycles at ~10s each = ~20 min, context_budget ~1240 (low)
+- Fully idle sessions: reset at ~20 min regardless of budget — budget stays low when no tasks arrive
 
-All 4 workers consistently operate in the **coordinator** domain. No frontend workers active.
-- Tasks involving coordinator/src/, coordinator/tests/ have all gone to any available worker.
-
-## Worker Specializations (from observed task affinity)
-
-- worker-1: coordinator domain fixes, merge remediation
-- worker-2: coordinator domain, infra tasks (setup.sh, scripts), fast completion
-- worker-3: coordinator domain, handles merge/close PR tasks (fix tasks for stale PRs)
-- worker-4: coordinator domain, general tasks
-
-## Allocation Patterns
+## Allocation Decisions
 
 ### What works well
-- **Drain-and-fill**: When all workers idle after restart, assign greedily.
-- **Fix task affinity**: Rule 4 preferred but not mandatory — any idle worker can handle gh CLI workarounds.
-- **Stale PR cleanup**: When PR is "not mergeable", fix task closes PR. Merge entry auto-purges at 600 min.
-- **Direct integration**: After fix task completes, call `integrate <request_id>` immediately.
+- **Drain-and-fill**: When all workers idle after restart, assign greedily
+- **Fix task affinity**: Rule 4 preferred; any idle worker works for merge-fix tasks
+- **Sentinel restart**: When sentinels die, `cd PROJECT_ROOT && bash .claude/scripts/worker-sentinel.sh N PROJECT_ROOT` with absolute paths
+- **Direct file verification**: Always check if file already exists on main before worrying about merge
+- **Stale FIX task bypass**: If request is already [completed], skip creating fix task for task_failed events on that request
+- **ready-tasks vs status discrepancy**: `status` may show task as [ready] while `ready-tasks` returns empty (max reassignment count reached). In this case, assign manually with `assign-task <id> <worker>` — it still works
+- **Idle session monitoring**: Condensed bash for-loop with 10s timeout blocks is efficient; only print every 5 cycles to reduce noise
+- **Coordinator running in tmux foreground**: When coordinator crashes, run it in the `codex10:coordinator` tmux window (not background) to capture crash output
+- **jq not available in bash**: Use node/python or the codex10 CLI for JSON manipulation; do not rely on jq in bash scripts
+- **Idle reset**: Even idle sessions should reset at 20m — but context_budget stays low (~50 at 98 cycles) so reset is cheap
+- **Fully idle sessions (no new tasks)**: context_budget stays very low; ~120 cycles at ~10s = ~20 min session. All requests completed — allocator correctly monitored and detected no work.
+- **Batched idle cycles in bash loop**: Running condensed bash loops with 10s inbox blocks, break on activity, print every 5 cycles reduces context noise significantly
+- **Health update via node**: `jq` not available in bash; use `node -e "..."` to update JSON health files
+- **research_batch_available messages**: These are for the research pipeline, not task allocation. Verify research sentinel is running and ignore these in allocator flow.
+- **Idle loop grep fix**: `ready-tasks` output "No ready tasks." contains the word "task" — use `grep -E "^\s*#[0-9]+|priority:"` to detect actual task lines, not "No ready tasks." string
+- **check-completion on completed requests**: Shows failed tasks from old retry cycles — does NOT mean work is pending. Cross-check with `status` (shows request-level status) and `merge-status` (shows actual merge state). If both show completed, ignore task-level failures from earlier retries.
+- **No task-details command**: Use `status`, `log`, `history <request_id>`, and `merge-status` to investigate task state. There is no `task-details` subcommand.
+- **Source revision drift is non-blocking**: `status` may warn "head differs from origin/main or worktree is dirty" — this is informational only when all requests are completed and no tasks are active. Do not act on drift unless a new request arrives that needs fresh main.
 
-### Systemic Issues
-- **gh CLI ENOENT**: Merger pipeline requires `gh` CLI but not in PATH initially. Workers must use direct git commands.
-- **Stale merge entries**: After direct git merge, PR shows "not mergeable". Merge entry stays in [conflict] — NON-RETRIABLE. Auto-purge at 600 min.
-- **Coordinator crashes**: Restart with Node v22 via nvm.
-- **merge_failed spam**: Don't call `integrate` multiple times for same stuck request.
-
-## Recently Completed
-- task #17 (FIX stale PR #309) → worker-3 — merged as PR #310
-- task #18 (setup.sh comment) → worker-2 — merged as PR #315
-- req-deb92704 integrated; stale merge #2 in [conflict] — do not re-integrate
-- req-8a728d8f: completed (Master-2 handled directly)
-- req-a40e1bc3: still [pending] — "Add comment to vite.config.js" (vite.config.js may not exist)
-- Sessions since last task: 29 full idle cycles; system fully idle throughout
-
-## Transient Failures
-- "Worker tmux window destroyed during coordinator restart" → RETRIABLE. Create new task.
-- "GraphQL: Pull Request is not mergeable" → NON-RETRIABLE. Code already on main. Create task to close stale PR.
-- "merge_queue:duplicate_pr_owned_by_other_request" → NON-RETRIABLE. Skip.
-- Coordinator restart: Use Node v22 with nvm.
-
-### Gotchas
-- **agent-health.json corruption**: Always write JSON directly with Python3. Strip non-JSON prefix with regex before parsing.
-- **jq not available**: Use Python3 for all JSON reads/writes.
-- **completed_task state**: Workers need 6-30s to transition to idle.
-- **Don't double-integrate**: Calling integrate twice for a stuck request causes new failing merge entries.
-- **merge_failed inbox flood**: Process once, ignore duplicates.
-- **Merge entry #2**: branch agent-2 / PR #309 stuck in [conflict]. Code is on main — no fix tasks. Auto-purge confirmed non-functional (well past 600m threshold). Code is on main — no action needed.
-- **req-a40e1bc3 [pending]**: Long-stalled. vite.config.js likely doesn't exist. Awaiting Master-2 triage only.
-- **Merge entry #2 persists**: Auto-purge timer is non-functional (confirmed across 29 sessions). Will likely persist until coordinator restart.
-- **Session count**: 29 consecutive idle sessions (session 28 ended). System fully idle awaiting Master-2 work.
-
-Last updated: 2026-03-25 06:55
+### CRITICAL: MAC10_WORKER_BACKEND=sandbox breaks workers
+- **Root cause**: If coordinator is started with `MAC10_WORKER_BACKEND=sandbox`, the msb sandbox mounts only the worktree (`wt-N:/workspace`) — NOT the project root
+- The sentinel is at `<project_root>/.claude/scripts/worker-sentinel.sh`
+- Inside the sandbox, this path doesnt exist → sentinel exits immediately → `msb_sandbox_dead`
+- This causes `worker_liveness_stale` → all tasks fail
+- **Symptom**: Log shows `worker_spawned_msb` followed by `worker_death: msb_sandbox_dead` within 5s
+- **Detection**: `cat /proc/<pid>/environ | tr 0 n | grep BACKEND`
+- **Fix**: Kill coordinator, restart WITHOUT `MAC10_WORKER_BACKEND=sandbox` (tmux is default)
+  `MAC10_NAMESPACE=codex10 MAC10_FORCE_PROVIDER=claude MAC10_AGENT_PROVIDER=claude MAC10_CLI_HOST=0.0.0.0 MAC10_WORKER_BACKEND=tmux node coordinator/src/index.js <project_root> >> .claude/state/codex10.coordinator.log 2>&1 &`
+  Wait 5 seconds then ping to verify: `node coordinator/bin/mac10 --project PROJECT_ROOT ping`

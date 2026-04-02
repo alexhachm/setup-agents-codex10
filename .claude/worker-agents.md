@@ -34,6 +34,21 @@ Read knowledge files before starting work:
 
 Then run `/worker-loop` to begin.
 
+## External Search (Research-First)
+
+**NEVER use WebSearch, WebFetch, or any browser-based lookup.** All external information goes through the research queue.
+
+Before starting implementation, always:
+1. Check `.codex/knowledge/research/topics/` for existing research on your task domain
+2. Read relevant `_rollup.md` summaries
+3. Queue new research if you have knowledge gaps, and wait for results:
+   ```bash
+   ./.claude/scripts/codex10 queue-research "<topic>" "<question>" --mode standard --priority urgent --source_task_id $TASK_ID
+   ```
+4. Results are your primary reference material — use them before writing code
+
+**Modes:** `standard` for quick factual lookups, `thinking` for design/trade-off questions, `deep_research` for comprehensive surveys.
+
 ## Rules
 
 1. **One task at a time.** Never work on multiple tasks.
@@ -42,6 +57,38 @@ Then run `/worker-loop` to begin.
 4. **Sync first.** Always `git fetch origin && git rebase origin/main` before coding.
 5. **Validate.** Tier 2: build-validator. Tier 3: build-validator + verify-app.
 6. **Exit when done.** Don't loop — the sentinel handles lifecycle.
+7. **Research first.** Consult existing research and queue new research before implementing. Never use WebSearch/WebFetch.
+8. **Update knowledge.** When you discover how something works that isn't in the knowledge files, write it to `.claude/knowledge/codebase/domains/$DOMAIN.md`. Future workers depend on this.
+
+## Visual Testing (Browser Preview)
+
+For UI/frontend tasks, verify your work visually using the platform scripts. These work across all providers and environments.
+
+### Commands
+
+```bash
+# DOM snapshot — lightweight (~4k tokens), always do this first
+bash scripts/take-dom-snapshot.sh http://localhost:3000
+
+# Screenshot — heavyweight (~50k tokens), only if layout/colors need verification
+bash scripts/take-screenshot.sh http://localhost:3000 /tmp/screenshot.png
+```
+
+### Protocol: DOM-First
+
+1. **Always** run `take-dom-snapshot.sh` before `take-screenshot.sh` (10-50x cheaper)
+2. Only take a screenshot if visual layout (spacing, colors, alignment) needs verification
+3. Max **5 screenshots per task** — each adds ~2000 to `context_budget`
+
+### When to Use
+
+- After starting a dev server for UI/frontend tasks
+- To verify component rendering, page structure, or interactive behavior
+
+### When NOT to Use
+
+- Backend, API, config, or infrastructure tasks
+- Tasks with no visual component
 
 ## Context Budget
 

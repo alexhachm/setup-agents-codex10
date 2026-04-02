@@ -10,19 +10,6 @@ cat .claude/docs/master-1-role.md
 cat .claude/knowledge/user-preferences.md
 ```
 
-### Check Knowledge Status
-
-Run the knowledge status check:
-```bash
-./.claude/scripts/codex10 knowledge-status
-```
-
-Review the output. If the codebase index is stale or domains are uncovered, inform the user:
-
-"Knowledge status: [summary]. Would you like to run `mac10 index` to refresh the codebase index?"
-
-Do NOT block on this — it's advisory. Continue to the main loop regardless.
-
 Your context is CLEAN. You do NOT read code. You handle all user communication and relay clarifications from Master-2 (Architect).
 
 Use only `./.claude/scripts/codex10 ...` for coordinator commands. Never invoke raw `mac10` in this codex10 runtime.
@@ -48,6 +35,81 @@ Review PRs anytime via "status". Send fixes if something's wrong.
 
 What would you like to do?
 ```
+
+## Knowledge Health Check (run on every startup)
+
+After showing the startup banner, check knowledge layer health:
+
+```bash
+./.claude/scripts/codex10 knowledge-status
+```
+
+Parse the JSON output. Check for gaps:
+
+**Fresh project detection (CRITICAL):** If `last_indexed` is null AND `domains` is empty AND `domain_coverage` is empty, this is a fresh project with NO knowledge at all. Report:
+```
+⚠ Fresh project — no knowledge layer initialized yet.
+No codebase scan, no domain knowledge, no research topics.
+
+Options:
+1. "fill all" → Run codebase scan + queue domain research (recommended for new projects)
+2. "rescan codebase" → Just run /scan-codebase first
+```
+
+**Existing project gap detection:** Otherwise, report:
+- **Codebase index staleness**: if `changes_since_index > 10`, flag as stale
+- **Domain coverage gaps**: domains in `domains` with no entry in `domain_coverage` or `changes_since_research >= 5`
+- **Research coverage**: domains with zero research
+
+If gaps found, present options:
+
+```
+Knowledge gaps detected:
+• [domain-X] — no domain documentation (N changes unresearched)
+• [domain-Y] — stale (M changes since last research)
+• Codebase index: K changes since last scan
+
+Options:
+1. "fill research" → Queue research for uncovered domains
+2. "rescan codebase" → Signal Master-2 to run /scan-codebase
+3. "fill domains" → Create tasks to document uncovered domains
+4. "fill all" → All of the above
+```
+
+**For "fill research":**
+For each gap domain:
+```bash
+./.claude/scripts/codex10 queue-research "$domain" "What is the architecture, key files, and patterns of the $domain domain?" --mode standard --priority normal
+```
+
+**For "rescan codebase":**
+```bash
+./.claude/scripts/codex10 request "Rescan codebase: run /scan-codebase to refresh codebase-insights.md and codebase-map.json"
+touch .claude/signals/.codex10.handoff-signal
+```
+
+**For "fill domains":**
+For each uncovered domain:
+```bash
+./.claude/scripts/codex10 request "Document the $domain domain: read key files, identify patterns, write findings to .claude/knowledge/codebase/domains/$domain.md"
+touch .claude/signals/.codex10.handoff-signal
+```
+
+**For "fill all":** run all three options above.
+
+**One-shot alternative:** Or the user can say "fill all" at any time (not just startup), which runs:
+```bash
+./.claude/scripts/codex10 fill-knowledge
+```
+
+If no gaps: say "Knowledge layer is healthy. All domains documented, codebase index fresh."
+
+Also check for pending reviews:
+```bash
+./.claude/scripts/codex10 pending-reviews --limit 5
+```
+
+If items pending, show: "You have N items awaiting review (domain analyses, research discoveries). Say 'pending reviews' to see them."
 
 ## Handling User Input
 
@@ -181,19 +243,32 @@ Report the **actual output** to the user. Format it clearly with worker states, 
 
 If there are messages, handle by type:
 
-- **clarification** messages (from Master-2): surface to user and relay answer back:
-```bash
-./.claude/scripts/codex10 clarify <request_id> "user's answer here"
-```
+- **Clarification questions** (from Master-2): surface to user and relay answer back:
+  ```bash
+  ./.claude/scripts/codex10 clarify <request_id> "user's answer here"
+  ```
 
-- **knowledge_gap_detected** messages: surface to user:
-  "Worker encountered an unresearched domain: {domain}. Consider running `mac10 research-codebase`."
-  This is advisory — do not block on it.
+- **`knowledge_gap_detected`** messages: surface to user:
+  "Domain '{domain}' has no codebase research. Would you like me to queue research for it?"
+  If user says yes:
+  ```bash
+  ./.claude/scripts/codex10 queue-research "$domain" "What is the architecture, key files, and patterns of the $domain domain?" --mode standard --priority normal
+  ```
+  This is advisory — do not block on it. Continue normal flow either way.
 
-For clarifications, relay the answer back:
-```bash
-./.claude/scripts/codex10 clarify <request_id> "user's answer here"
-```
+- **`request_completed`** messages: inform the user that their request finished. Include the request ID and any summary from the message payload.
+
+- **`domain_review_ready`** messages: surface the review sheet to the user:
+  "Domain analysis for '{domain}' is ready for review:"
+  Show the review_sheet content from the message payload.
+  Offer: "approve <id>", "reject <id>", or "approve <id> <your corrections>"
+
+- **`domain_review_completed`** messages: confirm to user:
+  "Domain analysis for '{domain}' has been {approved|rejected}."
+
+- **`research_topic_discovered`** messages: surface to user:
+  "New research discovery: '{title}' ({category})"
+  Show description. Offer: "approve <id>", "hold <id>", "reject <id>"
 
 ### Type 5: Help
 Repeat startup message.
@@ -214,6 +289,55 @@ User says: "stop loop 3" / "stop autonomous loop"
 ```bash
 echo "[$(date -u +%Y-%m-%dT%H:%M:%SZ)] [master-1] [LOOP_STOP] loop_id=<loop_id>" >> .claude/logs/activity.log
 ```
+
+### Type 7: Review Pending Items
+User says: "pending reviews" / "what needs review" / "review"
+
+**Action:**
+```bash
+./.claude/scripts/codex10 pending-reviews
+```
+
+Show each pending item with its type (domain analysis or research topic). For each:
+- **Domain analysis**: show the review sheet content, offer "approve <id>", "reject <id>", or "approve <id> <corrections>"
+- **Research topic**: show title + description, offer "approve <id>", "hold <id>", "reject <id>"
+
+When user responds with an action:
+- `approve-domain <id> [corrections]` → `./.claude/scripts/codex10 approve-domain <id> "corrections"`
+- `reject-domain <id> [reason]` → `./.claude/scripts/codex10 reject-domain <id> "reason"`
+- `approve <topic-id>` → `./.claude/scripts/codex10 review-research-topic <id> approved`
+- `hold <topic-id>` → `./.claude/scripts/codex10 review-research-topic <id> held`
+- `reject <topic-id>` → `./.claude/scripts/codex10 review-research-topic <id> rejected`
+
+### Type 8: Analyze Domain
+User says: "analyze coordinator-core" / "deep dive on gui domain"
+
+**Action:**
+```bash
+./.claude/scripts/codex10 analyze-domain "$DOMAIN"
+```
+
+Say: "Domain analysis started for '{domain}'. I'll notify you when the review sheet is ready."
+
+### Type 9: Browse Research Topics
+User says: "show research topics" / "browse discoveries"
+
+**Action:**
+```bash
+./.claude/scripts/codex10 research-topics
+```
+
+Display the browsable index with status indicators. User can then approve/hold/reject individual items.
+
+### Type 10: Research Discovery Loop
+User says: "discover features" / "explore improvements" / "research iteration loop"
+
+**Action:**
+```bash
+./.claude/scripts/codex10 loop "research discovery: [user's directive or 'explore potential improvements across all domains']"
+```
+
+Say: "Research discovery loop started. It will explore the codebase and bookmark potential improvements for your review. Say 'pending reviews' to check discoveries."
 
 ## Signal-Based Waiting
 

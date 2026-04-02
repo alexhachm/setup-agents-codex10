@@ -972,7 +972,7 @@ describe('Non-tmux worker liveness', () => {
 });
 
 describe('Stale integration completion gating', () => {
-  it('does not complete request when all merges are merged but a sibling task is still assigned', () => {
+  it('completes request when all merges are merged and at least one task completed, even if sibling is still assigned', () => {
     const requestId = db.createRequest('Gated integration — sibling in progress');
     db.updateRequest(requestId, { status: 'integrating' });
 
@@ -988,7 +988,7 @@ describe('Stale integration completion gating', () => {
     const siblingTaskId = db.createTask({
       request_id: requestId,
       subject: 'Sibling task',
-      description: 'Still running — should gate completion',
+      description: 'Still running — no longer gates completion when merges succeeded',
       domain: 'coordinator-routing',
       tier: 2,
     });
@@ -1009,6 +1009,51 @@ describe('Stale integration completion gating', () => {
     tick(tmpDir);
 
     const request = db.getRequest(requestId);
+    assert.strictEqual(request.status, 'completed', `Expected completed but got: ${request.status}`);
+
+    const completionMail = db.checkMail('master-1', false).filter(
+      (mail) => mail.type === 'request_completed' && mail.payload.request_id === requestId
+    );
+    assert.ok(completionMail.length >= 1, 'Should send request_completed mail when merges succeeded and at least one task completed');
+  });
+
+  it('gates completion when all merges are merged but no tasks have completed', () => {
+    const requestId = db.createRequest('Gated integration — no completed tasks');
+    db.updateRequest(requestId, { status: 'integrating' });
+
+    const task1Id = db.createTask({
+      request_id: requestId,
+      subject: 'Failed retry task',
+      description: 'Old retry attempt that failed',
+      domain: 'coordinator-routing',
+      tier: 2,
+    });
+    db.updateTask(task1Id, { status: 'failed' });
+
+    const task2Id = db.createTask({
+      request_id: requestId,
+      subject: 'Another failed retry task',
+      description: 'Another old retry attempt that failed',
+      domain: 'coordinator-routing',
+      tier: 2,
+    });
+    db.updateTask(task2Id, { status: 'failed' });
+
+    const enqueueResult = db.enqueueMerge({
+      request_id: requestId,
+      task_id: task1Id,
+      pr_url: 'https://example.com/pr/all-failed',
+      branch: 'agent-3/all-failed-test',
+      priority: 0,
+    });
+    db.updateMerge(enqueueResult.lastInsertRowid, {
+      status: 'merged',
+      merged_at: new Date().toISOString(),
+    });
+
+    tick(tmpDir);
+
+    const request = db.getRequest(requestId);
     assert.ok(
       ['integrating', 'in_progress'].includes(request.status),
       `Expected integrating/in_progress but got: ${request.status}`
@@ -1017,43 +1062,46 @@ describe('Stale integration completion gating', () => {
     const completionMail = db.checkMail('master-1', false).filter(
       (mail) => mail.type === 'request_completed' && mail.payload.request_id === requestId
     );
-    assert.strictEqual(completionMail.length, 0, 'Should not send request_completed mail while sibling task is non-terminal');
+    assert.strictEqual(completionMail.length, 0, 'Should not send request_completed mail when no tasks completed');
 
     const gatedLog = db.getLog(50, 'coordinator')
       .filter((entry) => entry.action === 'stale_integration_gated')
       .map((entry) => JSON.parse(entry.details))
       .find((entry) => entry.request_id === requestId);
     assert.ok(gatedLog, 'Should log stale_integration_gated');
-    assert.strictEqual(gatedLog.reason, 'non_terminal_tasks');
+    assert.strictEqual(gatedLog.reason, 'no_completed_tasks');
   });
 
-  it('completes request only after the final sibling task reaches terminal success', () => {
-    const requestId = db.createRequest('Gated integration — completes after sibling done');
+  it('completes request when mixed results (some completed, some failed) and all merges merged', () => {
+    const requestId = db.createRequest('Mixed-result integration — completes with some failures');
     db.updateRequest(requestId, { status: 'integrating' });
 
-    const mergeTaskId = db.createTask({
+    const completedTaskId = db.createTask({
       request_id: requestId,
-      subject: 'Merge task',
+      subject: 'Completed task',
       description: 'PR submitted and merged',
       domain: 'coordinator-routing',
       tier: 2,
     });
-    db.updateTask(mergeTaskId, { status: 'completed' });
+    db.updateTask(completedTaskId, { status: 'completed' });
 
-    const siblingTaskId = db.createTask({
-      request_id: requestId,
-      subject: 'Sibling task',
-      description: 'In progress — gates completion',
-      domain: 'coordinator-routing',
-      tier: 2,
-    });
-    db.updateTask(siblingTaskId, { status: 'in_progress' });
+    // Simulate old retry tasks that failed
+    for (let i = 0; i < 3; i++) {
+      const failedTaskId = db.createTask({
+        request_id: requestId,
+        subject: `Failed retry task ${i + 1}`,
+        description: 'Old retry attempt that failed',
+        domain: 'coordinator-routing',
+        tier: 2,
+      });
+      db.updateTask(failedTaskId, { status: 'failed' });
+    }
 
     const enqueueResult = db.enqueueMerge({
       request_id: requestId,
-      task_id: mergeTaskId,
-      pr_url: 'https://example.com/pr/gated-sibling',
-      branch: 'agent-3/gated-sibling-test',
+      task_id: completedTaskId,
+      pr_url: 'https://example.com/pr/mixed-result',
+      branch: 'agent-3/mixed-result-test',
       priority: 0,
     });
     db.updateMerge(enqueueResult.lastInsertRowid, {
@@ -1061,26 +1109,15 @@ describe('Stale integration completion gating', () => {
       merged_at: new Date().toISOString(),
     });
 
-    // First tick: sibling still in_progress → should not complete
     tick(tmpDir);
-    let request = db.getRequest(requestId);
-    assert.ok(
-      ['integrating', 'in_progress'].includes(request.status),
-      `Expected integrating/in_progress on first tick but got: ${request.status}`
-    );
 
-    // Sibling task completes
-    db.updateTask(siblingTaskId, { status: 'completed' });
-
-    // Second tick: all tasks terminal → should now complete
-    tick(tmpDir);
-    request = db.getRequest(requestId);
-    assert.strictEqual(request.status, 'completed');
+    const request = db.getRequest(requestId);
+    assert.strictEqual(request.status, 'completed', `Expected completed but got: ${request.status}`);
 
     const completionMail = db.checkMail('master-1', false).filter(
       (mail) => mail.type === 'request_completed' && mail.payload.request_id === requestId
     );
-    assert.ok(completionMail.length >= 1, 'Should send request_completed mail after all tasks done');
+    assert.ok(completionMail.length >= 1, 'Should send request_completed mail when merges succeeded and at least one task completed');
   });
 });
 

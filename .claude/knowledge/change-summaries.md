@@ -2,6 +2,12 @@
 
 Workers append summaries here after completing each task. Newest entries at the top.
 
+## [25] FIX: merge test-hello.js branch to main via direct git — 2026-03-29
+- Domain: coordinator
+- Files: coordinator/src/test-hello.js (verification only, no changes)
+- What changed: No-op — coordinator/src/test-hello.js with helloWorld() already exists on origin/main. All 581 tests pass with Node v22. origin/agent-2 has no test-hello.js to merge.
+- PR: N/A (goal already achieved)
+
 ## [17] FIX: close stale PR #309 — 2026-03-24
 - Domain: coordinator
 - Files: coordinator/src/test-hello.js (verification only, no changes)
@@ -103,3 +109,15 @@ Workers append summaries here after completing each task. Newest entries at the 
 - Files: setup.sh
 - What changed: Added `# Tested multi-project isolation` comment at line 2 of setup.sh (after shebang)
 - PR: https://github.com/alexhachm/setup-agents-codex10/pull/315
+
+## [23] Retry: Test overlay injection for knowledge layer — 2026-03-29
+- Domain: coordinator-extensions
+- Files: coordinator/src/overlay.js, coordinator/tests/overlay-knowledge.test.js
+- What changed: Verified overlay-knowledge test suite (27/27 pass): base doc injection, task context, domain knowledge, mistakes.md, worker info, validation sections. overlay.js generateOverlay() correctly injects all task-specific context. PR already exists.
+- PR: https://github.com/alexhachm/setup-agents-codex10/pull/317
+
+## [22] Test gap detection — 2026-03-29
+- Domain: newdomain
+- Files: coordinator/src/gap-detection.js, coordinator/tests/gap-detection.test.js
+- What changed: Added detectGaps() utility that finds missing integers in a numeric sequence, with 7 passing tests.
+- PR: https://github.com/alexhachm/setup-agents-codex10/pull/316

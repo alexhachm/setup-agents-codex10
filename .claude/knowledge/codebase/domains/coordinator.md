@@ -1,3 +1,9 @@
+# Coordinator Domain
+- SQLite-backed state machine
+- CLI socket for IPC
+- Workers spawned in tmux sessions
+
+## Legacy Domain Knowledge
 # Coordinator Domain Knowledge
 
 ## Architecture

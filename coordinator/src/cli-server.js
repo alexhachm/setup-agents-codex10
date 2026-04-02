@@ -526,6 +526,19 @@ const COMMAND_SCHEMAS = {
   'research-fail':       { required: ['intent_id'], types: { intent_id: 'number', error: 'string' } },
   'research-next':       { required: [], types: {} },
   'research-gaps':       { required: [], types: {} },
+  'research-retry-failed': { required: [], types: { topic: 'string', include_running: 'boolean' } },
+  'fill-knowledge':      { required: [], types: {} },
+  'analyze-domain':        { required: ['domain'], types: { domain: 'string' } },
+  'domain-analysis':       { required: ['id'], types: { id: 'number' } },
+  'domain-analyses':       { required: [], types: { domain: 'string', status: 'string', limit: 'number' } },
+  'approve-domain':        { required: ['id'], types: { id: 'number', feedback: 'string' } },
+  'reject-domain':         { required: ['id'], types: { id: 'number', feedback: 'string' } },
+  'submit-domain-draft':   { required: ['id'], types: { id: 'number', review_sheet: 'string', draft_payload: 'string', analyzed_files: 'string' } },
+  'create-research-topic': { required: ['title', 'description'], types: { title: 'string', description: 'string', category: 'string', discovery_source: 'string', loop_id: 'number', tags: 'string' } },
+  'research-topic':        { required: ['id'], types: { id: 'number' } },
+  'research-topics':       { required: [], types: { review_status: 'string', category: 'string', loop_id: 'number', limit: 'number' } },
+  'review-research-topic': { required: ['id', 'review_status'], types: { id: 'number', review_status: 'string', notes: 'string' } },
+  'pending-reviews':       { required: [], types: { limit: 'number' } },
   'memory-snapshots': {
     required: [],
     types: {
@@ -2313,22 +2326,34 @@ function start(projectDir, handlers) {
   // Derive a stable per-project port from the same hash used for sockets (range 31000-31999)
   const portHash = crypto.createHash('md5').update(`${NAMESPACE}:${projectDir}`).digest('hex');
   const derivedPort = 31000 + (parseInt(portHash.slice(0, 4), 16) % 1000);
-  const tcpPort = parseInt(process.env.MAC10_CLI_PORT) || derivedPort;
+  const baseTcpPort = parseInt(process.env.MAC10_CLI_PORT) || derivedPort;
   const stateDir = path.join(projectDir, '.claude', 'state');
-  tcpServer = net.createServer(connHandler);
-  tcpServer.listen(tcpPort, '127.0.0.1', () => {
-    fs.mkdirSync(stateDir, { recursive: true });
-    fs.writeFileSync(
-      path.join(stateDir, namespacedFile('mac10.tcp.port', `${NAMESPACE}.tcp.port`)),
-      String(tcpPort),
-      'utf8'
-    );
-    console.log(`CLI TCP bridge listening on localhost:${tcpPort}`);
-  });
-  tcpServer.on('error', (e) => {
-    // Port in use — not fatal, Unix socket still works
-    console.warn(`TCP bridge failed (port ${tcpPort}): ${e.message}`);
-  });
+  const tcpHost = process.env.MAC10_CLI_HOST || '127.0.0.1';
+
+  // Retry with port offset if the derived port is already in use (multi-project collision)
+  function tryListenTcp(port, retries) {
+    tcpServer = net.createServer(connHandler);
+    tcpServer.listen(port, tcpHost, () => {
+      fs.mkdirSync(stateDir, { recursive: true });
+      fs.writeFileSync(
+        path.join(stateDir, namespacedFile('mac10.tcp.port', `${NAMESPACE}.tcp.port`)),
+        String(port),
+        'utf8'
+      );
+      console.log(`CLI TCP bridge listening on ${tcpHost}:${port}`);
+    });
+    tcpServer.on('error', (e) => {
+      if (e.code === 'EADDRINUSE' && retries > 0) {
+        console.warn(`TCP port ${port} in use, trying ${port + 1}...`);
+        tcpServer = null;
+        tryListenTcp(port + 1, retries - 1);
+      } else {
+        // Not fatal — Unix socket still works
+        console.warn(`TCP bridge failed (port ${port}): ${e.message}`);
+      }
+    });
+  }
+  tryListenTcp(baseTcpPort, 10);
 
   return server;
 }
@@ -4268,17 +4293,18 @@ function handleCommand(cmd, conn, handlers) {
       }
 
       case 'queue-research': {
-        const queued = db.queueResearch({
-          topic: args.topic,
-          question: args.question,
-          mode: args.mode || 'standard',
+        const result = db.enqueueResearchIntent({
+          intent_type: 'browser_research',
+          intent_payload: JSON.stringify({
+            topic: args.topic,
+            question: args.question,
+            mode: args.mode || 'standard',
+            context: args.context || null,
+          }),
           priority: args.priority || 'normal',
-          context: args.context || null,
-          source_agent: args.source_agent || null,
-          source_task_id: args.source_task_id || null,
+          task_id: args.source_task_id || null,
         });
-        db.log('coordinator', 'research_queued', { id: queued.id, topic: queued.topic });
-        respond(conn, { ok: true, ...queued });
+        respond(conn, { ok: true, id: result.intent.id, created: result.created, deduplicated: result.deduplicated });
         break;
       }
 
@@ -4368,6 +4394,16 @@ function handleCommand(cmd, conn, handlers) {
         const items = db.getResearchQueueItems({ status: 'queued' });
         const topics = [...new Set(items.map(i => i.topic))];
         respond(conn, { ok: true, queued_count: items.length, topics });
+        break;
+      }
+
+      case 'research-retry-failed': {
+        const requeued = db.requeueFailedResearch({
+          topic: args.topic || null,
+          include_running: args.include_running || false,
+        });
+        db.log('coordinator', 'research_retry_failed', requeued);
+        respond(conn, { ok: true, ...requeued });
         break;
       }
 
@@ -4550,7 +4586,13 @@ function handleCommand(cmd, conn, handlers) {
       case 'knowledge-status': {
         const knowledgeMeta = require('./knowledge-metadata');
         const status = knowledgeMeta.getKnowledgeStatus(_projectDir || process.cwd());
-        respond(conn, { ok: true, ...status });
+        const pendingReviews = db.getPendingReviewItems({ limit: 100 });
+        const approvedAnalyses = db.listDomainAnalyses({ status: 'approved' });
+        const analysisCoverage = {};
+        for (const a of approvedAnalyses) {
+          analysisCoverage[a.domain] = { approved_at: a.approved_at, confidence: a.confidence_score };
+        }
+        respond(conn, { ok: true, ...status, pending_reviews_count: pendingReviews.length, domain_analysis_coverage: analysisCoverage });
         break;
       }
       case 'knowledge-increment': {
@@ -4570,6 +4612,196 @@ function handleCommand(cmd, conn, handlers) {
         const knowledgeMeta = require('./knowledge-metadata');
         const meta = knowledgeMeta.updateIndexTimestamp(_projectDir || process.cwd());
         respond(conn, { ok: true, last_indexed: meta.last_indexed });
+        break;
+      }
+
+      // === DOMAIN ANALYSIS commands ===
+
+      case 'analyze-domain': {
+        const fs = require('fs');
+        const path = require('path');
+        const projDir = _projectDir || process.cwd();
+        const mapPath = path.join(projDir, '.claude', 'state', 'codebase-map.json');
+        let mapHash = null;
+        try {
+          const mapContent = fs.readFileSync(mapPath, 'utf8');
+          mapHash = require('crypto').createHash('sha256').update(mapContent).digest('hex').slice(0, 16);
+        } catch {}
+        const analysis = db.createDomainAnalysis(args.domain, mapHash);
+        db.sendMail('architect', 'domain_analysis_requested', { analysis_id: analysis.id, domain: args.domain });
+        respond(conn, { ok: true, id: analysis.id, domain: args.domain });
+        break;
+      }
+
+      case 'domain-analysis': {
+        const analysis = db.getDomainAnalysis(args.id);
+        if (!analysis) { respond(conn, { ok: false, error: 'Domain analysis not found' }); break; }
+        respond(conn, { ok: true, analysis });
+        break;
+      }
+
+      case 'domain-analyses': {
+        const items = db.listDomainAnalyses({ domain: args.domain, status: args.status, limit: args.limit || 50 });
+        respond(conn, { ok: true, items, count: items.length });
+        break;
+      }
+
+      case 'submit-domain-draft': {
+        const updated = db.updateDomainAnalysis(args.id, {
+          status: 'review_pending',
+          draft_payload: args.draft_payload,
+          review_sheet: args.review_sheet,
+          analyzed_files: args.analyzed_files,
+        });
+        if (updated) {
+          db.sendMail('master-1', 'domain_review_ready', { analysis_id: args.id, domain: updated.domain, review_sheet: args.review_sheet });
+          db.log('coordinator', 'domain_draft_submitted', { id: args.id, domain: updated.domain });
+        }
+        respond(conn, { ok: true, analysis: updated });
+        break;
+      }
+
+      case 'approve-domain': {
+        const approved = db.approveDomainAnalysis(args.id, args.feedback || null);
+        if (!approved) { respond(conn, { ok: false, error: 'Analysis not in review_pending state' }); break; }
+        const analysis = db.getDomainAnalysis(args.id);
+        // Write final domain doc to disk
+        if (analysis) {
+          const fs = require('fs');
+          const path = require('path');
+          const projDir = _projectDir || process.cwd();
+          const domainDir = path.join(projDir, '.claude', 'knowledge', 'codebase', 'domains');
+          fs.mkdirSync(domainDir, { recursive: true });
+          let content = analysis.draft_payload || '';
+          if (analysis.human_feedback) {
+            content += '\n\n## Human-Confirmed Context\n' + analysis.human_feedback + '\n';
+          }
+          fs.writeFileSync(path.join(domainDir, `${analysis.domain}.md`), content);
+          const knowledgeMeta = require('./knowledge-metadata');
+          knowledgeMeta.incrementChanges(projDir, analysis.domain);
+          db.sendMail('master-1', 'domain_review_completed', { analysis_id: args.id, domain: analysis.domain, status: 'approved' });
+        }
+        respond(conn, { ok: true, id: args.id });
+        break;
+      }
+
+      case 'reject-domain': {
+        const rejected = db.rejectDomainAnalysis(args.id, args.feedback || null);
+        if (!rejected) { respond(conn, { ok: false, error: 'Analysis not in review_pending state' }); break; }
+        const analysis = db.getDomainAnalysis(args.id);
+        if (analysis) {
+          db.sendMail('master-1', 'domain_review_completed', { analysis_id: args.id, domain: analysis.domain, status: 'rejected' });
+        }
+        respond(conn, { ok: true, id: args.id });
+        break;
+      }
+
+      // === EXTENDED RESEARCH TOPIC commands ===
+
+      case 'create-research-topic': {
+        const topic = db.createExtendedResearchTopic({
+          title: args.title,
+          description: args.description,
+          category: args.category || 'feature',
+          discovery_source: args.discovery_source || null,
+          loop_id: args.loop_id || null,
+          tags: args.tags ? (typeof args.tags === 'string' ? args.tags : JSON.stringify(args.tags)) : null,
+        });
+        db.sendMail('master-1', 'research_topic_discovered', { topic_id: topic.id, title: args.title, category: args.category || 'feature' });
+        respond(conn, { ok: true, id: topic.id, topic });
+        break;
+      }
+
+      case 'research-topic': {
+        const topic = db.getExtendedResearchTopic(args.id);
+        if (!topic) { respond(conn, { ok: false, error: 'Research topic not found' }); break; }
+        respond(conn, { ok: true, topic });
+        break;
+      }
+
+      case 'research-topics': {
+        const topics = db.listExtendedResearchTopics({
+          review_status: args.review_status,
+          category: args.category,
+          loop_id: args.loop_id,
+          limit: args.limit || 50,
+        });
+        respond(conn, { ok: true, topics, count: topics.length });
+        break;
+      }
+
+      case 'review-research-topic': {
+        const reviewed = db.reviewExtendedResearchTopic(args.id, args.review_status, args.notes || null);
+        if (!reviewed) { respond(conn, { ok: false, error: 'Invalid review_status or topic not found' }); break; }
+        respond(conn, { ok: true, id: args.id, review_status: args.review_status });
+        break;
+      }
+
+      case 'pending-reviews': {
+        const items = db.getPendingReviewItems({ limit: args.limit || 20 });
+        respond(conn, { ok: true, items, count: items.length });
+        break;
+      }
+
+      case 'fill-knowledge': {
+        const knowledgeMeta = require('./knowledge-metadata');
+        const projDir = _projectDir || process.cwd();
+        const status = knowledgeMeta.getKnowledgeStatus(projDir);
+        const actions = [];
+        const domainMeta = status.domains || {};
+        const domainCoverage = status.domain_coverage || {};
+
+        // Queue research for domains with no coverage or high staleness
+        for (const [domain, meta] of Object.entries(domainMeta)) {
+          const coverage = domainCoverage[domain];
+          const isUncovered = !coverage || !coverage.exists || !coverage.non_empty;
+          const isStale = (meta.changes_since_research || 0) >= 3;
+          if (isUncovered || isStale) {
+            try {
+              const result = db.enqueueResearchIntent({
+                intent_type: 'browser_research',
+                intent_payload: JSON.stringify({
+                  topic: domain,
+                  question: `What is the architecture, key files, and patterns of the ${domain} domain?`,
+                  mode: 'standard',
+                }),
+                priority: 'normal',
+              });
+              actions.push({ type: 'research_queued', domain, created: result.created, id: result.intent.id });
+            } catch (e) {
+              actions.push({ type: 'research_queue_error', domain, error: e.message });
+            }
+          }
+        }
+
+        // Signal Master-2 to rescan if codebase index is stale
+        if ((status.changes_since_index || 0) > 5) {
+          try {
+            db.sendMail('architect', 'rescan_requested', {
+              reason: 'fill-knowledge detected stale index',
+              changes: status.changes_since_index,
+            });
+            actions.push({ type: 'rescan_signaled', changes_since_index: status.changes_since_index });
+          } catch (e) {
+            actions.push({ type: 'rescan_signal_error', error: e.message });
+          }
+        }
+
+        const domainsWithGaps = Object.keys(domainMeta).filter(d => {
+          const c = domainCoverage[d];
+          return !c || !c.exists || !c.non_empty;
+        });
+        const staleDomains = Object.keys(domainMeta).filter(d => (domainMeta[d].changes_since_research || 0) >= 3);
+
+        respond(conn, {
+          ok: true,
+          actions,
+          status_summary: {
+            domains_with_gaps: domainsWithGaps,
+            stale_domains: staleDomains,
+            changes_since_index: status.changes_since_index || 0,
+          },
+        });
         break;
       }
 

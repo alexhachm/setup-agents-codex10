@@ -1,4 +1,4 @@
-name: mac10-workers
+name: ${MAC10_SANDBOX_NAME:-mac10-workers}
 
 sandboxes:
   worker-1:
@@ -6,69 +6,65 @@ sandboxes:
     cpus: 2
     memory: 2048
     volumes:
-      - ./.worktrees/wt-1:/workspace
+      - ../.worktrees/wt-1:/workspace
     network:
-      allow:
-        - api.anthropic.com
-        - github.com
-        - api.openai.com
-        - registry.npmjs.org
+      scope: any
     secrets:
       - ANTHROPIC_API_KEY
       - OPENAI_API_KEY
+      - MAC10_NAMESPACE
+      - MAC10_CLI_HOST
+      - MAC10_CLI_PORT
     scripts:
-      start: bash /workspace/.claude/scripts/worker-sentinel.sh 1 /workspace
+      start: MAC10_SANDBOX=1 MAC10_CLI_HOST=127.0.0.1 MAC10_CLI_PORT=31195 bash /workspace/.claude/scripts/worker-sentinel.sh 1 /workspace
 
   worker-2:
     image: node:20
     cpus: 2
     memory: 2048
     volumes:
-      - ./.worktrees/wt-2:/workspace
+      - ../.worktrees/wt-2:/workspace
     network:
-      allow:
-        - api.anthropic.com
-        - github.com
-        - api.openai.com
-        - registry.npmjs.org
+      scope: any
     secrets:
       - ANTHROPIC_API_KEY
       - OPENAI_API_KEY
+      - MAC10_NAMESPACE
+      - MAC10_CLI_HOST
+      - MAC10_CLI_PORT
     scripts:
-      start: bash /workspace/.claude/scripts/worker-sentinel.sh 2 /workspace
+      start: MAC10_SANDBOX=1 MAC10_CLI_HOST=127.0.0.1 MAC10_CLI_PORT=31195 bash /workspace/.claude/scripts/worker-sentinel.sh 2 /workspace
 
   worker-3:
     image: node:20
     cpus: 2
     memory: 2048
     volumes:
-      - ./.worktrees/wt-3:/workspace
+      - ../.worktrees/wt-3:/workspace
     network:
-      allow:
-        - api.anthropic.com
-        - github.com
-        - api.openai.com
-        - registry.npmjs.org
+      scope: any
     secrets:
       - ANTHROPIC_API_KEY
       - OPENAI_API_KEY
+      - MAC10_NAMESPACE
+      - MAC10_CLI_HOST
+      - MAC10_CLI_PORT
     scripts:
-      start: bash /workspace/.claude/scripts/worker-sentinel.sh 3 /workspace
+      start: MAC10_SANDBOX=1 MAC10_CLI_HOST=127.0.0.1 MAC10_CLI_PORT=31195 bash /workspace/.claude/scripts/worker-sentinel.sh 3 /workspace
 
   worker-4:
     image: node:20
     cpus: 2
     memory: 2048
     volumes:
-      - ./.worktrees/wt-4:/workspace
+      - ../.worktrees/wt-4:/workspace
     network:
-      allow:
-        - api.anthropic.com
-        - github.com
-        - api.openai.com
-        - registry.npmjs.org
+      scope: any
     secrets:
       - ANTHROPIC_API_KEY
       - OPENAI_API_KEY
+      - MAC10_NAMESPACE
+      - MAC10_CLI_HOST
+      - MAC10_CLI_PORT
     scripts:
-      start: bash /workspace/.claude/scripts/worker-sentinel.sh 4 /workspace
+      start: MAC10_SANDBOX=1 MAC10_CLI_HOST=127.0.0.1 MAC10_CLI_PORT=31195 bash /workspace/.claude/scripts/worker-sentinel.sh 4 /workspace

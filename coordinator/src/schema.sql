@@ -81,7 +81,8 @@ CREATE TABLE IF NOT EXISTS tasks (
   updated_at TEXT NOT NULL DEFAULT (datetime('now')),
   started_at TEXT,
   completed_at TEXT,
-  result TEXT  -- outcome summary
+  result TEXT,  -- outcome summary
+  needs_sandbox INTEGER NOT NULL DEFAULT 0
 );
 
 -- Browser research batching: intents, staged plans, and per-intent fan-out
@@ -157,6 +158,55 @@ CREATE TABLE IF NOT EXISTS research_intent_fanout (
   completed_at TEXT,
   UNIQUE(intent_id, fanout_key)
 );
+
+-- Domain analysis tracking with human review workflow
+CREATE TABLE IF NOT EXISTS domain_analyses (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  domain TEXT NOT NULL,
+  status TEXT NOT NULL DEFAULT 'pending'
+    CHECK (status IN ('pending','analyzing','draft','review_pending','approved','rejected','superseded')),
+  source_map_hash TEXT,
+  draft_payload TEXT,
+  review_sheet TEXT,
+  human_feedback TEXT,
+  confidence_score REAL DEFAULT 0.5,
+  analyzed_files TEXT,
+  created_at TEXT NOT NULL DEFAULT (datetime('now')),
+  updated_at TEXT NOT NULL DEFAULT (datetime('now')),
+  approved_at TEXT
+);
+
+CREATE INDEX IF NOT EXISTS idx_domain_analyses_domain_status
+  ON domain_analyses(domain, status);
+CREATE INDEX IF NOT EXISTS idx_domain_analyses_status
+  ON domain_analyses(status, updated_at DESC);
+
+-- Extended research topics: bookmarkable discoveries for human review
+CREATE TABLE IF NOT EXISTS extended_research_topics (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  title TEXT NOT NULL,
+  description TEXT NOT NULL,
+  category TEXT NOT NULL DEFAULT 'feature'
+    CHECK (category IN ('feature','addon','optimization','pattern','architecture','tooling')),
+  discovery_source TEXT,
+  loop_id INTEGER REFERENCES loops(id),
+  research_intent_id INTEGER REFERENCES research_intents(id),
+  review_status TEXT NOT NULL DEFAULT 'discovered'
+    CHECK (review_status IN ('discovered','held','approved','rejected','in_progress','completed')),
+  priority TEXT NOT NULL DEFAULT 'normal'
+    CHECK (priority IN ('urgent','high','normal','low')),
+  tags TEXT,
+  findings TEXT,
+  human_notes TEXT,
+  created_at TEXT NOT NULL DEFAULT (datetime('now')),
+  updated_at TEXT NOT NULL DEFAULT (datetime('now')),
+  reviewed_at TEXT
+);
+
+CREATE INDEX IF NOT EXISTS idx_ext_research_topics_status
+  ON extended_research_topics(review_status, priority DESC, created_at ASC);
+CREATE INDEX IF NOT EXISTS idx_ext_research_topics_category
+  ON extended_research_topics(category, review_status);
 
 -- Project memory snapshots and insight artifacts
 CREATE TABLE IF NOT EXISTS project_memory_snapshots (
@@ -306,6 +356,7 @@ CREATE TABLE IF NOT EXISTS workers (
   last_heartbeat TEXT,
   launched_at TEXT,
   tasks_completed INTEGER NOT NULL DEFAULT 0,
+  backend TEXT NOT NULL DEFAULT 'tmux',
   created_at TEXT NOT NULL DEFAULT (datetime('now'))
 );
 

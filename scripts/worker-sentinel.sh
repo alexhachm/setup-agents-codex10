@@ -6,7 +6,13 @@ export PATH="$HOME/bin:$HOME/.local/bin:$PATH"
 
 WORKER_ID="${1:?Usage: worker-sentinel.sh <worker_id> <project_dir>}"
 PROJECT_DIR="${2:?Usage: worker-sentinel.sh <worker_id> <project_dir>}"
-WORKTREE="$PROJECT_DIR/.worktrees/wt-$WORKER_ID"
+
+# In sandbox/microVM mode, /workspace IS the worktree (volume-mounted directly).
+if [ "${MAC10_SANDBOX:-}" = "1" ]; then
+  WORKTREE="$PROJECT_DIR"
+else
+  WORKTREE="$PROJECT_DIR/.worktrees/wt-$WORKER_ID"
+fi
 
 if [ ! -d "$WORKTREE" ]; then
   echo "[sentinel-$WORKER_ID] ERROR: Worktree not found: $WORKTREE" >&2

@@ -8,7 +8,14 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PROJECT_DIR="${1:?Usage: bash setup.sh <project_dir> [num_workers]}"
 NUM_WORKERS="${2:-4}"
 MAX_WORKERS=8
-NAMESPACE="codex10"
+
+# Derive namespace from project name for multi-project isolation (override with MAC10_NAMESPACE)
+PROJECT_BASENAME="$(basename "$PROJECT_DIR" 2>/dev/null || echo 'project')"
+NAMESPACE="${MAC10_NAMESPACE:-codex10-${PROJECT_BASENAME}}"
+# Sanitize: lowercase, replace non-alnum with dash, truncate to 20 chars
+NAMESPACE="$(echo "$NAMESPACE" | tr '[:upper:]' '[:lower:]' | sed 's/[^a-z0-9-]/-/g' | cut -c1-20)"
+# Export COMPOSE_PROJECT_NAME for Docker Compose multi-project isolation
+export COMPOSE_PROJECT_NAME="mac10-$(echo -n "${NAMESPACE}:${PROJECT_DIR}" | md5sum | cut -c1-6)"
 
 # Validate NUM_WORKERS is a positive integer within bounds
 if ! [[ "$NUM_WORKERS" =~ ^[0-9]+$ ]] || [ "$NUM_WORKERS" -lt 1 ]; then
@@ -314,6 +321,14 @@ for s in worker-sentinel.sh loop-sentinel.sh launch-worker.sh signal-wait.sh sta
 done
 chmod +x "$CLAUDE_DIR/scripts/"*.sh
 
+# Research scripts → .codex/scripts/ (for research-sentinel / chatgpt-driver pipeline)
+CODEX_SCRIPTS_DIR="$PROJECT_DIR/.codex/scripts"
+mkdir -p "$CODEX_SCRIPTS_DIR"
+for s in research-sentinel.sh chatgpt-driver.py ingest-research.py compose-research-prompt.py requirements-research.txt; do
+  [ -f "$SCRIPT_DIR/scripts/$s" ] && cp "$SCRIPT_DIR/scripts/$s" "$CODEX_SCRIPTS_DIR/"
+done
+chmod +x "$CODEX_SCRIPTS_DIR/"*.sh 2>/dev/null || true
+
 # Hooks
 mkdir -p "$CLAUDE_DIR/hooks"
 cp "$SCRIPT_DIR/.claude/hooks/pre-tool-secret-guard.sh" "$CLAUDE_DIR/hooks/" 2>/dev/null || true
@@ -352,18 +367,18 @@ if [ ! -f "$MAC10_BIN" ]; then
   echo "  Has the setup-agents repo moved? Re-run setup.sh to fix." >&2
   exit 1
 fi
-export MAC10_NAMESPACE="codex10"
+export MAC10_NAMESPACE="PLACEHOLDER_NAMESPACE"
 exec node "$MAC10_BIN" --project "$PROJECT_ROOT" "$@"
 WRAPPER
-# Substitute the actual path into the wrapper (quoted heredoc prevents expansion above)
-sed -i "s|PLACEHOLDER_MAC10_BIN|$MAC10_BIN|" "$MAC10_CLI"
+# Substitute the actual path and namespace into the wrapper (quoted heredoc prevents expansion above)
+sed -i "s|PLACEHOLDER_MAC10_BIN|$MAC10_BIN|; s|PLACEHOLDER_NAMESPACE|$NAMESPACE|" "$MAC10_CLI"
 chmod +x "$MAC10_CLI"
 
 # Primary codex wrapper name used by codex-specific prompts/scripts
 cp "$MAC10_CLI" "$CODEX10_CLI"
 chmod +x "$CODEX10_CLI"
 
-# Compatibility compat shim: mac10 command — always uses codex10 namespace, never defaults to mac10
+# Compatibility compat shim: mac10 command — always uses derived namespace, never defaults to mac10
 cat > "$MAC10_COMPAT" <<'WRAPPER'
 #!/usr/bin/env bash
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -374,10 +389,10 @@ if [ ! -f "$MAC10_BIN" ]; then
   echo "  Has the setup-agents repo moved? Re-run setup.sh to fix." >&2
   exit 1
 fi
-export MAC10_NAMESPACE="codex10"
+export MAC10_NAMESPACE="PLACEHOLDER_NAMESPACE"
 exec node "$MAC10_BIN" --project "$PROJECT_ROOT" "$@"
 WRAPPER
-sed -i "s|PLACEHOLDER_MAC10_BIN|$MAC10_BIN|" "$MAC10_COMPAT"
+sed -i "s|PLACEHOLDER_MAC10_BIN|$MAC10_BIN|; s|PLACEHOLDER_NAMESPACE|$NAMESPACE|" "$MAC10_COMPAT"
 chmod +x "$MAC10_COMPAT"
 
 # Claude-side wrappers: use the namespaced mac10-codex10 path (enforces codex10 namespace)

@@ -75,10 +75,9 @@ function updateIndexTimestamp(projectDir) {
 
 function getDomainCoverage(projectDir) {
   const codebaseDir = path.join(projectDir, '.claude', 'knowledge', 'codebase', 'domains');
-  const legacyDir = path.join(projectDir, '.claude', 'knowledge', 'domains');
   const result = { domains: {} };
 
-  // Check new-style codebase domain files
+  // Single source of truth: .claude/knowledge/codebase/domains/
   try {
     if (fs.existsSync(codebaseDir) && fs.statSync(codebaseDir).isDirectory()) {
       for (const entry of fs.readdirSync(codebaseDir)) {
@@ -90,29 +89,12 @@ function getDomainCoverage(projectDir) {
             const content = fs.readFileSync(filePath, 'utf8').trim();
             result.domains[name] = { source: 'codebase', exists: true, non_empty: content.length > 0 };
           } else if (stat.isDirectory()) {
-            // Check for domain directory with files inside
             const readmePath = path.join(filePath, 'README.md');
             if (fs.existsSync(readmePath)) {
               const content = fs.readFileSync(readmePath, 'utf8').trim();
               result.domains[name] = { source: 'codebase', exists: true, non_empty: content.length > 0 };
             }
           }
-        } catch {}
-      }
-    }
-  } catch {}
-
-  // Check legacy domain files (don't overwrite codebase entries)
-  try {
-    if (fs.existsSync(legacyDir) && fs.statSync(legacyDir).isDirectory()) {
-      for (const entry of fs.readdirSync(legacyDir)) {
-        if (!entry.endsWith('.md')) continue;
-        const name = entry.replace(/\.md$/, '');
-        if (result.domains[name]) continue; // codebase takes precedence
-        const filePath = path.join(legacyDir, entry);
-        try {
-          const content = fs.readFileSync(filePath, 'utf8').trim();
-          result.domains[name] = { source: 'legacy', exists: true, non_empty: content.length > 0 };
         } catch {}
       }
     }

@@ -93,6 +93,9 @@ db.init(projectDir);
 rebuildProjectMemorySnapshotIndexOnStartup();
 console.log('Database initialized.');
 
+// Set project context for multi-project Docker/sandbox container isolation
+if (backend.setProjectContext) backend.setProjectContext(namespace, projectDir);
+
 // Namespace tmux session per project (optional — not available on native Windows)
 tmux.setSession(projectDir, namespace);
 if (tmux.isAvailable()) {
@@ -102,6 +105,25 @@ if (tmux.isAvailable()) {
   console.log('tmux not available — workers will be spawned via Windows Terminal tabs.');
 }
 console.log(`Worker backend: ${backend.name} (available: ${backend.isAvailable()})`);
+
+// Auto-start msb server if installed but not running
+if (microvmManager.isMsbInstalled() && !microvmManager.isServerRunning()) {
+  console.log('Microsandbox installed but server not running — starting...');
+  try {
+    microvmManager.startServer();
+    // Brief wait for server to come up
+    const { execFileSync } = require('child_process');
+    try { execFileSync('sleep', ['2'], { timeout: 5000 }); } catch {}
+    if (microvmManager.isServerRunning()) {
+      console.log('Microsandbox server started successfully.');
+    } else {
+      console.log('Microsandbox server did not start — will fall back to Docker/tmux.');
+    }
+  } catch (e) {
+    console.log(`Microsandbox server start failed: ${e.message}`);
+  }
+}
+
 console.log(`Microsandbox (msb): ${microvmManager.isMsbInstalled() ? 'installed' : 'not installed'}, server: ${microvmManager.isServerRunning() ? 'running' : 'stopped'}`);
 console.log(`Docker: ${sandboxManager.isDockerAvailable() ? 'available' : 'not available'}`);
 console.log(`Isolation priority: msb → Docker → tmux`);

@@ -54,6 +54,12 @@ echo "[$(date -u +%Y-%m-%dT%H:%M:%SZ)] [master-1] [ACTION] details" >> .claude/l
 ```
 Actions to log: REQUEST, FIX_CREATED, CLARIFICATION_SURFACED, STATUS_REPORT, DISTILL, RESET
 
+## Knowledge Layer Monitoring
+- Monitor knowledge layer health — surface staleness and gaps to the user
+- Prompt user to run index/research drivers when coverage is insufficient
+- On startup, run `./.claude/scripts/codex10 knowledge-status` and summarize for user
+- Handle `knowledge_gap_detected` inbox messages by surfacing uncovered domains
+
 ## Context Health
 After ~40 user messages, reset:
 1. Distill user preferences to knowledge file

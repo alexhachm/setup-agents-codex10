@@ -10,9 +10,11 @@
  */
 
 const { execFileSync, execFile } = require('child_process');
+const path = require('path');
 const db = require('./db');
 
 const DEFAULT_IMAGE = 'node:20';
+const SANDBOXFILE = path.resolve(__dirname, '../../sandbox/Sandboxfile');
 
 function isMsbInstalled() {
   try {
@@ -86,16 +88,20 @@ function ensureReady() {
 function listSandboxes() {
   try {
     const out = execFileSync(
-      'msb', ['ps'],
+      'msb', ['status', '-f', SANDBOXFILE],
       { encoding: 'utf8', timeout: 5000, stdio: 'pipe' }
     ).trim();
     if (!out) return [];
-    return out.split('\n')
+    // Parse status table: skip header (line 0) and separator (line 1)
+    const lines = out.split('\n');
+    return lines
+      .slice(2)
       .filter(Boolean)
       .map(line => {
         const parts = line.trim().split(/\s+/);
         return { name: parts[0], status: parts[1] || 'unknown' };
-      });
+      })
+      .filter(s => s.name);
   } catch {
     return [];
   }
@@ -103,19 +109,19 @@ function listSandboxes() {
 
 function stopSandbox(name) {
   try {
-    execFileSync('msb', ['stop', name], {
+    execFileSync('msb', ['down', name, '-f', SANDBOXFILE], {
       encoding: 'utf8', timeout: 10000, stdio: 'pipe',
     });
   } catch { /* may not exist */ }
 }
 
 function cleanupAll() {
-  const sandboxes = listSandboxes().filter(s => s.name.startsWith('worker-'));
-  for (const s of sandboxes) {
-    stopSandbox(s.name);
-  }
-  db.log('coordinator', 'msb_cleanup_all', { stopped: sandboxes.length });
-  return sandboxes.length;
+  try {
+    execFileSync('msb', ['down', '-f', SANDBOXFILE], {
+      encoding: 'utf8', timeout: 15000, stdio: 'pipe',
+    });
+  } catch { /* may not be running */ }
+  db.log('coordinator', 'msb_cleanup_all', {});
 }
 
 function getStatus() {
@@ -145,4 +151,5 @@ module.exports = {
   cleanupAll,
   getStatus,
   DEFAULT_IMAGE,
+  SANDBOXFILE,
 };

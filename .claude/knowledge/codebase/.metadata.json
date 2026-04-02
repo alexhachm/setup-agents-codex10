@@ -1,0 +1,28 @@
+{
+  "last_indexed": "2026-03-29T08:59:09.594Z",
+  "changes_since_index": 14,
+  "domains": {
+    "coordinator": {
+      "changes_since_research": 6,
+      "worker_patches": 1
+    },
+    "newdomain": {
+      "changes_since_research": 1,
+      "worker_patches": 1
+    },
+    "coordinator-extensions": {
+      "changes_since_research": 2,
+      "worker_patches": 0
+    },
+    "coordinator-core": {
+      "changes_since_research": 3,
+      "worker_patches": 1
+    },
+    "coordinator-routing": {
+      "changes_since_research": 2,
+      "worker_patches": 1
+    }
+  },
+  "last_external_research": null,
+  "external_research_stale_topics": []
+}
