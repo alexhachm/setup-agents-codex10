@@ -154,6 +154,29 @@ function runStartupRecoverySweep() {
   }
 }
 
+/**
+ * Single watchdog tick: inspect all workers and drive recovery logic.
+ *
+ * Called on every interval (default 10 s). For each non-idle worker the tick:
+ *  - detects dead tmux panes and triggers handleDeath()
+ *  - skips workers still inside their post-launch grace period
+ *  - escalates stale heartbeats through warn → nudge → triage → terminate
+ *  - auto-resets workers that completed a task but were never recycled
+ *
+ * After the per-worker loop the tick runs system-wide sweeps:
+ *  - checkWorkerFatigue()        — context-budget enforcement
+ *  - releaseStaleClaimsCheck()   — orphaned claim cleanup
+ *  - recoverOrphanTasks()        — stalled assignment recovery (with retry bounds)
+ *  - recoverFailedRequestsWithActiveRemediation() — keeps failed requests visible
+ *  - recoverStaleDecomposedRequests() — tier-3 decomposition that never produced tasks
+ *  - db.reconcileAllActiveRequests() — lifecycle-invariant reconciliation
+ *  - recoverStaleIntegrations()  — stuck integrations
+ *  - monitorLoops()              — persistent-loop detection
+ *  - research-batch timeout recovery
+ *
+ * @param {string} projectDir - Absolute path to the project root, forwarded to
+ *   helpers that need to spawn subprocesses or write project-relative paths.
+ */
 function tick(projectDir) {
   tickCount += 1;
   const workers = db.getAllWorkers();
