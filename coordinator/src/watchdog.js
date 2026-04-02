@@ -127,6 +127,10 @@ function start(projectDir) {
   db.log('coordinator', 'watchdog_started', { interval_ms: intervalMs });
 }
 
+/**
+ * Stop the watchdog interval and reset all internal state.
+ * After calling stop(), a startup recovery sweep will be performed on the next start().
+ */
 function stop() {
   if (intervalId) { clearInterval(intervalId); intervalId = null; }
   startupRecoverySweepPending = true;
