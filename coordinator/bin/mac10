@@ -236,6 +236,7 @@ function getTransportTimeoutMs(command, args) {
   return 30000;
 }
 
+// Normalizes inbox recipients so master-3 is routed to allocator for inbox queries
 function normalizeInboxRecipient(recipient) {
   if (typeof recipient !== 'string') return recipient;
   return INBOX_RECIPIENT_ALIASES[recipient] || recipient;
