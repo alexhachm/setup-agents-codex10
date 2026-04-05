@@ -14,6 +14,7 @@ const PR_NUMBER_RE = /^#?(\d+)$/;
 const PR_REFERENCE_RE = /^(pull request|pull|pr)\s*#?(\d+)$/i;
 const WORKER_BRANCH_RE = /^agent-\d+$/;
 const INBOX_RECIPIENT_ALIASES = Object.freeze({
+  'master-2': 'architect',
   'master-3': 'allocator',
 });
 const COMPLETE_TASK_USAGE_FIELDS = Object.freeze({
@@ -287,35 +288,42 @@ function send(target, command, args) {
 }
 
 function findConnectionTargetForProject(projectDir) {
-  const stateDir = path.join(projectDir, '.claude', 'state');
+  // Walk up from projectDir to find the coordinator socket.
+  // This handles worktrees (e.g. .worktrees/wt-1/) where the coordinator
+  // socket lives in the parent project's .claude/state/ directory.
+  let dir = path.resolve(projectDir);
+  while (dir !== path.dirname(dir)) {
+    const stateDir = path.join(dir, '.claude', 'state');
 
-  // Priority matches findConnectionTarget: sock.path > sock > TCP > pipe
-  for (const name of namespacedCandidates('mac10.sock.path')) {
-    const sockPathFile = path.join(stateDir, name);
-    if (fs.existsSync(sockPathFile)) {
-      const sockPath = fs.readFileSync(sockPathFile, 'utf8').trim();
-      try { if (fs.statSync(sockPath).isSocket()) return sockPath; } catch {}
+    for (const name of namespacedCandidates('mac10.sock.path')) {
+      const sockPathFile = path.join(stateDir, name);
+      if (fs.existsSync(sockPathFile)) {
+        const sockPath = fs.readFileSync(sockPathFile, 'utf8').trim();
+        try { if (fs.statSync(sockPath).isSocket()) return sockPath; } catch {}
+      }
     }
-  }
 
-  for (const name of namespacedCandidates('mac10.sock')) {
-    const sock = path.join(stateDir, name);
-    try { if (fs.existsSync(sock) && fs.statSync(sock).isSocket()) return sock; } catch {}
-  }
-
-  for (const name of namespacedCandidates('mac10.tcp.port')) {
-    const tcpFile = path.join(stateDir, name);
-    if (fs.existsSync(tcpFile)) {
-      const port = parseInt(fs.readFileSync(tcpFile, 'utf8').trim(), 10);
-      if (port > 0) return { host: '127.0.0.1', port };
+    for (const name of namespacedCandidates('mac10.sock')) {
+      const sock = path.join(stateDir, name);
+      try { if (fs.existsSync(sock) && fs.statSync(sock).isSocket()) return sock; } catch {}
     }
-  }
 
-  for (const name of namespacedCandidates('mac10.pipe')) {
-    const pipeFile = path.join(stateDir, name);
-    if (fs.existsSync(pipeFile)) {
-      return fs.readFileSync(pipeFile, 'utf8').trim();
+    for (const name of namespacedCandidates('mac10.tcp.port')) {
+      const tcpFile = path.join(stateDir, name);
+      if (fs.existsSync(tcpFile)) {
+        const port = parseInt(fs.readFileSync(tcpFile, 'utf8').trim(), 10);
+        if (port > 0) return { host: '127.0.0.1', port };
+      }
     }
+
+    for (const name of namespacedCandidates('mac10.pipe')) {
+      const pipeFile = path.join(stateDir, name);
+      if (fs.existsSync(pipeFile)) {
+        return fs.readFileSync(pipeFile, 'utf8').trim();
+      }
+    }
+
+    dir = path.dirname(dir);
   }
 
   console.error(`Error: mac10 coordinator not running for project: ${projectDir}`);
@@ -323,33 +331,40 @@ function findConnectionTargetForProject(projectDir) {
 }
 
 function getCandidateTargetsForProject(projectDir) {
-  const stateDir = path.join(projectDir, '.claude', 'state');
+  // Walk up from projectDir to find candidates (handles worktrees)
   const targets = [];
+  let dir = path.resolve(projectDir);
+  while (dir !== path.dirname(dir)) {
+    const stateDir = path.join(dir, '.claude', 'state');
 
-  for (const name of namespacedCandidates('mac10.sock.path')) {
-    const sockPathFile = path.join(stateDir, name);
-    if (!fs.existsSync(sockPathFile)) continue;
-    const sockPath = fs.readFileSync(sockPathFile, 'utf8').trim();
-    if (sockPath) targets.push({ type: 'socket-path-file', file: sockPathFile, target: sockPath });
-  }
+    for (const name of namespacedCandidates('mac10.sock.path')) {
+      const sockPathFile = path.join(stateDir, name);
+      if (!fs.existsSync(sockPathFile)) continue;
+      const sockPath = fs.readFileSync(sockPathFile, 'utf8').trim();
+      if (sockPath) targets.push({ type: 'socket-path-file', file: sockPathFile, target: sockPath });
+    }
 
-  for (const name of namespacedCandidates('mac10.sock')) {
-    const sock = path.join(stateDir, name);
-    if (fs.existsSync(sock)) targets.push({ type: 'socket-file', target: sock });
-  }
+    for (const name of namespacedCandidates('mac10.sock')) {
+      const sock = path.join(stateDir, name);
+      if (fs.existsSync(sock)) targets.push({ type: 'socket-file', target: sock });
+    }
 
-  for (const name of namespacedCandidates('mac10.tcp.port')) {
-    const tcpFile = path.join(stateDir, name);
-    if (!fs.existsSync(tcpFile)) continue;
-    const port = parseInt(fs.readFileSync(tcpFile, 'utf8').trim(), 10);
-    if (port > 0) targets.push({ type: 'tcp-file', file: tcpFile, target: { host: '127.0.0.1', port } });
-  }
+    for (const name of namespacedCandidates('mac10.tcp.port')) {
+      const tcpFile = path.join(stateDir, name);
+      if (!fs.existsSync(tcpFile)) continue;
+      const port = parseInt(fs.readFileSync(tcpFile, 'utf8').trim(), 10);
+      if (port > 0) targets.push({ type: 'tcp-file', file: tcpFile, target: { host: '127.0.0.1', port } });
+    }
 
-  for (const name of namespacedCandidates('mac10.pipe')) {
-    const pipeFile = path.join(stateDir, name);
-    if (!fs.existsSync(pipeFile)) continue;
-    const pipePath = fs.readFileSync(pipeFile, 'utf8').trim();
-    if (pipePath) targets.push({ type: 'pipe-file', file: pipeFile, target: pipePath });
+    for (const name of namespacedCandidates('mac10.pipe')) {
+      const pipeFile = path.join(stateDir, name);
+      if (!fs.existsSync(pipeFile)) continue;
+      const pipePath = fs.readFileSync(pipeFile, 'utf8').trim();
+      if (pipePath) targets.push({ type: 'pipe-file', file: pipeFile, target: pipePath });
+    }
+
+    if (targets.length > 0) break;
+    dir = path.dirname(dir);
   }
 
   return targets;
