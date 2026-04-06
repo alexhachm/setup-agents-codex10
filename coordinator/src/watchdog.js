@@ -854,12 +854,12 @@ function recoverStaleIntegrations(now, options = {}) {
     const allMerged = freshMerges.every(m => m.status === 'merged');
 
     if (allMerged) {
-      // Case 2: All merges succeeded — gate only when no tasks have completed yet
+      // Case 2: All merges succeeded — guard against non-terminal or failed sibling tasks
       const taskCompletion = db.checkRequestCompletion(req.id);
-      if (taskCompletion.total > 0 && taskCompletion.completed === 0) {
+      if (taskCompletion.total > 0 && (!taskCompletion.all_done || taskCompletion.completed === 0)) {
         db.log('coordinator', 'stale_integration_gated', {
           request_id: req.id,
-          reason: 'no_completed_tasks',
+          reason: !taskCompletion.all_done ? 'non_terminal_tasks' : 'failed_tasks',
           total: taskCompletion.total,
           completed: taskCompletion.completed,
           failed: taskCompletion.failed,
