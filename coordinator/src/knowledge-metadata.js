@@ -75,9 +75,27 @@ function updateIndexTimestamp(projectDir) {
 
 function getDomainCoverage(projectDir) {
   const codebaseDir = path.join(projectDir, '.claude', 'knowledge', 'codebase', 'domains');
+  const legacyDir = path.join(projectDir, '.claude', 'knowledge', 'domains');
   const result = { domains: {} };
 
-  // Single source of truth: .claude/knowledge/codebase/domains/
+  // Legacy path: .claude/knowledge/domains/ (lower priority)
+  try {
+    if (fs.existsSync(legacyDir) && fs.statSync(legacyDir).isDirectory()) {
+      for (const entry of fs.readdirSync(legacyDir)) {
+        const filePath = path.join(legacyDir, entry);
+        try {
+          const stat = fs.statSync(filePath);
+          if (stat.isFile() && entry.endsWith('.md')) {
+            const name = entry.replace(/\.md$/, '');
+            const content = fs.readFileSync(filePath, 'utf8').trim();
+            result.domains[name] = { source: 'legacy', exists: true, non_empty: content.length > 0 };
+          }
+        } catch {}
+      }
+    }
+  } catch {}
+
+  // Primary source: .claude/knowledge/codebase/domains/ (overrides legacy)
   try {
     if (fs.existsSync(codebaseDir) && fs.statSync(codebaseDir).isDirectory()) {
       for (const entry of fs.readdirSync(codebaseDir)) {
