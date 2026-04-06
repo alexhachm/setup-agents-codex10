@@ -7,6 +7,7 @@ const cliServer = require('./cli-server');
 const allocator = require('./allocator');
 const watchdog = require('./watchdog');
 const merger = require('./merger');
+const autoSync = require('./auto-sync');
 // const webServer = require('./web-server');  // GUI disabled — outdated
 const tmux = require('./tmux');
 const backend = require('./worker-backend');
@@ -282,6 +283,10 @@ console.log('Watchdog running.');
 merger.start(projectDir);
 console.log('Merger running.');
 
+// Start auto-sync (periodic fetch + conditional rebase of root workspace)
+autoSync.start(projectDir);
+console.log('Auto-sync running.');
+
 // --- GUI disabled (outdated) ---
 // Web dashboard and instance registry startup removed.
 // To re-enable, restore webServer.start() and instanceRegistry usage.
@@ -291,6 +296,7 @@ function shutdown() {
   allocator.stop();
   watchdog.stop();
   merger.stop();
+  autoSync.stop();
   cliServer.stop();
   db.log('coordinator', 'stopped');
   db.close();
