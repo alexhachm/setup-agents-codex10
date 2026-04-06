@@ -4960,3 +4960,175 @@ describe('research-queue COMMAND_SCHEMAS validation', () => {
     assert.strictEqual(res.error, 'Field "id" must be of type number');
   });
 });
+
+describe('PID lock semantics', () => {
+  const { makeLock, isPidAlive } = require('../src/pid-lock');
+
+  it('acquire creates pid file with current pid', () => {
+    const lockDir = fs.mkdtempSync(path.join(os.tmpdir(), 'pid-lock-test-'));
+    try {
+      const lock = makeLock(lockDir, 'mac10');
+      const acquired = lock.acquire();
+      assert.strictEqual(acquired, true);
+      const written = parseInt(fs.readFileSync(lock.pidFile, 'utf8').trim(), 10);
+      assert.strictEqual(written, process.pid);
+      lock.release();
+    } finally {
+      fs.rmSync(lockDir, { recursive: true, force: true });
+    }
+  });
+
+  it('release removes pid file', () => {
+    const lockDir = fs.mkdtempSync(path.join(os.tmpdir(), 'pid-lock-test-'));
+    try {
+      const lock = makeLock(lockDir, 'mac10');
+      lock.acquire();
+      lock.release();
+      assert.strictEqual(fs.existsSync(lock.pidFile), false);
+    } finally {
+      fs.rmSync(lockDir, { recursive: true, force: true });
+    }
+  });
+
+  it('acquire returns false when live process holds the lock', () => {
+    const lockDir = fs.mkdtempSync(path.join(os.tmpdir(), 'pid-lock-test-'));
+    try {
+      // Write current process's own PID — it is guaranteed alive
+      fs.mkdirSync(lockDir, { recursive: true });
+      const pidFilePath = path.join(lockDir, 'mac10.pid');
+      fs.writeFileSync(pidFilePath, String(process.pid));
+
+      // A second lock object trying to acquire the same file should fail
+      const lock2 = makeLock(lockDir, 'mac10');
+      const acquired = lock2.acquire();
+      assert.strictEqual(acquired, false);
+      // PID file still contains the original pid
+      const written = parseInt(fs.readFileSync(pidFilePath, 'utf8').trim(), 10);
+      assert.strictEqual(written, process.pid);
+    } finally {
+      fs.rmSync(lockDir, { recursive: true, force: true });
+    }
+  });
+
+  it('acquire clears stale pid file and succeeds', () => {
+    const lockDir = fs.mkdtempSync(path.join(os.tmpdir(), 'pid-lock-test-'));
+    try {
+      // Write a PID that is guaranteed to not be alive (PID 0 is never a real process)
+      fs.mkdirSync(lockDir, { recursive: true });
+      const pidFilePath = path.join(lockDir, 'mac10.pid');
+      fs.writeFileSync(pidFilePath, '0');
+
+      const lock = makeLock(lockDir, 'mac10');
+      const acquired = lock.acquire();
+      assert.strictEqual(acquired, true);
+      const written = parseInt(fs.readFileSync(lock.pidFile, 'utf8').trim(), 10);
+      assert.strictEqual(written, process.pid);
+      lock.release();
+    } finally {
+      fs.rmSync(lockDir, { recursive: true, force: true });
+    }
+  });
+
+  it('isPidAlive returns false for invalid pids', () => {
+    assert.strictEqual(isPidAlive(0), false);
+    assert.strictEqual(isPidAlive(-1), false);
+    assert.strictEqual(isPidAlive(NaN), false);
+    assert.strictEqual(isPidAlive(null), false);
+  });
+
+  it('isPidAlive returns true for current process', () => {
+    assert.strictEqual(isPidAlive(process.pid), true);
+  });
+});
+
+describe('mac10 CLI start/stop orchestration', () => {
+  // Use MAC10_NAMESPACE='mac10' so the CLI looks for 'mac10.pid' regardless of
+  // the ambient namespace set in the test runner's environment.
+  const CLI_ENV = { ...process.env, MAC10_NAMESPACE: 'mac10' };
+
+  it('mac10 stop exits 0 when no coordinator is running and no pid file exists', async () => {
+    const projectDir2 = fs.mkdtempSync(path.join(os.tmpdir(), 'mac10-stop-test-'));
+    fs.mkdirSync(path.join(projectDir2, '.claude', 'state'), { recursive: true });
+    try {
+      const cliPath = path.join(__dirname, '..', 'bin', 'mac10');
+      const result = await new Promise((resolve) => {
+        execFile(
+          process.execPath,
+          [cliPath, '--project', projectDir2, 'stop'],
+          { encoding: 'utf8', env: CLI_ENV },
+          (error, stdout, stderr) => {
+            resolve({
+              status: error ? (Number.isInteger(error.code) ? error.code : 1) : 0,
+              stdout,
+              stderr,
+            });
+          }
+        );
+      });
+      assert.strictEqual(result.status, 0);
+      assert.match(result.stdout, /Coordinator stopped/);
+    } finally {
+      fs.rmSync(projectDir2, { recursive: true, force: true });
+    }
+  });
+
+  it('mac10 stop cleans up a stale pid file and exits 0', async () => {
+    const projectDir2 = fs.mkdtempSync(path.join(os.tmpdir(), 'mac10-stop-test-'));
+    const stateDir2 = path.join(projectDir2, '.claude', 'state');
+    fs.mkdirSync(stateDir2, { recursive: true });
+    // Write a stale PID (pid 0 is never alive) using the 'mac10' namespace filename
+    fs.writeFileSync(path.join(stateDir2, 'mac10.pid'), '0');
+    try {
+      const cliPath = path.join(__dirname, '..', 'bin', 'mac10');
+      const result = await new Promise((resolve) => {
+        execFile(
+          process.execPath,
+          [cliPath, '--project', projectDir2, 'stop'],
+          { encoding: 'utf8', env: CLI_ENV },
+          (error, stdout, stderr) => {
+            resolve({
+              status: error ? (Number.isInteger(error.code) ? error.code : 1) : 0,
+              stdout,
+              stderr,
+            });
+          }
+        );
+      });
+      assert.strictEqual(result.status, 0);
+      // Stale pid file should be removed
+      assert.strictEqual(fs.existsSync(path.join(stateDir2, 'mac10.pid')), false);
+      assert.match(result.stdout, /Coordinator stopped/);
+    } finally {
+      fs.rmSync(projectDir2, { recursive: true, force: true });
+    }
+  });
+
+  it('mac10 start detects existing running coordinator and exits 0 without spawning duplicate', async () => {
+    const projectDir2 = fs.mkdtempSync(path.join(os.tmpdir(), 'mac10-start-test-'));
+    const stateDir2 = path.join(projectDir2, '.claude', 'state');
+    fs.mkdirSync(stateDir2, { recursive: true });
+    // Simulate a live coordinator by writing the current process's PID to 'mac10.pid'
+    fs.writeFileSync(path.join(stateDir2, 'mac10.pid'), String(process.pid));
+    try {
+      const cliPath = path.join(__dirname, '..', 'bin', 'mac10');
+      const result = await new Promise((resolve) => {
+        execFile(
+          process.execPath,
+          [cliPath, 'start', projectDir2],
+          { encoding: 'utf8', env: CLI_ENV },
+          (error, stdout, stderr) => {
+            resolve({
+              status: error ? (Number.isInteger(error.code) ? error.code : 1) : 0,
+              stdout,
+              stderr,
+            });
+          }
+        );
+      });
+      assert.strictEqual(result.status, 0);
+      assert.match(result.stdout, /already running/i);
+    } finally {
+      fs.rmSync(projectDir2, { recursive: true, force: true });
+    }
+  });
+});

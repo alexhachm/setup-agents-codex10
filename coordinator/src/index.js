@@ -15,12 +15,13 @@ const microvmManager = require('./microvm-manager');
 const overlay = require('./overlay');
 // const instanceRegistry = require('./instance-registry');  // GUI disabled — outdated
 
+const pidLock = require('./pid-lock');
+
 const projectDir = process.argv[2] || process.cwd();
 const scriptDir = process.env.MAC10_SCRIPT_DIR || path.resolve(__dirname, '..', '..');
 const namespace = process.env.MAC10_NAMESPACE || 'mac10';
 const stateDir = path.join(projectDir, '.claude', 'state');
-const pidFile = path.join(stateDir, namespace === 'mac10' ? 'mac10.pid' : `${namespace}.pid`);
-let ownsPidLock = false;
+const _lock = pidLock.makeLock(stateDir, namespace);
 // let _registeredPort = null;  // GUI disabled
 
 function rebuildProjectMemorySnapshotIndexOnStartup() {
@@ -37,54 +38,12 @@ function rebuildProjectMemorySnapshotIndexOnStartup() {
   }
 }
 
-function isPidAlive(pid) {
-  if (!Number.isInteger(pid) || pid <= 0) return false;
-  try {
-    process.kill(pid, 0);
-    return true;
-  } catch {
-    return false;
-  }
-}
-
-function acquirePidLock() {
-  fs.mkdirSync(stateDir, { recursive: true });
-  for (let i = 0; i < 2; i++) {
-    try {
-      fs.writeFileSync(pidFile, String(process.pid), { flag: 'wx' });
-      ownsPidLock = true;
-      return true;
-    } catch (err) {
-      if (!err || err.code !== 'EEXIST') throw err;
-      let existingPid = NaN;
-      try {
-        existingPid = parseInt(fs.readFileSync(pidFile, 'utf8').trim(), 10);
-      } catch {}
-      if (isPidAlive(existingPid)) {
-        console.log(`Coordinator already running for namespace "${namespace}" (PID ${existingPid}), exiting duplicate start.`);
-        return false;
-      }
-      try { fs.unlinkSync(pidFile); } catch {}
-    }
-  }
-  console.error(`Failed to acquire coordinator pid lock: ${pidFile}`);
-  return false;
-}
-
-function releasePidLock() {
-  if (!ownsPidLock) return;
-  try {
-    const current = parseInt(fs.readFileSync(pidFile, 'utf8').trim(), 10);
-    if (current === process.pid) fs.unlinkSync(pidFile);
-  } catch {}
-  ownsPidLock = false;
-}
-
-if (!acquirePidLock()) {
+if (!_lock.acquire()) {
+  console.log(`Coordinator already running for namespace "${namespace}", exiting duplicate start.`);
   process.exit(0);
 }
 
-process.on('exit', releasePidLock);
+process.on('exit', () => _lock.release());
 
 console.log(`mac10 coordinator starting for: ${projectDir}`);
 
