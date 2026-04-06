@@ -57,3 +57,15 @@ Fields mirror the registry entry, plus an explicit `iteration` self-identifier.
 ## Usage
 
 Consumers `require()` the registry to enumerate known audit entries, or `require()` individual fixture files by iteration ID for test assertions.
+
+## Dependencies and Coupling
+
+- **No imports:** The status domain files have zero imports — no coordinator, no external libs.
+- **Pure data:** Consumers load these files via require(). Currently no external files reference these (grep shows no non-status consumers in the codebase).
+- **Standalone:** This domain is entirely self-contained and isolated from coordinator internals.
+
+## Concerns and Opportunities
+
+- **Registry/fixture drift:** The registry (3 entries: 013409Z, 013831Z, manual-probe) is out of sync with the fixtures dir (5 files: 014351Z, 014930Z, 015229Z, 015519Z, 020322Z). Different sets entirely. No tooling enforces consistency.
+- **No consumers found:** As of 2026-04-06, no code outside status/ imports these files. Either the consumer code is not yet written or these fixtures are used indirectly via filesystem scan.
+- **Opportunity:** Add a validation script to assert registry entries have corresponding fixture files (and vice versa).
