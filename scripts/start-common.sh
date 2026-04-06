@@ -487,6 +487,9 @@ else
   MAC10_FORCE_PROVIDER="$PROVIDER" bash "$REPO_ROOT/setup.sh" "$PROJECT_DIR"
 fi
 
+mkdir -p "$PROJECT_DIR/.codex/logs"
+echo "[$(date -u +%Y-%m-%dT%H:%M:%SZ)] Startup validation passed" >> "$PROJECT_DIR/.codex/logs/startup-validation.log"
+
 ensure_worktree_codex_copies "$PROJECT_DIR" "${NUM_WORKERS:-4}"
 force_reset_research_runtime "$PROJECT_DIR"
 start_research_sentinel "$PROJECT_DIR"
