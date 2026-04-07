@@ -59,5 +59,6 @@ Fixtures mirror registry metadata and add explicit `iteration` self-identificati
 - Keep registry entries synchronized with fixture files to avoid stale audit indexes.
 - If new fixtures are added, update `live-audit-registry.js` in the same change.
 
-### 2026-04-06 — Registry/Fixture Synchronization
-Registry now includes all iteration fixtures present in `status/live-audit-fixtures/` (`014351Z`, `014930Z`, `015229Z`, `015519Z`, `020322Z`) plus `manual-probe`. This removes previous registry drift and keeps status-domain audit metadata coherent.
+### 2026-04-07 — Registry/Fixture Synchronization
+Registry now includes all iteration fixtures present in `status/live-audit-fixtures/` (`014351Z`, `014930Z`, `015229Z`, `015519Z`, `020322Z`, `035239Z`) plus `manual-probe`.
+The `iter-20260407T035239Z-1` fixture captures the live-audit rerun used to recover from the `worker_idle_orphan` retry-exhaustion merge block path.
