@@ -1,34 +1,30 @@
 # Domain: status
 
 **Location:** `status/`
-**Purpose:** Provides live-audit test fixtures and a registry for integration/audit testing of the multi-agent system.
+**Purpose:** Stores immutable live-audit fixture data plus a curated registry used by status/audit workflows.
 
 ---
 
 ## Files
 
-### `live-audit-registry.js`
+### `status/live-audit-registry.js`
 
-A frozen CommonJS module exporting a single `entries` object (also frozen). Keys are iteration IDs or the special `manual-probe` key.
+Frozen CommonJS export containing the canonical `entries` map.
 
-**Registry entry shape:**
+**Entry shape:**
 ```js
 {
-  kind: 'tier2',         // tier of the audit entry (always 'tier2' so far)
-  createdAt: '<YYYYMMDDTHHmmssZ>' | 'probe',  // ISO-compact timestamp, or 'probe' for manual
-  source: 'live-audit'   // always 'live-audit'
+  kind: 'tier2',
+  createdAt: '<YYYYMMDDTHHmmssZ>' | 'probe',
+  source: 'live-audit'
 }
 ```
 
-The registry holds a static curated set of iteration IDs. Not all fixtures are reflected here — fixtures grow faster than registry entries.
+Current registry now tracks all fixture-backed iterations plus `manual-probe`.
 
-Special entry: `manual-probe` has `createdAt: 'probe'` — used to test the audit system without a real iteration timestamp.
+### `status/live-audit-fixtures/*.js`
 
----
-
-### `live-audit-fixtures/`
-
-Directory of individual iteration fixture files. Each fixture is a frozen CommonJS module.
+One frozen module per live audit iteration.
 
 **Naming:** `iter-<YYYYMMDDTHHmmssZ>-<seq>.js`
 
@@ -42,30 +38,26 @@ module.exports = Object.freeze({
 });
 ```
 
-Fields mirror the registry entry, plus an explicit `iteration` self-identifier.
+Fixtures mirror registry metadata and add explicit `iteration` self-identification.
 
 ---
 
 ## Patterns
 
-- **Immutability:** All exports use `Object.freeze()` — data is read-only by design.
-- **Registry vs Fixtures:** Registry is a sparse curated index; fixtures directory grows with each audit run and may contain more iterations than the registry lists.
-- **`manual-probe`:** Special entry for testing the audit plumbing without a real timestamp.
-- **Tier:** All current entries are `tier2`. `kind` field supports future tier3 entries.
-- **No runtime logic:** Purely data — no functions, no imports, no side effects.
+- Immutability-first: every exported object is wrapped with `Object.freeze()`.
+- Data-only modules: no runtime logic, no imports, no side effects.
+- Stable naming contract: iteration ID is encoded in filename and payload.
+- `manual-probe` is an intentional non-timestamp sentinel for audit plumbing checks.
 
-## Usage
+## Coupling
 
-Consumers `require()` the registry to enumerate known audit entries, or `require()` individual fixture files by iteration ID for test assertions.
+- This domain is standalone and currently has no in-repo runtime consumers outside `status/`.
+- Consumers are expected to load registry/fixtures via `require()` for test/audit assertions.
 
-## Dependencies and Coupling
+## Operational Notes
 
-- **No imports:** The status domain files have zero imports — no coordinator, no external libs.
-- **Pure data:** Consumers load these files via require(). Currently no external files reference these (grep shows no non-status consumers in the codebase).
-- **Standalone:** This domain is entirely self-contained and isolated from coordinator internals.
+- Keep registry entries synchronized with fixture files to avoid stale audit indexes.
+- If new fixtures are added, update `live-audit-registry.js` in the same change.
 
-## Concerns and Opportunities
-
-- **Registry/fixture drift:** The registry (3 entries: 013409Z, 013831Z, manual-probe) is out of sync with the fixtures dir (5 files: 014351Z, 014930Z, 015229Z, 015519Z, 020322Z). Different sets entirely. No tooling enforces consistency.
-- **No consumers found:** As of 2026-04-06, no code outside status/ imports these files. Either the consumer code is not yet written or these fixtures are used indirectly via filesystem scan.
-- **Opportunity:** Add a validation script to assert registry entries have corresponding fixture files (and vice versa).
+### 2026-04-06 — Registry/Fixture Synchronization
+Registry now includes all iteration fixtures present in `status/live-audit-fixtures/` (`014351Z`, `014930Z`, `015229Z`, `015519Z`, `020322Z`) plus `manual-probe`. This removes previous registry drift and keeps status-domain audit metadata coherent.
