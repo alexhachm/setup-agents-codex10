@@ -58,6 +58,16 @@ Fixtures mirror registry metadata and add explicit `iteration` self-identificati
 
 - Keep registry entries synchronized with fixture files to avoid stale audit indexes.
 - If new fixtures are added, update `live-audit-registry.js` in the same change.
+- `manual-probe` is intentionally registry-only and should not be expected as a fixture file.
+- Use deterministic key/filename order (chronological iteration ids) to reduce review noise.
 
 ### 2026-04-06 — Registry/Fixture Synchronization
 Registry now includes all iteration fixtures present in `status/live-audit-fixtures/` (`014351Z`, `014930Z`, `015229Z`, `015519Z`, `020322Z`) plus `manual-probe`. This removes previous registry drift and keeps status-domain audit metadata coherent.
+
+### 2026-04-07 — Status Domain Invariants and Parity Check
+Status data is pure CommonJS data, and all exported payloads are immutable via `Object.freeze()`. The source has no in-repo runtime consumers right now, so drift prevention is primarily a maintenance concern.
+
+Quick parity check command (run from repo root):
+```bash
+node -e "const fs=require('fs');const path=require('path');const r=require('./status/live-audit-registry');const fixtureDir='./status/live-audit-fixtures';const fixtures=new Set(fs.readdirSync(fixtureDir).filter(f=>f.endsWith('.js')).map(f=>path.basename(f,'.js')));const reg=new Set(Object.keys(r.entries).filter(k=>k!=='manual-probe'));const missingFixtures=[...reg].filter(k=>!fixtures.has(k));const missingRegistry=[...fixtures].filter(k=>!reg.has(k));if(missingFixtures.length||missingRegistry.length){console.error(JSON.stringify({missingFixtures,missingRegistry},null,2));process.exit(1)}console.log('status parity ok');"
+```

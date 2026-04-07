@@ -151,6 +151,66 @@ The same `operator_diagnostics` block is embedded in the `/api/status` response.
 2. Watchdog auto-resolves after 15 min (no-merge case) or after all merges settle.
 3. Force recovery: `mac10 repair` (restarts coordinator with startup sweep).
 
+### Browser Offload Smoke Harness (Controlled Lifecycle)
+
+Use a dedicated Tier-2 smoke task for browser offload lifecycle testing:
+- Subject: `Browser offload smoke harness`
+- Description: `Use this task only for browser offload lifecycle smoke testing.`
+
+Run the command chain against that task:
+
+```bash
+# Required inputs
+TASK_ID=<task_id>
+WORKFLOW_URL='https://chatgpt.com/g/guided-research'
+
+# 1) Create session (task status: requested)
+mac10 browser-create-session "$TASK_ID" "$WORKFLOW_URL" smoke-create-001
+
+# 2) Attach session (task status advances queued -> launching -> attached)
+mac10 browser-attach-session "$TASK_ID" <session_id> smoke-attach-001
+
+# 3) Start job (task status advances running -> awaiting_callback)
+mac10 browser-start-job "$TASK_ID" <session_id> "$WORKFLOW_URL" smoke-start-001 "Smoke harness lifecycle probe"
+
+# 4) Stream callback chunks while awaiting callback
+mac10 browser-callback-chunk "$TASK_ID" <session_id> <job_id> <callback_token> smoke-chunk-001 0 "chunk one "
+mac10 browser-callback-chunk "$TASK_ID" <session_id> <job_id> <callback_token> smoke-chunk-002 1 "chunk two"
+
+# 5) Check status (expected: awaiting_callback until complete/fail)
+mac10 browser-job-status "$TASK_ID" <session_id> <job_id>
+
+# 6a) Complete path (terminal status: completed)
+mac10 browser-complete-job "$TASK_ID" <session_id> <job_id> <callback_token> smoke-complete-001 '{"summary":"ok"}'
+
+# 6b) Failure path (terminal status: failed)
+mac10 browser-fail-job "$TASK_ID" <session_id> <job_id> <callback_token> smoke-fail-001 "intentional smoke failure"
+```
+
+Expected browser-offload status progression (from `coordinator/src/db.js`):
+
+| Stage | Allowed progression |
+|---|---|
+| Session bring-up | `not_requested -> requested -> queued -> launching -> attached` |
+| Job execution | `attached -> running -> awaiting_callback` |
+| Terminal | `awaiting_callback -> completed` or `awaiting_callback -> failed` (`cancelled` is also terminal) |
+
+Notes:
+1. `idempotency_key` should be stable for retries of the same operation and unique across distinct operations.
+2. `browser-job-status` is read-only and safe to poll while waiting for callback chunks.
+3. CLI enforces forward-only lifecycle transitions; backward transitions fail.
+
+### Liveness Recovery for Browser Smoke Tasks
+
+If the worker hosting the smoke task dies (`worker_death:msb_sandbox_dead`), watchdog reassigns the task with bounded retries:
+- Retry cap: `watchdog_task_reassign_limit` (default `2`)
+- Exhaustion result text: `Liveness recovery exhausted after <N> reassignments (<reason>)`
+
+When retries are exhausted:
+1. Confirm failure context: `mac10 status` and `mac10 log`
+2. Check diagnostics counters: `failure_counts.worker_deaths` and `failure_counts.stall_recoveries`
+3. Repair worker runtime cause first (sandbox availability, sentinel health), then re-run the dedicated smoke harness task with fresh idempotency keys.
+
 ## Key Design Decisions
 
 - **SQLite WAL** replaces 7 JSON files + jq — concurrent reads, serialized writes, no race conditions
