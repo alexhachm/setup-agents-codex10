@@ -76,3 +76,19 @@ node -e "const fs=require('fs');const path=require('path');const r=require('./st
 `request-pipeline-smoke.txt` established a second fixture mode: non-JS, presence-based liveness markers with explicit metadata headers.
 For this domain, `iter-*` remains the registry-fixture parity surface, while smoke markers may intentionally stay fixture-only and unkeyed in registry entries.
 To reduce worker liveness recovery noise, keep fixture marker headers stable and preserve append-only ordering for iteration ids and registry keys.
+
+### 2026-04-07 — Liveness Recovery Follow-up
+Registry comments and fixture README now explicitly define exception handling for `manual-probe` (registry-only) and `request-pipeline-smoke.txt` (fixture-only).
+Recovery checks should first validate marker presence/headers, then validate `iter-*` registry parity to isolate data drift from worker heartbeat failures.
+
+### 2026-04-07 — Liveness Recovery Exhaustion Findings
+When both marker-header checks and `iter-*` parity checks pass, treat the incident as orchestration liveness (idle/orphan heartbeat flow), not status-domain data corruption.
+`request-pipeline-smoke.txt` remains intentionally fixture-only because consumers rely on filesystem presence for smoke/liveness checks rather than keyed registry lookup.
+
+### 2026-04-07 — Idle/Orphan Recovery Decision Rule
+If recovery retries are exhausted with `worker_idle_orphan`, run marker-header + `iter-*` parity checks before touching status artifacts.
+When both checks pass, keep status files immutable and route remediation to coordinator liveness paths (heartbeat/watchdog/reassignment) rather than data patching.
+
+### 2026-04-07 — Reassignment Exhaustion Triage Signal
+`Liveness recovery exhausted after 2 reassignments` is a coordinator/worker lifecycle signal, not a status-data signal, unless marker/parity checks fail.
+For status triage, treat reassignments as retry telemetry and only patch status files when there is concrete evidence of missing headers or registry/fixture mismatch.

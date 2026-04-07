@@ -34,8 +34,10 @@ This directory stores immutable fixture modules for timestamped live-audit itera
 1. Validate fixture-only marker presence/headers (`request-pipeline-smoke.txt`).
 2. Validate `iter-*` parity between fixture filenames and registry keys.
 3. If both pass, treat failures as orchestration liveness issues (worker heartbeat/watchdog), not status-data drift.
+4. For incidents reported as "liveness recovery exhausted after N reassignments", keep status fixtures/registry immutable and escalate to coordinator recovery.
 
 ## Failure Classification
 
 - `worker_idle_orphan` / liveness-recovery exhaustion should not trigger status fixture rewrites when steps 1-2 pass.
 - In those cases, escalate to worker heartbeat/watchdog recovery instead of editing registry keys or fixture payloads.
+- Reassignments count retries; it is not evidence of fixture corruption by itself.
