@@ -1,0 +1,4 @@
+REQUEST_ID: req-2301e6a9
+DOMAIN: status
+FIXTURE: request-pipeline-smoke
+PURPOSE: smoke-check fixture presence for request pipeline
