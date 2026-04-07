@@ -71,3 +71,8 @@ Quick parity check command (run from repo root):
 ```bash
 node -e "const fs=require('fs');const path=require('path');const r=require('./status/live-audit-registry');const fixtureDir='./status/live-audit-fixtures';const fixtures=new Set(fs.readdirSync(fixtureDir).filter(f=>f.endsWith('.js')).map(f=>path.basename(f,'.js')));const reg=new Set(Object.keys(r.entries).filter(k=>k!=='manual-probe'));const missingFixtures=[...reg].filter(k=>!fixtures.has(k));const missingRegistry=[...fixtures].filter(k=>!reg.has(k));if(missingFixtures.length||missingRegistry.length){console.error(JSON.stringify({missingFixtures,missingRegistry},null,2));process.exit(1)}console.log('status parity ok');"
 ```
+
+### 2026-04-07 — Registry/Fixture Pattern Findings
+`request-pipeline-smoke.txt` established a second fixture mode: non-JS, presence-based liveness markers with explicit metadata headers.
+For this domain, `iter-*` remains the registry-fixture parity surface, while smoke markers may intentionally stay fixture-only and unkeyed in registry entries.
+To reduce worker liveness recovery noise, keep fixture marker headers stable and preserve append-only ordering for iteration ids and registry keys.
