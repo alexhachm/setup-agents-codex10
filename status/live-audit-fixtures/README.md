@@ -22,3 +22,9 @@ This directory stores immutable fixture modules for timestamped live-audit itera
 - `request-pipeline-smoke.txt` is a fixture-only presence marker for liveness/recovery tooling.
 - Keep marker files plaintext with explicit, stable headers (`REQUEST_ID`, `DOMAIN`, `FIXTURE`, `PURPOSE`).
 - Do not add liveness marker files to registry `entries` unless a runtime consumer needs keyed lookup.
+
+## Recovery Checklist
+
+- Confirm `request-pipeline-smoke.txt` exists and retains all four headers.
+- Confirm each `iter-*` fixture filename stem appears in `status/live-audit-registry.js`.
+- Prefer append-only edits for new iteration fixtures and registry keys to reduce merge/recovery noise.
