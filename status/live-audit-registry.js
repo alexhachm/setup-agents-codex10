@@ -7,6 +7,8 @@ module.exports = Object.freeze({
   // 3) request-pipeline-smoke.txt is intentionally fixture-only and is checked by presence.
   // 4) Keep iteration ids append-only to preserve a stable live-audit timeline.
   // 5) Keep any registry/fixture exceptions documented in status/live-audit-fixtures/README.md.
+  // 6) During liveness recovery, verify fixture-only markers before iter-* registry parity checks.
+  // 7) If marker/parity checks pass, classify failures as orchestration liveness (worker_idle_orphan), not registry drift.
   entries: Object.freeze({
     'iter-20260405T014351Z-1': { kind: 'tier2', createdAt: '20260405T014351Z', source: 'live-audit' },
     'iter-20260405T014930Z-1': { kind: 'tier2', createdAt: '20260405T014930Z', source: 'live-audit' },

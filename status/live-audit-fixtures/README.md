@@ -28,3 +28,14 @@ This directory stores immutable fixture modules for timestamped live-audit itera
 - Confirm `request-pipeline-smoke.txt` exists and retains all four headers.
 - Confirm each `iter-*` fixture filename stem appears in `status/live-audit-registry.js`.
 - Prefer append-only edits for new iteration fixtures and registry keys to reduce merge/recovery noise.
+
+## Liveness Triage Order
+
+1. Validate fixture-only marker presence/headers (`request-pipeline-smoke.txt`).
+2. Validate `iter-*` parity between fixture filenames and registry keys.
+3. If both pass, treat failures as orchestration liveness issues (worker heartbeat/watchdog), not status-data drift.
+
+## Failure Classification
+
+- `worker_idle_orphan` / liveness-recovery exhaustion should not trigger status fixture rewrites when steps 1-2 pass.
+- In those cases, escalate to worker heartbeat/watchdog recovery instead of editing registry keys or fixture payloads.
