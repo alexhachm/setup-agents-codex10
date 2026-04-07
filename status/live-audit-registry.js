@@ -7,6 +7,7 @@ module.exports = Object.freeze({
     'iter-20260405T015229Z-1': { kind: 'tier2', createdAt: '20260405T015229Z', source: 'live-audit' },
     'iter-20260405T015519Z-1': { kind: 'tier2', createdAt: '20260405T015519Z', source: 'live-audit' },
     'iter-20260405T020322Z-1': { kind: 'tier2', createdAt: '20260405T020322Z', source: 'live-audit' },
+    'iter-20260407T035239Z-1': { kind: 'tier2', createdAt: '20260407T035239Z', source: 'live-audit' },
     'manual-probe': { kind: 'tier2', createdAt: 'probe', source: 'live-audit' },
   }),
 });
