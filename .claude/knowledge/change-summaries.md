@@ -2,6 +2,12 @@
 
 Workers append summaries here after completing each task. Newest entries at the top.
 
+## [5] FIX: Document status domain patterns and findings - worker liveness recovery exhausted — 2026-04-07
+- Domain: status
+- Files: status/live-audit-registry.js, status/live-audit-fixtures/README.md, .claude/knowledge/codebase/domains/status.md
+- What changed: Added explicit live-audit invariants in the registry, documented fixture contract and registry parity rules in a new fixtures README, and extended status domain knowledge with operational invariants plus a reproducible parity-check command.
+- PR: https://github.com/alexhachm/setup-agents-codex10/pull/345
+
 ## [25] FIX: merge test-hello.js branch to main via direct git — 2026-03-29
 - Domain: coordinator
 - Files: coordinator/src/test-hello.js (verification only, no changes)
