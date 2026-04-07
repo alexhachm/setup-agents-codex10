@@ -3,9 +3,15 @@
 **Location:** `status/`
 **Purpose:** Stores immutable live-audit fixture data plus a curated registry used by status/audit workflows.
 
----
+## Key Files
 
-## Files
+### `status/live-audit-registry.js`
+- Canonical registry map: `entries` keyed by iteration ID plus `manual-probe`.
+- Value contract:
+  - `kind`: currently `tier2`
+  - `createdAt`: timestamp token (`YYYYMMDDTHHmmssZ`) or `probe`
+  - `source`: currently `live-audit`
+- Export is frozen (`Object.freeze`) to keep the registry read-only at runtime.
 
 ### `status/live-audit-registry.js`
 
@@ -43,6 +49,10 @@ Fixtures mirror registry metadata and add explicit `iteration` self-identificati
 ---
 
 ## Patterns
+- Data-only modules: no imports, no side effects, no runtime logic.
+- Immutability-first: all exported domain objects are frozen.
+- Naming/payload coupling: fixture filename iteration token must match `iteration` and registry key.
+- Registry is the index; fixtures are detailed records.
 
 - Immutability-first: every exported object is wrapped with `Object.freeze()`.
 - Data-only modules: no runtime logic, no imports, no side effects.
