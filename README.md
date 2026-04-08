@@ -2,6 +2,8 @@
 
 A deterministic coordination system for multiple Codex agents. LLMs do coding work; Node.js does coordination.
 
+<!-- E2E test run: 20260408T2040 -->
+
 ## Architecture
 
 ```
