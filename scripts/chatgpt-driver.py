@@ -481,9 +481,50 @@ def acquire_single_instance_lock():
     except BlockingIOError:
         lock_fp.close()
         return None
+    except OSError:
+        # flock not supported on this filesystem (e.g., NTFS/DrvFs in WSL2).
+        # Fall back to PID-file check for best-effort single-instance guarantee.
+        lock_fp.close()
+        return _acquire_pid_file_lock()
     lock_fp.write(str(os.getpid()))
     lock_fp.flush()
     return lock_fp
+
+
+def _acquire_pid_file_lock():
+    """PID-file based single-instance lock for filesystems without flock support."""
+    pid_file = LOCK_FILE.with_suffix(".pid")
+    try:
+        pid_file.parent.mkdir(parents=True, exist_ok=True)
+        if pid_file.exists():
+            try:
+                existing_pid = int(pid_file.read_text().strip())
+                if _pid_is_alive(existing_pid):
+                    return None  # Another live driver is running
+            except Exception:
+                pass
+            try:
+                pid_file.unlink()
+            except Exception:
+                pass
+        pid_file.write_text(str(os.getpid()))
+        log.info("Using PID-file lock (flock unavailable on this filesystem)")
+        # Return an object with a close() method that removes the PID file
+        class _PidHandle:
+            def close(self):
+                try:
+                    if pid_file.exists() and int(pid_file.read_text().strip()) == os.getpid():
+                        pid_file.unlink()
+                except Exception:
+                    pass
+        return _PidHandle()
+    except Exception as e:
+        log.warning(f"PID-file lock fallback failed: {e}; proceeding without lock")
+        # Return a no-op handle so the driver can still run
+        class _NoopHandle:
+            def close(self):
+                pass
+        return _NoopHandle()
 
 class BrowserManager:
     """Async context manager guaranteeing browser cleanup.

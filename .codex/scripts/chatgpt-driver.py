@@ -128,9 +128,22 @@ POLL_INTERVAL_SEC = 20
 # Follow-up conversation limits
 MAX_FOLLOW_UPS = 3
 
+# Shared cross-project concurrency
+DEFAULT_SHARED_RESEARCH_CONCURRENCY_MAX = 12
+_shared_concurrency_raw = os.environ.get(
+    "MAC10_RESEARCH_CONCURRENCY_MAX",
+    str(DEFAULT_SHARED_RESEARCH_CONCURRENCY_MAX),
+)
+try:
+    SHARED_RESEARCH_CONCURRENCY_MAX = max(1, int(_shared_concurrency_raw))
+except (TypeError, ValueError):
+    SHARED_RESEARCH_CONCURRENCY_MAX = DEFAULT_SHARED_RESEARCH_CONCURRENCY_MAX
+GLOBAL_RESEARCH_DIR = Path.home() / ".codex" / "research-runtime"
+GLOBAL_RESEARCH_LOCK_FILE = GLOBAL_RESEARCH_DIR / "concurrency.lock"
+GLOBAL_RESEARCH_LEASE_DIR = GLOBAL_RESEARCH_DIR / "leases"
+
 # Tab Pool
-POOL_MIN_TABS = 5
-POOL_MAX_TABS = 10
+POOL_SESSION_DISPATCH_TARGET = SHARED_RESEARCH_CONCURRENCY_MAX
 POOL_RESIZE_INTERVAL_SEC = 30 * 60   # Pick new random target every ~30 min
 TAB_CLOSE_DELAY_MIN = 60             # Min seconds a completed tab lingers
 TAB_CLOSE_DELAY_MAX = 300            # Max seconds before tab closes
@@ -202,6 +215,7 @@ class TabSlot:
         self._current_model = "standard"
         self.linger_until = 0
         self._task = None  # asyncio.Task for per-item lifecycle
+        self.global_lease = None
 
     @property
     def is_active(self):
@@ -222,6 +236,7 @@ class TabSlot:
         self._current_model = "standard"
         self.linger_until = 0
         self._task = None
+        self.global_lease = None
 
     def __repr__(self):
         return f"<TabSlot {self.slot_id} state={self.state.value} item={getattr(self.item, 'get', lambda k, d=None: d)('id', None) if self.item else None}>"
@@ -481,9 +496,149 @@ def acquire_single_instance_lock():
     except BlockingIOError:
         lock_fp.close()
         return None
+    except OSError:
+        # flock not supported on this filesystem (e.g., NTFS/DrvFs in WSL2).
+        # Fall back to PID-file check for best-effort single-instance guarantee.
+        lock_fp.close()
+        return _acquire_pid_file_lock()
     lock_fp.write(str(os.getpid()))
     lock_fp.flush()
     return lock_fp
+
+
+def _acquire_pid_file_lock():
+    """PID-file based single-instance lock for filesystems without flock support."""
+    pid_file = LOCK_FILE.with_suffix(".pid")
+    try:
+        pid_file.parent.mkdir(parents=True, exist_ok=True)
+        if pid_file.exists():
+            try:
+                existing_pid = int(pid_file.read_text().strip())
+                if _pid_is_alive(existing_pid):
+                    return None  # Another live driver is running
+            except Exception:
+                pass
+            try:
+                pid_file.unlink()
+            except Exception:
+                pass
+        pid_file.write_text(str(os.getpid()))
+        log.info("Using PID-file lock (flock unavailable on this filesystem)")
+        # Return an object with a close() method that removes the PID file
+        class _PidHandle:
+            def close(self):
+                try:
+                    if pid_file.exists() and int(pid_file.read_text().strip()) == os.getpid():
+                        pid_file.unlink()
+                except Exception:
+                    pass
+        return _PidHandle()
+    except Exception as e:
+        log.warning(f"PID-file lock fallback failed: {e}; proceeding without lock")
+        # Return a no-op handle so the driver can still run
+        class _NoopHandle:
+            def close(self):
+                pass
+        return _NoopHandle()
+
+
+def _pid_is_alive(pid):
+    try:
+        os.kill(int(pid), 0)
+        return True
+    except (ProcessLookupError, ValueError, TypeError):
+        return False
+    except PermissionError:
+        return True
+    except Exception:
+        return False
+
+
+class GlobalResearchLease:
+    """Cross-project lease for aggregate research concurrency."""
+
+    def __init__(self, item):
+        item_id = item.get("id", "unknown")
+        self.item = item
+        self.item_id = str(item_id)
+        self.project_hash = _project_hash
+        self.lease_path = (
+            GLOBAL_RESEARCH_LEASE_DIR
+            / f"{self.project_hash}-{os.getpid()}-{self.item_id}.json"
+        )
+        self.acquired = False
+
+    @staticmethod
+    def _load_lease(path):
+        try:
+            with open(path, "r") as f:
+                return json.load(f)
+        except Exception:
+            return None
+
+    @staticmethod
+    def _cleanup_stale_leases():
+        if not GLOBAL_RESEARCH_LEASE_DIR.exists():
+            return
+        for path in GLOBAL_RESEARCH_LEASE_DIR.glob("*.json"):
+            payload = GlobalResearchLease._load_lease(path)
+            pid = (payload or {}).get("pid")
+            if _pid_is_alive(pid):
+                continue
+            try:
+                path.unlink()
+            except FileNotFoundError:
+                pass
+            except Exception as e:
+                log.warning(f"Failed to remove stale research lease {path}: {e}")
+
+    @staticmethod
+    def active_count():
+        if fcntl is None:
+            return 0
+        GLOBAL_RESEARCH_LEASE_DIR.mkdir(parents=True, exist_ok=True)
+        with open(GLOBAL_RESEARCH_LOCK_FILE, "a+") as lock_fp:
+            fcntl.flock(lock_fp.fileno(), fcntl.LOCK_EX)
+            GlobalResearchLease._cleanup_stale_leases()
+            return sum(1 for _ in GLOBAL_RESEARCH_LEASE_DIR.glob("*.json"))
+
+    def acquire(self):
+        if fcntl is None:
+            self.acquired = True
+            return True
+
+        GLOBAL_RESEARCH_LEASE_DIR.mkdir(parents=True, exist_ok=True)
+        with open(GLOBAL_RESEARCH_LOCK_FILE, "a+") as lock_fp:
+            fcntl.flock(lock_fp.fileno(), fcntl.LOCK_EX)
+            self._cleanup_stale_leases()
+            active = sum(1 for _ in GLOBAL_RESEARCH_LEASE_DIR.glob("*.json"))
+            if active >= SHARED_RESEARCH_CONCURRENCY_MAX:
+                return False
+
+            payload = {
+                "pid": os.getpid(),
+                "project_dir": str(PROJECT_DIR),
+                "project_hash": self.project_hash,
+                "item_id": self.item.get("id"),
+                "topic": self.item.get("topic"),
+                "acquired_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+            }
+            with open(self.lease_path, "w") as f:
+                json.dump(payload, f)
+            self.acquired = True
+            return True
+
+    def release(self):
+        if not self.acquired:
+            return
+        try:
+            self.lease_path.unlink()
+        except FileNotFoundError:
+            pass
+        except Exception as e:
+            log.warning(f"Failed to release research lease {self.lease_path}: {e}")
+        finally:
+            self.acquired = False
 
 class BrowserManager:
     """Async context manager guaranteeing browser cleanup.
@@ -1048,9 +1203,25 @@ class ResponseDetector:
 
     def _handle_stabilizing(self, s):
         """STABILIZING: streaming stopped, wait for text to be stable."""
-        # If streaming resumes, go back
+        last_changed = s.get("lastAssistantTextChangedAt", 0)
+        seconds_since_change = (time.time() * 1000 - last_changed) / 1000.0
+        linger_timeout = max(
+            self.config.get("stream_stale_timeout", 20.0),
+            self.config["stability_duration"] * 2,
+        )
+
+        # If streaming resumes, only bounce back when text is still actively
+        # changing. Lingering indicators are common and otherwise trap the
+        # detector in a STREAMING↔STABILIZING loop forever.
         if self._is_streaming(s):
-            self._transition(ResponseState.STREAMING)
+            if seconds_since_change >= linger_timeout:
+                log.info(
+                    f"Streaming indicator lingered for {seconds_since_change:.1f}s "
+                    "during stabilizing — forcing collection"
+                )
+                self._transition(ResponseState.COLLECTING)
+            else:
+                self._transition(ResponseState.STREAMING)
             return
 
         # Deep Research: if iframe reappears or DR is working, go back
@@ -1064,9 +1235,7 @@ class ResponseDetector:
                 return
 
         # Check time-based stability using JS-side timestamp
-        last_changed = s.get("lastAssistantTextChangedAt", 0)
         # JS timestamp is in milliseconds
-        seconds_since_change = (time.time() * 1000 - last_changed) / 1000.0
 
         if seconds_since_change >= self.config["stability_duration"]:
             # Text has been stable long enough
@@ -2222,13 +2391,10 @@ async def select_model_for_slot(slot, mode):
 class TabPool:
     """Session-based ChatGPT research driver.
 
-    Every ~30 minutes a new session begins with a random N in [5-10].
-    N is the max items dispatched that session.  Items are dispatched
-    ONE AT A TIME: open a fresh tab, type the prompt, send it, confirm
-    it's streaming, then move to the next item.  Multiple tabs wait for
-    responses concurrently.  Completed tabs linger 1-5 min before
-    closing.  Sequential dispatch means the focus lock is never
-    contended during normal operation.
+    Each session gets a fresh dispatch budget equal to the shared
+    cross-project concurrency cap. Multiple tabs can wait for responses
+    concurrently, but aggregate in-flight work across every project is
+    bounded by the shared lease pool.
     """
 
     def __init__(self, bm):
@@ -2243,8 +2409,8 @@ class TabPool:
         self._session_start_time = 0.0
 
     def _start_new_session(self):
-        """Roll a new session: random N in [5-10], reset dispatch counter."""
-        self._session_n = random.randint(POOL_MIN_TABS, POOL_MAX_TABS)
+        """Reset the dispatch budget for the current session window."""
+        self._session_n = POOL_SESSION_DISPATCH_TARGET
         self._session_dispatched = 0
         self._session_start_time = time.monotonic()
         log.info(f"Session reset: N={self._session_n} (max dispatches)")
@@ -2333,12 +2499,16 @@ class TabPool:
     # --- Dispatcher (sequential — one item at a time) ---
 
     async def _dispatcher_loop(self):
-        """Poll queue, open a fresh tab per item, type and send inline."""
+        """Poll queue, subject to the shared cross-project concurrency cap."""
         while not self._shutdown:
             update_health("polling")
 
             # Session exhausted — idle until session timer resets
             if self._session_dispatched >= self._session_n:
+                await asyncio.sleep(POLL_INTERVAL_SEC)
+                continue
+
+            if GlobalResearchLease.active_count() >= SHARED_RESEARCH_CONCURRENCY_MAX:
                 await asyncio.sleep(POLL_INTERVAL_SEC)
                 continue
 
@@ -2349,7 +2519,13 @@ class TabPool:
                 continue
 
             item_id = item.get("id")
+            lease = GlobalResearchLease(item)
+            if not lease.acquire():
+                await asyncio.sleep(POLL_INTERVAL_SEC)
+                continue
+
             if not mark_in_progress(item_id):
+                lease.release()
                 await asyncio.sleep(1)
                 continue
 
@@ -2361,11 +2537,13 @@ class TabPool:
             if slot.state != TabSlotState.IDLE:
                 log.error(f"Slot {slot.slot_id}: open failed, failing item #{item_id}")
                 run_codex10("research-fail", str(item_id), "Tab open failed")
+                lease.release()
                 if slot in self.slots:
                     self.slots.remove(slot)
                 continue
 
             slot.item = item
+            slot.global_lease = lease
             slot.composed = compose_prompt(item)
             slot.follow_up_round = 0
             composed = slot.composed
@@ -2382,6 +2560,7 @@ class TabPool:
             except Exception as e:
                 log.error(f"Slot {slot.slot_id}: send failed for #{item_id}: {e}")
                 run_codex10("research-fail", str(item_id), str(e))
+                lease.release()
                 await self._close_tab(slot)
                 continue
 
@@ -2549,6 +2728,10 @@ class TabPool:
         except Exception as e:
             log.error(f"Slot {slot.slot_id}: error for #{item_id}: {e}")
             run_codex10("research-fail", str(item_id), str(e))
+        finally:
+            if slot.global_lease:
+                slot.global_lease.release()
+                slot.global_lease = None
 
         # Linger before closing (human-like)
         slot.linger_until = time.time() + random.uniform(
@@ -2564,7 +2747,7 @@ class TabPool:
     # --- Session Timer ---
 
     async def _session_timer_loop(self):
-        """Every ~30 min, start a new session with a fresh random N."""
+        """Every ~30 min, reset the session dispatch budget."""
         while not self._shutdown:
             await asyncio.sleep(POOL_RESIZE_INTERVAL_SEC + random.uniform(-60, 60))
             self._start_new_session()

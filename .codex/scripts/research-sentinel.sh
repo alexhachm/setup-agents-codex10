@@ -22,6 +22,7 @@ mkdir -p "$(dirname "$HEALTH_FILE")"
 BACKOFF=5
 MAX_BACKOFF=300
 CONSECUTIVE_FAILURES=0
+RESEARCH_HEADLESS_MODE="${MAC10_RESEARCH_HEADLESS:-1}"
 
 update_health() {
   local status="$1"
@@ -44,17 +45,38 @@ with open('$HEALTH_FILE', 'w') as f:
   fi
 }
 
+LOCK_FILE="$PROJECT_DIR/.codex/state/research-driver.lock"
+LOCK_PID_FILE="$PROJECT_DIR/.codex/state/research-driver.pid"
+
+# Clean up a stale lock/pid file left by a crashed driver process.
+# flock() on NTFS/DrvFs (WSL2) raises EOPNOTSUPP, so the driver may fall back
+# to a PID file. Either way, if the recorded PID is gone the file is stale.
+cleanup_stale_lock() {
+  for _lf in "$LOCK_FILE" "$LOCK_PID_FILE"; do
+    [ -f "$_lf" ] || continue
+    _pid=$(cat "$_lf" 2>/dev/null | tr -d '[:space:]')
+    if [ -n "$_pid" ] && kill -0 "$_pid" 2>/dev/null; then
+      : # Process is alive — leave the lock alone
+    else
+      echo "[research-sentinel] Removing stale lock file: $_lf (pid=${_pid:-unknown} gone)" | tee -a "$LOG_FILE"
+      rm -f "$_lf"
+    fi
+  done
+}
+
 echo "[research-sentinel] Starting in $PROJECT_DIR" | tee -a "$LOG_FILE"
 update_health "starting"
 
 while true; do
+  cleanup_stale_lock
   echo "[research-sentinel] Launching chatgpt-driver.py (backoff=${BACKOFF}s)..." | tee -a "$LOG_FILE"
   update_health "active"
 
   START_TIME=$(date +%s)
 
-  if command -v xvfb-run >/dev/null 2>&1 && [ -z "${DISPLAY:-}" ]; then
-    XVFB_RUNNING=1 xvfb-run -a --server-args="-screen 0 1920x1080x24 -ac -nolisten tcp" \
+  if [ "$RESEARCH_HEADLESS_MODE" != "0" ] && command -v xvfb-run >/dev/null 2>&1; then
+    env -u DISPLAY -u WAYLAND_DISPLAY -u XAUTHORITY \
+      XVFB_RUNNING=1 xvfb-run -a --server-args="-screen 0 1920x1080x24 -ac -nolisten tcp" \
       python3 "$DRIVER_SCRIPT" 2>&1 | tee -a "$LOG_FILE" || true
   else
     python3 "$DRIVER_SCRIPT" 2>&1 | tee -a "$LOG_FILE" || true

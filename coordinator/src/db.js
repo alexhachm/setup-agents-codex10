@@ -4461,9 +4461,21 @@ function requeueFailedResearch({ topic = null, include_running = false } = {}) {
 function requeueStaleResearch({ max_age_minutes = 60 } = {}) {
   const d = getDb();
   const now = currentSqlTimestamp();
-  const stale = d.prepare(
-    "SELECT id FROM research_intents WHERE status = 'running' AND updated_at < datetime('now', '-' || ? || ' minutes')"
-  ).all(max_age_minutes);
+  // max_age_minutes=0 is a special sentinel meaning "requeue ALL running items
+  // unconditionally" — used at driver startup to recover from a previous crash.
+  // The standard datetime arithmetic `< datetime('now', '-0 minutes')` uses
+  // strict less-than which misses items updated in the same second, so we use
+  // a dedicated branch for the zero case.
+  let stale;
+  if (Number(max_age_minutes) === 0) {
+    stale = d.prepare(
+      "SELECT id FROM research_intents WHERE status = 'running'"
+    ).all();
+  } else {
+    stale = d.prepare(
+      "SELECT id FROM research_intents WHERE status = 'running' AND updated_at < datetime('now', '-' || ? || ' minutes')"
+    ).all(max_age_minutes);
+  }
   const ids = stale.map(r => r.id);
   if (ids.length > 0) {
     const placeholders = buildSqlInClause(ids);
@@ -4472,6 +4484,10 @@ function requeueStaleResearch({ max_age_minutes = 60 } = {}) {
     ).run(now, ...ids);
   }
   return { requeued_count: ids.length, ids };
+}
+
+function getQueuedResearchIntents({ limit = 50 } = {}) {
+  return getResearchQueueItems({ status: 'queued', limit });
 }
 
 // --- Domain analysis functions ---
@@ -4646,7 +4662,7 @@ module.exports = {
   listProjectMemoryLineageLinks,
   rebuildProjectMemorySnapshotIndex,
   enqueueResearchIntent, getResearchIntent, scoreResearchIntentCandidates, materializeResearchBatchPlan,
-  getResearchQueueItems, startResearchItem, completeResearchItem, failResearchItem, requeueFailedResearch, requeueStaleResearch,
+  getResearchQueueItems, getQueuedResearchIntents, startResearchItem, completeResearchItem, failResearchItem, requeueFailedResearch, requeueStaleResearch,
   getResearchBatch, listResearchBatchStages, listResearchIntentFanout, markResearchBatchStage,
   listTasks, getReadyTasks, checkAndPromoteTasks, replanTaskDependency,
   registerWorker, getWorker, updateWorker, getIdleWorkers, getAllWorkers, claimWorker, releaseWorker,

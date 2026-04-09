@@ -4352,7 +4352,7 @@ function handleCommand(cmd, conn, handlers) {
 
       case 'research-requeue-stale': {
         const requeued = db.requeueStaleResearch({
-          max_age_minutes: args.max_age_minutes || 60,
+          max_age_minutes: args.max_age_minutes != null ? args.max_age_minutes : 60,
         });
         db.log('coordinator', 'research_requeued_stale', requeued);
         respond(conn, { ok: true, ...requeued });
