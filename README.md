@@ -16,10 +16,30 @@ User ──mac10 CLI──→ Coordinator (Node.js) ──tmux──→ Workers 
 - **Architect**: Single deep-model agent. Triages requests into Tier 1/2/3, decomposes complex work into tasks.
 - **Workers 1-8**: Deep-model agents in git worktrees. Receive tasks, code, create PRs.
 
+## Prerequisites
+
+Before running setup, ensure the following are installed:
+
+| Tool | Version | Required | Notes |
+|------|---------|----------|-------|
+| **Node.js** | 22+ | Yes | Use `nvm install 22 && nvm use 22`. Node v22 is required — `better-sqlite3` is compiled against it. |
+| **Git** | Any recent | Yes | Workers commit and push via git. |
+| **GitHub CLI (`gh`)** | Any recent | Yes | Must be authenticated (`gh auth login`) for the PR workflow. |
+| **tmux** | Any recent | Yes | All workers and the coordinator run in tmux windows. |
+| **xvfb** | Any | Optional | Required only for headless browser testing (visual verification tasks). |
+| **Python** | 3.12+ | Optional | Required only for the research pipeline (`codex10 queue-research`). |
+
+Quick check:
+```bash
+node --version   # must be v22.x
+git --version
+gh auth status   # must show "Logged in"
+tmux -V
+```
+
 ## Quick Start
 
 ```bash
-# Prerequisites: node 18+, git, gh, tmux, codex
 bash setup.sh /path/to/your-project 4
 
 # Or use provider-specific full launchers (defaults to current repo + 4 workers)
@@ -45,6 +65,59 @@ mac10 status
 # View dashboard
 open http://localhost:3100
 ```
+
+## First Run Walkthrough
+
+Follow these steps after running `setup.sh` for the first time.
+
+### 1. Clone and run setup
+
+```bash
+git clone <your-repo-url>
+cd <your-repo>
+bash setup.sh . 4        # sets up coordinator + 4 workers in current repo
+```
+
+`setup.sh` is idempotent — safe to re-run if setup fails midway.
+
+### 2. Verify the coordinator started
+
+```bash
+mac10 ping                # should return "pong"
+open http://localhost:3100  # web dashboard
+```
+
+If `ping` fails, check [Coordinator won't start](#coordinator-wont-start) below.
+
+### 3. Submit your first request
+
+```bash
+mac10 request "Add a health check endpoint"
+```
+
+The coordinator stores the request and mails the Architect, which triages it and assigns worker tasks automatically.
+
+### 4. Check status
+
+```bash
+mac10 status
+```
+
+Shows all active requests, tasks, and worker states.
+
+### 5. View logs
+
+```bash
+mac10 log
+```
+
+Streams coordinator log output. Useful for watching task progress in real time.
+
+### 6. Wait for completion
+
+Workers create PRs automatically. The coordinator merges them. When all PRs for a request are merged, the request moves to `completed`.
+
+---
 
 ## CLI Reference
 
@@ -304,3 +377,76 @@ All state transitions are recorded in `.codex/knowledge/patches.json` (audit tra
 | `supersedes` | Replaces an older snapshot or artifact. |
 | `validated_by` | Validated by the referenced request or run. |
 | `consumed_by` | The insight was consumed (e.g. applied) in this request/run. |
+
+## Troubleshooting
+
+### Coordinator won't start
+
+**Symptom:** `mac10 ping` returns an error or times out.
+
+1. **Check Node version.** The coordinator requires Node v22:
+   ```bash
+   node --version   # must be v22.x
+   nvm use 22
+   ```
+2. **Port already bound.** If a previous run crashed and left port 3100 open:
+   ```bash
+   lsof -i :3100     # find the PID
+   kill <PID>
+   mac10 start
+   ```
+3. **Rebuild native modules** after switching Node versions:
+   ```bash
+   cd coordinator && npm rebuild better-sqlite3
+   ```
+4. **Re-run setup.sh** — it is idempotent and will repair most install issues:
+   ```bash
+   bash setup.sh . <num_workers>
+   ```
+
+### Workers stuck / not picking up tasks
+
+**Symptom:** `mac10 status` shows tasks in `ready` state with no worker activity.
+
+1. **Trigger repair** — restarts the coordinator and runs a startup recovery sweep:
+   ```bash
+   mac10 repair
+   ```
+2. **Reset a specific worker** if it is in a bad state:
+   ```bash
+   mac10 reset-worker <N>   # e.g. mac10 reset-worker 2
+   ```
+3. **Check tmux** for error output in the worker's window:
+   ```bash
+   tmux attach
+   # Then switch to the worker window: Ctrl-b N (by number)
+   ```
+4. **Nested session crash** — if a worker window shows a "nested session" error, ensure `unset CLAUDECODE` is present in `scripts/worker-sentinel.sh` and `.claude/scripts/worker-sentinel.sh`.
+
+### Setup fails midway
+
+`setup.sh` is fully idempotent — simply re-run it:
+
+```bash
+bash setup.sh . <num_workers>
+```
+
+It will skip already-completed steps and retry the failed ones.
+
+### `gh` authentication errors
+
+Workers create PRs using the GitHub CLI. If you see auth errors:
+
+```bash
+gh auth login    # follow the prompts
+gh auth status   # verify
+```
+
+### `mac10` command not found
+
+Ensure the coordinator's `bin` directory is on your `PATH`, or call it directly:
+
+```bash
+export PATH="$(pwd)/coordinator/bin:$PATH"
+mac10 ping
+```
