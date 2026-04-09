@@ -289,7 +289,7 @@
   function renderWorkers(workers) {
     const el = document.getElementById('workers-list');
     if (workers.length === 0) {
-      el.innerHTML = '<div style="color:#8b949e;font-size:13px">No workers registered</div>';
+      el.innerHTML = '<div style="color:#8b949e;font-size:13px">No workers yet — launch Masters to register workers</div>';
       return;
     }
     el.innerHTML = workers.map(w => `
@@ -305,7 +305,7 @@
   function renderRequests(requests) {
     const el = document.getElementById('requests-list');
     if (requests.length === 0) {
-      el.innerHTML = '<div style="color:#8b949e;font-size:13px">No requests</div>';
+      el.innerHTML = '<div style="color:#8b949e;font-size:13px">No requests yet — describe a task above and click Submit</div>';
       return;
     }
     el.innerHTML = requests.slice(0, 20).map(r => `
@@ -323,7 +323,7 @@
     const active = tasks.filter(t => t && t.status !== 'completed');
     const budgetIndicator = renderBudgetIndicator(state);
     if (active.length === 0) {
-      el.innerHTML = `${budgetIndicator}<div style="color:#8b949e;font-size:13px">No active tasks</div>`;
+      el.innerHTML = `${budgetIndicator}<div style="color:#8b949e;font-size:13px">No active tasks — submit a request to get started</div>`;
       return;
     }
     el.innerHTML = budgetIndicator + active.slice(0, 30).map(t => `
