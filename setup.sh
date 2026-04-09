@@ -129,6 +129,13 @@ echo "[1/8] Preflight checks..."
 check_cmd() {
   if ! command -v "$1" &>/dev/null; then
     echo "ERROR: '$1' not found. Please install it first."
+    case "$1" in
+      node)  echo "  Install Node.js 22+: https://nodejs.org/" ;;
+      gh)    echo "  Install GitHub CLI: https://cli.github.com/" ;;
+      tmux)  echo "  Install tmux: sudo apt install tmux (Linux) or brew install tmux (macOS)" ;;
+      codex) echo "  Install Codex CLI: npm install -g @openai/codex" ;;
+      claude) echo "  Install Claude Code: npm install -g @anthropic-ai/claude-code" ;;
+    esac
     exit 1
   fi
 }
@@ -145,6 +152,7 @@ check_cmd "$(mac10_provider_cli)"
 NODE_VER=$(node -v | sed 's/v//' | cut -d. -f1)
 if [ "$NODE_VER" -lt 18 ]; then
   echo "ERROR: Node.js 18+ required (found v$(node -v))"
+  echo "  Install Node.js 22+: https://nodejs.org/"
   exit 1
 fi
 
@@ -163,7 +171,7 @@ fi
 # Optional: Xvfb for headless research driver (Chrome runs invisibly)
 if ! command -v xvfb-run &>/dev/null; then
   echo "  WARNING: xvfb-run not found. Research driver will require a real display."
-  echo "  Install with: sudo apt-get install -y xvfb libxi6 libgconf-2-4 fonts-liberation libappindicator3-1 libnss3 libatk-bridge2.0-0 libgtk-3-0"
+  echo "  Install: sudo apt-get install -y xvfb libxi6 libgconf-2-4 fonts-liberation libappindicator3-1 libnss3 libatk-bridge2.0-0 libgtk-3-0"
 fi
 
 # Optional: Playwright MCP for visual testing (non-blocking)
@@ -759,9 +767,21 @@ echo "  Master-2 (Architect/Deep)  — triage & decomposition"
 echo "  Master-3 (Allocator/Fast)  — task-worker matching"
 echo ""
 echo "Dashboard:    $DASHBOARD_URL"
-echo "Submit work:  $CODEX10_CLI request \"Add user authentication\""
-echo "Check status: $CODEX10_CLI status"
-echo "View logs:    $CODEX10_CLI log"
+echo ""
+echo "========================================"
+echo " Getting Started"
+echo "========================================"
+echo ""
+echo "Send your first request:"
+echo "  $CODEX10_CLI request \"your first task description\""
+echo ""
+echo "Example:"
+echo "  $CODEX10_CLI request \"Add a hello-world endpoint to the API\""
+echo ""
+echo "Other commands:"
+echo "  $CODEX10_CLI status          — show active tasks and workers"
+echo "  $CODEX10_CLI log             — tail recent logs"
+echo "  $CODEX10_CLI workers         — list worker agents"
 echo ""
 echo "Workers will be spawned automatically when tasks are assigned."
 echo ""

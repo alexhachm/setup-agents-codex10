@@ -248,6 +248,21 @@ function tick(projectDir) {
           escalate(worker, staleSec, projectDir);
         }
       }
+
+      // Stale heartbeat guard: warn when an assigned worker has a last_heartbeat
+      // older than 90s — fires before the task pipeline can silently stall.
+      if (worker.last_heartbeat) {
+        const lastHbMs = parseTimestampMs(worker.last_heartbeat);
+        if (lastHbMs !== null) {
+          const hbAgeSec = (now - lastHbMs) / 1000;
+          if (hbAgeSec > 90) {
+            db.log('coordinator', 'assigned_worker_stale_heartbeat', {
+              worker_id: worker.id,
+              last_heartbeat_age_sec: Math.round(hbAgeSec),
+            });
+          }
+        }
+      }
     }
 
     // Check completed_task workers that haven't been reset
