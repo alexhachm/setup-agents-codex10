@@ -269,7 +269,7 @@
     var el = document.getElementById('popout-panel');
     var workers = data.workers || [];
     if (workers.length === 0) {
-      el.innerHTML = '<div style="color:#8b949e;font-size:13px">No workers registered</div>';
+      el.innerHTML = '<div style="color:#8b949e;font-size:13px">No workers yet — launch Masters to register workers</div>';
       return;
     }
     el.innerHTML = workers.map(function(w) {
@@ -286,7 +286,7 @@
     var el = document.getElementById('popout-panel');
     var requests = data.requests || [];
     if (requests.length === 0) {
-      el.innerHTML = '<div style="color:#8b949e;font-size:13px">No requests</div>';
+      el.innerHTML = '<div style="color:#8b949e;font-size:13px">No requests yet — use the dashboard to submit tasks</div>';
       return;
     }
     el.innerHTML = requests.slice(0, 50).map(function(r) {
@@ -304,7 +304,7 @@
     var tasks = data.tasks || [];
     var budgetIndicator = renderBudgetIndicator(data);
     if (tasks.length === 0) {
-      el.innerHTML = budgetIndicator + '<div style="color:#8b949e;font-size:13px">No tasks</div>';
+      el.innerHTML = budgetIndicator + '<div style="color:#8b949e;font-size:13px">No active tasks — submit a request to get started</div>';
       return;
     }
     el.innerHTML = budgetIndicator + tasks.slice(0, 50).map(function(t) {
