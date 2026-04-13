@@ -8,6 +8,10 @@ const migrations = require('./db/migrations');
 const { createRequestRepository } = require('./db/requests');
 const { createTaskRepository } = require('./db/tasks');
 const { createWorkerRepository } = require('./db/workers');
+const { createMergeQueueRepository } = require('./db/merge-queue');
+const { createMailRepository } = require('./db/mail');
+const { createConfigRepository } = require('./db/config');
+const { createLogRepository } = require('./db/log');
 
 let db = null;
 const NAMESPACE = process.env.MAC10_NAMESPACE || 'mac10';
@@ -567,6 +571,63 @@ function getDb() {
   if (!db) throw new Error('Database not initialized. Call init(projectDir) first.');
   return db;
 }
+
+const logRepository = createLogRepository({
+  getDb,
+});
+
+const {
+  log,
+  getLog,
+} = logRepository;
+
+const configRepository = createConfigRepository({
+  getDb,
+});
+
+const {
+  getConfig,
+  setConfig,
+  savePreset,
+  listPresets,
+  getPreset,
+  deletePreset,
+} = configRepository;
+
+const mailRepository = createMailRepository({
+  getDb,
+});
+
+const {
+  sendMail,
+  checkMail,
+  checkMailBlocking,
+  purgeOldMail,
+} = mailRepository;
+
+const mergeQueueRepository = createMergeQueueRepository({
+  getDb,
+  validateColumns,
+  parseCompletedTaskCursor,
+  currentSqlTimestamp,
+});
+
+const {
+  purgeTerminalMerges,
+  enqueueMerge,
+  getNextMerge,
+  updateMerge,
+  updateMergeIdentity,
+  getMergeIdentity,
+  updateMergeFailureClass,
+  getMergeByFingerprint,
+  recordFailure,
+  resetCircuitBreaker,
+  getOrCreateCircuitBreaker,
+  incrementMetric,
+  getMetrics,
+  listRecoverableMerges,
+} = mergeQueueRepository;
 
 const requestRepository = createRequestRepository({
   getDb,
@@ -2322,343 +2383,6 @@ function hasRequestCompletedTaskProgressSince(requestId, beforeCursor, afterCurs
   if (!parsedAfter) return false;
 
   return compareCompletedTaskCursors(parsedBefore, parsedAfter) < 0;
-}
-
-// --- Mail helpers ---
-
-function sendMail(recipient, type, payload = {}) {
-  getDb().prepare(`
-    INSERT INTO mail (recipient, type, payload) VALUES (?, ?, ?)
-  `).run(recipient, type, JSON.stringify(payload));
-}
-
-function normalizeMailFilters(filters) {
-  if (!filters || typeof filters !== 'object') return {};
-  const normalized = {};
-  if (typeof filters.type === 'string') normalized.type = filters.type;
-  if (typeof filters.request_id === 'string') normalized.request_id = filters.request_id;
-  return normalized;
-}
-
-function parseMailRows(rows) {
-  return rows.map((m) => {
-    try {
-      return { ...m, payload: JSON.parse(m.payload) };
-    } catch (e) {
-      return { ...m, payload: { _raw: m.payload, _parse_error: true } };
-    }
-  });
-}
-
-function filterMailRows(rows, filters) {
-  if (!Object.prototype.hasOwnProperty.call(filters, 'request_id')) return rows;
-  const desiredRequestId = filters.request_id;
-  return rows.filter((row) => {
-    const payload = row.payload;
-    if (!payload || typeof payload !== 'object' || Array.isArray(payload)) return false;
-    const requestId = payload.request_id;
-    if (requestId === null || requestId === undefined) return false;
-    return String(requestId) === desiredRequestId;
-  });
-}
-
-function prepareMailLookup(d, recipient, filters) {
-  let sql = 'SELECT * FROM mail WHERE recipient = ? AND consumed = 0';
-  const params = [recipient];
-  if (Object.prototype.hasOwnProperty.call(filters, 'type')) {
-    sql += ' AND type = ?';
-    params.push(filters.type);
-  }
-  sql += ' ORDER BY id';
-  return { stmt: d.prepare(sql), params };
-}
-
-function checkMail(recipient, consume = true, filters = {}) {
-  const d = getDb();
-  const normalizedFilters = normalizeMailFilters(filters);
-  const { stmt, params } = prepareMailLookup(d, recipient, normalizedFilters);
-  const loadMatchingMessages = () => {
-    const parsed = parseMailRows(stmt.all(...params));
-    return filterMailRows(parsed, normalizedFilters);
-  };
-
-  let messages;
-  if (consume) {
-    // Atomic read-and-consume: transaction prevents two consumers reading the same messages
-    const txn = d.transaction(() => {
-      const msgs = loadMatchingMessages();
-      if (msgs.length > 0) {
-        const ids = msgs.map(m => m.id);
-        d.prepare(
-          `UPDATE mail SET consumed = 1 WHERE id IN (${ids.map(() => '?').join(',')})`
-        ).run(...ids);
-      }
-      return msgs;
-    });
-    messages = txn();
-  } else {
-    messages = loadMatchingMessages();
-  }
-  return messages;
-}
-
-function purgeOldMail(days) {
-  const result = getDb().prepare(
-    "DELETE FROM mail WHERE consumed = 1 AND created_at < datetime('now', '-' || ? || ' days')"
-  ).run(days);
-  return result.changes;
-}
-
-function purgeTerminalMerges(days) {
-  const result = getDb().prepare(
-    `DELETE FROM merge_queue
-     WHERE status IN ('failed', 'conflict')
-       AND request_id IN (SELECT id FROM requests WHERE status IN ('completed', 'failed'))
-       AND updated_at < datetime('now', '-' || ? || ' days')`
-  ).run(days);
-  return result.changes;
-}
-
-function checkMailBlocking(recipient, timeoutMs = 300000, pollMs = 1000, consume = true, filters = {}) {
-  const deadline = Date.now() + timeoutMs;
-  while (Date.now() < deadline) {
-    const msgs = checkMail(recipient, consume, filters);
-    if (msgs.length > 0) return msgs;
-    // Sync sleep for polling (used by CLI, not coordinator)
-    const waitMs = Math.min(pollMs, deadline - Date.now());
-    if (waitMs > 0) {
-      Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, waitMs);
-    }
-  }
-  return [];
-}
-
-// --- Merge queue helpers ---
-
-function enqueueMerge({ request_id, task_id, pr_url, branch, priority, completion_checkpoint = null }) {
-  const normalizedPriority = Number.isInteger(priority) ? priority : 0;
-  const parsedCheckpoint = parseCompletedTaskCursor(completion_checkpoint);
-  const normalizedCheckpoint = parsedCheckpoint ? parsedCheckpoint.cursor : null;
-  // Atomic dedup+insert scoped to request + PR identity ownership.
-  // A request can refresh the same PR+branch entry across follow-up tasks.
-  const result = getDb().prepare(`
-    INSERT INTO merge_queue (request_id, task_id, pr_url, branch, priority, completion_checkpoint)
-    SELECT ?, ?, ?, ?, ?, ?
-    WHERE NOT EXISTS (
-      SELECT 1 FROM merge_queue
-      WHERE request_id = ? AND pr_url = ? AND branch = ?
-    )
-  `).run(request_id, task_id, pr_url, branch, normalizedPriority, normalizedCheckpoint, request_id, pr_url, branch);
-  return {
-    inserted: result.changes > 0,
-    changes: result.changes,
-    lastInsertRowid: result.lastInsertRowid,
-  };
-}
-
-function getNextMerge() {
-  return getDb().prepare(`
-    SELECT * FROM merge_queue WHERE status = 'pending'
-    ORDER BY priority DESC, id ASC LIMIT 1
-  `).get();
-}
-
-function updateMerge(id, fields) {
-  validateColumns('merge_queue', fields);
-  const sets = [];
-  const vals = [];
-  for (const [k, v] of Object.entries(fields)) {
-    sets.push(`${k} = ?`);
-    vals.push(v);
-  }
-  sets.push("updated_at = datetime('now')");
-  vals.push(id);
-  getDb().prepare(`UPDATE merge_queue SET ${sets.join(', ')} WHERE id = ?`).run(...vals);
-}
-
-// --- Merge identity, circuit breaker, and metrics ---
-
-const VALID_FAILURE_CLASSES = Object.freeze([
-  'branch_identity_mismatch',
-  'worktree_missing',
-  'worktree_dirty',
-  'remote_branch_missing',
-  'remote_diverged',
-  'gh_auth_or_network',
-  'textual_merge_conflict',
-  'validation_conflict',
-]);
-
-function updateMergeIdentity(mergeId, { head_sha, worker_id, head_branch }) {
-  const fields = {};
-  if (head_sha !== undefined && head_sha !== null) fields.head_sha = String(head_sha).trim() || null;
-  if (worker_id !== undefined && worker_id !== null) fields.worker_id = Number.parseInt(String(worker_id), 10) || null;
-  if (head_branch !== undefined && head_branch !== null) {
-    fields.branch = String(head_branch).trim() || null;
-  }
-  if (Object.keys(fields).length === 0) return;
-  validateColumns('merge_queue', fields);
-  const sets = [];
-  const vals = [];
-  for (const [k, v] of Object.entries(fields)) {
-    sets.push(`${k} = ?`);
-    vals.push(v);
-  }
-  sets.push("updated_at = datetime('now')");
-  vals.push(mergeId);
-  getDb().prepare(`UPDATE merge_queue SET ${sets.join(', ')} WHERE id = ?`).run(...vals);
-}
-
-function getMergeIdentity(mergeId) {
-  return getDb().prepare(
-    'SELECT id, request_id, task_id, pr_url, branch, head_sha, worker_id, failure_class, retry_count, fingerprint FROM merge_queue WHERE id = ?'
-  ).get(mergeId) || null;
-}
-
-function updateMergeFailureClass(mergeId, failureClass) {
-  if (failureClass !== null && !VALID_FAILURE_CLASSES.includes(failureClass)) {
-    throw new Error(`Invalid failure_class: ${failureClass}`);
-  }
-  getDb().prepare(
-    "UPDATE merge_queue SET failure_class = ?, updated_at = datetime('now') WHERE id = ?"
-  ).run(failureClass, mergeId);
-}
-
-function listRecoverableMerges(requestId) {
-  return getDb().prepare(`
-    SELECT mq.*
-    FROM merge_queue mq
-    LEFT JOIN merge_circuit_breaker mcb ON mcb.fingerprint = mq.fingerprint
-    WHERE mq.request_id = ?
-      AND mq.status IN ('pending', 'ready', 'conflict', 'failed')
-      AND (mcb.tripped IS NULL OR mcb.tripped = 0)
-    ORDER BY mq.priority DESC, mq.id ASC
-  `).all(requestId);
-}
-
-function getOrCreateCircuitBreaker(fingerprint) {
-  const existing = getDb().prepare(
-    'SELECT * FROM merge_circuit_breaker WHERE fingerprint = ?'
-  ).get(fingerprint);
-  if (existing) return existing;
-  getDb().prepare(
-    `INSERT OR IGNORE INTO merge_circuit_breaker (fingerprint, failure_count, tripped, first_seen_at, last_seen_at)
-     VALUES (?, 1, 0, datetime('now'), datetime('now'))`
-  ).run(fingerprint);
-  return getDb().prepare('SELECT * FROM merge_circuit_breaker WHERE fingerprint = ?').get(fingerprint);
-}
-
-function getMergeByFingerprint(fingerprint) {
-  return getDb().prepare(
-    'SELECT * FROM merge_circuit_breaker WHERE fingerprint = ?'
-  ).get(fingerprint) || null;
-}
-
-function recordFailure(mergeId, failureClass, fingerprint, normalizedError) {
-  if (failureClass !== null && !VALID_FAILURE_CLASSES.includes(failureClass)) {
-    throw new Error(`Invalid failure_class: ${failureClass}`);
-  }
-  const now = currentSqlTimestamp();
-
-  getDb().prepare(
-    `UPDATE merge_queue
-     SET failure_class = ?,
-         fingerprint = ?,
-         last_fingerprint_at = ?,
-         retry_count = retry_count + 1,
-         updated_at = datetime('now')
-     WHERE id = ?`
-  ).run(failureClass, fingerprint, now, mergeId);
-
-  getDb().prepare(
-    `INSERT INTO merge_circuit_breaker (merge_queue_id, fingerprint, failure_count, tripped, first_seen_at, last_seen_at)
-     VALUES (?, ?, 1, 0, ?, ?)
-     ON CONFLICT(fingerprint) DO UPDATE SET
-       failure_count = failure_count + 1,
-       last_seen_at = excluded.last_seen_at,
-       merge_queue_id = excluded.merge_queue_id`
-  ).run(mergeId, fingerprint, now, now);
-
-  const row = getDb().prepare('SELECT failure_count, tripped FROM merge_circuit_breaker WHERE fingerprint = ?').get(fingerprint);
-  return { tripped: row ? row.tripped === 1 : false, failure_count: row ? row.failure_count : 1 };
-}
-
-function resetCircuitBreaker(fingerprint) {
-  getDb().prepare(
-    `UPDATE merge_circuit_breaker SET failure_count = 0, tripped = 0, last_seen_at = datetime('now') WHERE fingerprint = ?`
-  ).run(fingerprint);
-}
-
-function incrementMetric(metricName) {
-  getDb().prepare(
-    `INSERT INTO merge_metrics (metric_name, metric_value, updated_at)
-     VALUES (?, 1, datetime('now'))
-     ON CONFLICT(metric_name) DO UPDATE SET
-       metric_value = metric_value + 1,
-       updated_at = datetime('now')`
-  ).run(metricName);
-}
-
-function getMetrics() {
-  return getDb().prepare('SELECT metric_name, metric_value, updated_at FROM merge_metrics ORDER BY metric_name ASC').all();
-}
-
-// --- Activity log ---
-
-function log(actor, action, details = {}) {
-  getDb().prepare(`
-    INSERT INTO activity_log (actor, action, details) VALUES (?, ?, ?)
-  `).run(actor, action, JSON.stringify(details));
-}
-
-function getLog(limit = 50, actor) {
-  if (actor) {
-    return getDb().prepare('SELECT * FROM activity_log WHERE actor = ? ORDER BY id DESC LIMIT ?').all(actor, limit);
-  }
-  return getDb().prepare('SELECT * FROM activity_log ORDER BY id DESC LIMIT ?').all(limit);
-}
-
-// --- Config helpers ---
-
-function getConfig(key) {
-  const row = getDb().prepare('SELECT value FROM config WHERE key = ?').get(key);
-  return row ? row.value : null;
-}
-
-function setConfig(key, value) {
-  getDb().prepare('INSERT OR REPLACE INTO config (key, value) VALUES (?, ?)').run(key, String(value));
-}
-
-// --- Preset helpers ---
-
-function savePreset(name, projectDir, githubRepo, numWorkers, opts = {}) {
-  const { provider = null, fast_model = null, deep_model = null, economy_model = null } = opts;
-  getDb().prepare(`
-    INSERT INTO presets (name, project_dir, github_repo, num_workers, provider, fast_model, deep_model, economy_model)
-    VALUES (?, ?, ?, ?, ?, ?, ?, ?)
-    ON CONFLICT(name) DO UPDATE SET
-      project_dir = excluded.project_dir,
-      github_repo = excluded.github_repo,
-      num_workers = excluded.num_workers,
-      provider = excluded.provider,
-      fast_model = excluded.fast_model,
-      deep_model = excluded.deep_model,
-      economy_model = excluded.economy_model,
-      updated_at = datetime('now')
-  `).run(name, projectDir, githubRepo || '', numWorkers || 4, provider, fast_model, deep_model, economy_model);
-}
-
-function listPresets() {
-  return getDb().prepare('SELECT * FROM presets ORDER BY updated_at DESC').all();
-}
-
-function getPreset(id) {
-  return getDb().prepare('SELECT * FROM presets WHERE id = ?').get(id);
-}
-
-function deletePreset(id) {
-  const result = getDb().prepare('DELETE FROM presets WHERE id = ?').run(id);
-  return result.changes > 0;
 }
 
 // --- Overlap detection helpers ---
