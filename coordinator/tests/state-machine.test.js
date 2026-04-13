@@ -1298,3 +1298,79 @@ describe('Stale integration watchdog recovery regression', () => {
     );
   });
 });
+
+describe('Extended task statuses', () => {
+  it('accepts superseded status', () => {
+    const reqId = db.createRequest('Test superseded');
+    const taskId = db.createTask({ request_id: reqId, subject: 'Task', description: 'Will be superseded' });
+    db.updateTask(taskId, { status: 'superseded', result: 'Replaced by newer task' });
+    const task = db.getTask(taskId);
+    assert.strictEqual(task.status, 'superseded');
+  });
+
+  it('accepts failed_needs_reroute status', () => {
+    const reqId = db.createRequest('Test reroute');
+    const taskId = db.createTask({ request_id: reqId, subject: 'Task', description: 'Needs reroute' });
+    db.updateTask(taskId, { status: 'failed_needs_reroute', result: 'Worker unavailable' });
+    const task = db.getTask(taskId);
+    assert.strictEqual(task.status, 'failed_needs_reroute');
+  });
+
+  it('accepts failed_final status', () => {
+    const reqId = db.createRequest('Test final failure');
+    const taskId = db.createTask({ request_id: reqId, subject: 'Task', description: 'Final failure' });
+    db.updateTask(taskId, { status: 'failed_final', result: 'Unrecoverable error' });
+    const task = db.getTask(taskId);
+    assert.strictEqual(task.status, 'failed_final');
+  });
+
+  it('isTerminalTaskStatus classifies all terminal statuses', () => {
+    for (const status of ['completed', 'failed', 'superseded', 'failed_needs_reroute', 'failed_final']) {
+      assert.ok(db.isTerminalTaskStatus(status), `${status} should be terminal`);
+    }
+    for (const status of ['pending', 'ready', 'assigned', 'in_progress', 'blocked']) {
+      assert.ok(!db.isTerminalTaskStatus(status), `${status} should not be terminal`);
+    }
+    assert.ok(!db.isTerminalTaskStatus(null));
+    assert.ok(!db.isTerminalTaskStatus(undefined));
+  });
+
+  it('supports blocking column default and update', () => {
+    const reqId = db.createRequest('Test blocking');
+    const taskId = db.createTask({ request_id: reqId, subject: 'Blocking task', description: 'Blocks completion' });
+    const task = db.getTask(taskId);
+    assert.strictEqual(task.blocking, 1, 'default is blocking');
+
+    db.updateTask(taskId, { blocking: 0 });
+    const updated = db.getTask(taskId);
+    assert.strictEqual(updated.blocking, 0, 'can be set to non-blocking');
+  });
+
+  it('watchdog supersedes non-terminal sibling tasks on merged request recovery', () => {
+    const reqId = db.createRequest('Supersede test');
+    db.updateRequest(reqId, { status: 'integrating' });
+
+    const completedTaskId = db.createTask({ request_id: reqId, subject: 'Done', description: 'Merged work' });
+    db.updateTask(completedTaskId, { status: 'completed' });
+
+    const activeTaskId = db.createTask({ request_id: reqId, subject: 'Active', description: 'Still running' });
+    db.updateTask(activeTaskId, { status: 'in_progress' });
+
+    const mergeResult = db.enqueueMerge({
+      request_id: reqId,
+      task_id: completedTaskId,
+      pr_url: 'https://example.com/pr/1',
+      branch: 'agent/supersede-test',
+      priority: 0,
+    });
+    db.updateMerge(mergeResult.lastInsertRowid, { status: 'merged', merged_at: new Date().toISOString() });
+
+    watchdog.tick(tmpDir);
+
+    const activeAfter = db.getTask(activeTaskId);
+    assert.strictEqual(activeAfter.status, 'superseded', 'non-terminal sibling should be superseded');
+
+    const request = db.getRequest(reqId);
+    assert.strictEqual(request.status, 'completed');
+  });
+});

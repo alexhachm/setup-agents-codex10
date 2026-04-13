@@ -18,6 +18,7 @@ const DEFAULT_STALE_DECOMPOSED_RECOVERY_SEC = 120;
 const DEFAULT_STALLED_ASSIGNMENT_RECOVERY_SEC = 180;
 const DEFAULT_TASK_LIVENESS_MAX_REASSIGNMENTS = 2;
 const REQUEST_TERMINAL_STATUSES = new Set(['completed', 'failed']);
+const TASK_TERMINAL_STATUSES = new Set(['completed', 'failed', 'superseded', 'failed_needs_reroute', 'failed_final']);
 const TASK_PRIORITY_RANK = Object.freeze({ urgent: 0, high: 1, normal: 2, low: 3 });
 const PRIORITY_OVERRIDE_MARKER_RE = /\bpriority\s+override\b/i;
 const REQUEST_ID_TOKEN_RE = /\breq-[a-f0-9]{8}\b/gi;
@@ -115,6 +116,12 @@ function normalizeRequestLifecycleStatus(status) {
 function isTerminalRequestStatus(status) {
   const normalized = normalizeRequestLifecycleStatus(status);
   return normalized !== null && REQUEST_TERMINAL_STATUSES.has(normalized);
+}
+
+function isTerminalTaskStatus(status) {
+  if (status === null || status === undefined) return false;
+  const normalized = String(status).trim().toLowerCase();
+  return TASK_TERMINAL_STATUSES.has(normalized);
 }
 
 function shouldClearRequestCompletionMetadata(previousStatus, nextStatus) {
@@ -439,7 +446,7 @@ const VALID_COLUMNS = Object.freeze({
     'usage_cache_creation_ephemeral_5m_input_tokens',
     'usage_cache_creation_ephemeral_1h_input_tokens',
     'usage_total_tokens', 'usage_cost_usd',
-    'started_at', 'completed_at', 'result',
+    'started_at', 'completed_at', 'result', 'blocking',
   ]),
   workers: new Set(['status', 'domain', 'worktree_path', 'branch', 'tmux_session', 'tmux_window', 'pid', 'current_task_id', 'claimed_by', 'claimed_at', 'last_heartbeat', 'launched_at', 'tasks_completed', 'backend']),
   merge_queue: new Set([
@@ -586,6 +593,44 @@ function ensureTaskUsageTelemetryColumns(database) {
   if (!taskCols.includes('usage_cost_usd')) {
     database.exec("ALTER TABLE tasks ADD COLUMN usage_cost_usd REAL");
   }
+}
+
+function ensureTaskExtendedStatuses(database) {
+  const taskCols = database.prepare("PRAGMA table_info(tasks)").all().map((column) => column.name);
+  if (taskCols.length === 0) return;
+
+  if (!taskCols.includes('blocking')) {
+    database.exec("ALTER TABLE tasks ADD COLUMN blocking INTEGER NOT NULL DEFAULT 1");
+  }
+
+  const schemaSql = database.prepare(
+    "SELECT sql FROM sqlite_master WHERE type='table' AND name='tasks'"
+  ).get();
+  if (!schemaSql || !schemaSql.sql) return;
+  if (schemaSql.sql.includes('superseded')) return;
+
+  const colDefs = database.prepare("PRAGMA table_info(tasks)").all();
+  const colNames = colDefs.map(c => c.name);
+
+  const newCheck = "('pending','ready','assigned','in_progress','completed','failed','blocked','superseded','failed_needs_reroute','failed_final')";
+  database.exec('PRAGMA foreign_keys = OFF');
+  const tx = database.transaction(() => {
+    database.exec(`CREATE TABLE tasks_migrate AS SELECT ${colNames.map(c => '"' + c + '"').join(', ')} FROM tasks`);
+    database.exec('DROP TABLE tasks');
+
+    let newSql = schemaSql.sql.replace(
+      /CHECK\s*\(\s*status\s+IN\s*\([^)]+\)\s*\)/i,
+      `CHECK (status IN ${newCheck})`
+    );
+    if (!newSql.includes('blocking')) {
+      newSql = newSql.replace(/needs_sandbox\s+INTEGER[^,)]*/, '$&,\n  blocking INTEGER NOT NULL DEFAULT 1');
+    }
+    database.exec(newSql);
+    database.exec(`INSERT INTO tasks SELECT ${colNames.map(c => '"' + c + '"').join(', ')} FROM tasks_migrate`);
+    database.exec('DROP TABLE tasks_migrate');
+  });
+  tx();
+  database.exec('PRAGMA foreign_keys = ON');
 }
 
 function ensureTaskBrowserOffloadColumns(database) {
@@ -986,6 +1031,7 @@ function init(projectDir) {
     if (!taskCols.includes('needs_sandbox')) {
       db.exec("ALTER TABLE tasks ADD COLUMN needs_sandbox INTEGER NOT NULL DEFAULT 0");
     }
+    ensureTaskExtendedStatuses(db);
     ensureTaskLivenessRecoveryColumns(db);
     ensureTaskRoutingTelemetryColumns(db);
     ensureTaskBrowserOffloadColumns(db);
@@ -1020,6 +1066,7 @@ function init(projectDir) {
   db.exec(schema);
   ensureMergeQueueColumns(db);
   ensureMergeIdentityColumns(db);
+  ensureTaskExtendedStatuses(db);
   ensureTaskLivenessRecoveryColumns(db);
   ensureTaskRoutingTelemetryColumns(db);
   ensureTaskBrowserOffloadColumns(db);
@@ -3360,12 +3407,25 @@ function checkRequestCompletion(requestId, options = {}) {
     SELECT
       COUNT(*) as total,
       COALESCE(SUM(CASE WHEN status = 'completed' THEN 1 ELSE 0 END), 0) as completed,
-      COALESCE(SUM(CASE WHEN status = 'failed' THEN 1 ELSE 0 END), 0) as failed
+      COALESCE(SUM(CASE WHEN status = 'failed' THEN 1 ELSE 0 END), 0) as failed,
+      COALESCE(SUM(CASE WHEN status = 'superseded' THEN 1 ELSE 0 END), 0) as superseded,
+      COALESCE(SUM(CASE WHEN status = 'failed_needs_reroute' THEN 1 ELSE 0 END), 0) as rerouted,
+      COALESCE(SUM(CASE WHEN status = 'failed_final' THEN 1 ELSE 0 END), 0) as failed_final,
+      COALESCE(SUM(CASE WHEN status = 'failed' AND COALESCE(blocking, 1) != 0 THEN 1 ELSE 0 END), 0) as blocking_failed,
+      COALESCE(SUM(CASE WHEN status = 'failed' AND COALESCE(blocking, 1) = 0 THEN 1 ELSE 0 END), 0) as nonblocking_failed
     FROM tasks WHERE request_id = ?
   `).get(requestId);
   const total = Number(row.total) || 0;
   const completed = Number(row.completed) || 0;
   const failed = Number(row.failed) || 0;
+  const superseded = Number(row.superseded) || 0;
+  const rerouted = Number(row.rerouted) || 0;
+  const failedFinal = Number(row.failed_final) || 0;
+  const blockingFailed = Number(row.blocking_failed) || 0;
+  const nonblockingFailed = Number(row.nonblocking_failed) || 0;
+  const hardFailures = blockingFailed + failedFinal;
+  const terminal = completed + failed + superseded + rerouted + failedFinal;
+  const allTerminal = total > 0 && terminal === total;
   const zeroTaskCompleted = total === 0 && requestStatus === 'completed';
   const zeroTaskFailed = total === 0 && requestStatus === 'failed';
   const allCompleted = (total > 0 && completed === total) || zeroTaskCompleted;
@@ -3376,8 +3436,15 @@ function checkRequestCompletion(requestId, options = {}) {
     total,
     completed,
     failed,
+    superseded,
+    rerouted,
+    failed_final: failedFinal,
+    blocking_failed: blockingFailed,
+    nonblocking_failed: nonblockingFailed,
+    hard_failures: hardFailures,
     all_completed: allCompleted,
-    all_done: allCompleted || allFailed,
+    all_terminal: allTerminal,
+    all_done: allTerminal || allCompleted || allFailed || zeroTaskCompleted || zeroTaskFailed,
     stale_decomposed_recovered: repaired.length > 0,
   };
 }
@@ -4691,4 +4758,6 @@ module.exports = {
   listDomainAnalyses, approveDomainAnalysis, rejectDomainAnalysis, getAuthoritativeFeedback,
   createExtendedResearchTopic, getExtendedResearchTopic, listExtendedResearchTopics, reviewExtendedResearchTopic,
   getPendingReviewItems,
+  isTerminalTaskStatus,
+  TASK_TERMINAL_STATUSES,
 };

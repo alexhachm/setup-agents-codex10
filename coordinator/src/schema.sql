@@ -34,7 +34,8 @@ CREATE TABLE IF NOT EXISTS tasks (
   depends_on TEXT,  -- JSON array of task IDs
   assigned_to INTEGER REFERENCES workers(id),
   status TEXT NOT NULL DEFAULT 'pending'
-    CHECK (status IN ('pending','ready','assigned','in_progress','completed','failed','blocked')),
+    CHECK (status IN ('pending','ready','assigned','in_progress','completed','failed','blocked','superseded','failed_needs_reroute','failed_final')),
+  blocking INTEGER NOT NULL DEFAULT 1,
   pr_url TEXT,
   branch TEXT,
   validation TEXT,  -- JSON: what checks to run

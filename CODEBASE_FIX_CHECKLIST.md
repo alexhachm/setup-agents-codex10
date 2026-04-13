@@ -377,6 +377,17 @@ Blocking failure reroute slice:
 - Focused validation: `node --check coordinator/src/cli-server.js && node --check coordinator/src/db.js && node --check coordinator/src/merger.js` and `node --test coordinator/tests/cli.test.js coordinator/tests/state-machine.test.js coordinator/tests/merger.test.js coordinator/tests/allocator.test.js` -> 330 passing, 0 failing.
 - Regression validation: `cd coordinator && npm test` -> 655 passing, 0 failing.
 
+Extended task statuses slice:
+
+- Added `superseded`, `failed_needs_reroute`, `failed_final` to the task status CHECK constraint in `schema.sql` and migrated existing databases via table recreation in `ensureTaskExtendedStatuses()`.
+- Added `blocking` column (INTEGER, default 1) to tasks table for distinguishing blocking vs non-blocking tasks.
+- Added `TASK_TERMINAL_STATUSES` constant set and `isTerminalTaskStatus()` helper to `db.js`, exported for use by watchdog and other modules.
+- Updated `watchdog.js` `releaseMergedRequestSiblingTasks` to set superseded sibling tasks to `superseded` status instead of `failed`.
+- Updated `hasActiveRemediationTasks` to use `isTerminalTaskStatus()` instead of hardcoded `['completed', 'failed']`.
+- Added 6 focused tests in `state-machine.test.js`: status acceptance for each new state, `isTerminalTaskStatus` classification, blocking column default/update, and watchdog supersession behavior.
+- Focused validation: `node --test coordinator/tests/state-machine.test.js` -> 74 passing, 0 failing.
+- Regression validation: `cd coordinator && npm test` -> 642 passing, 0 failing.
+
 ## Phase 11 - Plugin Agent Integration
 
 - [x] Create one provider plugin path, proposed: `plugins/agents/<provider>/`.
