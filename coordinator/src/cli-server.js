@@ -6,6 +6,7 @@ const path = require('path');
 const crypto = require('crypto');
 const { execFileSync } = require('child_process');
 const db = require('./db');
+const changeCommands = require('./commands/changes');
 const contextBundle = require('./context-bundle');
 const memoryCommands = require('./commands/memory');
 const sandboxCommands = require('./commands/sandbox');
@@ -4163,31 +4164,11 @@ function handleCommand(cmd, conn, handlers) {
       }
 
       // === CHANGES commands ===
-      case 'log-change': {
-        const changeId = db.createChange(args);
-        const change = db.getChange(changeId);
-        db.log('coordinator', 'change_logged', { change_id: changeId, description: args.description });
-        if (handlers.onChangeCreated) handlers.onChangeCreated(change);
-        respond(conn, { ok: true, change_id: changeId });
-        break;
-      }
-      case 'list-changes': {
-        const changes = db.listChanges(args || {});
-        respond(conn, { ok: true, changes });
-        break;
-      }
+      case 'log-change':
+      case 'list-changes':
       case 'update-change': {
-        const { id: changeId2, ...changeFields } = args;
-        // Only allow valid change columns
-        const allowed = ['enabled', 'status', 'description', 'tooltip'];
-        const filtered = {};
-        for (const k of allowed) {
-          if (changeFields[k] !== undefined) filtered[k] = changeFields[k];
-        }
-        db.updateChange(changeId2, filtered);
-        const updated = db.getChange(changeId2);
-        if (handlers.onChangeUpdated) handlers.onChangeUpdated(updated);
-        respond(conn, { ok: true });
+        const result = changeCommands.handleChangeCommand(command, args, { db, handlers });
+        respond(conn, result);
         break;
       }
 

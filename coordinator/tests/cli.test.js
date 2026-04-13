@@ -4845,6 +4845,53 @@ describe('CLI Server', () => {
   });
 });
 
+describe('changes CLI commands', () => {
+  it('logs changes and filters them by domain', async () => {
+    const created = await sendCommand('log-change', {
+      description: 'Refactor command handling',
+      domain: 'coordinator',
+      file_path: 'coordinator/src/cli-server.js',
+      function_name: 'handleCommand',
+      tooltip: 'Move one command group at a time',
+    });
+
+    assert.strictEqual(created.ok, true);
+    assert.ok(Number.isInteger(created.change_id));
+
+    const listed = await sendCommand('list-changes', { domain: 'coordinator' });
+    assert.strictEqual(listed.ok, true);
+    assert.strictEqual(listed.changes.length, 1);
+    assert.strictEqual(listed.changes[0].id, created.change_id);
+    assert.strictEqual(listed.changes[0].description, 'Refactor command handling');
+  });
+
+  it('updates only mutable change fields', async () => {
+    const created = await sendCommand('log-change', {
+      description: 'Original description',
+      domain: 'coordinator',
+      file_path: 'coordinator/src/cli-server.js',
+      tooltip: 'Original tooltip',
+    });
+
+    const updated = await sendCommand('update-change', {
+      id: created.change_id,
+      description: 'Updated description',
+      tooltip: 'Updated tooltip',
+      status: 'pending_user_action',
+      file_path: 'coordinator/src/commands/changes.js',
+      domain: 'ignored-domain',
+    });
+
+    assert.strictEqual(updated.ok, true);
+    const change = db.getChange(created.change_id);
+    assert.strictEqual(change.description, 'Updated description');
+    assert.strictEqual(change.tooltip, 'Updated tooltip');
+    assert.strictEqual(change.status, 'pending_user_action');
+    assert.strictEqual(change.file_path, 'coordinator/src/cli-server.js');
+    assert.strictEqual(change.domain, 'coordinator');
+  });
+});
+
 describe('memory-retrieval CLI commands', () => {
   it('memory-snapshots returns ok with empty list when no snapshots', async () => {
     const result = await sendCommand('memory-snapshots', {});
