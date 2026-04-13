@@ -330,6 +330,11 @@ describe('CLI Server', () => {
     assert.ok(typeof result.worker_count === 'number', 'worker_count should be a number');
     assert.ok(typeof result.idle_workers === 'number', 'idle_workers should be a number');
     assert.ok(typeof result.active_tasks === 'number', 'active_tasks should be a number');
+    assert.strictEqual(result.project_dir, tmpDir);
+    assert.ok(result.workers && typeof result.workers.total === 'number', 'workers summary should be present');
+    assert.ok(result.tasks && typeof result.tasks.active === 'number', 'tasks summary should be present');
+    assert.ok(result.isolation && Array.isArray(result.isolation.priority), 'isolation summary should be present');
+    assert.ok(result.runtime && result.runtime.research, 'runtime research summary should be present');
   });
 
   it('should default npm_config_if_present to true when unset', async () => {
@@ -1363,6 +1368,68 @@ describe('CLI Server', () => {
     const task = db.getTask(taskId);
     assert.strictEqual(task.status, 'completed');
     assert.strictEqual(getCoordinatorOwnershipMismatchEvents('complete-task', 1, taskId).length, 0);
+  });
+
+  it('should not recover or enqueue a merge from branch when complete-task has no PR URL', async () => {
+    db.registerWorker(1, '/wt-1', 'agent-1');
+    const reqId = db.createRequest('No PR branch fallback guard');
+    const taskId = db.createTask({ request_id: reqId, subject: 'No PR', description: 'Complete without a PR' });
+    db.updateTask(taskId, { status: 'in_progress', assigned_to: 1, branch: null, pr_url: null });
+    db.updateWorker(1, { status: 'busy', current_task_id: taskId, tasks_completed: 0 });
+
+    const result = await sendCommand('complete-task', {
+      worker_id: '1',
+      task_id: String(taskId),
+      branch: 'agent-1',
+      result: 'No PR was opened',
+    });
+    assert.strictEqual(result.ok, true);
+
+    const task = db.getTask(taskId);
+    assert.strictEqual(task.status, 'completed');
+    assert.strictEqual(task.pr_url, null);
+    assert.strictEqual(task.branch, 'agent-1');
+    assert.strictEqual(db.getWorker(1).tasks_completed, 1);
+
+    const mergeRows = db.getDb().prepare('SELECT * FROM merge_queue WHERE task_id = ?').all(taskId);
+    assert.strictEqual(mergeRows.length, 0);
+    const skipEvents = db.getLog(100, 'coordinator').filter((entry) => entry.action === 'complete_task_merge_skipped_no_pr');
+    assert.strictEqual(skipEvents.length, 1);
+  });
+
+  it('should skip duplicate complete-task calls after a task is already terminal', async () => {
+    db.registerWorker(1, '/wt-1', 'agent-1');
+    const reqId = db.createRequest('Duplicate completion guard');
+    const taskId = db.createTask({ request_id: reqId, subject: 'Idempotent completion', description: 'Complete once only' });
+    db.updateTask(taskId, { status: 'in_progress', assigned_to: 1 });
+    db.updateWorker(1, { status: 'busy', current_task_id: taskId, tasks_completed: 0 });
+
+    const first = await sendCommand('complete-task', {
+      worker_id: '1',
+      task_id: String(taskId),
+      result: 'First completion',
+    });
+    assert.strictEqual(first.ok, true);
+    const completedAt = db.getTask(taskId).completed_at;
+    assert.ok(completedAt);
+    assert.strictEqual(db.getWorker(1).tasks_completed, 1);
+    assert.strictEqual(listMailForRecipient('allocator').filter((mail) => mail.type === 'task_completed').length, 1);
+
+    const second = await sendCommand('complete-task', {
+      worker_id: '1',
+      task_id: String(taskId),
+      result: 'Late duplicate completion',
+    });
+    assert.strictEqual(second.ok, true);
+    assert.strictEqual(second.skipped, true);
+    assert.strictEqual(second.reason, 'duplicate_terminal_completion');
+
+    const task = db.getTask(taskId);
+    assert.strictEqual(task.status, 'completed');
+    assert.strictEqual(task.result, 'First completion');
+    assert.strictEqual(task.completed_at, completedAt);
+    assert.strictEqual(db.getWorker(1).tasks_completed, 1);
+    assert.strictEqual(listMailForRecipient('allocator').filter((mail) => mail.type === 'task_completed').length, 1);
   });
 
   it('should reject fail-task when task is assigned to another worker and preserve ownership state', async () => {

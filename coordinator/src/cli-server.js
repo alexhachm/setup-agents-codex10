@@ -326,6 +326,90 @@ function formatUptimeHuman(ms) {
   parts.push(`${s}s`);
   return parts.join(' ');
 }
+
+function readJsonFileSafe(filePath) {
+  try {
+    return JSON.parse(fs.readFileSync(filePath, 'utf8'));
+  } catch {
+    return null;
+  }
+}
+
+function isoAgeMs(value) {
+  if (!value) return null;
+  const ts = Date.parse(value);
+  if (!Number.isFinite(ts)) return null;
+  return Math.max(0, Date.now() - ts);
+}
+
+function countByStatus(rows) {
+  const counts = {};
+  for (const row of rows || []) {
+    const status = row && row.status ? String(row.status) : 'unknown';
+    counts[status] = (counts[status] || 0) + 1;
+  }
+  return counts;
+}
+
+function callHealthProbe(name, fn, fallback = {}) {
+  try {
+    return fn();
+  } catch (e) {
+    return { ...fallback, probe: name, error: e.message };
+  }
+}
+
+function collectRuntimeHealth(projectDir, workers) {
+  const sandboxManager = require('./sandbox-manager');
+  const microvmManager = require('./microvm-manager');
+  const workerBackend = require('./worker-backend');
+  const researchDriverManager = require('./research-driver-manager');
+  const sandbox = callHealthProbe('sandbox', () => sandboxManager.getStatus(projectDir), {
+    docker_available: false,
+    auto_sandbox_enabled: db.getConfig('auto_sandbox_enabled') !== 'false',
+  });
+  const microvm = callHealthProbe('microvm', () => microvmManager.getStatus(), {
+    msb_installed: false,
+    server_running: false,
+  });
+  const tmuxAvailable = callHealthProbe('tmux', () => {
+    const tmuxBackend = workerBackend.getBackend('tmux');
+    return { available: Boolean(tmuxBackend && tmuxBackend.isAvailable()) };
+  }, { available: false }).available === true;
+  const isolationEnabled = db.getConfig('auto_sandbox_enabled') !== 'false';
+  const msbAvailable = microvm.msb_installed === true && microvm.server_running === true;
+  const dockerAvailable = sandbox.docker_available === true;
+  const effectiveBackend = !isolationEnabled
+    ? (tmuxAvailable ? 'tmux' : 'none')
+    : (msbAvailable ? 'sandbox' : (dockerAvailable ? 'docker' : (tmuxAvailable ? 'tmux' : 'none')));
+  const researchRuntime = callHealthProbe('research-driver-runtime', () => (
+    researchDriverManager.getRuntimeStatus(projectDir)
+  ), { running: false, sentinel_running: false, driver_running: false });
+  const agentHealth = readJsonFileSafe(path.join(projectDir, '.claude', 'state', 'agent-health.json')) || {};
+  const researchHeartbeat = agentHealth['research-driver'] || {};
+
+  return {
+    isolation: {
+      enabled: isolationEnabled,
+      priority: ['sandbox', 'docker', 'tmux'],
+      effective_backend: effectiveBackend,
+      msb_available: msbAvailable,
+      docker_available: dockerAvailable,
+      tmux_available: tmuxAvailable,
+    },
+    sandbox,
+    microvm,
+    research: {
+      status: researchHeartbeat.status || null,
+      last_active: researchHeartbeat.last_active || null,
+      last_active_age_ms: isoAgeMs(researchHeartbeat.last_active),
+      runtime: researchRuntime,
+    },
+    worker_backends: countByStatus((workers || []).map((worker) => ({
+      status: worker.backend || 'tmux',
+    }))),
+  };
+}
 const NAMESPACE = process.env.MAC10_NAMESPACE || 'mac10';
 const WORKER_LIMIT_MIN = 1;
 const WORKER_LIMIT_MAX = 8;
@@ -1496,7 +1580,7 @@ function findOpenPrUrlForBranch(rawBranch, cwd = _projectDir || process.cwd()) {
   }
 }
 
-function resolveQueuePrTarget(prUrl, branch, cwd = _projectDir || process.cwd()) {
+function resolveQueuePrTarget(prUrl, branch, cwd = _projectDir || process.cwd(), options = {}) {
   const normalizedPrUrl = normalizePrUrl(prUrl, cwd);
   if (isValidGitHubPrUrl(normalizedPrUrl) && isResolvableGitHubPrUrl(normalizedPrUrl, cwd)) {
     const original = typeof prUrl === 'string' ? prUrl.trim() : '';
@@ -1507,13 +1591,15 @@ function resolveQueuePrTarget(prUrl, branch, cwd = _projectDir || process.cwd())
     };
   }
 
-  const branchPrUrl = findOpenPrUrlForBranch(branch, cwd);
-  if (branchPrUrl) {
-    return {
-      pr_url: branchPrUrl,
-      source: 'branch_fallback',
-      resolvable: true,
-    };
+  if (options.allowBranchFallback === true) {
+    const branchPrUrl = findOpenPrUrlForBranch(branch, cwd);
+    if (branchPrUrl) {
+      return {
+        pr_url: branchPrUrl,
+        source: 'branch_fallback',
+        resolvable: true,
+      };
+    }
   }
 
   return {
@@ -1763,10 +1849,13 @@ function queueMergeWithRecovery({
   priority = 0,
   force_retry = false,
   latest_completion_timestamp = undefined,
+  allow_branch_pr_fallback = false,
 }) {
   const normalizedPriority = Number.isInteger(priority) ? priority : 0;
   const queueCwd = _projectDir || process.cwd();
-  const resolvedPr = resolveQueuePrTarget(pr_url, branch, queueCwd);
+  const resolvedPr = resolveQueuePrTarget(pr_url, branch, queueCwd, {
+    allowBranchFallback: allow_branch_pr_fallback === true,
+  });
   const resolvedPrUrl = resolvedPr.pr_url;
 
   if (resolvedPr.source === 'branch_fallback' && isValidGitHubPrUrl(resolvedPrUrl)) {
@@ -2435,6 +2524,24 @@ function handleCommand(cmd, conn, handlers) {
         }
         const task = ownership.task;
         const worker = ownership.worker;
+        if (!['assigned', 'in_progress'].includes(task.status)) {
+          const reason = task.status === 'completed'
+            ? 'duplicate_terminal_completion'
+            : 'task_not_active';
+          db.log('coordinator', 'complete_task_skipped_terminal', {
+            worker_id,
+            task_id,
+            reason,
+            task_status: task.status || null,
+          });
+          respond(conn, {
+            ok: true,
+            skipped: true,
+            reason,
+            task_status: task.status || null,
+          });
+          break;
+        }
         const usage = normalizeCompleteTaskUsagePayload(args.usage);
         const usageTaskFields = mapUsagePayloadToTaskFields(usage, task);
         const completionPrNormalizationCwd = worker && worker.worktree_path
@@ -2469,7 +2576,7 @@ function handleCommand(cmd, conn, handlers) {
         const queueBranch = sanitizeBranchName(resolvedBranch.branch || completedTask.branch || (worker && worker.branch) || '');
         let completionPrUrl = normalizedPrUrl;
         let queueResult = null;
-        if (completedTask && queueBranch) {
+        if (completedTask && queueBranch && isValidGitHubPrUrl(normalizedPrUrl)) {
           queueResult = queueMergeWithRecovery({
             request_id: completedTask.request_id,
             task_id,
@@ -2492,6 +2599,13 @@ function handleCommand(cmd, conn, handlers) {
               merge_id: queueResult.merge_id || null,
             });
           }
+        } else if (completedTask && queueBranch && !isValidGitHubPrUrl(normalizedPrUrl)) {
+          db.log('coordinator', 'complete_task_merge_skipped_no_pr', {
+            request_id: completedTask.request_id,
+            task_id,
+            branch: queueBranch,
+            pr_url: normalizedPrUrl || null,
+          });
         }
         if (queueResult && isMergeOwnershipCollisionReason(queueResult.reason)) {
           const failureReason = queueResult.reason;
@@ -3430,7 +3544,7 @@ function handleCommand(cmd, conn, handlers) {
             db.updateTask(task.id, { pr_url: normalizedPrUrl || task.pr_url });
           }
           const mergeBranch = sanitizeBranchName(resolvedBranch.branch || task.branch || (worker && worker.branch) || '');
-          if (mergeBranch) {
+          if (mergeBranch && isValidGitHubPrUrl(normalizedPrUrl)) {
             if (resolvedBranch.mismatch || task.branch !== mergeBranch) {
               db.updateTask(task.id, { branch: mergeBranch });
             }
@@ -3523,6 +3637,13 @@ function handleCommand(cmd, conn, handlers) {
                 merge_id: queueResult.merge_id || null,
               });
             }
+          } else if (mergeBranch && !isValidGitHubPrUrl(normalizedPrUrl)) {
+            db.log('coordinator', 'integrate_merge_skipped_no_pr', {
+              request_id: reqId,
+              task_id: task.id,
+              branch: mergeBranch,
+              pr_url: normalizedPrUrl || null,
+            });
           }
         }
         if (queueFailures.length > 0) {
@@ -3647,16 +3768,40 @@ function handleCommand(cmd, conn, handlers) {
 
       case 'health-check': {
         const uptime_ms = db.coordinatorAgeMs(_serverStartedAt);
+        const projectDir = _projectDir || process.cwd();
         const allWorkers = db.getAllWorkers();
         const idleWorkers = db.getIdleWorkers();
-        const activeTasks = db.listTasks({ status: 'assigned' });
+        const assignedTasks = db.listTasks({ status: 'assigned' });
+        const inProgressTasks = db.listTasks({ status: 'in_progress' });
+        const taskRows = db.getDb().prepare('SELECT id, status FROM tasks').all();
+        const runtime = collectRuntimeHealth(projectDir, allWorkers);
         respond(conn, {
           ok: true,
+          project_dir: projectDir,
+          namespace: NAMESPACE,
           uptime_ms,
           uptime_human: formatUptimeHuman(uptime_ms),
           worker_count: allWorkers.length,
           idle_workers: idleWorkers.length,
-          active_tasks: activeTasks.length,
+          active_tasks: assignedTasks.length,
+          workers: {
+            total: allWorkers.length,
+            idle: idleWorkers.length,
+            status_counts: countByStatus(allWorkers),
+            backend_counts: runtime.worker_backends,
+          },
+          tasks: {
+            total: taskRows.length,
+            active: assignedTasks.length + inProgressTasks.length,
+            assigned: assignedTasks.length,
+            in_progress: inProgressTasks.length,
+            status_counts: countByStatus(taskRows),
+          },
+          runtime,
+          isolation: runtime.isolation,
+          sandbox: runtime.sandbox,
+          microvm: runtime.microvm,
+          research: runtime.research,
         });
         break;
       }

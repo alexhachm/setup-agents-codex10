@@ -842,6 +842,13 @@ async function main() {
         else { console.error(result.error); process.exit(1); }
         break;
 
+      case 'health':
+      case 'health-check':
+        result = await send(socketPath, 'health-check', {});
+        if (result.ok) console.log(JSON.stringify(result, null, 2));
+        else { console.error(result.error); process.exit(1); }
+        break;
+
       case 'clarify':
         if (argv.length < 3) { console.error('Usage: mac10 clarify <request_id> <message>'); process.exit(1); }
         result = await send(socketPath, 'clarify', {
@@ -2250,6 +2257,7 @@ SYSTEM:
   purge-tasks                    Remove all failed tasks and their merge queue entries
   add-worker                     Create a new worker worktree (up to max_workers)
   merge-status [request_id]      Show merge queue entries
+  health-check                   Show structured coordinator/runtime health
   ping                           Check coordinator health
 
 FLAGS:
