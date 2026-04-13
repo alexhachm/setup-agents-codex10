@@ -25,6 +25,7 @@ The coordinator owns durable state and command contracts:
 - `coordinator/src/watchdog.js` handles stale assignment, loop, and integration recovery
 - `coordinator/src/merger.js` handles merge queue processing and merge recovery
 - `coordinator/src/overlay.js` writes task-specific worker context
+- `coordinator/src/context-bundle.js` serves bounded task context through `mac10 task-context <task_id>`
 
 Large files remain in `cli-server.js` and `db.js`. They should be split only after each command/query domain has focused coverage.
 
@@ -50,7 +51,9 @@ Research runtime state is local and ignored. Startup now treats a missing resear
 
 ## Context And Worktrees
 
-Use `docs/agent-context-map.md` before broad edits. It separates generated/runtime paths from source-of-truth files and gives small context bundles by task domain.
+Use `mac10 task-context <task_id>` for the coordinator-served task bundle before worker edits. It returns task assignment, safe edit scope, validation commands, relevant knowledge/research excerpts, known pitfalls, related failures, sandbox state, and runtime health.
+
+Use `docs/agent-context-map.md` before broad edits. It separates generated/runtime paths from source-of-truth files and gives source-area guidance by task domain.
 
 Use `docs/worktree-lifecycle.md` for current worktree rules. Root worker worktrees live under `.worktrees/`; live E2E workspaces under `.live-e2e-workspaces/` are generated artifacts, not normal source context.
 
@@ -94,5 +97,6 @@ Still deferred after the provider-interface slice:
 - non-Claude local launch smokes, provider-specific local auth checks, and validated output schemas before enablement
 - sandbox cleanup implementation
 - task-state schema migration
+- ~~coordinator-served task context bundles~~ (done)
 - ~~canonical knowledge layout and health checks~~ (done)
 - module boundaries for splitting `cli-server.js` and `db.js`

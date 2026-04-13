@@ -979,6 +979,14 @@ async function main() {
         }
         break;
 
+      case 'task-context':
+      case 'context-bundle':
+        if (!argv[1]) { console.error(`Usage: mac10 ${cmd} <task_id>`); process.exit(1); }
+        result = await send(socketPath, 'task-context', { task_id: parseInt(argv[1], 10) });
+        if (result.ok) console.log(JSON.stringify(result.bundle, null, 2));
+        else { console.error(result.error); process.exit(1); }
+        break;
+
       case 'start-task':
         if (argv.length < 3) { console.error('Usage: mac10 start-task <worker_id> <task_id>'); process.exit(1); }
         result = await send(socketPath, 'start-task', {
@@ -2272,6 +2280,8 @@ ALLOCATOR:
 
 WORKER:
   my-task <worker_id>            Get current assigned task
+  task-context <task_id>         Get coordinator-served task context bundle
+  context-bundle <task_id>       Alias for task-context
   start-task <worker_id> <task_id>
   heartbeat <worker_id>
   reset-worker <worker_id>       Reset worker to idle state

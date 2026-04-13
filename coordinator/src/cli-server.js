@@ -6,6 +6,7 @@ const path = require('path');
 const crypto = require('crypto');
 const { execFileSync } = require('child_process');
 const db = require('./db');
+const contextBundle = require('./context-bundle');
 const providerOutput = require('./provider-output');
 let modelRouter = null;
 try {
@@ -410,6 +411,44 @@ function collectRuntimeHealth(projectDir, workers) {
     }))),
   };
 }
+
+function collectCoordinatorHealth(projectDir = _projectDir || process.cwd()) {
+  const uptime_ms = db.coordinatorAgeMs(_serverStartedAt);
+  const allWorkers = db.getAllWorkers();
+  const idleWorkers = db.getIdleWorkers();
+  const assignedTasks = db.listTasks({ status: 'assigned' });
+  const inProgressTasks = db.listTasks({ status: 'in_progress' });
+  const taskRows = db.getDb().prepare('SELECT id, status FROM tasks').all();
+  const runtime = collectRuntimeHealth(projectDir, allWorkers);
+
+  return {
+    project_dir: projectDir,
+    namespace: NAMESPACE,
+    uptime_ms,
+    uptime_human: formatUptimeHuman(uptime_ms),
+    worker_count: allWorkers.length,
+    idle_workers: idleWorkers.length,
+    active_tasks: assignedTasks.length,
+    workers: {
+      total: allWorkers.length,
+      idle: idleWorkers.length,
+      status_counts: countByStatus(allWorkers),
+      backend_counts: runtime.worker_backends,
+    },
+    tasks: {
+      total: taskRows.length,
+      active: assignedTasks.length + inProgressTasks.length,
+      assigned: assignedTasks.length,
+      in_progress: inProgressTasks.length,
+      status_counts: countByStatus(taskRows),
+    },
+    runtime,
+    isolation: runtime.isolation,
+    sandbox: runtime.sandbox,
+    microvm: runtime.microvm,
+    research: runtime.research,
+  };
+}
 const NAMESPACE = process.env.MAC10_NAMESPACE || 'mac10';
 const WORKER_LIMIT_MIN = 1;
 const WORKER_LIMIT_MAX = 8;
@@ -541,6 +580,8 @@ const COMMAND_SCHEMAS = {
   'tier1-complete':    { required: ['request_id', 'result'], types: { request_id: 'string', result: 'string' } },
   'ask-clarification': { required: ['request_id', 'question'], types: { request_id: 'string', question: 'string' } },
   'my-task':           { required: ['worker_id'], types: { worker_id: 'string' } },
+  'task-context':      { required: ['task_id'], types: { task_id: 'number' } },
+  'context-bundle':    { required: ['task_id'], types: { task_id: 'number' } },
   'start-task':        { required: ['worker_id', 'task_id'], types: { worker_id: 'string' } },
   'heartbeat':         { required: ['worker_id'], types: { worker_id: 'string' } },
   'complete-task':     { required: ['worker_id', 'task_id'], types: { worker_id: 'string', usage: 'object' } },
@@ -2501,6 +2542,18 @@ function handleCommand(cmd, conn, handlers) {
         });
         break;
       }
+      case 'task-context':
+      case 'context-bundle': {
+        const projectDir = _projectDir || process.cwd();
+        const health = collectCoordinatorHealth(projectDir);
+        const bundle = contextBundle.buildTaskContextBundle({
+          taskId: args.task_id,
+          projectDir,
+          runtimeHealth: health,
+        });
+        respond(conn, { ok: true, bundle });
+        break;
+      }
       case 'start-task': {
         const { worker_id, task_id } = args;
         const ownership = validateWorkerTaskOwnership('start-task', worker_id, task_id);
@@ -3955,42 +4008,7 @@ function handleCommand(cmd, conn, handlers) {
       }
 
       case 'health-check': {
-        const uptime_ms = db.coordinatorAgeMs(_serverStartedAt);
-        const projectDir = _projectDir || process.cwd();
-        const allWorkers = db.getAllWorkers();
-        const idleWorkers = db.getIdleWorkers();
-        const assignedTasks = db.listTasks({ status: 'assigned' });
-        const inProgressTasks = db.listTasks({ status: 'in_progress' });
-        const taskRows = db.getDb().prepare('SELECT id, status FROM tasks').all();
-        const runtime = collectRuntimeHealth(projectDir, allWorkers);
-        respond(conn, {
-          ok: true,
-          project_dir: projectDir,
-          namespace: NAMESPACE,
-          uptime_ms,
-          uptime_human: formatUptimeHuman(uptime_ms),
-          worker_count: allWorkers.length,
-          idle_workers: idleWorkers.length,
-          active_tasks: assignedTasks.length,
-          workers: {
-            total: allWorkers.length,
-            idle: idleWorkers.length,
-            status_counts: countByStatus(allWorkers),
-            backend_counts: runtime.worker_backends,
-          },
-          tasks: {
-            total: taskRows.length,
-            active: assignedTasks.length + inProgressTasks.length,
-            assigned: assignedTasks.length,
-            in_progress: inProgressTasks.length,
-            status_counts: countByStatus(taskRows),
-          },
-          runtime,
-          isolation: runtime.isolation,
-          sandbox: runtime.sandbox,
-          microvm: runtime.microvm,
-          research: runtime.research,
-        });
+        respond(conn, { ok: true, ...collectCoordinatorHealth(_projectDir || process.cwd()) });
         break;
       }
 

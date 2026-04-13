@@ -130,11 +130,9 @@ Live E2E harness source:
 
 Task assignment bundle:
 
-- Task JSON from `mac10 my-task`
-- Request ID and task ID
-- `domain`, `files`, `tier`, `validation`
-- Relevant domain file in `.claude/knowledge/codebase/domains/`
-- Recent relevant notes from `.claude/knowledge/research/topics/<topic>/_rollup.md`
+- Preferred source: `mac10 task-context <task_id>` (alias: `mac10 context-bundle <task_id>`)
+- Includes task/request/worker assignment, active task sandbox, safe edit files, validation commands, domain knowledge, research rollups, known pitfalls, recent related failures, and runtime health
+- Fallback source for the currently assigned task only: `mac10 my-task <worker_id>`
 
 Validation bundle:
 

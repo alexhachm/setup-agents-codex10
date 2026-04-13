@@ -337,6 +337,101 @@ describe('CLI Server', () => {
     assert.ok(result.runtime && result.runtime.research, 'runtime research summary should be present');
   });
 
+  it('should serve bounded task context bundles', async () => {
+    const knowledgeDir = path.join(tmpDir, '.claude', 'knowledge');
+    fs.mkdirSync(path.join(knowledgeDir, 'codebase', 'domains'), { recursive: true });
+    fs.mkdirSync(path.join(knowledgeDir, 'research', 'topics', 'coordinator-core'), { recursive: true });
+    fs.writeFileSync(
+      path.join(knowledgeDir, 'codebase', 'domains', 'coordinator-core.md'),
+      '# Coordinator Core\n\nCoordinator core context from canonical knowledge.\n',
+      'utf8'
+    );
+    fs.writeFileSync(
+      path.join(knowledgeDir, 'mistakes.md'),
+      '# Known Pitfalls\n\nAvoid repeating coordinator startup failures.\n',
+      'utf8'
+    );
+    fs.writeFileSync(
+      path.join(knowledgeDir, 'research', 'topics', 'coordinator-core', '_rollup.md'),
+      '## Current Recommended Approach\n\nUse coordinator-owned state instead of direct file state.\n',
+      'utf8'
+    );
+
+    db.registerWorker(1, path.join(tmpDir, '.worktrees', 'wt-1'), 'agent-1');
+    const reqId = db.createRequest('Need a context bundle');
+    const taskId = db.createTask({
+      request_id: reqId,
+      subject: 'Build context bundle',
+      description: 'Return task context from coordinator state',
+      domain: 'coordinator-core',
+      files: ['coordinator/src/cli-server.js', 'coordinator/src/context-bundle.js'],
+      priority: 'high',
+      tier: 2,
+      validation: { test_cmd: 'node --test coordinator/tests/cli.test.js' },
+    });
+    db.updateTask(taskId, {
+      status: 'assigned',
+      assigned_to: 1,
+      overlap_with: JSON.stringify([99]),
+      routing_class: 'mid',
+      routed_model: 'sonnet',
+      model_source: 'test-router',
+    });
+    db.updateWorker(1, {
+      status: 'assigned',
+      current_task_id: taskId,
+      domain: 'coordinator-core',
+      launched_at: '2026-04-13T12:00:00.000Z',
+    });
+    const sandbox = db.createTaskSandbox({ task_id: taskId, worker_id: 1, backend: 'tmux' });
+    const failedTaskId = db.createTask({
+      request_id: reqId,
+      subject: 'Earlier failure',
+      description: 'Previous related failure',
+      domain: 'coordinator-core',
+      tier: 2,
+    });
+    db.updateTask(failedTaskId, {
+      status: 'failed',
+      result: 'Previous context bundle failure',
+    });
+    const mergeRow = db.enqueueMerge({
+      request_id: reqId,
+      task_id: failedTaskId,
+      pr_url: 'https://github.com/org/repo/pull/10',
+      branch: 'agent-1',
+    });
+    db.updateMerge(mergeRow.lastInsertRowid, { status: 'failed', error: 'merge failed' });
+
+    const result = await sendCommand('task-context', { task_id: taskId });
+    assert.strictEqual(result.ok, true);
+    const bundle = result.bundle;
+    assert.strictEqual(bundle.task.id, taskId);
+    assert.strictEqual(bundle.assignment.request.id, reqId);
+    assert.strictEqual(bundle.assignment.worker.id, 1);
+    assert.strictEqual(bundle.assignment.task_sandbox.id, sandbox.id);
+    assert.deepStrictEqual(bundle.safe_edit_files.explicit, [
+      'coordinator/src/cli-server.js',
+      'coordinator/src/context-bundle.js',
+    ]);
+    assert.deepStrictEqual(bundle.safe_edit_files.overlap_task_ids, [99]);
+    assert.deepStrictEqual(bundle.validation.explicit_commands, [
+      { label: 'test', command: 'node --test coordinator/tests/cli.test.js' },
+    ]);
+    assert.match(bundle.knowledge.domain.content, /Coordinator core context/);
+    assert.match(bundle.knowledge.research[0].content, /coordinator-owned state/);
+    assert.match(bundle.knowledge.known_pitfalls.content, /coordinator startup failures/);
+    assert.ok(bundle.recent_related_failures.tasks.some((task) => task.id === failedTaskId));
+    assert.ok(bundle.recent_related_failures.merges.some((merge) => merge.error === 'merge failed'));
+    assert.ok(bundle.runtime_health && bundle.runtime_health.runtime);
+
+    const cliResult = await runMac10Cli(['context-bundle', String(taskId)]);
+    assert.strictEqual(cliResult.status, 0, cliResult.stderr);
+    const cliBundle = parseCliJsonOutput(cliResult.stdout);
+    assert.strictEqual(cliBundle.task.id, taskId);
+    assert.strictEqual(cliBundle.assignment.task_sandbox.id, sandbox.id);
+  });
+
   it('should default npm_config_if_present to true when unset', async () => {
     const originalIfPresent = process.env.npm_config_if_present;
     try {
