@@ -18,4 +18,4 @@ WORKDIR /workspace
 # Worker sentinel script is mounted via volume or copied at build time
 # COPY scripts/worker-sentinel.sh /usr/local/bin/
 
-ENTRYPOINT ["bash"]
+CMD ["bash"]

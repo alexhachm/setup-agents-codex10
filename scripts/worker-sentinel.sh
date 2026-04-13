@@ -41,6 +41,9 @@ export PATH="$PROJECT_DIR/.claude/scripts:$PATH"
 
 # Resolve the coordinator binary path from an existing wrapper script
 MAC10_BIN=""
+if [ -f "$PROJECT_DIR/coordinator/bin/mac10" ]; then
+  MAC10_BIN="$PROJECT_DIR/coordinator/bin/mac10"
+fi
 for _wrapper in "$PROJECT_DIR/.claude/scripts/mac10"; do
   if [ -f "$_wrapper" ]; then
     _candidate="$(grep -m1 '^MAC10_BIN=' "$_wrapper" 2>/dev/null | cut -d'"' -f2)"
@@ -52,7 +55,7 @@ for _wrapper in "$PROJECT_DIR/.claude/scripts/mac10"; do
 done
 if [ -z "$MAC10_BIN" ]; then
   # Fallback: derive from the harness repo structure
-  MAC10_BIN="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)/coordinator/bin/mac10"
+  MAC10_BIN="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)/coordinator/bin/mac10"
 fi
 
 SHIM_DIR="$PROJECT_DIR/.claude/scripts/.ns-shims"

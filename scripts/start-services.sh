@@ -143,9 +143,15 @@ start_coordinator() {
   fi
 
   if [ "$ALREADY_RUNNING" = false ]; then
-    nohup env MAC10_NAMESPACE="$NAMESPACE" MAC10_SCRIPT_DIR="$SCRIPT_DIR" \
-      node "$SCRIPT_DIR/coordinator/src/index.js" "$PROJECT_DIR" \
-      > "$CLAUDE_DIR/state/${NAMESPACE}.coordinator.log" 2>&1 &
+    if command -v setsid >/dev/null 2>&1; then
+      setsid env MAC10_NAMESPACE="$NAMESPACE" MAC10_SCRIPT_DIR="$SCRIPT_DIR" \
+        node "$SCRIPT_DIR/coordinator/src/index.js" "$PROJECT_DIR" \
+        > "$CLAUDE_DIR/state/${NAMESPACE}.coordinator.log" 2>&1 < /dev/null &
+    else
+      nohup env MAC10_NAMESPACE="$NAMESPACE" MAC10_SCRIPT_DIR="$SCRIPT_DIR" \
+        node "$SCRIPT_DIR/coordinator/src/index.js" "$PROJECT_DIR" \
+        > "$CLAUDE_DIR/state/${NAMESPACE}.coordinator.log" 2>&1 < /dev/null &
+    fi
     local COORD_PID=$!
 
     for i in $(seq 1 30); do

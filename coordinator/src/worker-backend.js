@@ -127,9 +127,14 @@ const dockerBackend = {
       '--name', containerName,
       '--label', 'mac10-worker=true',
       '--label', _projectLabel(),
+      '--entrypoint', '',
       '-v', `${cwd}:/workspace`,
       '-w', '/workspace',
     ];
+
+    if (_projectDir && path.resolve(_projectDir) !== path.resolve(cwd)) {
+      args.push('-v', `${_projectDir}:${_projectDir}`);
+    }
 
     if (envVars && typeof envVars === 'object') {
       for (const [k, v] of Object.entries(envVars)) {

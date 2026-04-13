@@ -1,11 +1,11 @@
 {
-  "last_indexed": "2026-04-11T12:31:51.623Z",
-  "changes_since_index": 0,
+  "last_indexed": "2026-04-13T09:46:19.185Z",
+  "changes_since_index": 6,
   "domains": {
     "coordinator": {
       "changes_since_research": 0,
       "worker_patches": 1,
-      "last_researched": "2026-04-11T08:43:31.495Z"
+      "last_researched": "2026-04-13T08:42:26.928Z"
     },
     "newdomain": {
       "changes_since_research": 1,
@@ -14,35 +14,42 @@
     "coordinator-extensions": {
       "changes_since_research": 0,
       "worker_patches": 0,
-      "last_researched": "2026-04-11T08:43:30.983Z"
+      "last_researched": "2026-04-13T08:42:26.658Z"
     },
     "coordinator-core": {
       "changes_since_research": 0,
       "worker_patches": 1,
-      "last_researched": "2026-04-11T08:43:30.673Z"
+      "last_researched": "2026-04-13T08:42:26.492Z"
     },
     "coordinator-routing": {
       "changes_since_research": 0,
       "worker_patches": 1,
-      "last_researched": "2026-04-11T08:43:31.209Z"
+      "last_researched": "2026-04-13T08:42:26.779Z"
     },
     "infra": {
-      "changes_since_research": 0,
+      "changes_since_research": 6,
       "worker_patches": 0,
-      "last_researched": "2026-04-11T08:43:31.892Z"
+      "last_researched": "2026-04-13T08:42:27.145Z",
+      "last_changed": "2026-04-13T09:58:25.243Z"
     },
     "status": {
       "changes_since_research": 0,
       "worker_patches": 0,
-      "last_researched": "2026-04-11T08:43:32.622Z"
+      "last_researched": "2026-04-13T08:42:27.624Z"
     },
     "10.1-port-sequential-plan": {
       "changes_since_research": 0,
       "worker_patches": 0,
       "last_researched": "2026-04-12T00:08:23.322Z"
+    },
+    "e2e-audit": {
+      "changes_since_research": 0,
+      "worker_patches": 0,
+      "last_researched": "2026-04-13T09:53:58.337Z"
     }
   },
-  "last_external_research": "2026-04-12T00:08:23.322Z",
+  "last_external_research": "2026-04-13T09:53:58.337Z",
   "external_research_stale_topics": [],
-  "last_index_artifact": ".claude/state/codebase-map.json"
+  "last_index_artifact": ".claude/state/codebase-map.json",
+  "last_changed": "2026-04-13T09:58:25.243Z"
 }

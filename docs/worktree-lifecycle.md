@@ -17,6 +17,22 @@ Purpose: separate durable source worktrees from disposable runtime sandboxes so 
 - Do not run `git worktree prune`, remove worktrees, or delete live E2E directories unless the task explicitly says those registrations are disposable.
 - Use `git worktree prune --dry-run --verbose` first and record the output before any destructive cleanup.
 
+## Cleanup Policy
+
+- Default cleanup mode is inventory-only.
+- A worktree may be deleted only when it is both unregistered or explicitly listed in an owner-approved deletion plan, and it has no unique commits or uncommitted source changes that need preservation.
+- A live E2E directory may be deleted only when its run ID is documented as disposable and no checklist, report, or regression fixture references it.
+- `git worktree prune --dry-run --verbose` is required before any prune. If the dry run reports no prunable paths, no prune command should be run.
+- Worker homes under `.worktrees/wt-<id>/` are not task sandboxes. They are durable launch homes and may be dirty from old runs; cleanup must not assume they are disposable.
+- Disposable task sandboxes must have their own lifecycle metadata before deletion is automated: task ID, request ID, source branch, created timestamp, completion status, retention reason, and cleanup decision.
+
+## Live Audit Findings - 2026-04-13
+
+- `git worktree list --porcelain` found one main worktree, root worker worktrees, and nested live-E2E worktrees; `git worktree prune --dry-run --verbose` found no prunable missing-path worktrees.
+- A provider-backed worker smoke in namespace `liveaudit102` failed first in `msb` isolation (`worker_death:msb_sandbox_dead`), then completed through tmux fallback. This means the execution plane should not treat "msb server is running" as enough evidence to select `msb` for a task.
+- The same smoke recovered a stale worker branch/PR (`agent-1`, PR `#359`) during completion. Merge eligibility must be tied to the current task assignment token and task-created branch, not merely the worker home branch.
+- Until disposable task sandboxes exist, root worker worktrees should be treated as shared, stateful launch homes and excluded from broad source cleanup.
+
 ## Selected Direction
 
 - Keep root `.worktrees/wt-<id>/` directories as worker homes.
