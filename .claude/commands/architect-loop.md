@@ -16,7 +16,7 @@ Apply any pending instruction patches targeted at you, then clear them from the 
 
 You have deep codebase knowledge from `/scan-codebase`. Your job is to **triage and act** on requests. You do NOT route Tier 3 tasks to workers — Master-3 handles that.
 
-Use only `./.claude/scripts/codex10 ...` for coordinator commands. Never invoke raw `mac10` in this codex10 runtime.
+Use only `./.claude/scripts/mac10 ...` for coordinator commands. Never invoke raw `mac10` in this mac10 runtime.
 
 ## Internal Counters (Track These)
 ```
@@ -30,7 +30,7 @@ ready_floor = 6        # Keep this many ready tasks when possible
 
 ## Native Agent Teams
 
-Native teammate delegation is disabled in this Codex workflow. Use the standard codex10 path:
+Native teammate delegation is disabled in this mac10 workflow. Use the standard mac10 path:
 - Tier 1: direct execution only for trivial docs-only edits
 - Tier 2: claim and assign one worker
 - Tier 3: decompose tasks for Master-3
@@ -40,7 +40,7 @@ Native teammate delegation is disabled in this Codex workflow. Use the standard 
 ```
 ████  I AM MASTER-2 — ARCHITECT (Deep)  ████
 
-Monitoring codex10 architect inbox for new requests.
+Monitoring mac10 architect inbox for new requests.
 I triage every request:
   Tier 1: docs-only direct exception
   Tier 2: I assign to one worker (~5-15 min)
@@ -65,17 +65,17 @@ if [ $((now_epoch - last_activity_epoch)) -lt 30 ]; then
 else
   timeout=15
 fi
-bash .claude/scripts/signal-wait.sh .claude/signals/.codex10.handoff-signal "$timeout"
+bash .claude/scripts/signal-wait.sh .claude/signals/.mac10.handoff-signal "$timeout"
 ```
 Use 5s timeout if activity was < 30s ago. Use 15s otherwise.
-Then check for new requests via codex10 CLI (source of truth — never read JSON files directly):
+Then check for new requests via mac10 CLI (source of truth — never read JSON files directly):
 ```bash
-./.claude/scripts/codex10 inbox architect
+./.claude/scripts/mac10 inbox architect
 ```
 
 If no pending requests, also check overall status:
 ```bash
-./.claude/scripts/codex10 status
+./.claude/scripts/mac10 status
 ```
 
 If no pending work, go to Step 6.
@@ -119,9 +119,9 @@ echo "[$(date -u +%Y-%m-%dT%H:%M:%SZ)] [master-2] [TIER_CLASSIFY] id=[request_id
 Before acting on inbox order, measure queue pressure:
 
 ```bash
-request_rows=$(./.claude/scripts/codex10 status | sed -n '/=== Requests ===/,/=== Workers ===/p')
+request_rows=$(./.claude/scripts/mac10 status | sed -n '/=== Requests ===/,/=== Workers ===/p')
 pending_count=$(printf '%s\n' "$request_rows" | awk '$1 ~ /^req-/ && $2 == "[pending]" {count++} END {print count+0}')
-ready_count=$(./.claude/scripts/codex10 ready-tasks | grep -c '^  #')
+ready_count=$(./.claude/scripts/mac10 ready-tasks | grep -c '^  #')
 oldest_pending_id=$(printf '%s\n' "$request_rows" | awk '$1 ~ /^req-/ && $2 == "[pending]" {id=$1} END {print id}')
 ```
 
@@ -164,7 +164,7 @@ Only use this path for trivial docs/prompt/comment edits. If the request touches
    ```
 6. Mark Tier 1 completion via coordinator (DB state + notifications):
    ```bash
-   ./.claude/scripts/codex10 tier1-complete [id] "tier=1 pr=[PR URL] summary=[what changed]"
+   ./.claude/scripts/mac10 tier1-complete [id] "tier=1 pr=[PR URL] summary=[what changed]"
    ```
 7. Log and increment counter:
    ```bash
@@ -179,9 +179,9 @@ Go to Step 6.
 
 ### Step 3b: Tier 2 — Claim and Assign Directly to Worker
 
-1. Check workers via codex10 CLI:
+1. Check workers via mac10 CLI:
    ```bash
-   ./.claude/scripts/codex10 worker-status
+   ./.claude/scripts/mac10 worker-status
    ```
    Find an idle worker (skip any with `claimed_by` set).
 
@@ -191,7 +191,7 @@ Go to Step 6.
    worker_id="${raw_worker_id#worker-}"   # claim/release require numeric N
    ```
    ```bash
-   ./.claude/scripts/codex10 claim-worker "$worker_id"
+   ./.claude/scripts/mac10 claim-worker "$worker_id"
    ```
    If claim fails, pick another idle worker and retry.
 
@@ -214,7 +214,7 @@ Go to Step 6.
 
    task_payload='{"request_id":"[id]","subject":"[task title]","description":"DOMAIN: [domain]\nFILES: [files]\nVALIDATION: tier2\nTIER: 2\n\n[detailed requirements]\n\n[success criteria]","domain":"[domain]","tier":2,"priority":"normal","files":["file1.js","file2.js"]'"$validation_field"'}'
    create_task_output="$(
-     printf '%s\n' "$task_payload" | ./.claude/scripts/codex10 create-task -
+     printf '%s\n' "$task_payload" | ./.claude/scripts/mac10 create-task -
    )"
    task_id=$(printf '%s\n' "$create_task_output" | awk '/Task created:/ {print $3}')
    [ -n "$task_id" ] || { echo "Failed to capture task_id from create-task output"; exit 1; }
@@ -222,12 +222,12 @@ Go to Step 6.
    ```
    Then assign with the captured `task_id` and normalized numeric worker id:
    ```bash
-   ./.claude/scripts/codex10 assign-task "$task_id" "$worker_id"
+   ./.claude/scripts/mac10 assign-task "$task_id" "$worker_id"
    ```
 
 4. **Release claim:**
    ```bash
-   ./.claude/scripts/codex10 release-worker "$worker_id"
+   ./.claude/scripts/mac10 release-worker "$worker_id"
    ```
    Do not call `launch-worker.sh` here; `assign-task` already wakes the worker.
 
@@ -247,14 +247,14 @@ Go to Step 6.
 2. Optional teammate burst (only when criteria above are met): run read-only teammate analysis, then synthesize findings yourself.
 3. If clarification is needed, request it via coordinator and block for a reply:
    ```bash
-   ./.claude/scripts/codex10 ask-clarification <request_id> "[specific question]"
-   ./.claude/scripts/codex10 inbox architect --block --type=clarification_response --request-id=<request_id>
+   ./.claude/scripts/mac10 ask-clarification <request_id> "[specific question]"
+   ./.claude/scripts/mac10 inbox architect --block --type=clarification_response --request-id=<request_id>
    ```
 4. Record the Tier 3 decision in coordinator state:
    ```bash
-   ./.claude/scripts/codex10 triage <request_id> 3 "Decomposed into [N] tasks"
+   ./.claude/scripts/mac10 triage <request_id> 3 "Decomposed into [N] tasks"
    ```
-5. Create each decomposed Tier 3 task via codex10, capturing output and task IDs as you go.
+5. Create each decomposed Tier 3 task via mac10, capturing output and task IDs as you go.
    Use script-aware validation selection per target package:
    - Prefer `npm test` when `test` exists.
    - Else run `npm run <script>` for the `build` script when present.
@@ -274,7 +274,7 @@ Go to Step 6.
 
    task_payload='{"request_id":"[id]","subject":"[task title]","description":"REQUEST_ID: [id]\nDOMAIN: [domain]\nFILES: [specific files]\nVALIDATION: tier3\nTIER: 3\n\n[detailed requirements]\n\n[success criteria]","domain":"[domain]","tier":3,"priority":"normal","files":["file1.js","file2.js"],"depends_on":[]'"$validation_field"'}'
    create_task_output="$(
-     printf '%s\n' "$task_payload" | ./.claude/scripts/codex10 create-task -
+     printf '%s\n' "$task_payload" | ./.claude/scripts/mac10 create-task -
    )"
    task_id=$(printf '%s\n' "$create_task_output" | awk '/Task created:/ {print $3}')
    [ -n "$task_id" ] || { echo "Failed to capture Tier 3 task ID"; exit 1; }
@@ -285,10 +285,10 @@ Go to Step 6.
    The coordinator will automatically provision a sandboxed environment with browser testing capabilities.
 6. Validate decomposition overlap via coordinator:
    ```bash
-   ./.claude/scripts/codex10 check-overlaps <request_id>
+   ./.claude/scripts/mac10 check-overlaps <request_id>
    ```
    For CRITICAL overlaps, adjust decomposition so conflicting tasks are serialized via `depends_on` before workers execute them.
-7. Do not write `.claude/state/codex10.task-queue.json`, `.claude/state/codex10.handoff.json`, or signal files for decomposition handoff; `create-task` updates coordinator state directly.
+7. Do not write `.claude/state/mac10.task-queue.json`, `.claude/state/mac10.handoff.json`, or signal files for decomposition handoff; `create-task` updates coordinator state directly.
 8. Log:
    ```bash
    echo "[$(date -u +%Y-%m-%dT%H:%M:%SZ)] [master-2] [DECOMPOSE_DONE] id=[request_id] tasks=[N] domains=[list]" >> .claude/logs/activity.log
@@ -362,12 +362,12 @@ Go back to Step 1.
 3. **Write** patterns.md with decomposition outcomes
 4. **Check stagger:**
    ```bash
-   cat .claude/state/codex10.agent-health.json
+   cat .claude/state/agent-health.json
    ```
    If Master-3 status is "resetting", `sleep 30` and check again. Do not reset simultaneously.
-5. **Update codex10.agent-health.json:** set master-2 status to "resetting", reset counters
+5. **Update agent-health.json:** set master-2 status to "resetting", reset counters
 6. Log: `[DISTILL] [RESET] tier1=[count] decompositions=[count]`
-7. Exit and relaunch with a fresh Codex session.
+7. Exit and relaunch with a fresh agent session.
 8. Run `/scan-codebase`.
 
 ## Decomposition Quality Rules (Tier 3)
@@ -375,5 +375,5 @@ Go back to Step 1.
 **Rule 1: Each task must be self-contained**
 **Rule 2: Tag every task with DOMAIN, FILES, VALIDATION, TIER**
 **Rule 3: Be specific in requirements** — "Fix the bug" is bad
-**Rule 4: Respect coupling boundaries** — coupled files in SAME task. After creating all tasks, run `./.claude/scripts/codex10 check-overlaps` and serialize CRITICAL overlaps with `depends_on`
+**Rule 4: Respect coupling boundaries** — coupled files in SAME task. After creating all tasks, run `./.claude/scripts/mac10 check-overlaps` and serialize CRITICAL overlaps with `depends_on`
 **Rule 5: Use depends_on for sequential work**

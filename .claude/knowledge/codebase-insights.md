@@ -1,7 +1,7 @@
 # Codebase Insights
 
 ## Tech Stack
-- Node.js 22+ (coordinator, better-sqlite3 compat), SQLite WAL (better-sqlite3 v12), Express v4.21, WebSocket (ws v8.18)
+- Node.js 22+ (coordinator, better-sqlite3 compat), SQLite WAL (better-sqlite3 v12)
 - Python 3.12 (research pipeline: chatgpt-driver, ingest-research, compose-research-prompt)
 - Bash scripts for worker lifecycle, tmux for process orchestration
 - Docker/sandbox support for isolated worker execution (sandbox-agent-bridge)
@@ -9,20 +9,19 @@
 - No build step — pure JS runtime
 
 ## Build & Test
-- Test: `cd coordinator && npm test` (node --test tests/*.test.js, 19 test files)
+- Test: `cd coordinator && npm test` (node --test tests/*.test.js, 17 test files)
 - Start: `mac10 start [project_dir]`
-- Setup: `bash setup.sh /path/to/project [num_workers]` (max 8 workers, default 4, namespace=codex10)
-- Dashboard: disabled (hub.js gutted, web-server.js unused)
+- Setup: `bash setup.sh /path/to/project [num_workers]` (max 8 workers, default 4, namespace derived as `mac10-<project>`)
+- Dashboard/GUI: removed from active system
 
 ## Directory Structure
 - `coordinator/src/` — Core server (21 modules)
 - `coordinator/bin/mac10` — CLI entry point
-- `coordinator/tests/` — 19 test files
-- `gui/public/` — Web dashboard (disabled)
+- `coordinator/tests/` — 17 test files
 - `scripts/` — worker-sentinel.sh, research-sentinel.sh, chatgpt-driver.py, loop-sentinel.sh, provider scripts
 - `sandbox/` — Docker-based worker sandboxing (Dockerfile.worker, Sandboxfile, docker-compose)
-- `.claude/commands-codex10/` — Agent loop templates (codex10 namespace)
-- `.claude/scripts/` — codex10 wrapper, worker-sentinel.sh, launch-worker.sh, signal-wait.sh, state-lock.sh, loop-sentinel.sh
+- `.claude/commands/` — Agent loop templates for mac10 roles and live E2E launch/repair
+- `.claude/scripts/` — mac10 wrapper, worker-sentinel.sh, launch-worker.sh, signal-wait.sh, state-lock.sh, loop-sentinel.sh
 - `.claude/knowledge/` — Shared knowledge base (synced to worktrees before tasks)
 - `.worktrees/wt-{1..N}/` — Worker git worktrees
 - `templates/` — Template files for project setup
@@ -31,15 +30,14 @@
 - **coordinator-core**: index.js (293L), db.js (~4400L), schema.sql (510L+)
 - **coordinator-routing**: cli-server.js (~4500L), allocator.js, merger.js (~963L), watchdog.js (~1112L)
 - **coordinator-extensions**: overlay.js (358L), knowledge-metadata.js (191L), insight-ingestion.js (279L), sandbox-agent-bridge.js (194L), worker-backend.js (280L), sandbox-manager.js (152L), microvm-manager.js (156L)
-- **coordinator-runtime**: tmux.js (160L), instance-registry.js, recovery.js (23L)
-- **coordinator-surface**: web-server.js (~2493L, disabled), hub.js (52L, gutted)
+- **coordinator-runtime**: tmux.js (160L), recovery.js (23L)
+- **coordinator-surface**: cli-server.js + coordinator/bin/mac10
 - **coordinator-test-files**: greet.js (7L), hello-test.js (7L), test-hello.js (7L) — E2E test artifacts
-- **gui**: gui/public/ — disabled
 - **cli**: coordinator/bin/mac10
 - **infra**: scripts/, setup.sh (752L), .claude/scripts/
 - **sandbox**: sandbox/ — Docker worker isolation + microsandbox (Sandboxfile)
 - **research**: scripts/chatgpt-driver.py (2795L), scripts/ingest-research.py (267L), scripts/compose-research-prompt.py (328L)
-- **agent-config**: .claude/commands-codex10/, .claude/agents/, templates/
+- **agent-config**: .claude/commands/, .claude/agents/, templates/
 
 ## DB Schema (15+ tables)
 - `requests` — user requests with status workflow (pending->triaging->decomposed->completed)
@@ -68,7 +66,7 @@
 - Worker backend abstraction: tmux/docker/sandbox via MAC10_WORKER_BACKEND env var
 - Backend priority: msb (sandbox) -> Docker -> tmux fallback
 - Research pipeline: ChatGPT-driven external search via queue -> driver -> ingest -> insight ingestion
-- codex10 namespace: wrapper in .claude/scripts/codex10 routes to mac10 with MAC10_NAMESPACE=codex10
+- Claude is the active provider; retired Codex/Codex10 command trees and shims are removed from active source
 - Loop system: persistent autonomous loops with sentinels, checkpoints, and heartbeats
 - Insight ingestion: lifecycle events auto-captured as project memory snapshots/artifacts
 - Model routing: configurable model selection (spark/mini/flagship) with routing classes
@@ -85,7 +83,7 @@
 - `watchdog.js` + `db.js` + `tmux.js` (escalation reads DB, kills via tmux)
 - `merger.js` + `db.js` + `insight-ingestion.js` (merge events trigger insight capture)
 - `allocator.js` + `db.js` + `insight-ingestion.js` (allocation triggers insights)
-- `scripts/start-common.sh` + `.claude/scripts/codex10` (startup coupling)
+- `scripts/start-common.sh` + `scripts/provider-utils.sh` + `.claude/scripts/mac10` (startup coupling)
 - `setup.sh` + agent loop templates (change together frequently)
 - `worker-backend.js` + `sandbox-manager.js` + `microvm-manager.js` (backend selection coupling)
 
@@ -94,6 +92,5 @@
 - coordinator/src/cli-server.js (4519L)
 - coordinator/src/db.js (4419L)
 - scripts/chatgpt-driver.py (2795L)
-- coordinator/src/web-server.js (2493L, disabled)
 
-Last scanned: 2026-03-31
+Last scanned: 2026-04-11

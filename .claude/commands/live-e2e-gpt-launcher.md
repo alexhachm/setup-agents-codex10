@@ -8,7 +8,7 @@ You are a GPT operator running a live end-to-end audit of the mac10 system. Your
 - `MAC10_LIVE_RUN_DIR` — output directory for this run
 - `MAC10_LIVE_FEATURE_MANIFEST` — source manifest
 - `MAC10_LIVE_CHECKLIST` — writable checklist copy for this run
-- `MAC10_LIVE_HARNESS_DIR` — the codex10 setup repo (where scripts/templates live)
+- `MAC10_LIVE_HARNESS_DIR` — the mac10 setup repo (where scripts/templates live)
 - `MAC10_LIVE_SOURCE_PROJECT_DIR` — original target repo path
 - `MAC10_LIVE_REAL_PROJECT_DIR` — the live project path for bounded source-repo smoke checks
 - `MAC10_LIVE_TEST_PROJECT_DIR` — working repo path (isolated copy or real repo, depending on mode)
@@ -52,10 +52,9 @@ Start where a human would start:
 
 Do not test deprecated surfaces in this live suite:
 
-- do not run `./start-codex.sh`
-- do not run `./start-claude.sh`
-- do not run `mac10 gui`
-- do not treat the removed localhost dashboard as part of the supported operator surface
+- do not run removed provider-specific startup scripts
+- use `./start.sh` for stack bootstrap
+- do not treat the removed HTTP operator surface as part of pass/fail criteria
 
 Before you begin product testing, verify that `pwd` matches `MAC10_LIVE_TEST_PROJECT_DIR` or is inside it. If not, stop and write a failure note.
 
@@ -80,7 +79,7 @@ For each scenario:
 For the dedicated real-project smoke scenario:
 
 - keep it bounded to wrapper/coordinator reachability and one or two representative operator commands
-- prefer project-local wrappers such as `./.claude/scripts/mac10` or `./.claude/scripts/codex10`
+- prefer project-local wrappers such as `./.claude/scripts/mac10` or `./.claude/scripts/mac10`
 - if a wrapper-specific `ping` fails, attempt one bounded recovery using that same wrapper's `start`, then retry `ping`
 - capture which wrapper you used and why
 - do not reuse the source repo as the environment for the rest of the suite
@@ -95,7 +94,7 @@ For the dedicated real-project smoke scenario:
 - Respect async behavior. Poll status and wait for transitions instead of racing ahead.
 - Use bounded retries only once for a failed scenario unless the manifest says otherwise.
 - If a feature fails, gather enough evidence that another engineer can reproduce it without rerunning the whole suite.
-- Stay on the supported operator path. Deprecated launchers and the removed dashboard are out of scope for pass/fail results.
+- Stay on the supported operator path. Deprecated launchers and removed HTTP operator surfaces are out of scope for pass/fail results.
 
 ## Deep verification protocol
 

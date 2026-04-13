@@ -2,6 +2,11 @@
 
 ## Successful Patterns
 - (none yet — first iteration)
+- For explicit no-op audit directives (for example, "do nothing, verify lifecycle"), skip research submissions and checkpoint `DONE` after prompt/checkpoint/heartbeat validation.
+- If `loop-requests` returns no entries under a no-op audit prompt, keep `SUBMITTED: none` and only advance lifecycle markers (heartbeat and checkpoint).
+- Loop 8 no-op audit: validating `loop-prompt`, `loop-requests`, and loop CLI lifecycle handlers before heartbeat/checkpoint is sufficient; submitting new requests would violate prompt scope.
+- Repeated no-op audit iterations should avoid opening unrelated source files; verify lifecycle via `loop-prompt`, `loop-requests`, `loop-heartbeat`, and `loop-checkpoint` only.
+- Loop 8 iteration 714: when checkpoint REMAINING is `none (no-op audit directive)` and request history is empty, preserve no-op behavior and advance only heartbeat + checkpoint.
 
 ## Failed Patterns
 - Quality gate rejects requests missing file path signals (need `path/file.ext` format) and production impact keywords (production, risk, failure, regression, etc.)

@@ -1,28 +1,48 @@
 {
-  "last_indexed": "2026-03-29T08:59:09.594Z",
-  "changes_since_index": 14,
+  "last_indexed": "2026-04-11T12:31:51.623Z",
+  "changes_since_index": 0,
   "domains": {
     "coordinator": {
-      "changes_since_research": 6,
-      "worker_patches": 1
+      "changes_since_research": 0,
+      "worker_patches": 1,
+      "last_researched": "2026-04-11T08:43:31.495Z"
     },
     "newdomain": {
       "changes_since_research": 1,
       "worker_patches": 1
     },
     "coordinator-extensions": {
-      "changes_since_research": 2,
-      "worker_patches": 0
+      "changes_since_research": 0,
+      "worker_patches": 0,
+      "last_researched": "2026-04-11T08:43:30.983Z"
     },
     "coordinator-core": {
-      "changes_since_research": 3,
-      "worker_patches": 1
+      "changes_since_research": 0,
+      "worker_patches": 1,
+      "last_researched": "2026-04-11T08:43:30.673Z"
     },
     "coordinator-routing": {
-      "changes_since_research": 2,
-      "worker_patches": 1
+      "changes_since_research": 0,
+      "worker_patches": 1,
+      "last_researched": "2026-04-11T08:43:31.209Z"
+    },
+    "infra": {
+      "changes_since_research": 0,
+      "worker_patches": 0,
+      "last_researched": "2026-04-11T08:43:31.892Z"
+    },
+    "status": {
+      "changes_since_research": 0,
+      "worker_patches": 0,
+      "last_researched": "2026-04-11T08:43:32.622Z"
+    },
+    "10.1-port-sequential-plan": {
+      "changes_since_research": 0,
+      "worker_patches": 0,
+      "last_researched": "2026-04-12T00:08:23.322Z"
     }
   },
-  "last_external_research": null,
-  "external_research_stale_topics": []
+  "last_external_research": "2026-04-12T00:08:23.322Z",
+  "external_research_stale_topics": [],
+  "last_index_artifact": ".claude/state/codebase-map.json"
 }

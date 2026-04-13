@@ -4,7 +4,7 @@ Perform a 2-pass progressive scan of the codebase. Write findings to knowledge f
 
 ## Setup
 
-Ensure `codex10` is on PATH:
+Ensure `mac10` is on PATH:
 
 ```bash
 export PATH="$(pwd)/.claude/scripts:$PATH"
@@ -105,6 +105,14 @@ Write a machine-readable map to `.claude/state/codebase-map.json`:
   "entry_points": ["src/index.ts"],
   "last_scanned": "YYYY-MM-DD"
 }
+```
+
+### 3. Mark Scan Complete
+
+After both scan artifacts are written successfully, update the knowledge metadata:
+
+```bash
+./.claude/scripts/mac10 knowledge-update-index-timestamp
 ```
 
 ## Auto-Start

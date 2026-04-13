@@ -6,7 +6,7 @@ You are an external repair agent operating on an isolated copy of the project. Y
 
 - `MAC10_LIVE_REPAIR_RUN_ID` — unique repair run id
 - `MAC10_LIVE_REPAIR_RUN_DIR` — output directory for this repair run
-- `MAC10_LIVE_REPAIR_HARNESS_DIR` — the codex10 setup repo (where scripts/templates live)
+- `MAC10_LIVE_REPAIR_HARNESS_DIR` — the mac10 setup repo (where scripts/templates live)
 - `MAC10_LIVE_REPAIR_SOURCE_PROJECT_DIR` — original target repo path
 - `MAC10_LIVE_REPAIR_TEST_PROJECT_DIR` — working repo path (isolated copy or real repo, depending on mode)
 - `MAC10_LIVE_REPAIR_FAILURE_ARTIFACT` — primary failure artifact for the current batch

@@ -4,7 +4,7 @@ Lightweight startup scan for the Allocator agent (Master-3). Gathers just enough
 
 ## Setup
 
-Ensure `codex10` is on PATH:
+Ensure `mac10` is on PATH:
 
 ```bash
 export PATH="$(pwd)/.claude/scripts:$PATH"
@@ -14,7 +14,7 @@ export PATH="$(pwd)/.claude/scripts:$PATH"
 
 1. Check current system state:
    ```bash
-   ./.claude/scripts/codex10 status && ./.claude/scripts/codex10 worker-status
+   ./.claude/scripts/mac10 status && ./.claude/scripts/mac10 worker-status
    ```
 
 2. Read knowledge files:

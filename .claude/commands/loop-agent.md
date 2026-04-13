@@ -11,7 +11,7 @@ You are a persistent autonomous loop agent. The sentinel script runs you repeate
 
 ## Phase 1 — Context Load
 
-1. Run `./.claude/scripts/codex10 loop-prompt $MAC10_LOOP_ID` and parse the JSON:
+1. Run `./.claude/scripts/mac10 loop-prompt $MAC10_LOOP_ID` and parse the JSON:
    - `prompt` — your high-level directive (this defines your entire scope)
    - `last_checkpoint` — structured state from previous iteration (null on first run)
    - `iteration_count` — how many iterations have completed
@@ -23,7 +23,7 @@ You are a persistent autonomous loop agent. The sentinel script runs you repeate
 
 If `iteration_count > 0` (not first run):
 
-1. Run `./.claude/scripts/codex10 loop-requests $MAC10_LOOP_ID` to get all requests from this loop.
+1. Run `./.claude/scripts/mac10 loop-requests $MAC10_LOOP_ID` to get all requests from this loop.
 2. For **completed** requests: note what worked — the description style, specificity, and scope that led to success.
 3. For **failed** requests: note what went wrong and why — extract the failure reason from the checkpoint's FAILED field or request status.
 4. Write findings to `.claude/knowledge/loop-findings.md` (create if doesn't exist, append/update if it does).
@@ -53,7 +53,7 @@ This is the value-producing phase. Your goal: find concrete, actionable improvem
 
 Submit 1-3 high-quality requests via:
 ```bash
-./.claude/scripts/codex10 loop-request $MAC10_LOOP_ID "description"
+./.claude/scripts/mac10 loop-request $MAC10_LOOP_ID "description"
 ```
 
 ### Quality Gate — Every request MUST specify:
@@ -69,7 +69,7 @@ Bad: "Add input validation"
 
 Good: "Add input validation to createTask in coordinator/src/db.js — the priority parameter accepts any string, bypassing the CHECK constraint and causing sqlite CONSTRAINT errors at runtime"
 Good: "Fix race condition in merger.js tryCleanMerge — if two workers finish simultaneously, both call git merge on the same branch, causing one to fail with a non-fast-forward error that isn't retried"
-Good: "Remove dead code: the handleLegacyStatus function in web-server.js (lines 145-180) is never called — the /api/legacy-status route was removed in commit abc123 but the handler remained"
+Good: "Remove dead code: the handleLegacyStatus function in cli-server.js is never called after the corresponding CLI command was removed"
 
 ### Submission Rules
 - Maximum 3 requests per iteration
@@ -80,11 +80,11 @@ Good: "Remove dead code: the handleLegacyStatus function in web-server.js (lines
 
 ## Phase 5 — Checkpoint and Exit
 
-1. Run heartbeat: `./.claude/scripts/codex10 loop-heartbeat $MAC10_LOOP_ID` (exit if code 2)
+1. Run heartbeat: `./.claude/scripts/mac10 loop-heartbeat $MAC10_LOOP_ID` (exit if code 2)
 2. Update `.claude/knowledge/loop-findings.md` with any new findings from this iteration
 3. Save structured checkpoint:
 ```bash
-./.claude/scripts/codex10 loop-checkpoint $MAC10_LOOP_ID "ITERATION: N | BUDGET: NNNN | SUBMITTED: req-abc, req-def | COMPLETED: req-xyz | FAILED: req-123 (reason) | EXPLORED: file1.js, file2.js, area3 | REMAINING: area4, area5 | NEXT: specific next action"
+./.claude/scripts/mac10 loop-checkpoint $MAC10_LOOP_ID "ITERATION: N | BUDGET: NNNN | SUBMITTED: req-abc, req-def | COMPLETED: req-xyz | FAILED: req-123 (reason) | EXPLORED: file1.js, file2.js, area3 | REMAINING: area4, area5 | NEXT: specific next action"
 ```
 4. Exit cleanly.
 
@@ -107,7 +107,7 @@ Pipe-delimited fields, all mandatory:
 
 Example:
 ```
-ITERATION: 5 | BUDGET: 2500 | SUBMITTED: req-abc, req-def | COMPLETED: req-xyz | FAILED: req-123 (merge conflict) | EXPLORED: coordinator/src/db.js, coordinator/src/merger.js, coordinator/src/watchdog.js | REMAINING: gui/, scripts/, templates/ | NEXT: explore gui/public/app.js for XSS issues and dead event handlers
+ITERATION: 5 | BUDGET: 2500 | SUBMITTED: req-abc, req-def | COMPLETED: req-xyz | FAILED: req-123 (merge conflict) | EXPLORED: coordinator/src/db.js, coordinator/src/merger.js, coordinator/src/watchdog.js | REMAINING: scripts/, templates/ | NEXT: explore coordinator/src/cli-server.js for stale command handlers
 ```
 
 ## Loop Findings File
