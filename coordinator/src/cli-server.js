@@ -10,6 +10,7 @@ const changeCommands = require('./commands/changes');
 const contextBundle = require('./context-bundle');
 const memoryCommands = require('./commands/memory');
 const mergeObservabilityCommands = require('./commands/merge-observability');
+const microvmCommands = require('./commands/microvm');
 const sandboxCommands = require('./commands/sandbox');
 const providerOutput = require('./provider-output');
 let modelRouter = null;
@@ -4569,31 +4570,11 @@ function handleCommand(cmd, conn, handlers) {
       }
 
       // === MICROVM (msb) commands ===
-      case 'msb-status': {
-        const microvmManager = require('./microvm-manager');
-        const status = microvmManager.getStatus();
-        respond(conn, { ok: true, ...status });
-        break;
-      }
-      case 'msb-setup': {
-        const microvmManager = require('./microvm-manager');
-        if (!microvmManager.isMsbInstalled()) {
-          respond(conn, { error: 'msb CLI is not installed. Run: curl -sSL https://get.microsandbox.dev | sh' });
-          break;
-        }
-        try {
-          microvmManager.ensureReady();
-          microvmManager.pullImage();
-          respond(conn, { ok: true, message: 'msb server running, default image pulled' });
-        } catch (e) {
-          respond(conn, { error: `msb setup failed: ${e.message}` });
-        }
-        break;
-      }
+      case 'msb-status':
+      case 'msb-setup':
       case 'msb-cleanup': {
-        const microvmManager = require('./microvm-manager');
-        const stopped = microvmManager.cleanupAll();
-        respond(conn, { ok: true, stopped });
+        const result = microvmCommands.handleMicrovmCommand(command, args);
+        respond(conn, result);
         break;
       }
 

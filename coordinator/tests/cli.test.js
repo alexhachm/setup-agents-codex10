@@ -4926,6 +4926,62 @@ describe('merge observability CLI commands', () => {
   });
 });
 
+describe('microvm CLI commands', () => {
+  function resetMicrovmModule() {
+    delete require.cache[require.resolve('../src/microvm-manager')];
+  }
+
+  function msbStatusTable(...rows) {
+    const header = 'SANDBOX         STATUS     PIDS            CPU          MEMORY       DISK';
+    const sep = '-'.repeat(80);
+    const dataLines = rows.map(([name, status]) => `${name.padEnd(16)}${status.padEnd(11)}-               -            -            -`);
+    return [header, sep, ...dataLines].join('\n');
+  }
+
+  it('exposes msb status through RPC', async () => {
+    const childProcess = require('child_process');
+    resetMicrovmModule();
+    const execMock = mock.method(childProcess, 'execFileSync', (cmd, args) => {
+      if (cmd === 'msb' && args[0] === '--version') return 'msb 0.3.4\n';
+      if (cmd === 'msb' && args[0] === 'server' && args[1] === 'status') return 'running\n';
+      if (cmd === 'msb' && args[0] === 'status') {
+        return msbStatusTable(['worker-1', 'RUNNING'], ['loop-1', 'RUNNING']);
+      }
+      return '';
+    });
+
+    try {
+      const status = await sendCommand('msb-status', {});
+      assert.strictEqual(status.ok, true);
+      assert.strictEqual(status.msb_installed, true);
+      assert.strictEqual(status.server_running, true);
+      assert.strictEqual(status.total_sandboxes, 2);
+      assert.strictEqual(status.sandboxes.length, 1);
+      assert.strictEqual(status.sandboxes[0].name, 'worker-1');
+    } finally {
+      execMock.mock.restore();
+      resetMicrovmModule();
+    }
+  });
+
+  it('reports missing msb setup dependency without starting setup', async () => {
+    const childProcess = require('child_process');
+    resetMicrovmModule();
+    const execMock = mock.method(childProcess, 'execFileSync', (cmd, args) => {
+      if (cmd === 'msb' && args[0] === '--version') throw new Error('not found');
+      return '';
+    });
+
+    try {
+      const result = await sendCommand('msb-setup', {});
+      assert.match(result.error, /msb CLI is not installed/);
+    } finally {
+      execMock.mock.restore();
+      resetMicrovmModule();
+    }
+  });
+});
+
 describe('memory-retrieval CLI commands', () => {
   it('memory-snapshots returns ok with empty list when no snapshots', async () => {
     const result = await sendCommand('memory-snapshots', {});
