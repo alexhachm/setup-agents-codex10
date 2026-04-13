@@ -1,0 +1,43 @@
+{
+  "schema_version": 1,
+  "id": "gemini",
+  "display_name": "Gemini CLI (disabled provider stub)",
+  "enabled": false,
+  "enablement": {
+    "status": "disabled_scaffold",
+    "reason": "Enable only after the Gemini agent runtime has a local CLI/auth command, launch args, and output schema validated through the provider interface."
+  },
+  "cli": {
+    "command": "gemini",
+    "auth_check": {
+      "command": "gemini",
+      "args": ["--version"]
+    }
+  },
+  "models": {
+    "fast": "default",
+    "deep": "default",
+    "economy": "default",
+    "worker": "default",
+    "loop": "default"
+  },
+  "environment": {
+    "set": {},
+    "unset": []
+  },
+  "launch": {
+    "interactive": {
+      "args": ["$PROMPT_TEXT"]
+    },
+    "noninteractive": {
+      "args": ["$PROMPT_TEXT"]
+    }
+  },
+  "output": {
+    "usage_payloads": ["canonical"],
+    "task_completion": {
+      "success_command": "mac10 complete-task",
+      "failure_command": "mac10 fail-task"
+    }
+  }
+}

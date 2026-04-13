@@ -18,7 +18,7 @@ If no domain provided, exit with error.
 ## Step 1: Create Analysis Record
 
 ```bash
-ANALYSIS_OUTPUT=$(./.claude/scripts/codex10 analyze-domain "$DOMAIN")
+ANALYSIS_OUTPUT=$(./.claude/scripts/mac10 analyze-domain "$DOMAIN")
 ANALYSIS_ID=$(printf '%s' "$ANALYSIS_OUTPUT" | grep -o '"id":[0-9]*' | head -1 | cut -d: -f2)
 ```
 
@@ -33,7 +33,7 @@ Extract the files array for `$DOMAIN`. If domain not found in map, fail the anal
 
 ### Read prior authoritative feedback (human ground truth):
 ```bash
-./.claude/scripts/codex10 domain-analyses --domain "$DOMAIN" --status approved
+./.claude/scripts/mac10 domain-analyses --domain "$DOMAIN" --status approved
 ```
 
 If approved analyses exist with `human_feedback`, treat their feedback as **confirmed facts**. Your analysis must not contradict these. Include them as context: "Human-confirmed facts about this domain: ..."
@@ -155,7 +155,7 @@ Compose a review sheet for the human:
 ## Step 9: Submit for Review
 
 ```bash
-./.claude/scripts/codex10 submit-domain-draft "$ANALYSIS_ID" "$REVIEW_SHEET" "$DRAFT_DOC" "$ANALYZED_FILES_JSON"
+./.claude/scripts/mac10 submit-domain-draft "$ANALYSIS_ID" "$REVIEW_SHEET" "$DRAFT_DOC" "$ANALYZED_FILES_JSON"
 ```
 
 This transitions the analysis to `review_pending` and notifies Master-1 via inbox.
