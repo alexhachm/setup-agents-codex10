@@ -6,18 +6,28 @@ const path = require('path');
 const crypto = require('crypto');
 const { execFileSync } = require('child_process');
 const db = require('./db');
+const allocatorCommands = require('./commands/allocator');
+const architectCommands = require('./commands/architect');
+const browserOffloadCommands = require('./commands/browser-offload');
 const changeCommands = require('./commands/changes');
 const cliProtocol = require('./cli-protocol');
 const contextBundle = require('./context-bundle');
 const domainAnalysisCommands = require('./commands/domain-analysis');
 const extendedResearchCommands = require('./commands/extended-research');
+const integrationCommands = require('./commands/integration');
 const knowledgeCommands = require('./commands/knowledge');
+const loopCommands = require('./commands/loop');
 const memoryCommands = require('./commands/memory');
 const mergeObservabilityCommands = require('./commands/merge-observability');
 const mergeQueueService = require('./merge-queue-service');
 const microvmCommands = require('./commands/microvm');
 const researchQueueCommands = require('./commands/research-queue');
 const sandboxCommands = require('./commands/sandbox');
+const systemCommands = require('./commands/system');
+const userCommands = require('./commands/user');
+const workerCompletionCommands = require('./commands/worker-completion');
+const workerFailureCommands = require('./commands/worker-failure');
+const workerLifecycleCommands = require('./commands/worker-lifecycle');
 const providerOutput = require('./provider-output');
 const runtimeHealth = require('./runtime-health');
 let modelRouter = null;
@@ -350,6 +360,13 @@ const LOOP_REQUEST_SET_CONFIG_SPECS = Object.freeze({
   loop_request_max_per_hour: Object.freeze({ type: 'int', min: 1, max: 1000 }),
   loop_request_similarity_threshold: Object.freeze({ type: 'float', min: 0.5, max: 0.99 }),
 });
+
+function clampWorkerLimit(rawValue) {
+  const parsed = parseInt(rawValue, 10);
+  if (!Number.isFinite(parsed)) return DEFAULT_WORKERS;
+  return Math.max(WORKER_LIMIT_MIN, Math.min(WORKER_LIMIT_MAX, parsed));
+}
+
 function namespacedFile(defaultName, namespacedName) {
   return NAMESPACE === 'mac10' ? defaultName : namespacedName;
 }
@@ -1446,1026 +1463,116 @@ function handleCommand(cmd, conn, handlers) {
   try {
     switch (command) {
       // === USER commands ===
-      case 'request': {
-        const id = db.createRequest(args.description);
-        bridgeToHandoff(id, args.description);
-        respond(conn, { ok: true, request_id: id });
-        break;
-      }
-      case 'fix': {
-        const fixResult = db.getDb().transaction(() => {
-          const id = db.createRequest(args.description);
-          db.updateRequest(id, { tier: 2, status: 'decomposed' });
-          const taskId = db.createTask({
-            request_id: id,
-            subject: `Fix: ${args.description}`,
-            description: args.description,
-            priority: 'urgent',
-            tier: 2,
-          });
-          db.updateTask(taskId, { status: 'ready' });
-          return { request_id: id, task_id: taskId };
-        })();
-        respond(conn, { ok: true, ...fixResult });
-        break;
-      }
-      case 'status': {
-        const requests = db.listRequests();
-        const workers = db.getAllWorkers();
-        const tasks = db.listTasks();
-        const project_dir = db.getConfig('project_dir') || '';
-        const source_revision = getSourceRevision(project_dir || _projectDir || process.cwd());
-        const merges = db.getDb().prepare(
-          "SELECT * FROM merge_queue WHERE status != 'merged' ORDER BY id DESC"
-        ).all();
-        const routingBudget = modelRouter.getBudgetState(db.getConfig);
-        respond(conn, {
-          ok: true,
-          requests,
-          workers,
-          tasks,
-          project_dir,
-          source_revision,
-          merges,
-          budget_state: routingBudget,
-          budget_source: routingBudget ? (routingBudget.source || 'none') : 'none',
-        });
-        break;
-      }
-      case 'clarify': {
-        db.sendMail('architect', 'clarification_reply', {
-          request_id: args.request_id,
-          message: args.message,
-        });
-        respond(conn, { ok: true });
-        break;
-      }
-      case 'log': {
-        const logs = db.getLog(args.limit || 50, args.actor);
-        respond(conn, { ok: true, logs });
-        break;
-      }
+      case 'request':
+      case 'fix':
+      case 'status':
+      case 'clarify':
+      case 'log':
       case 'request-history': {
-        const requestId = args.request_id;
-        const rawLimit = args.limit || 500;
-        const limit = Math.max(1, Math.min(rawLimit, 10000));
-        const logs = getSafeRequestHistory(requestId, limit);
-        respond(conn, { ok: true, request_id: requestId, logs });
+        const result = userCommands.handleUserCommand(command, args, {
+          db,
+          bridgeToHandoff,
+          getSourceRevision,
+          getSafeRequestHistory,
+          modelRouter,
+          projectDir: _projectDir,
+        });
+        respond(conn, result);
         break;
       }
 
       // === ARCHITECT commands ===
-      case 'triage': {
-        const { request_id, tier, reasoning } = args;
-        db.updateRequest(request_id, { tier, status: tier === 1 ? 'executing_tier1' : 'decomposed' });
-        db.log('architect', 'triage', { request_id, tier, reasoning });
-        respond(conn, { ok: true });
-        break;
-      }
-      case 'create-task': {
-        // Normalize files to an array before persisting (handles strings, JSON strings, arrays)
-        args.files = parseFilesField(args.files);
-        args.depends_on = parseDependsOnField(args.depends_on);
-        const taskId = db.createTask(args);
-        // If no dependencies, mark ready immediately
-        if (!args.depends_on || args.depends_on.length === 0) {
-          db.updateTask(taskId, { status: 'ready' });
-        }
-        // Detect file overlaps with other tasks in the same request
-        let overlaps = [];
-        const taskFiles = Array.isArray(args.files) ? args.files : [];
-        if (taskFiles.length > 0) {
-          overlaps = db.findOverlappingTasks(args.request_id, taskFiles, taskId)
-            .filter((o) => Number(o.task_id) !== taskId);
-          const overlapIds = normalizeOverlapIdsField(overlaps.map((o) => o.task_id), taskId);
-          if (overlapIds.length > 0) {
-            // Set overlap_with on the new task
-            db.updateTask(taskId, { overlap_with: JSON.stringify(overlapIds) });
-            // Update existing overlapping tasks to include the new task
-            for (const overlapId of overlapIds) {
-              const existing = db.getTask(overlapId);
-              const existingOverlaps = normalizeOverlapIdsField(existing && existing.overlap_with, overlapId);
-              let shouldUpdate = !!existing;
-              if (!existingOverlaps.includes(taskId)) {
-                existingOverlaps.push(taskId);
-                shouldUpdate = true;
-              }
-              if (shouldUpdate) {
-                db.updateTask(overlapId, { overlap_with: JSON.stringify(existingOverlaps) });
-              }
-            }
-            db.log('coordinator', 'overlap_detected', {
-              task_id: taskId,
-              request_id: args.request_id,
-              overlaps: overlaps.map(o => ({ task_id: o.task_id, shared_files: o.shared_files })),
-            });
-          }
-        }
-        const request = db.getRequest(args.request_id);
-        const totalTaskRow = db.getDb().prepare(
-          'SELECT COUNT(*) AS count FROM tasks WHERE request_id = ?'
-        ).get(args.request_id);
-        const totalTasks = Number(totalTaskRow && totalTaskRow.count) || 0;
-        if (request && Number(request.tier) >= 3 && totalTasks === 1) {
-          if (request.status === 'pending') {
-            db.updateRequest(args.request_id, { status: 'decomposed' });
-          }
-          db.sendMail('allocator', 'tasks_ready', {
-            request_id: args.request_id,
-            task_id: taskId,
-            trigger: 'first_task_created',
-          });
-        }
-        respond(conn, { ok: true, task_id: taskId, overlaps });
-        break;
-      }
-      case 'tier1-complete': {
-        const { request_id, result } = args;
-        db.updateRequest(request_id, { status: 'completed', result, completed_at: new Date().toISOString() });
-        db.sendMail('master-1', 'request_completed', { request_id, result });
-        db.log('architect', 'tier1_complete', { request_id, result });
-        respond(conn, { ok: true });
-        break;
-      }
+      case 'triage':
+      case 'create-task':
+      case 'tier1-complete':
       case 'ask-clarification': {
-        db.sendMail('master-1', 'clarification_ask', {
-          request_id: args.request_id,
-          question: args.question,
+        const result = architectCommands.handleArchitectCommand(command, args, {
+          db,
+          parseFilesField,
+          parseDependsOnField,
+          normalizeOverlapIdsField,
         });
-        db.log('architect', 'clarification_ask', { request_id: args.request_id, question: args.question });
-        respond(conn, { ok: true });
+        respond(conn, result);
         break;
       }
 
       // === WORKER commands ===
-      case 'my-task': {
-        const worker = db.getWorker(args.worker_id);
-        if (!worker) {
-          respond(conn, { ok: false, error: 'Worker not found' });
-          break;
-        }
-        if (!worker.current_task_id) {
-          respond(conn, { ok: true, task: null });
-          break;
-        }
-        const task = db.getTask(worker.current_task_id);
-        respond(conn, {
-          ok: true,
-          task: task
-            ? {
-              ...task,
-              assignment_token: worker.launched_at || null,
-            }
-            : null,
-        });
-        break;
-      }
+      case 'my-task':
       case 'task-context':
-      case 'context-bundle': {
-        const projectDir = _projectDir || process.cwd();
-        const health = runtimeHealth.collectCoordinatorHealth({
+      case 'context-bundle':
+      case 'start-task':
+      case 'heartbeat':
+      case 'distill': {
+        const result = workerLifecycleCommands.handleWorkerLifecycleCommand(command, args, {
           db,
-          projectDir,
-          namespace: NAMESPACE,
-          serverStartedAt: _serverStartedAt,
+          projectDir: _projectDir || process.cwd(),
+          contextBundle,
+          collectCoordinatorHealth: (projectDir) => runtimeHealth.collectCoordinatorHealth({
+            db,
+            projectDir,
+            namespace: NAMESPACE,
+            serverStartedAt: _serverStartedAt,
+          }),
+          validateWorkerTaskOwnership,
+          reopenFailedRequestForActiveRemediation,
+          parseWorkerId,
         });
-        const bundle = contextBundle.buildTaskContextBundle({
-          taskId: args.task_id,
-          projectDir,
-          runtimeHealth: health,
-        });
-        respond(conn, { ok: true, bundle });
+        respond(conn, result);
         break;
       }
-      case 'start-task': {
-        const { worker_id, task_id } = args;
-        const ownership = validateWorkerTaskOwnership('start-task', worker_id, task_id);
-        if (!ownership.ok) {
-          // Stale agents whose current_task assignment changed (e.g. after watchdog
-          // sentinel_reset) should be silently skipped — same pattern as the
-          // reset-worker stale-sentinel guards.
-          if (ownership.response.reason === 'worker_current_task_mismatch') {
-            respond(conn, { ok: true, skipped: true, reason: 'worker_current_task_mismatch' });
-          } else {
-            respond(conn, ownership.response);
-          }
-          break;
-        }
-        const { task } = ownership;
 
-        if (task.status === 'completed' || task.status === 'failed') {
-          respond(conn, { ok: false, error: 'task_not_startable' });
-          break;
-        }
-
-        if (task.status === 'in_progress') {
-          respond(conn, { ok: true, idempotent: true });
-          break;
-        }
-
-        if (task.status !== 'assigned') {
-          respond(conn, { ok: false, error: 'task_not_startable' });
-          break;
-        }
-
-        const now = new Date().toISOString();
-        db.updateTask(task_id, { status: 'in_progress', started_at: now });
-        db.updateWorker(worker_id, { status: 'busy', last_heartbeat: now });
-        reopenFailedRequestForActiveRemediation({
-          requestId: task.request_id,
-          taskId: task_id,
-          workerId: parseWorkerId(worker_id),
-          trigger: 'start-task',
-        });
-        db.log(`worker-${worker_id}`, 'task_started', { task_id });
-        respond(conn, { ok: true });
-        break;
-      }
-      case 'heartbeat': {
-        const worker = db.getWorker(args.worker_id);
-        if (!worker) {
-          respond(conn, { ok: false, error: 'Worker not found' });
-          break;
-        }
-
-        const heartbeatTs = new Date().toISOString();
-        const updateResult = db.getDb().prepare(`
-          UPDATE workers
-          SET last_heartbeat = ?
-          WHERE id = ?
-        `).run(heartbeatTs, args.worker_id);
-        if (updateResult.changes !== 1) {
-          respond(conn, { ok: false, error: 'Worker not found' });
-          break;
-        }
-
-        respond(conn, { ok: true });
-        break;
-      }
       case 'complete-task': {
-        const { worker_id, task_id, pr_url, result, branch } = args;
-        const ownership = validateWorkerTaskOwnership('complete-task', worker_id, task_id, { logic: 'or', softFail: true });
-        if (!ownership.ok) {
-          respond(conn, ownership.response);
-          break;
-        }
-        const task = ownership.task;
-        const worker = ownership.worker;
-        if (!['assigned', 'in_progress'].includes(task.status)) {
-          const reason = task.status === 'completed'
-            ? 'duplicate_terminal_completion'
-            : 'task_not_active';
-          db.log('coordinator', 'complete_task_skipped_terminal', {
-            worker_id,
-            task_id,
-            reason,
-            task_status: task.status || null,
-          });
-          respond(conn, {
-            ok: true,
-            skipped: true,
-            reason,
-            task_status: task.status || null,
-          });
-          break;
-        }
-        const usage = normalizeCompleteTaskUsagePayload(args.usage);
-        const usageTaskFields = mapUsagePayloadToTaskFields(usage, task);
-        const completionPrNormalizationCwd = worker && worker.worktree_path
-          ? worker.worktree_path
-          : (_projectDir || process.cwd());
-        const normalizedPrUrl = mergeQueueService.normalizePrUrl(pr_url, completionPrNormalizationCwd);
-        const resolvedBranch = mergeQueueService.resolveCompletionBranch(worker, branch, worker_id);
-        if (resolvedBranch.mismatch) {
-          db.log('coordinator', 'complete_task_branch_overridden', {
-            worker_id,
-            task_id,
-            requested_branch: resolvedBranch.requestedBranch,
-            worker_branch: resolvedBranch.workerBranch,
-          });
-        }
-        db.updateTask(task_id, {
-          status: 'completed',
-          pr_url: normalizedPrUrl || null,
-          branch: resolvedBranch.branch,
-          result: result || null,
-          completed_at: new Date().toISOString(),
-          ...usageTaskFields,
-        });
-        const completedTask = db.getTask(task_id);
-        // Pre-queue overlap detection: serialize overlapping pending merge entries
-        if (completedTask) {
-          let changedFiles = [];
-          try { changedFiles = completedTask.files ? JSON.parse(completedTask.files) : []; } catch { changedFiles = []; }
-          mergeQueueService.preQueueOverlapCheck({ db, taskId: task_id, changedFiles });
-        }
-        // Enqueue merge if PR exists (must be a valid URL, not a status string like "already_merged")
-        const queueBranch = mergeQueueService.sanitizeBranchName(resolvedBranch.branch || completedTask.branch || (worker && worker.branch) || '');
-        let completionPrUrl = normalizedPrUrl;
-        let queueResult = null;
-        if (completedTask && queueBranch && mergeQueueService.isValidGitHubPrUrl(normalizedPrUrl)) {
-          queueResult = mergeQueueService.queueMergeWithRecovery({
+        const result = workerCompletionCommands.handleWorkerCompletionCommand(command, args, {
+          db,
+          projectDir: _projectDir || process.cwd(),
+          handlers,
+          validateWorkerTaskOwnership,
+          normalizeCompleteTaskUsagePayload,
+          mapUsagePayloadToTaskFields,
+          normalizePrUrl: mergeQueueService.normalizePrUrl,
+          isValidGitHubPrUrl: mergeQueueService.isValidGitHubPrUrl,
+          sanitizeBranchName: mergeQueueService.sanitizeBranchName,
+          resolveCompletionBranch: mergeQueueService.resolveCompletionBranch,
+          preQueueOverlapCheck: (taskId, changedFiles) => mergeQueueService.preQueueOverlapCheck({ db, taskId, changedFiles }),
+          queueMergeWithRecovery: (options) => mergeQueueService.queueMergeWithRecovery({
             db,
             projectDir: _projectDir || process.cwd(),
-            request_id: completedTask.request_id,
-            task_id,
-            pr_url: normalizedPrUrl,
-            branch: queueBranch,
-            priority: completedTask.priority === 'urgent' ? 10 : 0,
-          });
-          if (queueResult.resolved_pr_url && queueResult.resolved_pr_url !== completionPrUrl) {
-            completionPrUrl = queueResult.resolved_pr_url;
-            db.updateTask(task_id, { pr_url: completionPrUrl });
-          }
-          if (queueResult.refreshed) {
-            db.log('coordinator', 'merge_queue_entry_refreshed', {
-              request_id: completedTask.request_id,
-              task_id,
-              pr_url: queueResult.resolved_pr_url || completionPrUrl || normalizedPrUrl,
-              branch: queueBranch,
-              retried: queueResult.retried,
-              previous_status: queueResult.previous_status || null,
-              merge_id: queueResult.merge_id || null,
-            });
-          }
-        } else if (completedTask && queueBranch && !mergeQueueService.isValidGitHubPrUrl(normalizedPrUrl)) {
-          db.log('coordinator', 'complete_task_merge_skipped_no_pr', {
-            request_id: completedTask.request_id,
-            task_id,
-            branch: queueBranch,
-            pr_url: normalizedPrUrl || null,
-          });
-        }
-        if (queueResult && mergeQueueService.isMergeOwnershipCollisionReason(queueResult.reason)) {
-          const failureReason = queueResult.reason;
-          const failureError = `merge_queue:${failureReason}`;
-          const failureTimestamp = new Date().toISOString();
-          db.updateTask(task_id, {
-            status: 'failed',
-            pr_url: completionPrUrl || null,
-            branch: queueBranch || resolvedBranch.branch || null,
-            result: failureError,
-            completed_at: failureTimestamp,
-          });
-          db.updateWorker(worker_id, { status: 'idle', current_task_id: null });
-          const failedTask = db.getTask(task_id);
-          const routingMeta = failedTask ? {
-            subject: failedTask.subject,
-            description: failedTask.description,
-            domain: failedTask.domain,
-            files: failedTask.files,
-            tier: failedTask.tier,
-            assigned_to: failedTask.assigned_to,
-          } : null;
-          db.sendMail('allocator', 'task_failed', {
-            worker_id,
-            task_id,
-            request_id: failedTask ? failedTask.request_id : null,
-            error: failureError,
-            subject: routingMeta ? routingMeta.subject : null,
-            domain: routingMeta ? routingMeta.domain : null,
-            files: routingMeta ? routingMeta.files : null,
-            tier: routingMeta ? routingMeta.tier : null,
-            assigned_to: routingMeta ? routingMeta.assigned_to : null,
-            original_task: routingMeta,
-          });
-          db.sendMail('architect', 'task_failed', {
-            worker_id,
-            task_id,
-            request_id: failedTask ? failedTask.request_id : null,
-            error: failureError,
-            original_task: routingMeta,
-          });
-          db.log('coordinator', 'merge_queue_ownership_collision_rejected', {
-            request_id: failedTask ? failedTask.request_id : null,
-            worker_id,
-            task_id,
-            reason: failureReason,
-            pr_url: queueResult.resolved_pr_url || completionPrUrl || normalizedPrUrl || null,
-            branch: queueBranch || null,
-            merge_id: queueResult.merge_id || null,
-            duplicate_merge_id: queueResult.duplicate_merge_id || null,
-            existing_request_id: queueResult.existing_request_id || null,
-            existing_task_id: queueResult.existing_task_id || null,
-            existing_branch: queueResult.existing_branch || null,
-            existing_status: queueResult.existing_status || null,
-          });
-          db.log(`worker-${worker_id}`, 'task_failed', { task_id, error: failureError });
-          respond(conn, {
-            ok: false,
-            error: 'merge_queue_rejected',
-            reason: failureReason,
-            merge_id: queueResult.merge_id || null,
-            duplicate_merge_id: queueResult.duplicate_merge_id || null,
-            existing_request_id: queueResult.existing_request_id || null,
-            existing_task_id: queueResult.existing_task_id || null,
-            existing_branch: queueResult.existing_branch || null,
-            existing_status: queueResult.existing_status || null,
-          });
-          break;
-        }
-        // Increment tasks_completed counter on worker
-        const workerRow = db.getWorker(worker_id);
-        const tasksCompleted = (workerRow ? workerRow.tasks_completed : 0) + 1;
-        db.updateWorker(worker_id, {
-          status: 'completed_task',
-          current_task_id: null,
-          tasks_completed: tasksCompleted,
+            ...options,
+          }),
+          isMergeOwnershipCollisionReason: mergeQueueService.isMergeOwnershipCollisionReason,
         });
-        // Auto-increment knowledge staleness counter on task completion
-        try {
-          const knowledgeMeta = require('./knowledge-metadata');
-          knowledgeMeta.incrementChanges(_projectDir || process.cwd(), completedTask.domain);
-        } catch (kmErr) {
-          db.log('coordinator', 'knowledge_metadata_increment_error', {
-            task_id, error: kmErr.message,
-          });
-        }
-        if (completionPrUrl && completionPrUrl !== (pr_url || '')) {
-          db.log('coordinator', 'complete_task_pr_url_normalized', {
-            task_id,
-            worker_id,
-            original_pr_url: pr_url,
-            normalized_pr_url: completionPrUrl,
-          });
-        }
-        db.sendMail('allocator', 'task_completed', {
-          worker_id, task_id,
-          request_id: completedTask ? completedTask.request_id : null,
-          pr_url: completionPrUrl,
-          tasks_completed: tasksCompleted,
-          usage,
-        });
-        // Notify architect so it has visibility into Tier 2 outcomes
-        db.sendMail('architect', 'task_completed', {
-          worker_id, task_id,
-          request_id: completedTask ? completedTask.request_id : null,
-          pr_url: completionPrUrl,
-          result,
-          usage,
-        });
-        db.log(`worker-${worker_id}`, 'task_completed', {
-          task_id,
-          pr_url: completionPrUrl,
-          result,
-          usage,
-          tasks_completed: tasksCompleted,
-        });
-        // Notify handlers for merge check
-        if (handlers.onTaskCompleted) handlers.onTaskCompleted(task_id);
-        respond(conn, { ok: true });
+        respond(conn, result);
         break;
       }
+
       case 'fail-task': {
-        const { worker_id: wid, task_id: tid, error } = args;
-        const ownership = validateWorkerTaskOwnership('fail-task', wid, tid);
-        if (!ownership.ok) {
-          respond(conn, ownership.response);
-          break;
-        }
-        const failedTask = ownership.task;
-        if (failedTask.status !== 'assigned' && failedTask.status !== 'in_progress') {
-          db.log('coordinator', 'ownership_mismatch', {
-            command: 'fail-task',
-            worker_id: wid || null,
-            task_id: tid || null,
-            reason: 'task_not_active',
-            task_status: failedTask.status,
-          });
-          respond(conn, { ok: false, error: 'ownership_mismatch', reason: 'task_not_active' });
-          break;
-        }
-        const usage = normalizeCompleteTaskUsagePayload(args.usage);
-        const usageTaskFields = mapUsagePayloadToTaskFields(usage, failedTask);
-        const routingMeta = failedTask ? {
-          subject: failedTask.subject,
-          description: failedTask.description,
-          domain: failedTask.domain,
-          files: failedTask.files,
-          tier: failedTask.tier,
-          assigned_to: failedTask.assigned_to,
-        } : null;
-        const isBlocking = failedTask && failedTask.blocking !== 0;
-        const failStatus = isBlocking ? 'failed_needs_reroute' : 'failed';
-        db.updateTask(tid, {
-          status: failStatus,
-          result: error,
-          completed_at: new Date().toISOString(),
-          ...usageTaskFields,
+        const result = workerFailureCommands.handleWorkerFailureCommand(command, args, {
+          db,
+          validateWorkerTaskOwnership,
+          normalizeCompleteTaskUsagePayload,
+          mapUsagePayloadToTaskFields,
         });
-        db.updateWorker(wid, { status: 'idle', current_task_id: null });
-
-        let rerouteTaskId = null;
-        if (isBlocking && failedTask.request_id) {
-          const fixDescription = `Fix: ${failedTask.subject || 'task ' + tid}\n\nOriginal task ${tid} failed with: ${error}`;
-          let parsedFiles = null;
-          try { parsedFiles = failedTask.files ? JSON.parse(failedTask.files) : null; } catch (_) { /* ignore */ }
-          rerouteTaskId = db.createTask({
-            request_id: failedTask.request_id,
-            subject: `[fix] ${failedTask.subject || 'task ' + tid}`,
-            description: fixDescription,
-            domain: failedTask.domain,
-            files: parsedFiles,
-            priority: 'urgent',
-            tier: failedTask.tier || 3,
-          });
-          db.updateTask(rerouteTaskId, { status: 'ready' });
-          db.log('coordinator', 'blocking_task_rerouted', {
-            failed_task_id: tid,
-            fix_task_id: rerouteTaskId,
-            request_id: failedTask.request_id,
-          });
-        }
-
-        db.sendMail('allocator', 'task_failed', {
-          worker_id: wid,
-          task_id: tid,
-          request_id: failedTask ? failedTask.request_id : null,
-          error,
-          usage,
-          subject: routingMeta ? routingMeta.subject : null,
-          domain: routingMeta ? routingMeta.domain : null,
-          files: routingMeta ? routingMeta.files : null,
-          tier: routingMeta ? routingMeta.tier : null,
-          assigned_to: routingMeta ? routingMeta.assigned_to : null,
-          original_task: routingMeta,
-          reroute_task_id: rerouteTaskId,
-        });
-        db.sendMail('architect', 'task_failed', {
-          worker_id: wid,
-          task_id: tid,
-          request_id: failedTask ? failedTask.request_id : null,
-          error,
-          usage,
-          original_task: routingMeta,
-          reroute_task_id: rerouteTaskId,
-        });
-        db.log(`worker-${wid}`, 'task_failed', { task_id: tid, error, usage, reroute_task_id: rerouteTaskId });
-        respond(conn, { ok: true, reroute_task_id: rerouteTaskId });
+        respond(conn, result);
         break;
       }
-      case 'browser-create-session': {
-        const browserTx = db.getDb().transaction(() => {
-          const { taskId, task } = ensureBrowserMutableTask(args.task_id);
-          const workflow = normalizeBrowserWorkflowUrl(args.workflow_url);
-          const idempotencyKey = normalizeBrowserIdempotencyKey(args.idempotency_key);
-          const channel = normalizeBrowserChannel(args.channel, taskId, task.browser_channel);
-          const state = normalizeBrowserOffloadState(task);
-          const fingerprint = buildBrowserIdempotencyFingerprint('browser-create-session', {
-            task_id: taskId,
-            workflow_url: workflow.url,
-            channel,
-          });
-          const replay = getBrowserIdempotencyReplay(state, 'browser-create-session', idempotencyKey, fingerprint);
-          if (replay) return { response: replay, idempotent: true };
 
-          const currentStatus = normalizeBrowserOffloadStatus(task);
-          if (currentStatus !== 'not_requested') {
-            throw new Error(`browser_session_already_initialized:${currentStatus}`);
-          }
-
-          const sessionId = `session-${crypto.randomBytes(8).toString('hex')}`;
-          const now = new Date().toISOString();
-          state.session = {
-            id: sessionId,
-            channel,
-            workflow_url: workflow.url,
-            workflow_host: workflow.host,
-            created_at: now,
-            attached_at: null,
-          };
-          state.job = null;
-
-          const response = {
-            task_id: taskId,
-            request_id: task.request_id,
-            session_id: sessionId,
-            browser_channel: channel,
-            workflow_url: workflow.url,
-            browser_offload_status: 'requested',
-          };
-          setBrowserIdempotencyEntry(state, idempotencyKey, 'browser-create-session', fingerprint, response);
-          const payloadText = serializeBrowserOffloadState(state);
-          db.transitionTaskBrowserOffload(taskId, 'requested', {
-            browser_session_id: sessionId,
-            browser_channel: channel,
-            browser_offload_payload: payloadText,
-            browser_offload_result: null,
-            browser_offload_error: null,
-          });
-          return { response, idempotent: false };
-        });
-
-        const created = browserTx();
-        db.log('coordinator', 'browser_research_session_created', {
-          task_id: created.response.task_id,
-          request_id: created.response.request_id,
-          session_id: created.response.session_id,
-          browser_channel: created.response.browser_channel,
-          workflow_url: created.response.workflow_url,
-          idempotent: created.idempotent,
-        });
-        respond(conn, { ok: true, ...created.response, idempotent: created.idempotent });
-        break;
-      }
-      case 'browser-attach-session': {
-        const browserTx = db.getDb().transaction(() => {
-          const { taskId, task } = ensureBrowserMutableTask(args.task_id);
-          const state = normalizeBrowserOffloadState(task);
-          const sessionId = ensureBrowserSessionMatch(state, task, args.session_id);
-          const idempotencyKey = normalizeBrowserIdempotencyKey(args.idempotency_key);
-          const channel = normalizeBrowserChannel(
-            args.channel,
-            taskId,
-            (state.session && state.session.channel) || task.browser_channel
-          );
-          const fingerprint = buildBrowserIdempotencyFingerprint('browser-attach-session', {
-            task_id: taskId,
-            session_id: sessionId,
-            channel,
-          });
-          const replay = getBrowserIdempotencyReplay(state, 'browser-attach-session', idempotencyKey, fingerprint);
-          if (replay) return { response: replay, idempotent: true };
-
-          const currentStatus = normalizeBrowserOffloadStatus(task);
-          if (currentStatus !== 'requested') {
-            throw new Error(`browser_session_not_attachable:${currentStatus}`);
-          }
-
-          const now = new Date().toISOString();
-          state.session = {
-            ...(state.session || {}),
-            id: sessionId,
-            channel,
-            attached_at: now,
-          };
-          const response = {
-            task_id: taskId,
-            request_id: task.request_id,
-            session_id: sessionId,
-            browser_channel: channel,
-            browser_offload_status: 'attached',
-          };
-          setBrowserIdempotencyEntry(state, idempotencyKey, 'browser-attach-session', fingerprint, response);
-          const payloadText = serializeBrowserOffloadState(state);
-          db.transitionTaskBrowserOffload(taskId, 'queued', {
-            browser_session_id: sessionId,
-            browser_channel: channel,
-            browser_offload_payload: payloadText,
-          });
-          db.transitionTaskBrowserOffload(taskId, 'launching', {
-            browser_session_id: sessionId,
-            browser_channel: channel,
-            browser_offload_payload: payloadText,
-          });
-          db.transitionTaskBrowserOffload(taskId, 'attached', {
-            browser_session_id: sessionId,
-            browser_channel: channel,
-            browser_offload_payload: payloadText,
-          });
-          return { response, idempotent: false };
-        });
-
-        const attached = browserTx();
-        db.log('coordinator', 'browser_research_session_attached', {
-          task_id: attached.response.task_id,
-          request_id: attached.response.request_id,
-          session_id: attached.response.session_id,
-          browser_channel: attached.response.browser_channel,
-          idempotent: attached.idempotent,
-        });
-        respond(conn, { ok: true, ...attached.response, idempotent: attached.idempotent });
-        break;
-      }
-      case 'browser-start-job': {
-        const browserTx = db.getDb().transaction(() => {
-          const { taskId, task } = ensureBrowserMutableTask(args.task_id);
-          const workflow = normalizeBrowserWorkflowUrl(args.workflow_url);
-          const guidance = normalizeBrowserGuidance(args.guidance);
-          const state = normalizeBrowserOffloadState(task);
-          const sessionId = ensureBrowserSessionMatch(state, task, args.session_id);
-          const idempotencyKey = normalizeBrowserIdempotencyKey(args.idempotency_key);
-          const fingerprint = buildBrowserIdempotencyFingerprint('browser-start-job', {
-            task_id: taskId,
-            session_id: sessionId,
-            workflow_url: workflow.url,
-            guidance,
-          });
-          const replay = getBrowserIdempotencyReplay(state, 'browser-start-job', idempotencyKey, fingerprint);
-          if (replay) return { response: replay, idempotent: true };
-
-          const currentStatus = normalizeBrowserOffloadStatus(task);
-          if (currentStatus !== 'attached') {
-            throw new Error(`browser_job_not_startable:${currentStatus}`);
-          }
-
-          const callbackToken = crypto.randomBytes(24).toString('base64url');
-          const jobId = `job-${crypto.randomBytes(8).toString('hex')}`;
-          const now = new Date().toISOString();
-          state.session = {
-            ...(state.session || {}),
-            id: sessionId,
-            workflow_url: workflow.url,
-            workflow_host: workflow.host,
-          };
-          state.job = {
-            id: jobId,
-            status: 'awaiting_callback',
-            workflow_url: workflow.url,
-            workflow_host: workflow.host,
-            guidance,
-            callback_token_hash: hashBrowserCallbackToken(callbackToken),
-            callback_chunk_map: {},
-            callback_count: 0,
-            callback_bytes: 0,
-            started_at: now,
-            updated_at: now,
-            completed_at: null,
-            failed_at: null,
-            result: null,
-            error: null,
-          };
-
-          const response = {
-            task_id: taskId,
-            request_id: task.request_id,
-            session_id: sessionId,
-            job_id: jobId,
-            callback_token: callbackToken,
-            browser_offload_status: 'awaiting_callback',
-            workflow_url: workflow.url,
-          };
-          setBrowserIdempotencyEntry(state, idempotencyKey, 'browser-start-job', fingerprint, response);
-          const payloadText = serializeBrowserOffloadState(state);
-          db.transitionTaskBrowserOffload(taskId, 'running', {
-            browser_offload_payload: payloadText,
-            browser_offload_error: null,
-          });
-          db.transitionTaskBrowserOffload(taskId, 'awaiting_callback', {
-            browser_offload_payload: payloadText,
-            browser_offload_error: null,
-          });
-          return { response, idempotent: false };
-        });
-
-        const started = browserTx();
-        db.log('coordinator', 'browser_research_job_started', {
-          task_id: started.response.task_id,
-          request_id: started.response.request_id,
-          session_id: started.response.session_id,
-          job_id: started.response.job_id,
-          workflow_url: started.response.workflow_url,
-          idempotent: started.idempotent,
-        });
-        respond(conn, { ok: true, ...started.response, idempotent: started.idempotent });
-        break;
-      }
-      case 'browser-callback-chunk': {
-        const browserTx = db.getDb().transaction(() => {
-          const { taskId, task } = ensureBrowserMutableTask(args.task_id);
-          const state = normalizeBrowserOffloadState(task);
-          const sessionId = ensureBrowserSessionMatch(state, task, args.session_id);
-          const jobId = ensureBrowserJobMatch(state, args.job_id);
-          ensureBrowserCallbackAuthorization(state, args.callback_token);
-          const idempotencyKey = normalizeBrowserIdempotencyKey(args.idempotency_key);
-          const chunkIndex = normalizeBrowserChunkIndex(args.chunk_index);
-          const normalizedChunk = normalizeBrowserChunk(args.chunk);
-          const fingerprint = buildBrowserIdempotencyFingerprint('browser-callback-chunk', {
-            task_id: taskId,
-            session_id: sessionId,
-            job_id: jobId,
-            chunk_index: chunkIndex,
-            chunk: normalizedChunk.value,
-          });
-          const replay = getBrowserIdempotencyReplay(state, 'browser-callback-chunk', idempotencyKey, fingerprint);
-          if (replay) return { response: replay, idempotent: true };
-
-          const currentStatus = normalizeBrowserOffloadStatus(task);
-          if (currentStatus !== 'awaiting_callback') {
-            throw new Error(`browser_callback_not_accepting_chunks:${currentStatus}`);
-          }
-
-          if (!isPlainObject(state.job.callback_chunk_map)) {
-            state.job.callback_chunk_map = {};
-          }
-          const chunkKey = String(chunkIndex);
-          const existingChunk = state.job.callback_chunk_map[chunkKey];
-          if (existingChunk !== undefined && existingChunk !== normalizedChunk.value) {
-            throw new Error('browser_callback_chunk_index_conflict');
-          }
-
-          if (existingChunk === undefined) {
-            const nextBytes = Number(state.job.callback_bytes || 0) + normalizedChunk.bytes;
-            if (nextBytes > BROWSER_MAX_CALLBACK_TOTAL_BYTES) {
-              throw new Error('Browser callback payload exceeds size limit');
-            }
-            state.job.callback_chunk_map[chunkKey] = normalizedChunk.value;
-            state.job.callback_bytes = nextBytes;
-            state.job.callback_count = Number(state.job.callback_count || 0) + 1;
-          }
-          state.job.updated_at = new Date().toISOString();
-
-          const response = {
-            task_id: taskId,
-            request_id: task.request_id,
-            session_id: sessionId,
-            job_id: jobId,
-            browser_offload_status: currentStatus,
-            callback_count: Number(state.job.callback_count || 0),
-            callback_bytes: Number(state.job.callback_bytes || 0),
-          };
-          setBrowserIdempotencyEntry(state, idempotencyKey, 'browser-callback-chunk', fingerprint, response);
-          const payloadText = serializeBrowserOffloadState(state);
-          db.transitionTaskBrowserOffload(taskId, 'awaiting_callback', {
-            browser_offload_payload: payloadText,
-          });
-          return { response, idempotent: false };
-        });
-
-        const callbackChunk = browserTx();
-        db.log('coordinator', 'browser_research_callback_chunk_received', {
-          task_id: callbackChunk.response.task_id,
-          request_id: callbackChunk.response.request_id,
-          session_id: callbackChunk.response.session_id,
-          job_id: callbackChunk.response.job_id,
-          callback_count: callbackChunk.response.callback_count,
-          callback_bytes: callbackChunk.response.callback_bytes,
-          idempotent: callbackChunk.idempotent,
-        });
-        respond(conn, { ok: true, ...callbackChunk.response, idempotent: callbackChunk.idempotent });
-        break;
-      }
-      case 'browser-complete-job': {
-        const browserTx = db.getDb().transaction(() => {
-          const { taskId, task } = ensureBrowserMutableTask(args.task_id);
-          const state = normalizeBrowserOffloadState(task);
-          const sessionId = ensureBrowserSessionMatch(state, task, args.session_id);
-          const jobId = ensureBrowserJobMatch(state, args.job_id);
-          ensureBrowserCallbackAuthorization(state, args.callback_token);
-          const idempotencyKey = normalizeBrowserIdempotencyKey(args.idempotency_key);
-          const normalizedResult = normalizeBrowserCompletionResult(args.result);
-          const fingerprint = buildBrowserIdempotencyFingerprint('browser-complete-job', {
-            task_id: taskId,
-            session_id: sessionId,
-            job_id: jobId,
-            result: normalizedResult,
-          });
-          const replay = getBrowserIdempotencyReplay(state, 'browser-complete-job', idempotencyKey, fingerprint);
-          if (replay) return { response: replay, idempotent: true };
-
-          const currentStatus = normalizeBrowserOffloadStatus(task);
-          if (currentStatus !== 'awaiting_callback') {
-            throw new Error(`browser_job_not_completable:${currentStatus}`);
-          }
-
-          const now = new Date().toISOString();
-          const callbackText = buildBrowserCallbackText(state.job);
-          const resultEnvelope = {
-            version: 1,
-            session_id: sessionId,
-            job_id: jobId,
-            workflow_url: state.job && state.job.workflow_url ? state.job.workflow_url : null,
-            guidance: state.job && state.job.guidance ? state.job.guidance : null,
-            callback_text: callbackText,
-            callback_count: Number(state.job && state.job.callback_count || 0),
-            callback_bytes: Number(state.job && state.job.callback_bytes || 0),
-            result: normalizedResult,
-            completed_at: now,
-          };
-          const resultText = JSON.stringify(resultEnvelope);
-          if (utf8ByteLength(resultText) > BROWSER_MAX_RESULT_BYTES) {
-            throw new Error('Browser completion result exceeds size limit');
-          }
-
-          state.job.status = 'completed';
-          state.job.completed_at = now;
-          state.job.updated_at = now;
-          state.job.result = normalizedResult;
-          state.job.error = null;
-          const response = {
-            task_id: taskId,
-            request_id: task.request_id,
-            session_id: sessionId,
-            job_id: jobId,
-            browser_offload_status: 'completed',
-            result_bytes: utf8ByteLength(resultText),
-          };
-          setBrowserIdempotencyEntry(state, idempotencyKey, 'browser-complete-job', fingerprint, response);
-          const payloadText = serializeBrowserOffloadState(state);
-          db.transitionTaskBrowserOffload(taskId, 'completed', {
-            browser_offload_payload: payloadText,
-            browser_offload_result: resultText,
-            browser_offload_error: null,
-          });
-          return { response, idempotent: false };
-        });
-
-        const completed = browserTx();
-        db.log('coordinator', 'browser_research_job_completed', {
-          task_id: completed.response.task_id,
-          request_id: completed.response.request_id,
-          session_id: completed.response.session_id,
-          job_id: completed.response.job_id,
-          result_bytes: completed.response.result_bytes,
-          idempotent: completed.idempotent,
-        });
-        respond(conn, { ok: true, ...completed.response, idempotent: completed.idempotent });
-        break;
-      }
-      case 'browser-fail-job': {
-        const browserTx = db.getDb().transaction(() => {
-          const { taskId, task } = ensureBrowserMutableTask(args.task_id);
-          const state = normalizeBrowserOffloadState(task);
-          const sessionId = ensureBrowserSessionMatch(state, task, args.session_id);
-          const jobId = ensureBrowserJobMatch(state, args.job_id);
-          ensureBrowserCallbackAuthorization(state, args.callback_token);
-          const idempotencyKey = normalizeBrowserIdempotencyKey(args.idempotency_key);
-          const normalizedError = normalizeBrowserError(args.error);
-          const fingerprint = buildBrowserIdempotencyFingerprint('browser-fail-job', {
-            task_id: taskId,
-            session_id: sessionId,
-            job_id: jobId,
-            error: normalizedError,
-          });
-          const replay = getBrowserIdempotencyReplay(state, 'browser-fail-job', idempotencyKey, fingerprint);
-          if (replay) return { response: replay, idempotent: true };
-
-          const currentStatus = normalizeBrowserOffloadStatus(task);
-          if (currentStatus !== 'awaiting_callback') {
-            throw new Error(`browser_job_not_failable:${currentStatus}`);
-          }
-
-          const now = new Date().toISOString();
-          state.job.status = 'failed';
-          state.job.failed_at = now;
-          state.job.updated_at = now;
-          state.job.error = normalizedError;
-          const response = {
-            task_id: taskId,
-            request_id: task.request_id,
-            session_id: sessionId,
-            job_id: jobId,
-            browser_offload_status: 'failed',
-            error: normalizedError,
-          };
-          setBrowserIdempotencyEntry(state, idempotencyKey, 'browser-fail-job', fingerprint, response);
-          const payloadText = serializeBrowserOffloadState(state);
-          db.transitionTaskBrowserOffload(taskId, 'failed', {
-            browser_offload_payload: payloadText,
-            browser_offload_error: normalizedError,
-          });
-          return { response, idempotent: false };
-        });
-
-        const failed = browserTx();
-        db.log('coordinator', 'browser_research_job_failed', {
-          task_id: failed.response.task_id,
-          request_id: failed.response.request_id,
-          session_id: failed.response.session_id,
-          job_id: failed.response.job_id,
-          error: failed.response.error,
-          idempotent: failed.idempotent,
-        });
-        respond(conn, { ok: true, ...failed.response, idempotent: failed.idempotent });
-        break;
-      }
+      case 'browser-create-session':
+      case 'browser-attach-session':
+      case 'browser-start-job':
+      case 'browser-callback-chunk':
+      case 'browser-complete-job':
+      case 'browser-fail-job':
       case 'browser-job-status': {
-        const { taskId, task } = ensureBrowserTask(args.task_id);
-        const state = normalizeBrowserOffloadState(task);
-        const sessionId = ensureBrowserSessionMatch(state, task, args.session_id);
-        const jobId = ensureBrowserJobMatch(state, args.job_id);
-        const resultPayload = parseBrowserResultPayload(task.browser_offload_result);
-        const response = {
-          ok: true,
-          task_id: taskId,
-          request_id: task.request_id,
-          session_id: sessionId,
-          job_id: jobId,
-          browser_channel: task.browser_channel || (state.session && state.session.channel) || null,
-          browser_offload_status: normalizeBrowserOffloadStatus(task),
-          workflow_url: state.session && state.session.workflow_url ? state.session.workflow_url : null,
-          callback_count: Number(state.job && state.job.callback_count || 0),
-          callback_bytes: Number(state.job && state.job.callback_bytes || 0),
-          result: resultPayload,
-          error: task.browser_offload_error || (state.job && state.job.error) || null,
-        };
-        db.log('coordinator', 'browser_research_job_status_fetched', {
-          task_id: taskId,
-          request_id: task.request_id,
-          session_id: sessionId,
-          job_id: jobId,
-          browser_offload_status: response.browser_offload_status,
+        const result = browserOffloadCommands.handleBrowserOffloadCommand(command, args, {
+          db,
+          isPlainObject,
+          utf8ByteLength,
+          normalizePositiveInteger,
         });
-        respond(conn, response);
-        break;
-      }
-      case 'distill': {
-        db.log(`worker-${args.worker_id}`, 'distill', { domain: args.domain, content: args.content });
-        respond(conn, { ok: true });
+        respond(conn, result);
         break;
       }
 
-      // === SHARED commands ===
       case 'inbox': {
         const recipient = normalizeInboxRecipient(args.recipient);
         const filters = extractInboxMailFilters(args);
@@ -2509,249 +1616,22 @@ function handleCommand(cmd, conn, handlers) {
       }
 
       // === ALLOCATOR commands ===
-      case 'ready-tasks': {
-        const tasks = db.getReadyTasks();
-        respond(conn, { ok: true, tasks });
-        break;
-      }
-      case 'assign-task': {
-        const { task_id: assignTaskId, worker_id: assignWorkerId } = args;
-        // Atomic assignment: same pattern as allocator.js assignTaskToWorker
-        const assignResult = db.getDb().transaction(() => {
-          const freshTask = db.getTask(assignTaskId);
-          const freshWorker = db.getWorker(assignWorkerId);
-          if (!freshTask || freshTask.status !== 'ready' || freshTask.assigned_to) return { ok: false, reason: 'task_not_ready' };
-          if (!freshWorker) return { ok: false, reason: 'worker_not_idle' };
-          if (freshWorker.claimed_by !== null && freshWorker.claimed_by !== undefined) {
-            return { ok: false, reason: 'worker_claimed', claimed_by: freshWorker.claimed_by };
-          }
-          if (freshWorker.status !== 'idle') return { ok: false, reason: 'worker_not_idle' };
-
-          db.updateTask(assignTaskId, { status: 'assigned', assigned_to: assignWorkerId });
-          db.updateWorker(assignWorkerId, {
-            status: 'assigned',
-            current_task_id: assignTaskId,
-            domain: freshTask.domain || freshWorker.domain,
-            launched_at: new Date().toISOString(),
-          });
-          return { ok: true, task: freshTask, worker: freshWorker };
-        })();
-
-        if (!assignResult.ok) {
-          const errPayload = { ok: false, error: assignResult.reason };
-          if (assignResult.claimed_by != null) errPayload.claimed_by = assignResult.claimed_by;
-          respond(conn, errPayload);
-          break;
-        }
-
-        const assignedTask = db.getTask(assignTaskId);
-        const assignedWorker = db.getWorker(assignWorkerId);
-        const routingDecision = modelRouter.routeTask(assignedTask, { getConfig: db.getConfig });
-        const modelSource = routingDecision.model_source || 'router:unspecified';
-        db.updateTask(assignTaskId, {
-          routing_class: routingDecision.routing_class || null,
-          routed_model: routingDecision.model || null,
-          model_source: modelSource,
-          reasoning_effort: routingDecision.reasoning_effort || null,
-        });
-        const routingReason = routingDecision.routing_reason || routingDecision.reason || 'router:unspecified';
-        const routingTelemetry = {
-          budget_state: routingDecision.budget_state || null,
-          budget_source: routingDecision.budget_source || 'none',
-          model_source: modelSource,
-          routing_reason: routingReason,
-          routing_precedence: routingDecision.routing_precedence || [],
-        };
-        let taskSandbox = null;
-        try {
-          taskSandbox = db.createTaskSandbox({
-            task_id: assignTaskId,
-            worker_id: assignWorkerId,
-            backend: 'pending',
-            metadata: {
-              source: 'assign-task',
-              routing_class: routingDecision.routing_class || null,
-              model: routingDecision.model || null,
-              model_source: modelSource,
-            },
-          });
-        } catch (sandboxErr) {
-          db.getDb().transaction(() => {
-            db.updateTask(assignTaskId, {
-              status: assignResult.task.status,
-              assigned_to: assignResult.task.assigned_to,
-              routing_class: assignResult.task.routing_class ?? null,
-              routed_model: assignResult.task.routed_model ?? null,
-              model_source: assignResult.task.model_source ?? null,
-              reasoning_effort: assignResult.task.reasoning_effort ?? null,
-            });
-            db.updateWorker(assignWorkerId, {
-              status: assignResult.worker.status,
-              current_task_id: assignResult.worker.current_task_id,
-              domain: assignResult.worker.domain,
-              claimed_by: assignResult.worker.claimed_by,
-              claimed_at: assignResult.worker.claimed_at,
-              launched_at: assignResult.worker.launched_at,
-            });
-          })();
-          db.log('coordinator', 'task_sandbox_allocation_failed', {
-            task_id: assignTaskId,
-            worker_id: assignWorkerId,
-            error: sandboxErr.message,
-          });
-          respond(conn, { ok: false, error: `Failed to allocate task sandbox: ${sandboxErr.message}` });
-          break;
-        }
-
-        // Trigger tmux spawn via handler — revert assignment on failure
-        if (handlers.onAssignTask) {
-          try {
-            handlers.onAssignTask(assignedTask, assignedWorker, routingDecision, taskSandbox);
-          } catch (spawnErr) {
-            try {
-              db.transitionTaskSandbox(taskSandbox.id, 'failed', { error: spawnErr.message });
-            } catch (sandboxErr) {
-              db.log('coordinator', 'task_sandbox_spawn_failure_mark_error', {
-                task_id: assignTaskId,
-                sandbox_id: taskSandbox ? taskSandbox.id : null,
-                error: sandboxErr.message,
-              });
-            }
-            const rollbackAsWorkerClaimed = isWorkerClaimedAssignmentError(spawnErr);
-            db.getDb().transaction(() => {
-              const rollbackWorker = rollbackAsWorkerClaimed ? db.getWorker(assignWorkerId) : null;
-              const claimedBy = rollbackAsWorkerClaimed
-                ? (rollbackWorker ? rollbackWorker.claimed_by : assignResult.worker.claimed_by)
-                : assignResult.worker.claimed_by;
-              const claimedAt = rollbackAsWorkerClaimed
-                ? (rollbackWorker ? rollbackWorker.claimed_at : assignResult.worker.claimed_at)
-                : assignResult.worker.claimed_at;
-              db.updateTask(assignTaskId, {
-                status: assignResult.task.status,
-                assigned_to: assignResult.task.assigned_to,
-                routing_class: assignResult.task.routing_class ?? null,
-                routed_model: assignResult.task.routed_model ?? null,
-                model_source: assignResult.task.model_source ?? null,
-                reasoning_effort: assignResult.task.reasoning_effort ?? null,
-              });
-              db.updateWorker(assignWorkerId, {
-                status: assignResult.worker.status,
-                current_task_id: assignResult.worker.current_task_id,
-                domain: assignResult.worker.domain,
-                claimed_by: claimedBy,
-                claimed_at: claimedAt,
-                launched_at: assignResult.worker.launched_at,
-              });
-            })();
-            db.log('coordinator', 'assign_handler_failed', { task_id: assignTaskId, worker_id: assignWorkerId, error: spawnErr.message });
-            if (rollbackAsWorkerClaimed) {
-              respond(conn, { ok: false, error: 'worker_claimed' });
-              break;
-            }
-            respond(conn, { ok: false, error: `Failed to spawn worker: ${spawnErr.message}` });
-            break;
-          }
-        }
-
-        reopenFailedRequestForActiveRemediation({
-          requestId: assignedTask.request_id,
-          taskId: assignTaskId,
-          workerId: assignWorkerId,
-          trigger: 'assign-task',
-        });
-
-        db.sendMail(`worker-${assignWorkerId}`, 'task_assigned', {
-          task_id: assignTaskId,
-          subject: assignedTask.subject,
-          description: assignedTask.description,
-          domain: assignedTask.domain,
-          files: assignedTask.files,
-          tier: assignedTask.tier,
-          request_id: assignedTask.request_id,
-          validation: assignedTask.validation,
-          assignment_token: assignedWorker ? assignedWorker.launched_at : null,
-          task_sandbox_id: taskSandbox ? taskSandbox.id : null,
-          routing_class: routingDecision.routing_class,
-          model: routingDecision.model,
-          model_source: routingTelemetry.model_source,
-          reasoning_effort: routingDecision.reasoning_effort,
-          routing_reason: routingTelemetry.routing_reason,
-          routing_precedence: routingTelemetry.routing_precedence,
-          budget_state: routingTelemetry.budget_state,
-          budget_source: routingTelemetry.budget_source,
-        });
-        db.log('allocator', 'task_assigned', {
-          task_id: assignTaskId,
-          worker_id: assignWorkerId,
-          domain: assignedTask.domain,
-          assignment_token: assignedWorker ? assignedWorker.launched_at : null,
-          task_sandbox_id: taskSandbox ? taskSandbox.id : null,
-          routing_class: routingDecision.routing_class,
-          model: routingDecision.model,
-          model_source: routingTelemetry.model_source,
-          reasoning_effort: routingDecision.reasoning_effort,
-          routing_reason: routingTelemetry.routing_reason,
-          routing_precedence: routingTelemetry.routing_precedence,
-          budget_state: routingTelemetry.budget_state,
-          budget_source: routingTelemetry.budget_source,
-        });
-
-        respond(conn, {
-          ok: true,
-          task_id: assignTaskId,
-          worker_id: assignWorkerId,
-          task_sandbox_id: taskSandbox ? taskSandbox.id : null,
-          routing: {
-            class: routingDecision.routing_class,
-            model: routingDecision.model,
-            model_source: routingTelemetry.model_source,
-            reasoning_effort: routingDecision.reasoning_effort,
-            routing_reason: routingTelemetry.routing_reason,
-            reason: routingTelemetry.routing_reason,
-            precedence: routingTelemetry.routing_precedence,
-          },
-          assignment_token: assignedWorker ? assignedWorker.launched_at : null,
-          budget_state: routingTelemetry.budget_state,
-          budget_source: routingTelemetry.budget_source,
-        });
-        break;
-      }
-      case 'claim-worker': {
-        const success = db.claimWorker(args.worker_id, args.claimer);
-        respond(conn, { ok: true, claimed: success });
-        break;
-      }
-      case 'release-worker': {
-        db.releaseWorker(args.worker_id);
-        respond(conn, { ok: true });
-        break;
-      }
-      case 'worker-status': {
-        const workers = db.getAllWorkers();
-        respond(conn, { ok: true, workers });
-        break;
-      }
-      case 'check-completion': {
-        const completion = db.checkRequestCompletion(args.request_id, {
-          source: 'check_completion_command',
-        });
-        respond(conn, { ok: true, ...completion });
-        break;
-      }
-
-      case 'check-overlaps': {
-        const overlapPairs = db.getOverlapsForRequest(args.request_id);
-        respond(conn, { ok: true, request_id: args.request_id, overlaps: overlapPairs });
-        break;
-      }
-
+      case 'ready-tasks':
+      case 'assign-task':
+      case 'claim-worker':
+      case 'release-worker':
+      case 'worker-status':
+      case 'check-completion':
+      case 'check-overlaps':
       case 'replan-dependency': {
-        const replanned = db.replanTaskDependency({
-          fromTaskId: args.from_task_id,
-          toTaskId: args.to_task_id,
-          requestId: args.request_id,
+        const result = allocatorCommands.handleAllocatorCommand(command, args, {
+          db,
+          handlers,
+          modelRouter,
+          isWorkerClaimedAssignmentError,
+          reopenFailedRequestForActiveRemediation,
         });
-        respond(conn, { ok: true, ...replanned });
+        respond(conn, result);
         break;
       }
 
@@ -2769,499 +1649,56 @@ function handleCommand(cmd, conn, handlers) {
       }
 
       case 'integrate': {
-        // Master-3 triggers integration when all tasks for a request complete
-        const reqId = args.request_id;
-        const forceRetry = args.retry_terminal === true || args.force_retry === true;
-        const completion = db.checkRequestCompletion(reqId, { source: 'integrate_guard' });
-        const hardFailures = Number(completion.hard_failures) || 0;
-        const canIntegrate = completion.all_terminal === true && completion.completed > 0 && hardFailures === 0;
-        if (!canIntegrate) {
-          const error = hardFailures > 0
-            ? 'Request has failed tasks'
-            : 'Not all tasks completed';
-          respond(conn, { ok: false, error, ...completion });
-          break;
-        }
-        // Queue merges for each completed task's branch/PR
-        const tasks = db.listTasks({ request_id: reqId, status: 'completed' });
-        const latestCompletedTaskState = db.getRequestLatestCompletedTaskCursor(reqId);
-        let queued = 0;
-        const queueFailures = [];
-        for (const task of tasks) {
-          const worker = task.assigned_to ? db.getWorker(task.assigned_to) : null;
-          const taskPrNormalizationCwd = worker && worker.worktree_path
-            ? worker.worktree_path
-            : (_projectDir || process.cwd());
-          const normalizedPrUrl = mergeQueueService.normalizePrUrl(task.pr_url, taskPrNormalizationCwd);
-          const resolvedBranch = mergeQueueService.resolveCompletionBranch(worker, task.branch, task.assigned_to);
-          if (task.pr_url !== normalizedPrUrl) {
-            db.updateTask(task.id, { pr_url: normalizedPrUrl || task.pr_url });
-          }
-          const mergeBranch = mergeQueueService.sanitizeBranchName(resolvedBranch.branch || task.branch || (worker && worker.branch) || '');
-          if (mergeBranch && mergeQueueService.isValidGitHubPrUrl(normalizedPrUrl)) {
-            if (resolvedBranch.mismatch || task.branch !== mergeBranch) {
-              db.updateTask(task.id, { branch: mergeBranch });
-            }
-            const queueResult = mergeQueueService.queueMergeWithRecovery({
-              db,
-              projectDir: _projectDir || process.cwd(),
-              request_id: reqId,
-              task_id: task.id,
-              branch: mergeBranch,
-              pr_url: normalizedPrUrl,
-              priority: task.priority === 'urgent' ? 10 : 0,
-              force_retry: forceRetry,
-              latest_completion_timestamp: latestCompletedTaskState,
-            });
-            const queuedPrUrl = queueResult.resolved_pr_url || normalizedPrUrl;
-            if (queuedPrUrl && queuedPrUrl !== task.pr_url) {
-              db.updateTask(task.id, { pr_url: queuedPrUrl });
-            }
-            if (mergeQueueService.isMergeOwnershipCollisionReason(queueResult.reason)) {
-              const failureReason = queueResult.reason;
-              const failureError = `merge_queue:${failureReason}`;
-              const failureTimestamp = new Date().toISOString();
-              db.updateTask(task.id, {
-                status: 'failed',
-                pr_url: queuedPrUrl || null,
-                branch: mergeBranch,
-                result: failureError,
-                completed_at: failureTimestamp,
-              });
-              const failedTask = db.getTask(task.id);
-              const routingMeta = failedTask ? {
-                subject: failedTask.subject,
-                description: failedTask.description,
-                domain: failedTask.domain,
-                files: failedTask.files,
-                tier: failedTask.tier,
-                assigned_to: failedTask.assigned_to,
-              } : null;
-              db.sendMail('allocator', 'task_failed', {
-                worker_id: task.assigned_to || null,
-                task_id: task.id,
-                request_id: failedTask ? failedTask.request_id : reqId,
-                error: failureError,
-                subject: routingMeta ? routingMeta.subject : null,
-                domain: routingMeta ? routingMeta.domain : null,
-                files: routingMeta ? routingMeta.files : null,
-                tier: routingMeta ? routingMeta.tier : null,
-                assigned_to: routingMeta ? routingMeta.assigned_to : null,
-                original_task: routingMeta,
-              });
-              db.sendMail('architect', 'task_failed', {
-                worker_id: task.assigned_to || null,
-                task_id: task.id,
-                request_id: failedTask ? failedTask.request_id : reqId,
-                error: failureError,
-                original_task: routingMeta,
-              });
-              db.log('coordinator', 'integrate_merge_queue_ownership_collision_rejected', {
-                request_id: reqId,
-                task_id: task.id,
-                reason: failureReason,
-                pr_url: queuedPrUrl || null,
-                branch: mergeBranch,
-                merge_id: queueResult.merge_id || null,
-                duplicate_merge_id: queueResult.duplicate_merge_id || null,
-                existing_request_id: queueResult.existing_request_id || null,
-                existing_task_id: queueResult.existing_task_id || null,
-                existing_branch: queueResult.existing_branch || null,
-                existing_status: queueResult.existing_status || null,
-              });
-              queueFailures.push({
-                task_id: task.id,
-                reason: failureReason,
-                merge_id: queueResult.merge_id || null,
-                duplicate_merge_id: queueResult.duplicate_merge_id || null,
-                existing_request_id: queueResult.existing_request_id || null,
-                existing_task_id: queueResult.existing_task_id || null,
-                existing_branch: queueResult.existing_branch || null,
-                existing_status: queueResult.existing_status || null,
-              });
-              continue;
-            }
-            if (queueResult.queued) queued++;
-            if (queueResult.refreshed) {
-              db.log('coordinator', 'merge_queue_entry_refreshed', {
-                request_id: reqId,
-                task_id: task.id,
-                pr_url: queuedPrUrl,
-                branch: mergeBranch,
-                retried: queueResult.retried,
-                previous_status: queueResult.previous_status || null,
-                merge_id: queueResult.merge_id || null,
-              });
-            }
-          } else if (mergeBranch && !mergeQueueService.isValidGitHubPrUrl(normalizedPrUrl)) {
-            db.log('coordinator', 'integrate_merge_skipped_no_pr', {
-              request_id: reqId,
-              task_id: task.id,
-              branch: mergeBranch,
-              pr_url: normalizedPrUrl || null,
-            });
-          }
-        }
-        if (queueFailures.length > 0) {
-          respond(conn, {
-            ok: false,
-            error: 'merge_queue_rejected',
-            request_id: reqId,
-            merges_queued: queued,
-            failures: queueFailures,
-          });
-          break;
-        }
-        if (queued > 0) {
-          db.updateRequest(reqId, { status: 'integrating' });
-        }
-        db.log('coordinator', 'integration_triggered', { request_id: reqId, merges_queued: queued });
-        // Trigger merger immediately
-        if (queued > 0 && handlers.onIntegrate) handlers.onIntegrate(reqId);
-        respond(conn, { ok: true, request_id: reqId, merges_queued: queued });
+        const result = integrationCommands.handleIntegrationCommand(command, args, {
+          db,
+          handlers,
+          projectDir: _projectDir || process.cwd(),
+          normalizePrUrl: mergeQueueService.normalizePrUrl,
+          isValidGitHubPrUrl: mergeQueueService.isValidGitHubPrUrl,
+          sanitizeBranchName: mergeQueueService.sanitizeBranchName,
+          resolveCompletionBranch: mergeQueueService.resolveCompletionBranch,
+          queueMergeWithRecovery: (options) => mergeQueueService.queueMergeWithRecovery({
+            db,
+            projectDir: _projectDir || process.cwd(),
+            ...options,
+          }),
+          isMergeOwnershipCollisionReason: mergeQueueService.isMergeOwnershipCollisionReason,
+        });
+        respond(conn, result);
         break;
       }
 
       // === SYSTEM commands ===
-      case 'register-worker': {
-        const { worker_id, worktree_path, branch } = args;
-        db.registerWorker(worker_id, worktree_path || '', branch || '');
-        db.log('coordinator', 'worker_registered', { worker_id });
-        respond(conn, { ok: true, worker_id });
-        break;
-      }
-      case 'repair': {
-        // Reset stuck states using the freshest lifecycle timestamp so newly assigned workers
-        // are not treated as stale when they still carry an older heartbeat value.
-        const cutoff = new Date(Date.now() - 3 * 60 * 1000).toISOString();
-        const dbConn = db.getDb();
-        const staleWorkers = dbConn.prepare(`
-          SELECT id
-          FROM workers
-          WHERE status IN ('assigned', 'running', 'busy')
-            AND datetime(
-              CASE
-                WHEN last_heartbeat IS NULL AND launched_at IS NULL THEN created_at
-                WHEN last_heartbeat IS NULL THEN launched_at
-                WHEN launched_at IS NULL THEN last_heartbeat
-                WHEN datetime(last_heartbeat) >= datetime(launched_at) THEN last_heartbeat
-                ELSE launched_at
-              END
-            ) < datetime(?)
-        `).all(cutoff);
-
-        let stuck = { changes: 0 };
-        let orphaned = { changes: 0 };
-
-        if (staleWorkers.length > 0) {
-          const staleIds = staleWorkers.map((row) => row.id);
-          const placeholders = staleIds.map(() => '?').join(', ');
-          const updateTasks = dbConn.prepare(`
-            UPDATE tasks
-            SET status = 'ready',
-                assigned_to = NULL
-            WHERE status IN ('assigned', 'in_progress')
-              AND assigned_to IN (${placeholders})
-          `);
-          const updateWorkers = dbConn.prepare(`
-            UPDATE workers
-            SET status = 'idle',
-                current_task_id = NULL,
-                claimed_by = NULL,
-                claimed_at = NULL
-            WHERE id IN (${placeholders})
-          `);
-          const tx = dbConn.transaction((ids) => {
-            const orphanedResult = updateTasks.run(...ids);
-            const stuckResult = updateWorkers.run(...ids);
-            return { stuckResult, orphanedResult };
-          });
-          const txResult = tx(staleIds);
-          stuck = txResult.stuckResult;
-          orphaned = txResult.orphanedResult;
-        }
-
-        const supersessionBackfill = backfillSupersededLoopRequestsSafe();
-        db.log('coordinator', 'repair', {
-          reset_workers: stuck.changes,
-          orphaned_tasks: orphaned.changes,
-          supersession_backfill: supersessionBackfill,
-        });
-        respond(conn, {
-          ok: true,
-          reset_workers: stuck.changes,
-          orphaned_tasks: orphaned.changes,
-          supersession_backfill: supersessionBackfill,
-        });
-        break;
-      }
-      case 'purge-tasks': {
-        const purgeStatus = args.status || 'failed';
-        const dbConn = db.getDb();
-        const deleteMerges = dbConn.prepare(`
-          DELETE FROM merge_queue
-          WHERE task_id IN (SELECT id FROM tasks WHERE status = ?)
-            AND status IN ('failed', 'conflict')
-        `);
-        const deleteTasks = dbConn.prepare(`
-          DELETE FROM tasks WHERE status = ?
-        `);
-        const tx = dbConn.transaction((s) => {
-          const mergesResult = deleteMerges.run(s);
-          const tasksResult = deleteTasks.run(s);
-          return { purged_merges: mergesResult.changes, purged_tasks: tasksResult.changes };
-        });
-        const result = tx(purgeStatus);
-        db.log('coordinator', 'purge-tasks', { status: purgeStatus, ...result });
-        respond(conn, { ok: true, ...result });
-        break;
-      }
-
-      case 'ping': {
-        respond(conn, { ok: true, ts: Date.now() });
-        break;
-      }
-
-      case 'health-check': {
-        respond(conn, {
-          ok: true,
-          ...runtimeHealth.collectCoordinatorHealth({
+      case 'register-worker':
+      case 'repair':
+      case 'purge-tasks':
+      case 'ping':
+      case 'health-check':
+      case 'add-worker':
+      case 'reset-worker': {
+        const result = systemCommands.handleSystemCommand(command, args, {
+          db,
+          projectDir: _projectDir || process.cwd(),
+          collectCoordinatorHealth: () => runtimeHealth.collectCoordinatorHealth({
             db,
             projectDir: _projectDir || process.cwd(),
             namespace: NAMESPACE,
             serverStartedAt: _serverStartedAt,
           }),
+          backfillSupersededLoopRequestsSafe,
+          parseResetOwnership,
+          getWorkerActiveAssignment,
         });
-        break;
-      }
-
-      case 'add-worker': {
-        const maxWorkers = parseInt(db.getConfig('max_workers')) || 8;
-        const allWorkers = db.getAllWorkers();
-        if (allWorkers.length >= maxWorkers) {
-          respond(conn, { ok: false, error: `Already at max workers (${maxWorkers})` });
-          break;
-        }
-        const nextId = allWorkers.length > 0
-          ? Math.max(...allWorkers.map(w => typeof w.id === 'number' ? w.id : parseInt(w.id))) + 1
-          : 1;
-        if (nextId > maxWorkers) {
-          respond(conn, { ok: false, error: `Next worker ID ${nextId} exceeds max_workers (${maxWorkers})` });
-          break;
-        }
-        const projDir = db.getConfig('project_dir');
-        if (!projDir) {
-          respond(conn, { ok: false, error: 'project_dir not set in config' });
-          break;
-        }
-        const wtDir = path.join(projDir, '.worktrees');
-        const wtPath = path.join(wtDir, `wt-${nextId}`);
-        const branchName = `agent-${nextId}`;
-        try {
-          fs.mkdirSync(wtDir, { recursive: true });
-          // Create branch from configured/default branch (not current checked-out feature branch).
-          const mainBranch = (() => {
-            const configuredPrimary = (db.getConfig('primary_branch') || '').trim();
-            if (configuredPrimary) return configuredPrimary;
-
-            try {
-              const remoteHead = execFileSync(
-                'git',
-                ['symbolic-ref', '--short', 'refs/remotes/origin/HEAD'],
-                { cwd: projDir, encoding: 'utf8' },
-              ).trim();
-              if (remoteHead.startsWith('origin/')) {
-                return remoteHead.slice('origin/'.length);
-              }
-            } catch {}
-
-            try {
-              const abbrevRemoteHead = execFileSync(
-                'git',
-                ['rev-parse', '--abbrev-ref', 'origin/HEAD'],
-                { cwd: projDir, encoding: 'utf8' },
-              ).trim();
-              if (abbrevRemoteHead.startsWith('origin/')) {
-                return abbrevRemoteHead.slice('origin/'.length);
-              }
-            } catch {}
-
-            return 'main';
-          })();
-          try {
-            execFileSync('git', ['branch', branchName, mainBranch], { cwd: projDir, encoding: 'utf8' });
-          } catch (branchError) {
-            const stderr = String(branchError?.stderr || '').trim();
-            const stdout = String(branchError?.stdout || '').trim();
-            const details = [stderr, stdout].filter(Boolean).join(' ').trim();
-            const message = String(branchError?.message || '').trim();
-            const combined = [message, details].filter(Boolean).join(' ').trim();
-
-            if (/already exists/i.test(combined)) {
-              // Existing branch is expected during retries/restarts.
-            } else if (
-              /not a commit/i.test(combined) ||
-              /not a valid object name/i.test(combined) ||
-              /unknown revision/i.test(combined) ||
-              /ambiguous argument/i.test(combined) ||
-              /bad revision/i.test(combined)
-            ) {
-              throw new Error(
-                `Cannot create worker branch '${branchName}' from base '${mainBranch}': base ref is invalid or cannot be resolved. ` +
-                `Set 'primary_branch' to a valid ref (for example: main) and retry.`
-              );
-            } else {
-              throw branchError;
-            }
-          }
-          execFileSync('git', ['worktree', 'add', wtPath, branchName], { cwd: projDir, encoding: 'utf8' });
-
-          // Copy only source/config assets into the worker worktree. Runtime
-          // state such as .claude/state, .claude/logs, and .claude/signals
-          // must stay local to the main coordinator process.
-          const srcClaude = path.join(projDir, '.claude');
-          const dstClaude = path.join(wtPath, '.claude');
-          const copyDir = (rel) => {
-            const src = path.join(srcClaude, rel);
-            const dst = path.join(dstClaude, rel);
-            if (!fs.existsSync(src)) return;
-            fs.mkdirSync(dst, { recursive: true });
-            for (const f of fs.readdirSync(src)) {
-              const srcF = path.join(src, f);
-              if (fs.statSync(srcF).isFile()) fs.copyFileSync(srcF, path.join(dst, f));
-            }
-          };
-          copyDir('commands');
-          copyDir('knowledge');
-          copyDir('knowledge/domain');
-          copyDir('scripts');
-          copyDir('agents');
-          copyDir('hooks');
-          const workerAgents = path.join(srcClaude, 'worker-agents.md');
-          const workerClaude = path.join(srcClaude, 'worker-claude.md');
-          const workerInstructions = fs.existsSync(workerAgents) ? workerAgents : workerClaude;
-          // AGENTS.md is canonical; CLAUDE.md is kept as a compatibility copy
-          // for Claude Code until all providers consume AGENTS.md directly.
-          if (fs.existsSync(workerInstructions)) {
-            fs.copyFileSync(workerInstructions, path.join(wtPath, 'AGENTS.md'));
-            fs.copyFileSync(workerInstructions, path.join(wtPath, 'CLAUDE.md'));
-          }
-          // Copy settings.json
-          const settingsFile = path.join(srcClaude, 'settings.json');
-          if (fs.existsSync(settingsFile)) {
-            fs.copyFileSync(settingsFile, path.join(dstClaude, 'settings.json'));
-          }
-          // Make hook scripts executable
-          try {
-            const hookDir = path.join(dstClaude, 'hooks');
-            if (fs.existsSync(hookDir)) {
-              for (const f of fs.readdirSync(hookDir)) {
-                if (f.endsWith('.sh')) fs.chmodSync(path.join(hookDir, f), 0o755);
-              }
-            }
-          } catch {}
-
-          db.registerWorker(nextId, wtPath, branchName);
-          db.log('coordinator', 'worker_added', { worker_id: nextId, worktree_path: wtPath, branch: branchName });
-          respond(conn, { ok: true, worker_id: nextId, worktree_path: wtPath, branch: branchName });
-        } catch (e) {
-          respond(conn, { ok: false, error: `Failed to create worker: ${e.message}` });
-        }
-        break;
-      }
-
-      case 'reset-worker': {
-        // Called by sentinel when Claude exits — ownership checks prevent stale
-        // sentinels from clearing a newer assignment.
-        const { worker_id: resetWid, expected_task_id: expectedTaskId, expected_assignment_token: expectedToken } = parseResetOwnership(args);
-        if (!resetWid) {
-          respond(conn, { ok: false, error: 'Missing worker_id' });
-          break;
-        }
-        const resetWorker = db.getWorker(resetWid);
-        if (!resetWorker) {
-          respond(conn, { ok: false, error: 'Worker not found' });
-          break;
-        }
-        const activeAssignment = getWorkerActiveAssignment(resetWid);
-        const observedTaskId = resetWorker.current_task_id || (activeAssignment ? activeAssignment.id : null);
-        const hasOwnershipContext = expectedTaskId !== null || Boolean(expectedToken);
-
-        if (!hasOwnershipContext && (observedTaskId !== null || resetWorker.status !== 'idle')) {
-          db.log(`worker-${resetWid}`, 'sentinel_reset_skipped', {
-            reason: 'missing_ownership_context',
-            worker_status: resetWorker.status,
-            current_task_id: resetWorker.current_task_id,
-            active_task_id: activeAssignment ? activeAssignment.id : null,
-          });
-          respond(conn, { ok: true, skipped: true, reason: 'missing_ownership_context' });
-          break;
-        }
-
-        if (
-          expectedTaskId !== null &&
-          observedTaskId !== null &&
-          observedTaskId !== expectedTaskId
-        ) {
-          db.log(`worker-${resetWid}`, 'sentinel_reset_skipped', {
-            reason: 'task_mismatch',
-            expected_task_id: expectedTaskId,
-            current_task_id: resetWorker.current_task_id,
-            active_task_id: activeAssignment ? activeAssignment.id : null,
-            observed_task_id: observedTaskId,
-          });
-          respond(conn, { ok: true, skipped: true, reason: 'task_mismatch' });
-          break;
-        }
-
-        if (
-          expectedToken &&
-          resetWorker.launched_at &&
-          resetWorker.launched_at !== expectedToken
-        ) {
-          db.log(`worker-${resetWid}`, 'sentinel_reset_skipped', {
-            reason: 'assignment_mismatch',
-            expected_assignment_token: expectedToken,
-            current_assignment_token: resetWorker.launched_at,
-          });
-          respond(conn, { ok: true, skipped: true, reason: 'assignment_mismatch' });
-          break;
-        }
-
-        // Only reset if worker isn't already idle (avoid clobbering a fresh assignment)
-        if (resetWorker.status !== 'idle') {
-          db.updateWorker(resetWid, {
-            status: 'idle',
-            current_task_id: null,
-            claimed_by: null,
-            claimed_at: null,
-            last_heartbeat: new Date().toISOString(),
-          });
-          db.log(`worker-${resetWid}`, 'sentinel_reset', {
-            previous_status: resetWorker.status,
-            expected_task_id: expectedTaskId,
-            expected_assignment_token: expectedToken,
-          });
-        }
-        respond(conn, { ok: true });
+        respond(conn, result);
         break;
       }
 
       case 'merge-status': {
-        const reqFilter = args && args.request_id;
-        let sql = 'SELECT * FROM merge_queue';
-        const params = [];
-        if (reqFilter) {
-          sql += ' WHERE request_id = ?';
-          params.push(reqFilter);
-        }
-        sql += ' ORDER BY id DESC';
-        const merges = db.getDb().prepare(sql).all(...params);
-        respond(conn, { ok: true, merges });
+        const result = integrationCommands.handleIntegrationCommand(command, args, { db });
+        respond(conn, result);
         break;
       }
 
-      // === CHANGES commands ===
       case 'log-change':
       case 'list-changes':
       case 'update-change': {
@@ -3271,235 +1708,38 @@ function handleCommand(cmd, conn, handlers) {
       }
 
       // === LOOP commands ===
-      case 'loop': {
-        const prompt = args.prompt;
-        if (prompt.trim().length === 0) {
-          respond(conn, { ok: false, error: 'prompt must be a non-empty string' });
-          break;
-        }
-        const loopId = db.createLoop(prompt);
-        if (handlers.onLoopCreated) handlers.onLoopCreated(loopId, prompt);
-        respond(conn, { ok: true, loop_id: loopId });
-        break;
-      }
-      case 'stop-loop': {
-        const loop = db.getLoop(args.loop_id);
-        if (!loop) {
-          respond(conn, { ok: false, error: 'Loop not found' });
-          break;
-        }
-        db.stopLoop(args.loop_id);
-        respond(conn, { ok: true, loop_id: args.loop_id });
-        break;
-      }
-      case 'loop-status': {
-        const loops = db.listLoops();
-        respond(conn, { ok: true, loops });
-        break;
-      }
-      case 'loop-checkpoint': {
-        const cpLoop = db.getLoop(args.loop_id);
-        if (!cpLoop) {
-          respond(conn, { ok: false, error: 'Loop not found' });
-          break;
-        }
-        if (cpLoop.status !== 'active') {
-          respond(conn, { ok: false, error: `Loop is ${cpLoop.status}, not active` });
-          break;
-        }
-        db.updateLoop(args.loop_id, {
-          last_checkpoint: args.summary,
-          iteration_count: cpLoop.iteration_count + 1,
-          last_heartbeat: new Date().toISOString(),
-        });
-        db.log('coordinator', 'loop_checkpoint', {
-          loop_id: args.loop_id,
-          iteration: cpLoop.iteration_count + 1,
-          summary: args.summary.slice(0, 200),
-        });
-        respond(conn, { ok: true, iteration: cpLoop.iteration_count + 1 });
-        break;
-      }
-      case 'loop-heartbeat': {
-        const hbLoop = db.getLoop(args.loop_id);
-        if (!hbLoop) {
-          respond(conn, { ok: false, error: 'Loop not found' });
-          break;
-        }
-        if (hbLoop.status !== 'active') {
-          respond(conn, { ok: false, error: `Loop is ${hbLoop.status}, not active` });
-          break;
-        }
-        db.updateLoop(args.loop_id, { last_heartbeat: new Date().toISOString() });
-        respond(conn, { ok: true, status: hbLoop.status });
-        break;
-      }
-      case 'set-config': {
-        const { key, value } = args;
-        // Allowlist of configurable keys to prevent arbitrary DB manipulation
-        const ALLOWED_KEYS = [
-          'watchdog_warn_sec', 'watchdog_nudge_sec', 'watchdog_triage_sec', 'watchdog_terminate_sec',
-          'watchdog_interval_ms', 'allocator_interval_ms', 'max_workers',
-          'primary_branch',
-          LOOP_SYNC_WITH_ORIGIN_KEY,
-          'loop_request_quality_gate',
-          'loop_request_min_description_chars',
-          'loop_request_min_interval_sec',
-          'loop_request_max_per_hour',
-          'loop_request_similarity_threshold',
-          'model_flagship', 'model_spark', 'model_mini',
-          'model_xhigh', 'model_high', 'model_mid',
-          'reasoning_xhigh', 'reasoning_high', 'reasoning_mid', 'reasoning_spark', 'reasoning_mini',
-          ROUTING_BUDGET_STATE_KEY,
-          ROUTING_BUDGET_REMAINING_KEY,
-          ROUTING_BUDGET_THRESHOLD_KEY,
-        ];
-        if (!ALLOWED_KEYS.includes(key)) {
-          respond(conn, { error: `Key '${key}' is not configurable. Allowed: ${ALLOWED_KEYS.join(', ')}` });
-          break;
-        }
-        const dbConn = db.getDb();
-        const upsertConfig = dbConn.prepare('INSERT INTO config(key, value) VALUES(?,?) ON CONFLICT(key) DO UPDATE SET value=excluded.value');
-        const normalizedLoopConfigValue = normalizeLoopRequestSetConfigValue(key, value);
-        if (!normalizedLoopConfigValue.ok) {
-          respond(conn, { error: normalizedLoopConfigValue.error });
-          break;
-        }
-
-        let storedValue = normalizedLoopConfigValue.value;
-        const isSparkModelKey = SPARK_MODEL_KEYS.includes(key);
-        if (key === 'max_workers') {
-          storedValue = String(clampWorkerLimit(value));
-          upsertConfig.run('max_workers', storedValue);
-          upsertConfig.run('num_workers', storedValue);
-        } else {
-          if (key === ROUTING_BUDGET_STATE_KEY) {
-            const parsedState = parseBudgetStateConfig(value);
-            if (parsedState.parsed) {
-              storedValue = JSON.stringify(parsedState.parsed);
-            }
-          }
-          if (isSparkModelKey) {
-            for (const sparkModelKey of SPARK_MODEL_KEYS) {
-              upsertConfig.run(sparkModelKey, storedValue);
-            }
-          } else {
-            upsertConfig.run(key, storedValue);
-          }
-        }
-
-        if (key === ROUTING_BUDGET_STATE_KEY) {
-          const parsedState = parseBudgetStateConfig(storedValue);
-          if (parsedState.remaining !== null) {
-            db.setConfig(ROUTING_BUDGET_REMAINING_KEY, String(parsedState.remaining));
-            db.setConfig(LEGACY_BUDGET_REMAINING_KEY, String(parsedState.remaining));
-          }
-          if (parsedState.threshold !== null) {
-            db.setConfig(ROUTING_BUDGET_THRESHOLD_KEY, String(parsedState.threshold));
-            db.setConfig(LEGACY_BUDGET_THRESHOLD_KEY, String(parsedState.threshold));
-          }
-        } else if (Object.prototype.hasOwnProperty.call(ROUTING_BUDGET_SCALAR_LEGACY_KEY_MAP, key)) {
-          const legacyKey = ROUTING_BUDGET_SCALAR_LEGACY_KEY_MAP[key];
-          db.setConfig(legacyKey, storedValue);
-          const synchronizedState = syncBudgetStateFromScalarFallback(
-            db.getConfig(ROUTING_BUDGET_STATE_KEY),
-            db.getConfig
-          );
-          db.setConfig(ROUTING_BUDGET_STATE_KEY, JSON.stringify(synchronizedState));
-        }
-
-        db.log('coordinator', 'config_set', { key, value: storedValue });
-        respond(conn, { ok: true, key, value: storedValue });
-        break;
-      }
-      case 'loop-prompt': {
-        const promptLoop = db.getLoop(args.loop_id);
-        if (!promptLoop) {
-          respond(conn, { ok: false, error: 'Loop not found' });
-          break;
-        }
-        respond(conn, {
-          ok: true,
-          loop_id: promptLoop.id,
-          prompt: promptLoop.prompt,
-          status: promptLoop.status,
-          last_checkpoint: promptLoop.last_checkpoint,
-          iteration_count: promptLoop.iteration_count,
-          loop_sync_with_origin: getLoopSyncWithOriginConfig(),
-        });
-        break;
-      }
-      case 'loop-refresh-prompt': {
-        const refreshed = db.refreshLoopPrompt(args.loop_id, args.prompt);
-        if (!refreshed.ok) {
-          respond(conn, { ok: false, error: refreshed.error });
-          break;
-        }
-        db.log('coordinator', 'loop_prompt_refreshed', {
-          loop_id: args.loop_id,
-          result: 'updated',
-          status: refreshed.loop.status,
-          prompt_preview: refreshed.loop.prompt.slice(0, 200),
-        });
-        respond(conn, {
-          ok: true,
-          loop_id: refreshed.loop.id,
-          prompt: refreshed.loop.prompt,
-          status: refreshed.loop.status,
-          last_checkpoint: refreshed.loop.last_checkpoint,
-          iteration_count: refreshed.loop.iteration_count,
-        });
-        break;
-      }
-      case 'loop-set-prompt': {
-        const updated = db.setLoopPrompt(args.loop_id, args.prompt, ['active', 'paused']);
-        if (!updated.ok) {
-          respond(conn, { ok: false, error: updated.error });
-          break;
-        }
-        db.log('coordinator', 'loop_prompt_updated', {
-          loop_id: args.loop_id,
-          status: updated.loop.status,
-          prompt_preview: updated.loop.prompt.slice(0, 200),
-        });
-        respond(conn, {
-          ok: true,
-          loop_id: updated.loop.id,
-          prompt: updated.loop.prompt,
-          status: updated.loop.status,
-          last_checkpoint: updated.loop.last_checkpoint,
-          iteration_count: updated.loop.iteration_count,
-        });
-        break;
-      }
-      case 'loop-request': {
-        const lrLoop = db.getLoop(args.loop_id);
-        if (!lrLoop) {
-          respond(conn, { ok: false, error: 'Loop not found' });
-          break;
-        }
-        if (lrLoop.status !== 'active') {
-          respond(conn, { ok: false, error: `Loop is ${lrLoop.status}, not active` });
-          break;
-        }
-        const lrResult = db.createLoopRequest(args.description, args.loop_id);
-        if (!lrResult.deduplicated) bridgeToHandoff(lrResult.id, args.description);
-        respond(conn, {
-          ok: true,
-          request_id: lrResult.id,
-          deduplicated: lrResult.deduplicated,
-          superseded_target: lrResult.superseded_target || null,
-        });
-        break;
-      }
+      case 'loop':
+      case 'stop-loop':
+      case 'loop-status':
+      case 'loop-checkpoint':
+      case 'loop-heartbeat':
+      case 'set-config':
+      case 'loop-prompt':
+      case 'loop-refresh-prompt':
+      case 'loop-set-prompt':
+      case 'loop-request':
       case 'loop-requests': {
-        const lrqLoop = db.getLoop(args.loop_id);
-        if (!lrqLoop) {
-          respond(conn, { ok: false, error: 'Loop not found' });
-          break;
-        }
-        const loopReqs = db.listLoopRequests(args.loop_id);
-        respond(conn, { ok: true, requests: loopReqs });
+        const result = loopCommands.handleLoopCommand(command, args, {
+          db,
+          handlers,
+          bridgeToHandoff,
+          getLoopSyncWithOriginConfig,
+          normalizeLoopRequestSetConfigValue,
+          parseBudgetStateConfig,
+          syncBudgetStateFromScalarFallback,
+          clampWorkerLimit,
+          constants: {
+            LOOP_SYNC_WITH_ORIGIN_KEY,
+            ROUTING_BUDGET_STATE_KEY,
+            ROUTING_BUDGET_REMAINING_KEY,
+            ROUTING_BUDGET_THRESHOLD_KEY,
+            LEGACY_BUDGET_REMAINING_KEY,
+            LEGACY_BUDGET_THRESHOLD_KEY,
+            ROUTING_BUDGET_SCALAR_LEGACY_KEY_MAP,
+            SPARK_MODEL_KEYS,
+          },
+        });
+        respond(conn, result);
         break;
       }
 
