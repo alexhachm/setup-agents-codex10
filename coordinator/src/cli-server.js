@@ -16,6 +16,7 @@ const mergeObservabilityCommands = require('./commands/merge-observability');
 const microvmCommands = require('./commands/microvm');
 const researchQueueCommands = require('./commands/research-queue');
 const sandboxCommands = require('./commands/sandbox');
+const workerLifecycleCommands = require('./commands/worker-lifecycle');
 const providerOutput = require('./provider-output');
 let modelRouter = null;
 try {
@@ -2523,103 +2524,21 @@ function handleCommand(cmd, conn, handlers) {
       }
 
       // === WORKER commands ===
-      case 'my-task': {
-        const worker = db.getWorker(args.worker_id);
-        if (!worker) {
-          respond(conn, { ok: false, error: 'Worker not found' });
-          break;
-        }
-        if (!worker.current_task_id) {
-          respond(conn, { ok: true, task: null });
-          break;
-        }
-        const task = db.getTask(worker.current_task_id);
-        respond(conn, {
-          ok: true,
-          task: task
-            ? {
-              ...task,
-              assignment_token: worker.launched_at || null,
-            }
-            : null,
-        });
-        break;
-      }
+      case 'my-task':
       case 'task-context':
-      case 'context-bundle': {
-        const projectDir = _projectDir || process.cwd();
-        const health = collectCoordinatorHealth(projectDir);
-        const bundle = contextBundle.buildTaskContextBundle({
-          taskId: args.task_id,
-          projectDir,
-          runtimeHealth: health,
-        });
-        respond(conn, { ok: true, bundle });
-        break;
-      }
-      case 'start-task': {
-        const { worker_id, task_id } = args;
-        const ownership = validateWorkerTaskOwnership('start-task', worker_id, task_id);
-        if (!ownership.ok) {
-          // Stale agents whose current_task assignment changed (e.g. after watchdog
-          // sentinel_reset) should be silently skipped — same pattern as the
-          // reset-worker stale-sentinel guards.
-          if (ownership.response.reason === 'worker_current_task_mismatch') {
-            respond(conn, { ok: true, skipped: true, reason: 'worker_current_task_mismatch' });
-          } else {
-            respond(conn, ownership.response);
-          }
-          break;
-        }
-        const { task } = ownership;
-
-        if (task.status === 'completed' || task.status === 'failed') {
-          respond(conn, { ok: false, error: 'task_not_startable' });
-          break;
-        }
-
-        if (task.status === 'in_progress') {
-          respond(conn, { ok: true, idempotent: true });
-          break;
-        }
-
-        if (task.status !== 'assigned') {
-          respond(conn, { ok: false, error: 'task_not_startable' });
-          break;
-        }
-
-        const now = new Date().toISOString();
-        db.updateTask(task_id, { status: 'in_progress', started_at: now });
-        db.updateWorker(worker_id, { status: 'busy', last_heartbeat: now });
-        reopenFailedRequestForActiveRemediation({
-          requestId: task.request_id,
-          taskId: task_id,
-          workerId: parseWorkerId(worker_id),
-          trigger: 'start-task',
-        });
-        db.log(`worker-${worker_id}`, 'task_started', { task_id });
-        respond(conn, { ok: true });
-        break;
-      }
+      case 'context-bundle':
+      case 'start-task':
       case 'heartbeat': {
-        const worker = db.getWorker(args.worker_id);
-        if (!worker) {
-          respond(conn, { ok: false, error: 'Worker not found' });
-          break;
-        }
-
-        const heartbeatTs = new Date().toISOString();
-        const updateResult = db.getDb().prepare(`
-          UPDATE workers
-          SET last_heartbeat = ?
-          WHERE id = ?
-        `).run(heartbeatTs, args.worker_id);
-        if (updateResult.changes !== 1) {
-          respond(conn, { ok: false, error: 'Worker not found' });
-          break;
-        }
-
-        respond(conn, { ok: true });
+        const result = workerLifecycleCommands.handleWorkerLifecycleCommand(command, args, {
+          db,
+          projectDir: _projectDir || process.cwd(),
+          contextBundle,
+          collectCoordinatorHealth,
+          validateWorkerTaskOwnership,
+          reopenFailedRequestForActiveRemediation,
+          parseWorkerId,
+        });
+        respond(conn, result);
         break;
       }
       case 'complete-task': {
@@ -3378,8 +3297,16 @@ function handleCommand(cmd, conn, handlers) {
         break;
       }
       case 'distill': {
-        db.log(`worker-${args.worker_id}`, 'distill', { domain: args.domain, content: args.content });
-        respond(conn, { ok: true });
+        const result = workerLifecycleCommands.handleWorkerLifecycleCommand(command, args, {
+          db,
+          projectDir: _projectDir || process.cwd(),
+          contextBundle,
+          collectCoordinatorHealth,
+          validateWorkerTaskOwnership,
+          reopenFailedRequestForActiveRemediation,
+          parseWorkerId,
+        });
+        respond(conn, result);
         break;
       }
 
