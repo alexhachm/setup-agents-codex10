@@ -1462,3 +1462,97 @@ describe('Request completion with extended task statuses', () => {
     assert.strictEqual(result.hard_failures, 1);
   });
 });
+
+describe('Task sandbox lifecycle state', () => {
+  it('creates one active sandbox per task with worker defaults', () => {
+    db.registerWorker(1, '/wt-1', 'agent-1');
+    const reqId = db.createRequest('Sandbox lifecycle');
+    const taskId = db.createTask({ request_id: reqId, subject: 'Sandboxed task', description: 'Use disposable sandbox' });
+    db.updateTask(taskId, { assigned_to: 1, branch: 'agent-1-task-1' });
+
+    const sandbox = db.createTaskSandbox({ task_id: taskId, backend: 'docker' });
+    assert.strictEqual(sandbox.task_id, taskId);
+    assert.strictEqual(sandbox.request_id, reqId);
+    assert.strictEqual(sandbox.worker_id, 1);
+    assert.strictEqual(sandbox.backend, 'docker');
+    assert.strictEqual(sandbox.status, 'allocated');
+    assert.strictEqual(sandbox.sandbox_name, `task-${taskId}-worker-1`);
+    assert.strictEqual(sandbox.worktree_path, '/wt-1');
+    assert.strictEqual(sandbox.branch, 'agent-1-task-1');
+    assert.strictEqual(db.getActiveTaskSandboxForTask(taskId).id, sandbox.id);
+    assert.throws(
+      () => db.createTaskSandbox({ task_id: taskId, backend: 'docker' }),
+      /active_task_sandbox_exists/
+    );
+  });
+
+  it('tracks allowed sandbox transitions and timestamps', () => {
+    const reqId = db.createRequest('Sandbox transitions');
+    const taskId = db.createTask({ request_id: reqId, subject: 'Sandboxed task', description: 'Use disposable sandbox' });
+    const sandbox = db.createTaskSandbox({ task_id: taskId, backend: 'pending', metadata: { reason: 'test' } });
+
+    const ready = db.transitionTaskSandbox(sandbox.id, 'ready', { backend: 'tmux' });
+    assert.strictEqual(ready.status, 'ready');
+    assert.strictEqual(ready.backend, 'tmux');
+
+    const running = db.transitionTaskSandbox(sandbox.id, 'running');
+    assert.strictEqual(running.status, 'running');
+    assert.ok(running.started_at);
+
+    const stopped = db.transitionTaskSandbox(sandbox.id, 'stopped', { error: 'worker exited' });
+    assert.strictEqual(stopped.status, 'stopped');
+    assert.strictEqual(stopped.error, 'worker exited');
+    assert.ok(stopped.stopped_at);
+
+    const cleaned = db.transitionTaskSandbox(sandbox.id, 'cleaned');
+    assert.strictEqual(cleaned.status, 'cleaned');
+    assert.ok(cleaned.cleaned_at);
+    assert.strictEqual(db.getActiveTaskSandboxForTask(taskId), undefined);
+  });
+
+  it('rejects invalid sandbox lifecycle transitions', () => {
+    const reqId = db.createRequest('Invalid sandbox transition');
+    const taskId = db.createTask({ request_id: reqId, subject: 'Sandboxed task', description: 'Use disposable sandbox' });
+    const sandbox = db.createTaskSandbox({ task_id: taskId });
+
+    assert.throws(
+      () => db.transitionTaskSandbox(sandbox.id, 'stopped'),
+      /invalid_task_sandbox_transition:allocated->stopped/
+    );
+  });
+
+  it('cleans only stale stopped or failed sandboxes', () => {
+    const reqId = db.createRequest('Sandbox cleanup');
+    const staleTaskId = db.createTask({ request_id: reqId, subject: 'Stale sandbox', description: 'Clean me' });
+    const freshTaskId = db.createTask({ request_id: reqId, subject: 'Fresh sandbox', description: 'Keep me' });
+    const runningTaskId = db.createTask({ request_id: reqId, subject: 'Running sandbox', description: 'Keep active' });
+
+    const stale = db.createTaskSandbox({ task_id: staleTaskId });
+    db.transitionTaskSandbox(stale.id, 'running');
+    db.transitionTaskSandbox(stale.id, 'stopped');
+    const fresh = db.createTaskSandbox({ task_id: freshTaskId });
+    db.transitionTaskSandbox(fresh.id, 'running');
+    db.transitionTaskSandbox(fresh.id, 'failed', { error: 'recent failure' });
+    const running = db.createTaskSandbox({ task_id: runningTaskId });
+    db.transitionTaskSandbox(running.id, 'running');
+
+    const oldTs = '2026-01-01T00:00:00.000Z';
+    db.getDb().prepare(`
+      UPDATE task_sandboxes
+      SET stopped_at = ?, updated_at = ?
+      WHERE id = ?
+    `).run(oldTs, oldTs, stale.id);
+
+    const dryRun = db.cleanupTaskSandboxes({ max_age_minutes: 60, dry_run: true });
+    assert.strictEqual(dryRun.cleaned_count, 0);
+    assert.deepStrictEqual(dryRun.ids, [stale.id]);
+    assert.strictEqual(db.getTaskSandbox(stale.id).status, 'stopped');
+
+    const cleaned = db.cleanupTaskSandboxes({ max_age_minutes: 60 });
+    assert.strictEqual(cleaned.cleaned_count, 1);
+    assert.deepStrictEqual(cleaned.ids, [stale.id]);
+    assert.strictEqual(db.getTaskSandbox(stale.id).status, 'cleaned');
+    assert.strictEqual(db.getTaskSandbox(fresh.id).status, 'failed');
+    assert.strictEqual(db.getTaskSandbox(running.id).status, 'running');
+  });
+});

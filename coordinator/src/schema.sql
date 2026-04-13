@@ -87,6 +87,30 @@ CREATE TABLE IF NOT EXISTS tasks (
   merge_history TEXT  -- JSON array of merge event records
 );
 
+-- Disposable per-task sandbox lifecycle records. One task can have historical
+-- sandbox attempts, but only one non-terminal sandbox should be active.
+CREATE TABLE IF NOT EXISTS task_sandboxes (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  task_id INTEGER NOT NULL REFERENCES tasks(id) ON DELETE CASCADE,
+  request_id TEXT REFERENCES requests(id),
+  worker_id INTEGER REFERENCES workers(id),
+  backend TEXT NOT NULL DEFAULT 'pending'
+    CHECK (backend IN ('pending','tmux','docker','sandbox','none')),
+  status TEXT NOT NULL DEFAULT 'allocated'
+    CHECK (status IN ('allocated','preparing','ready','running','stopped','failed','cleaned')),
+  sandbox_name TEXT,
+  sandbox_path TEXT,
+  worktree_path TEXT,
+  branch TEXT,
+  metadata TEXT,
+  error TEXT,
+  created_at TEXT NOT NULL DEFAULT (datetime('now')),
+  updated_at TEXT NOT NULL DEFAULT (datetime('now')),
+  started_at TEXT,
+  stopped_at TEXT,
+  cleaned_at TEXT
+);
+
 -- Browser research batching: intents, staged plans, and per-intent fan-out
 CREATE TABLE IF NOT EXISTS research_intents (
   id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -493,6 +517,11 @@ CREATE INDEX IF NOT EXISTS idx_tasks_status ON tasks(status);
 CREATE INDEX IF NOT EXISTS idx_tasks_request ON tasks(request_id);
 CREATE INDEX IF NOT EXISTS idx_tasks_assigned ON tasks(assigned_to);
 CREATE INDEX IF NOT EXISTS idx_tasks_request_status ON tasks(request_id, status);
+CREATE INDEX IF NOT EXISTS idx_task_sandboxes_task ON task_sandboxes(task_id, status);
+CREATE INDEX IF NOT EXISTS idx_task_sandboxes_worker ON task_sandboxes(worker_id, status) WHERE worker_id IS NOT NULL;
+CREATE UNIQUE INDEX IF NOT EXISTS idx_task_sandboxes_one_active_task
+  ON task_sandboxes(task_id)
+  WHERE status NOT IN ('failed','cleaned');
 CREATE INDEX IF NOT EXISTS idx_research_intents_status_score
   ON research_intents(status, priority_score DESC, created_at ASC, id ASC);
 CREATE INDEX IF NOT EXISTS idx_research_intents_active_dedupe

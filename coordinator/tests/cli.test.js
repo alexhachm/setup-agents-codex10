@@ -753,6 +753,94 @@ describe('CLI Server', () => {
     assert.strictEqual(db.getWorker(1).status, 'completed_task');
   });
 
+  it('should expose task sandbox lifecycle commands', async () => {
+    db.registerWorker(1, '/wt-1', 'agent-1');
+    const reqId = db.createRequest('Sandbox lifecycle command test');
+    const taskId = db.createTask({ request_id: reqId, subject: 'Sandboxed task', description: 'Track task sandbox state' });
+    db.updateTask(taskId, { status: 'assigned', assigned_to: 1, branch: 'agent-1-task-1' });
+
+    const created = await sendCommand('task-sandbox-create', {
+      task_id: taskId,
+      backend: 'docker',
+      metadata: { source: 'test' },
+    });
+    assert.strictEqual(created.ok, true);
+    assert.strictEqual(created.sandbox.task_id, taskId);
+    assert.strictEqual(created.sandbox.request_id, reqId);
+    assert.strictEqual(created.sandbox.worker_id, 1);
+    assert.strictEqual(created.sandbox.status, 'allocated');
+    assert.strictEqual(created.sandbox.backend, 'docker');
+    const sandboxId = created.sandbox.id;
+
+    const duplicate = await sendCommand('task-sandbox-create', {
+      task_id: taskId,
+      backend: 'docker',
+    });
+    assert.strictEqual(duplicate.ok, undefined);
+    assert.match(duplicate.error, /active_task_sandbox_exists/);
+
+    const ready = await sendCommand('task-sandbox-ready', {
+      id: sandboxId,
+      sandbox_path: '/tmp/task-sandbox',
+    });
+    assert.strictEqual(ready.ok, true);
+    assert.strictEqual(ready.sandbox.status, 'ready');
+    assert.strictEqual(ready.sandbox.sandbox_path, '/tmp/task-sandbox');
+
+    const running = await sendCommand('task-sandbox-start', { id: sandboxId });
+    assert.strictEqual(running.ok, true);
+    assert.strictEqual(running.sandbox.status, 'running');
+    assert.ok(running.sandbox.started_at);
+
+    const stopped = await sendCommand('task-sandbox-stop', { id: sandboxId, error: 'normal exit' });
+    assert.strictEqual(stopped.ok, true);
+    assert.strictEqual(stopped.sandbox.status, 'stopped');
+    assert.strictEqual(stopped.sandbox.error, 'normal exit');
+
+    const status = await sendCommand('task-sandbox-status', { task_id: taskId });
+    assert.strictEqual(status.ok, true);
+    assert.strictEqual(status.count, 1);
+    assert.strictEqual(status.sandboxes[0].id, sandboxId);
+
+    const cleaned = await sendCommand('task-sandbox-clean', { id: sandboxId });
+    assert.strictEqual(cleaned.ok, true);
+    assert.strictEqual(cleaned.sandbox.status, 'cleaned');
+    assert.ok(cleaned.sandbox.cleaned_at);
+  });
+
+  it('should expose dry-run capable task sandbox cleanup', async () => {
+    const reqId = db.createRequest('Sandbox cleanup command test');
+    const taskId = db.createTask({ request_id: reqId, subject: 'Sandbox cleanup', description: 'Clean stale sandbox' });
+    const sandbox = db.createTaskSandbox({ task_id: taskId });
+    db.transitionTaskSandbox(sandbox.id, 'running');
+    db.transitionTaskSandbox(sandbox.id, 'stopped');
+
+    const oldTs = '2026-01-01T00:00:00.000Z';
+    db.getDb().prepare(`
+      UPDATE task_sandboxes
+      SET stopped_at = ?, updated_at = ?
+      WHERE id = ?
+    `).run(oldTs, oldTs, sandbox.id);
+
+    const dryRun = await sendCommand('task-sandbox-cleanup', {
+      max_age_minutes: 60,
+      dry_run: true,
+    });
+    assert.strictEqual(dryRun.ok, true);
+    assert.strictEqual(dryRun.dry_run, true);
+    assert.strictEqual(dryRun.cleaned_count, 0);
+    assert.deepStrictEqual(dryRun.ids, [sandbox.id]);
+    assert.strictEqual(db.getTaskSandbox(sandbox.id).status, 'stopped');
+
+    const cleanup = await sendCommand('task-sandbox-cleanup', {
+      max_age_minutes: 60,
+    });
+    assert.strictEqual(cleanup.ok, true);
+    assert.strictEqual(cleanup.cleaned_count, 1);
+    assert.deepStrictEqual(cleanup.ids, [sandbox.id]);
+    assert.strictEqual(db.getTaskSandbox(sandbox.id).status, 'cleaned');
+  });
+
   it('should create worker worktree without copying runtime provider state', async () => {
     runGit(['init', '--initial-branch=main']);
     runGit(['config', 'user.email', 'add-worker@example.com']);
@@ -3476,6 +3564,40 @@ describe('CLI Server', () => {
     assert.ok(withMergeRecoveryEvents[0].details.merge_queue_entries >= 1);
   });
 
+  it('should allocate a task sandbox during assign-task and pass it to the spawn handler', async () => {
+    db.registerWorker(1, '/wt-1', 'agent-1');
+    const taskId = createReadyTask({
+      subject: 'Sandbox assignment lifecycle',
+      description: 'Assign with lifecycle state',
+      tier: 2,
+    });
+    let handlerSandbox = null;
+
+    cliServer.stop();
+    server = cliServer.start(tmpDir, {
+      onTaskCompleted: () => {},
+      onLoopCreated: (loopId, prompt) => {
+        loopCreatedEvents.push({ loopId, prompt });
+      },
+      onAssignTask: (_task, _worker, _routingDecision, taskSandbox) => {
+        handlerSandbox = taskSandbox;
+        db.transitionTaskSandbox(taskSandbox.id, 'running', { backend: 'tmux' });
+      },
+    });
+    await waitForCliServerReady();
+
+    const assignment = await sendCommand('assign-task', { task_id: taskId, worker_id: 1 });
+    assert.strictEqual(assignment.ok, true);
+    assert.ok(assignment.task_sandbox_id);
+    assert.strictEqual(handlerSandbox.id, assignment.task_sandbox_id);
+
+    const sandbox = db.getTaskSandbox(assignment.task_sandbox_id);
+    assert.strictEqual(sandbox.task_id, taskId);
+    assert.strictEqual(sandbox.worker_id, 1);
+    assert.strictEqual(sandbox.backend, 'tmux');
+    assert.strictEqual(sandbox.status, 'running');
+  });
+
   it('should default npm_config_if_present during server start when unset', async () => {
     const env = process.env;
     const hadKey = Object.prototype.hasOwnProperty.call(env, 'npm_config_if_present');
@@ -3574,6 +3696,11 @@ describe('CLI Server', () => {
     assert.ok(worker);
     assert.strictEqual(worker.status, 'idle');
     assert.strictEqual(worker.current_task_id, null);
+
+    const sandboxes = db.listTaskSandboxes({ task_id: taskId });
+    assert.strictEqual(sandboxes.length, 1);
+    assert.strictEqual(sandboxes[0].status, 'failed');
+    assert.match(sandboxes[0].error, /spawn failed for rollback regression/);
   });
 
   it('should preserve claim metadata and return worker_claimed on assign-task rollback path', async () => {

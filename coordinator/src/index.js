@@ -157,25 +157,63 @@ function shouldUseSandbox() {
   return true;
 }
 
+function markTaskSandboxRunning(taskSandbox, backendName, fields = {}) {
+  if (!taskSandbox || !taskSandbox.id) return;
+  try {
+    db.transitionTaskSandbox(taskSandbox.id, 'running', {
+      backend: backendName,
+      ...fields,
+    });
+  } catch (e) {
+    db.log('coordinator', 'task_sandbox_running_mark_error', {
+      sandbox_id: taskSandbox.id,
+      backend: backendName,
+      error: e.message,
+    });
+  }
+}
+
+function markTaskSandboxFailed(taskSandbox, error) {
+  if (!taskSandbox || !taskSandbox.id) return;
+  try {
+    db.transitionTaskSandbox(taskSandbox.id, 'failed', {
+      error: error && error.message ? error.message : String(error || 'worker spawn failed'),
+    });
+  } catch (e) {
+    db.log('coordinator', 'task_sandbox_failed_mark_error', {
+      sandbox_id: taskSandbox.id,
+      error: e.message,
+    });
+  }
+}
+
 // Tmux/default backend fallback — used when both msb and Docker are unavailable or fail.
-function spawnTmuxFallback(worker, windowName, cmd, worktreePath) {
-  if (!backend.isAvailable()) return;
+function spawnTmuxFallback(worker, windowName, cmd, worktreePath, taskSandbox = null) {
+  if (!backend.isAvailable()) return false;
   try {
     backend.killWorker(windowName);
     backend.createWorker(windowName, cmd, worktreePath, { MAC10_NAMESPACE: namespace });
   } catch (e) {
     db.log('coordinator', 'backend_spawn_error', { worker_id: worker.id, backend: backend.name, error: e.message });
+    markTaskSandboxFailed(taskSandbox, e);
+    return false;
   }
   db.updateWorker(worker.id, { backend: backend.name });
   if (backend.name === 'tmux') {
     db.updateWorker(worker.id, { tmux_session: tmux.SESSION, tmux_window: windowName });
   }
+  markTaskSandboxRunning(taskSandbox, backend.name, {
+    sandbox_name: windowName,
+    worktree_path: worktreePath,
+    branch: worker.branch || null,
+  });
+  return true;
 }
 
 // Start CLI server (Unix socket for mac10 commands)
 const handlers = {
   onTaskCompleted: (taskId) => merger.onTaskCompleted(taskId),
-  onAssignTask: (task, worker) => {
+  onAssignTask: (task, worker, _routingDecision, taskSandbox = null) => {
     const worktreePath = worker.worktree_path || path.join(projectDir, '.worktrees', `wt-${worker.id}`);
 
     // Symlink knowledge files from main project into worktree (no stale copies)
@@ -244,6 +282,11 @@ const handlers = {
         msbBackend.killWorker(windowName);
         msbBackend.createWorker(windowName, cmd, worktreePath, { MAC10_NAMESPACE: namespace });
         db.updateWorker(worker.id, { backend: 'sandbox' });
+        markTaskSandboxRunning(taskSandbox, 'sandbox', {
+          sandbox_name: windowName,
+          worktree_path: worktreePath,
+          branch: worker.branch || task.branch || null,
+        });
         db.log('coordinator', 'worker_spawned_msb', { worker_id: worker.id, task_id: task.id });
       } catch (e) {
         // msb failed — try Docker, then tmux
@@ -255,13 +298,18 @@ const handlers = {
             dockerBackend.killWorker(windowName);
             dockerBackend.createWorker(windowName, cmd, worktreePath, { MAC10_NAMESPACE: namespace });
             db.updateWorker(worker.id, { backend: 'docker' });
+            markTaskSandboxRunning(taskSandbox, 'docker', {
+              sandbox_name: windowName,
+              worktree_path: worktreePath,
+              branch: worker.branch || task.branch || null,
+            });
             db.log('coordinator', 'worker_spawned_docker_fallback', { worker_id: worker.id, task_id: task.id });
           } catch (e2) {
             db.log('coordinator', 'docker_spawn_failed_fallback', { worker_id: worker.id, error: e2.message });
-            spawnTmuxFallback(worker, windowName, cmd, worktreePath);
+            spawnTmuxFallback(worker, windowName, cmd, worktreePath, taskSandbox);
           }
         } else {
-          spawnTmuxFallback(worker, windowName, cmd, worktreePath);
+          spawnTmuxFallback(worker, windowName, cmd, worktreePath, taskSandbox);
         }
       }
     } else if (useDocker) {
@@ -271,13 +319,18 @@ const handlers = {
         dockerBackend.killWorker(windowName);
         dockerBackend.createWorker(windowName, cmd, worktreePath, { MAC10_NAMESPACE: namespace });
         db.updateWorker(worker.id, { backend: 'docker' });
+        markTaskSandboxRunning(taskSandbox, 'docker', {
+          sandbox_name: windowName,
+          worktree_path: worktreePath,
+          branch: worker.branch || task.branch || null,
+        });
         db.log('coordinator', 'worker_spawned_docker', { worker_id: worker.id, task_id: task.id });
       } catch (e) {
         db.log('coordinator', 'docker_spawn_failed_fallback', { worker_id: worker.id, error: e.message });
-        spawnTmuxFallback(worker, windowName, cmd, worktreePath);
+        spawnTmuxFallback(worker, windowName, cmd, worktreePath, taskSandbox);
       }
     } else if (backend.isAvailable()) {
-      spawnTmuxFallback(worker, windowName, cmd, worktreePath);
+      spawnTmuxFallback(worker, windowName, cmd, worktreePath, taskSandbox);
     } else {
       // Native Windows: spawn via launch-worker.sh (opens Windows Terminal tab)
       const launchScript = path.join(projectDir, '.claude', 'scripts', 'launch-worker.sh');
@@ -286,7 +339,15 @@ const handlers = {
         cwd: projectDir,
         env: { ...process.env, MAC10_NAMESPACE: namespace },
       }, (err) => {
-        if (err) db.log('coordinator', 'launch_worker_error', { worker_id: worker.id, error: err.message });
+        if (err) {
+          db.log('coordinator', 'launch_worker_error', { worker_id: worker.id, error: err.message });
+          markTaskSandboxFailed(taskSandbox, err);
+        }
+      });
+      markTaskSandboxRunning(taskSandbox, 'none', {
+        sandbox_name: windowName,
+        worktree_path: worktreePath,
+        branch: worker.branch || task.branch || null,
       });
     }
     db.log('coordinator', 'worker_spawned', { worker_id: worker.id, window: windowName });

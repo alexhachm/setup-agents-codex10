@@ -449,6 +449,11 @@ const VALID_COLUMNS = Object.freeze({
     'started_at', 'completed_at', 'result', 'blocking',
   ]),
   workers: new Set(['status', 'domain', 'worktree_path', 'branch', 'tmux_session', 'tmux_window', 'pid', 'current_task_id', 'claimed_by', 'claimed_at', 'last_heartbeat', 'launched_at', 'tasks_completed', 'backend']),
+  task_sandboxes: new Set([
+    'task_id', 'request_id', 'worker_id', 'backend', 'status', 'sandbox_name',
+    'sandbox_path', 'worktree_path', 'branch', 'metadata', 'error',
+    'started_at', 'stopped_at', 'cleaned_at',
+  ]),
   merge_queue: new Set([
     'status', 'priority', 'completion_checkpoint', 'merged_at', 'error',
     'head_sha', 'worker_id', 'failure_class', 'retry_count', 'fingerprint', 'last_fingerprint_at',
@@ -687,6 +692,54 @@ function ensureTaskMergeHistoryColumn(database) {
   if (!taskCols.includes('merge_history')) {
     database.exec("ALTER TABLE tasks ADD COLUMN merge_history TEXT");
   }
+}
+
+const TASK_SANDBOX_STATUSES = new Set([
+  'allocated', 'preparing', 'ready', 'running', 'stopped', 'failed', 'cleaned',
+]);
+const TASK_SANDBOX_BACKENDS = new Set(['pending', 'tmux', 'docker', 'sandbox', 'none']);
+const TASK_SANDBOX_ALLOWED_TRANSITIONS = Object.freeze({
+  allocated: new Set(['preparing', 'ready', 'running', 'failed', 'cleaned']),
+  preparing: new Set(['ready', 'running', 'failed', 'cleaned']),
+  ready: new Set(['running', 'stopped', 'failed', 'cleaned']),
+  running: new Set(['stopped', 'failed', 'cleaned']),
+  stopped: new Set(['cleaned']),
+  failed: new Set(['cleaned']),
+  cleaned: new Set(),
+});
+
+function ensureTaskSandboxLifecycleSchema(database) {
+  database.exec(`
+    CREATE TABLE IF NOT EXISTS task_sandboxes (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      task_id INTEGER NOT NULL REFERENCES tasks(id) ON DELETE CASCADE,
+      request_id TEXT REFERENCES requests(id),
+      worker_id INTEGER REFERENCES workers(id),
+      backend TEXT NOT NULL DEFAULT 'pending'
+        CHECK (backend IN ('pending','tmux','docker','sandbox','none')),
+      status TEXT NOT NULL DEFAULT 'allocated'
+        CHECK (status IN ('allocated','preparing','ready','running','stopped','failed','cleaned')),
+      sandbox_name TEXT,
+      sandbox_path TEXT,
+      worktree_path TEXT,
+      branch TEXT,
+      metadata TEXT,
+      error TEXT,
+      created_at TEXT NOT NULL DEFAULT (datetime('now')),
+      updated_at TEXT NOT NULL DEFAULT (datetime('now')),
+      started_at TEXT,
+      stopped_at TEXT,
+      cleaned_at TEXT
+    );
+
+    CREATE INDEX IF NOT EXISTS idx_task_sandboxes_task
+      ON task_sandboxes(task_id, status);
+    CREATE INDEX IF NOT EXISTS idx_task_sandboxes_worker
+      ON task_sandboxes(worker_id, status) WHERE worker_id IS NOT NULL;
+    CREATE UNIQUE INDEX IF NOT EXISTS idx_task_sandboxes_one_active_task
+      ON task_sandboxes(task_id)
+      WHERE status NOT IN ('failed','cleaned');
+  `);
 }
 
 function ensureResearchBatchingSchema(database) {
@@ -1081,6 +1134,7 @@ function init(projectDir) {
   ensureTaskBrowserOffloadColumns(db);
   ensureTaskUsageTelemetryColumns(db);
   ensureTaskMergeHistoryColumn(db);
+  ensureTaskSandboxLifecycleSchema(db);
   ensureResearchBatchingSchema(db);
   ensureProjectMemoryPersistenceSchema(db);
   ensureBrowserOffloadPersistenceSchema(db);
@@ -1197,6 +1251,233 @@ function updateTask(id, fields) {
   sets.push("updated_at = datetime('now')");
   vals.push(id);
   getDb().prepare(`UPDATE tasks SET ${sets.join(', ')} WHERE id = ?`).run(...vals);
+}
+
+function normalizeTaskSandboxBackend(value) {
+  const backend = String(value || 'pending').trim().toLowerCase() || 'pending';
+  if (!TASK_SANDBOX_BACKENDS.has(backend)) {
+    throw new Error(`Invalid task sandbox backend: ${backend}`);
+  }
+  return backend;
+}
+
+function normalizeTaskSandboxStatus(value) {
+  const status = String(value || '').trim().toLowerCase();
+  if (!TASK_SANDBOX_STATUSES.has(status)) {
+    throw new Error(`Invalid task sandbox status: ${status}`);
+  }
+  return status;
+}
+
+function normalizeTaskSandboxMetadata(value) {
+  if (value === undefined || value === null) return null;
+  if (typeof value === 'string') return value;
+  return JSON.stringify(value);
+}
+
+function defaultTaskSandboxName(taskId, workerId) {
+  return workerId ? `task-${taskId}-worker-${workerId}` : `task-${taskId}`;
+}
+
+function getTaskSandbox(id) {
+  return getDb().prepare('SELECT * FROM task_sandboxes WHERE id = ?').get(id);
+}
+
+function getActiveTaskSandboxForTask(taskId) {
+  return getDb().prepare(`
+    SELECT *
+    FROM task_sandboxes
+    WHERE task_id = ?
+      AND status NOT IN ('failed','cleaned')
+    ORDER BY id DESC
+    LIMIT 1
+  `).get(taskId);
+}
+
+function createTaskSandbox({
+  task_id,
+  worker_id = null,
+  backend = 'pending',
+  sandbox_name = null,
+  sandbox_path = null,
+  worktree_path = null,
+  branch = null,
+  metadata = null,
+} = {}) {
+  const taskId = Number.parseInt(task_id, 10);
+  if (!Number.isInteger(taskId) || taskId <= 0) throw new Error('Invalid task_id');
+  const task = getTask(taskId);
+  if (!task) throw new Error('Task not found');
+
+  const existing = getActiveTaskSandboxForTask(taskId);
+  if (existing) throw new Error(`active_task_sandbox_exists:${existing.id}`);
+
+  const parsedWorkerId = worker_id === null || worker_id === undefined
+    ? (task.assigned_to || null)
+    : Number.parseInt(worker_id, 10);
+  if (parsedWorkerId !== null && (!Number.isInteger(parsedWorkerId) || parsedWorkerId <= 0)) {
+    throw new Error('Invalid worker_id');
+  }
+  const worker = parsedWorkerId ? getWorker(parsedWorkerId) : null;
+  if (parsedWorkerId && !worker) throw new Error('Worker not found');
+
+  const effectiveBackend = normalizeTaskSandboxBackend(backend);
+  const effectiveName = sandbox_name || defaultTaskSandboxName(taskId, parsedWorkerId);
+  const result = getDb().prepare(`
+    INSERT INTO task_sandboxes (
+      task_id, request_id, worker_id, backend, status, sandbox_name,
+      sandbox_path, worktree_path, branch, metadata
+    )
+    VALUES (?, ?, ?, ?, 'allocated', ?, ?, ?, ?, ?)
+  `).run(
+    taskId,
+    task.request_id,
+    parsedWorkerId,
+    effectiveBackend,
+    effectiveName,
+    sandbox_path || null,
+    worktree_path || (worker && worker.worktree_path) || null,
+    branch || task.branch || (worker && worker.branch) || null,
+    normalizeTaskSandboxMetadata(metadata)
+  );
+  const sandbox = getTaskSandbox(result.lastInsertRowid);
+  log('coordinator', 'task_sandbox_created', {
+    sandbox_id: sandbox.id,
+    task_id: taskId,
+    worker_id: parsedWorkerId,
+    backend: effectiveBackend,
+    sandbox_name: effectiveName,
+  });
+  return sandbox;
+}
+
+function updateTaskSandbox(id, fields) {
+  validateColumns('task_sandboxes', fields);
+  const sandboxId = Number.parseInt(id, 10);
+  if (!Number.isInteger(sandboxId) || sandboxId <= 0) throw new Error('Invalid sandbox id');
+  if (Object.keys(fields).length === 0) return getTaskSandbox(sandboxId);
+  const normalizedFields = { ...fields };
+  if (Object.prototype.hasOwnProperty.call(normalizedFields, 'backend')) {
+    normalizedFields.backend = normalizeTaskSandboxBackend(normalizedFields.backend);
+  }
+  if (Object.prototype.hasOwnProperty.call(normalizedFields, 'status')) {
+    normalizedFields.status = normalizeTaskSandboxStatus(normalizedFields.status);
+  }
+  if (Object.prototype.hasOwnProperty.call(normalizedFields, 'metadata')) {
+    normalizedFields.metadata = normalizeTaskSandboxMetadata(normalizedFields.metadata);
+  }
+
+  const sets = [];
+  const vals = [];
+  for (const [k, v] of Object.entries(normalizedFields)) {
+    sets.push(`${k} = ?`);
+    vals.push(v);
+  }
+  sets.push("updated_at = datetime('now')");
+  vals.push(sandboxId);
+  const result = getDb().prepare(`UPDATE task_sandboxes SET ${sets.join(', ')} WHERE id = ?`).run(...vals);
+  if (result.changes !== 1) throw new Error('Task sandbox not found');
+  return getTaskSandbox(sandboxId);
+}
+
+function transitionTaskSandbox(id, status, fields = {}) {
+  const sandbox = getTaskSandbox(id);
+  if (!sandbox) throw new Error('Task sandbox not found');
+  const nextStatus = normalizeTaskSandboxStatus(status);
+  if (sandbox.status !== nextStatus) {
+    const allowed = TASK_SANDBOX_ALLOWED_TRANSITIONS[sandbox.status] || new Set();
+    if (!allowed.has(nextStatus)) {
+      throw new Error(`invalid_task_sandbox_transition:${sandbox.status}->${nextStatus}`);
+    }
+  }
+
+  const now = new Date().toISOString();
+  const updateFields = { ...fields, status: nextStatus };
+  if (nextStatus === 'running' && !sandbox.started_at && !updateFields.started_at) {
+    updateFields.started_at = now;
+  }
+  if ((nextStatus === 'stopped' || nextStatus === 'failed') && !sandbox.stopped_at && !updateFields.stopped_at) {
+    updateFields.stopped_at = now;
+  }
+  if (nextStatus === 'cleaned' && !sandbox.cleaned_at && !updateFields.cleaned_at) {
+    updateFields.cleaned_at = now;
+  }
+  const updated = updateTaskSandbox(id, updateFields);
+  log('coordinator', 'task_sandbox_transitioned', {
+    sandbox_id: updated.id,
+    task_id: updated.task_id,
+    from_status: sandbox.status,
+    to_status: nextStatus,
+  });
+  return updated;
+}
+
+function listTaskSandboxes(filters = {}) {
+  let sql = 'SELECT * FROM task_sandboxes WHERE 1=1';
+  const vals = [];
+  if (filters.id !== undefined && filters.id !== null) {
+    sql += ' AND id = ?';
+    vals.push(filters.id);
+  }
+  if (filters.task_id !== undefined && filters.task_id !== null) {
+    sql += ' AND task_id = ?';
+    vals.push(filters.task_id);
+  }
+  if (filters.worker_id !== undefined && filters.worker_id !== null) {
+    sql += ' AND worker_id = ?';
+    vals.push(filters.worker_id);
+  }
+  if (filters.status) {
+    sql += ' AND status = ?';
+    vals.push(filters.status);
+  }
+  sql += ' ORDER BY id ASC';
+  return getDb().prepare(sql).all(...vals);
+}
+
+function cleanupTaskSandboxes({ max_age_minutes = 60, dry_run = false } = {}) {
+  const parsedAge = Number.parseInt(max_age_minutes, 10);
+  const ageMinutes = Number.isInteger(parsedAge) && parsedAge >= 0 ? parsedAge : 60;
+  const cutoff = new Date(Date.now() - ageMinutes * 60 * 1000).toISOString();
+  const candidates = getDb().prepare(`
+    SELECT *
+    FROM task_sandboxes
+    WHERE status IN ('stopped','failed')
+      AND datetime(COALESCE(stopped_at, updated_at, created_at)) <= datetime(?)
+    ORDER BY id ASC
+  `).all(cutoff);
+  if (dry_run || candidates.length === 0) {
+    return {
+      dry_run: dry_run === true,
+      cleaned_count: 0,
+      candidate_count: candidates.length,
+      ids: candidates.map((sandbox) => sandbox.id),
+      candidates,
+    };
+  }
+
+  const now = new Date().toISOString();
+  const ids = candidates.map((sandbox) => sandbox.id);
+  const placeholders = buildSqlInClause(ids);
+  getDb().prepare(`
+    UPDATE task_sandboxes
+    SET status = 'cleaned',
+        cleaned_at = ?,
+        updated_at = datetime('now')
+    WHERE id IN (${placeholders})
+  `).run(now, ...ids);
+  log('coordinator', 'task_sandbox_cleanup', {
+    cleaned_count: ids.length,
+    ids,
+    max_age_minutes: ageMinutes,
+  });
+  return {
+    dry_run: false,
+    cleaned_count: ids.length,
+    candidate_count: ids.length,
+    ids,
+    candidates: ids.map((id) => getTaskSandbox(id)),
+  };
 }
 
 function appendTaskMergeHistory(taskId, entry) {
@@ -4753,6 +5034,8 @@ module.exports = {
   coordinatorAgeMs,
   createRequest, getRequest, updateRequest, listRequests,
   createTask, getTask, updateTask, transitionTaskBrowserOffload, appendTaskMergeHistory, getRequestMergeHistory,
+  createTaskSandbox, getTaskSandbox, getActiveTaskSandboxForTask,
+  updateTaskSandbox, transitionTaskSandbox, listTaskSandboxes, cleanupTaskSandboxes,
   createProjectMemorySnapshot,
   getProjectMemorySnapshot,
   getLatestProjectMemorySnapshot,

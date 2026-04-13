@@ -1973,6 +1973,82 @@ async function main() {
         break;
       }
 
+      // TASK SANDBOX LIFECYCLE
+      case 'task-sandbox-create': {
+        if (!argv[1]) {
+          console.error('Usage: mac10 task-sandbox-create <task_id> [backend]');
+          process.exit(1);
+        }
+        result = await send(socketPath, 'task-sandbox-create', {
+          task_id: parseInt(argv[1], 10),
+          backend: argv[2] || undefined,
+        });
+        if (result.ok) console.log(JSON.stringify(result, null, 2));
+        else { console.error(result.error); process.exit(1); }
+        break;
+      }
+
+      case 'task-sandbox-status': {
+        result = await send(socketPath, 'task-sandbox-status', {
+          task_id: argv[1] ? parseInt(argv[1], 10) : undefined,
+        });
+        if (result.ok) console.log(JSON.stringify(result, null, 2));
+        else { console.error(result.error); process.exit(1); }
+        break;
+      }
+
+      case 'task-sandbox-ready':
+      case 'task-sandbox-start':
+      case 'task-sandbox-clean': {
+        if (!argv[1]) {
+          console.error(`Usage: mac10 ${cmd} <sandbox_id>`);
+          process.exit(1);
+        }
+        result = await send(socketPath, cmd, { id: parseInt(argv[1], 10) });
+        if (result.ok) console.log(JSON.stringify(result, null, 2));
+        else { console.error(result.error); process.exit(1); }
+        break;
+      }
+
+      case 'task-sandbox-stop': {
+        if (!argv[1]) {
+          console.error('Usage: mac10 task-sandbox-stop <sandbox_id> [error]');
+          process.exit(1);
+        }
+        result = await send(socketPath, 'task-sandbox-stop', {
+          id: parseInt(argv[1], 10),
+          error: argv.slice(2).join(' ') || undefined,
+        });
+        if (result.ok) console.log(JSON.stringify(result, null, 2));
+        else { console.error(result.error); process.exit(1); }
+        break;
+      }
+
+      case 'task-sandbox-fail': {
+        if (argv.length < 3) {
+          console.error('Usage: mac10 task-sandbox-fail <sandbox_id> <error>');
+          process.exit(1);
+        }
+        result = await send(socketPath, 'task-sandbox-fail', {
+          id: parseInt(argv[1], 10),
+          error: argv.slice(2).join(' '),
+        });
+        if (result.ok) console.log(JSON.stringify(result, null, 2));
+        else { console.error(result.error); process.exit(1); }
+        break;
+      }
+
+      case 'task-sandbox-cleanup': {
+        const cleanupArgs = {
+          max_age_minutes: argv[1] ? parseInt(argv[1], 10) : undefined,
+          dry_run: argv.includes('--dry-run'),
+        };
+        result = await send(socketPath, 'task-sandbox-cleanup', cleanupArgs);
+        if (result.ok) console.log(JSON.stringify(result, null, 2));
+        else { console.error(result.error); process.exit(1); }
+        break;
+      }
+
       // SANDBOX
       case 'sandbox-status':
         result = await send(socketPath, 'sandbox-status', {});
@@ -2240,6 +2316,16 @@ CHANGES:
   list-changes [domain]          List all changes (optionally filter by domain)
 
 SANDBOX (Docker):
+  task-sandbox-create <task_id> [backend]
+                                 Allocate lifecycle state for a disposable task sandbox
+  task-sandbox-status [task_id]  List task sandbox lifecycle records
+  task-sandbox-ready <id>        Mark task sandbox ready
+  task-sandbox-start <id>        Mark task sandbox running
+  task-sandbox-stop <id> [err]   Mark task sandbox stopped
+  task-sandbox-fail <id> <err>   Mark task sandbox failed
+  task-sandbox-clean <id>        Mark task sandbox cleaned
+  task-sandbox-cleanup [min] [--dry-run]
+                                 Clean stopped/failed task sandboxes older than min
   sandbox-status                 Show Docker availability and containers
   sandbox-build                  Build (or rebuild) the sandbox Docker image
   sandbox-cleanup                Stop all Docker sandbox containers

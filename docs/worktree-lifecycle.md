@@ -24,7 +24,8 @@ Purpose: separate durable source worktrees from disposable runtime sandboxes so 
 - A live E2E directory may be deleted only when its run ID is documented as disposable and no checklist, report, or regression fixture references it.
 - `git worktree prune --dry-run --verbose` is required before any prune. If the dry run reports no prunable paths, no prune command should be run.
 - Worker homes under `.worktrees/wt-<id>/` are not task sandboxes. They are durable launch homes and may be dirty from old runs; cleanup must not assume they are disposable.
-- Disposable task sandboxes must have their own lifecycle metadata before deletion is automated: task ID, request ID, source branch, created timestamp, completion status, retention reason, and cleanup decision.
+- Disposable task sandboxes have coordinator-owned lifecycle metadata in `task_sandboxes`: task ID, request ID, worker ID, backend, status, sandbox name/path, worker home path, branch, timestamps, metadata, and error.
+- Cleanup automation is limited to `task-sandbox-cleanup`: it supports `--dry-run`, age-gates candidates, and only marks stopped/failed task sandboxes as cleaned. It does not delete root worker homes or live-E2E directories.
 
 ## Live Audit Findings - 2026-04-13
 
@@ -40,9 +41,9 @@ Purpose: separate durable source worktrees from disposable runtime sandboxes so 
 - If multiple tasks are routed to the same worker, the coordinator decides whether the worker receives a fresh task sandbox or a reused sandbox with explicit carried context.
 - Reuse is allowed only when the coordinator marks the previous task context as relevant and non-conflicting.
 - Completed, superseded, or failed task sandboxes are archived or removed by an explicit coordinator-owned lifecycle command, not by worker improvisation.
+- Assignment now allocates a `task_sandboxes` row and passes it to the worker spawn path. The spawn path records the effective backend (`sandbox`, `docker`, `tmux`, or `none`) and marks spawn rollback as failed.
 
 ## Deferred Implementation Details
 
-- Exact sandbox naming and retention policy.
 - How much previous task state may be served back to a worker when the same worker receives related work.
-- Whether cleanup runs through watchdog, an explicit `mac10` maintenance command, startup preflight, or a combination of those.
+- Whether cleanup runs through watchdog/startup preflight in addition to the explicit `mac10 task-sandbox-cleanup` maintenance command.

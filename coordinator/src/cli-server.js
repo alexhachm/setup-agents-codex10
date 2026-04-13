@@ -610,6 +610,47 @@ const COMMAND_SCHEMAS = {
   'worker-status':     { required: [], types: {} },
   'check-completion':  { required: ['request_id'], types: { request_id: 'string' } },
   'replan-dependency': { required: ['from_task_id', 'to_task_id'], types: { from_task_id: 'number', to_task_id: 'number', request_id: 'string' } },
+  'task-sandbox-create': {
+    required: ['task_id'],
+    types: {
+      task_id: 'number',
+      worker_id: 'number',
+      backend: 'string',
+      sandbox_name: 'string',
+      sandbox_path: 'string',
+      worktree_path: 'string',
+      branch: 'string',
+      metadata: 'object',
+    },
+  },
+  'task-sandbox-status': {
+    required: [],
+    types: { id: 'number', task_id: 'number', worker_id: 'number', status: 'string' },
+  },
+  'task-sandbox-ready': {
+    required: ['id'],
+    types: { id: 'number', backend: 'string', sandbox_name: 'string', sandbox_path: 'string', worktree_path: 'string', branch: 'string', metadata: 'object' },
+  },
+  'task-sandbox-start': {
+    required: ['id'],
+    types: { id: 'number', backend: 'string', sandbox_name: 'string', sandbox_path: 'string', worktree_path: 'string', branch: 'string', metadata: 'object' },
+  },
+  'task-sandbox-stop': {
+    required: ['id'],
+    types: { id: 'number', error: 'string', metadata: 'object' },
+  },
+  'task-sandbox-fail': {
+    required: ['id', 'error'],
+    types: { id: 'number', error: 'string', metadata: 'object' },
+  },
+  'task-sandbox-clean': {
+    required: ['id'],
+    types: { id: 'number', metadata: 'object' },
+  },
+  'task-sandbox-cleanup': {
+    required: [],
+    types: { max_age_minutes: 'number', dry_run: 'boolean' },
+  },
   'register-worker':   { required: ['worker_id'], types: { worker_id: 'string', worktree_path: 'string', branch: 'string' } },
   'repair':            { required: [], types: {} },
   'purge-tasks':       { required: [], types: { status: 'string' } },
@@ -1607,6 +1648,16 @@ function resolveQueuePrTarget(prUrl, branch, cwd = _projectDir || process.cwd(),
     source: 'unresolved',
     resolvable: false,
   };
+}
+
+function extractTaskSandboxFields(args, keys = [
+  'backend', 'sandbox_name', 'sandbox_path', 'worktree_path', 'branch', 'metadata', 'error',
+]) {
+  const fields = {};
+  for (const key of keys) {
+    if (args[key] !== undefined) fields[key] = args[key];
+  }
+  return fields;
 }
 
 function parseWorkerId(rawWorkerId) {
@@ -3373,12 +3424,61 @@ function handleCommand(cmd, conn, handlers) {
           routing_reason: routingReason,
           routing_precedence: routingDecision.routing_precedence || [],
         };
+        let taskSandbox = null;
+        try {
+          taskSandbox = db.createTaskSandbox({
+            task_id: assignTaskId,
+            worker_id: assignWorkerId,
+            backend: 'pending',
+            metadata: {
+              source: 'assign-task',
+              routing_class: routingDecision.routing_class || null,
+              model: routingDecision.model || null,
+              model_source: modelSource,
+            },
+          });
+        } catch (sandboxErr) {
+          db.getDb().transaction(() => {
+            db.updateTask(assignTaskId, {
+              status: assignResult.task.status,
+              assigned_to: assignResult.task.assigned_to,
+              routing_class: assignResult.task.routing_class ?? null,
+              routed_model: assignResult.task.routed_model ?? null,
+              model_source: assignResult.task.model_source ?? null,
+              reasoning_effort: assignResult.task.reasoning_effort ?? null,
+            });
+            db.updateWorker(assignWorkerId, {
+              status: assignResult.worker.status,
+              current_task_id: assignResult.worker.current_task_id,
+              domain: assignResult.worker.domain,
+              claimed_by: assignResult.worker.claimed_by,
+              claimed_at: assignResult.worker.claimed_at,
+              launched_at: assignResult.worker.launched_at,
+            });
+          })();
+          db.log('coordinator', 'task_sandbox_allocation_failed', {
+            task_id: assignTaskId,
+            worker_id: assignWorkerId,
+            error: sandboxErr.message,
+          });
+          respond(conn, { ok: false, error: `Failed to allocate task sandbox: ${sandboxErr.message}` });
+          break;
+        }
 
         // Trigger tmux spawn via handler — revert assignment on failure
         if (handlers.onAssignTask) {
           try {
-            handlers.onAssignTask(assignedTask, assignedWorker, routingDecision);
+            handlers.onAssignTask(assignedTask, assignedWorker, routingDecision, taskSandbox);
           } catch (spawnErr) {
+            try {
+              db.transitionTaskSandbox(taskSandbox.id, 'failed', { error: spawnErr.message });
+            } catch (sandboxErr) {
+              db.log('coordinator', 'task_sandbox_spawn_failure_mark_error', {
+                task_id: assignTaskId,
+                sandbox_id: taskSandbox ? taskSandbox.id : null,
+                error: sandboxErr.message,
+              });
+            }
             const rollbackAsWorkerClaimed = isWorkerClaimedAssignmentError(spawnErr);
             db.getDb().transaction(() => {
               const rollbackWorker = rollbackAsWorkerClaimed ? db.getWorker(assignWorkerId) : null;
@@ -3432,6 +3532,7 @@ function handleCommand(cmd, conn, handlers) {
           request_id: assignedTask.request_id,
           validation: assignedTask.validation,
           assignment_token: assignedWorker ? assignedWorker.launched_at : null,
+          task_sandbox_id: taskSandbox ? taskSandbox.id : null,
           routing_class: routingDecision.routing_class,
           model: routingDecision.model,
           model_source: routingTelemetry.model_source,
@@ -3446,6 +3547,7 @@ function handleCommand(cmd, conn, handlers) {
           worker_id: assignWorkerId,
           domain: assignedTask.domain,
           assignment_token: assignedWorker ? assignedWorker.launched_at : null,
+          task_sandbox_id: taskSandbox ? taskSandbox.id : null,
           routing_class: routingDecision.routing_class,
           model: routingDecision.model,
           model_source: routingTelemetry.model_source,
@@ -3460,6 +3562,7 @@ function handleCommand(cmd, conn, handlers) {
           ok: true,
           task_id: assignTaskId,
           worker_id: assignWorkerId,
+          task_sandbox_id: taskSandbox ? taskSandbox.id : null,
           routing: {
             class: routingDecision.routing_class,
             model: routingDecision.model,
@@ -3511,6 +3614,91 @@ function handleCommand(cmd, conn, handlers) {
           requestId: args.request_id,
         });
         respond(conn, { ok: true, ...replanned });
+        break;
+      }
+
+      case 'task-sandbox-create': {
+        const sandbox = db.createTaskSandbox({
+          task_id: args.task_id,
+          worker_id: args.worker_id,
+          backend: args.backend,
+          sandbox_name: args.sandbox_name,
+          sandbox_path: args.sandbox_path,
+          worktree_path: args.worktree_path,
+          branch: args.branch,
+          metadata: args.metadata,
+        });
+        respond(conn, { ok: true, sandbox });
+        break;
+      }
+
+      case 'task-sandbox-status': {
+        const sandboxes = db.listTaskSandboxes({
+          id: args.id,
+          task_id: args.task_id,
+          worker_id: args.worker_id,
+          status: args.status,
+        });
+        respond(conn, { ok: true, sandboxes, count: sandboxes.length });
+        break;
+      }
+
+      case 'task-sandbox-ready': {
+        const sandbox = db.transitionTaskSandbox(
+          args.id,
+          'ready',
+          extractTaskSandboxFields(args, ['backend', 'sandbox_name', 'sandbox_path', 'worktree_path', 'branch', 'metadata'])
+        );
+        respond(conn, { ok: true, sandbox });
+        break;
+      }
+
+      case 'task-sandbox-start': {
+        const sandbox = db.transitionTaskSandbox(
+          args.id,
+          'running',
+          extractTaskSandboxFields(args, ['backend', 'sandbox_name', 'sandbox_path', 'worktree_path', 'branch', 'metadata'])
+        );
+        respond(conn, { ok: true, sandbox });
+        break;
+      }
+
+      case 'task-sandbox-stop': {
+        const sandbox = db.transitionTaskSandbox(
+          args.id,
+          'stopped',
+          extractTaskSandboxFields(args, ['error', 'metadata'])
+        );
+        respond(conn, { ok: true, sandbox });
+        break;
+      }
+
+      case 'task-sandbox-fail': {
+        const sandbox = db.transitionTaskSandbox(
+          args.id,
+          'failed',
+          extractTaskSandboxFields(args, ['error', 'metadata'])
+        );
+        respond(conn, { ok: true, sandbox });
+        break;
+      }
+
+      case 'task-sandbox-clean': {
+        const sandbox = db.transitionTaskSandbox(
+          args.id,
+          'cleaned',
+          extractTaskSandboxFields(args, ['metadata'])
+        );
+        respond(conn, { ok: true, sandbox });
+        break;
+      }
+
+      case 'task-sandbox-cleanup': {
+        const result = db.cleanupTaskSandboxes({
+          max_age_minutes: args.max_age_minutes,
+          dry_run: args.dry_run === true,
+        });
+        respond(conn, { ok: true, ...result });
         break;
       }
 
