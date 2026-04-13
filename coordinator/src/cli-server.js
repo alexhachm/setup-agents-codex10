@@ -9,6 +9,7 @@ const db = require('./db');
 const changeCommands = require('./commands/changes');
 const contextBundle = require('./context-bundle');
 const memoryCommands = require('./commands/memory');
+const mergeObservabilityCommands = require('./commands/merge-observability');
 const sandboxCommands = require('./commands/sandbox');
 const providerOutput = require('./provider-output');
 let modelRouter = null;
@@ -4546,37 +4547,10 @@ function handleCommand(cmd, conn, handlers) {
       }
 
       // === MERGE OBSERVABILITY commands ===
-      case 'merge-metrics': {
-        const metrics = db.getMetrics();
-        respond(conn, { ok: true, metrics });
-        break;
-      }
-
+      case 'merge-metrics':
       case 'merge-health': {
-        const healthRows = db.getDb().prepare(
-          "SELECT status, COUNT(*) as count FROM merge_queue GROUP BY status"
-        ).all();
-        const counts = {};
-        for (const row of healthRows) counts[row.status] = row.count;
-        const circuitBreakerTrips = db.getMetrics().circuit_breaker_trips || 0;
-        const selfHealAttempts = db.getMetrics().self_heal_attempts || 0;
-        const selfHealSuccesses = db.getMetrics().self_heal_successes || 0;
-        const reconciliations = db.getMetrics().merge_queue_reconciliations || 0;
-        respond(conn, {
-          ok: true,
-          health: {
-            pending: counts.pending || 0,
-            ready: counts.ready || 0,
-            merging: counts.merging || 0,
-            merged: counts.merged || 0,
-            conflict: counts.conflict || 0,
-            failed: counts.failed || 0,
-            circuit_breaker_trips: circuitBreakerTrips,
-            self_heal_attempts: selfHealAttempts,
-            self_heal_successes: selfHealSuccesses,
-            merge_queue_reconciliations: reconciliations,
-          },
-        });
+        const result = mergeObservabilityCommands.handleMergeObservabilityCommand(command, args, { db });
+        respond(conn, result);
         break;
       }
 

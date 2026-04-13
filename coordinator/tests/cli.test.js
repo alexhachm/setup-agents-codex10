@@ -4892,6 +4892,40 @@ describe('changes CLI commands', () => {
   });
 });
 
+describe('merge observability CLI commands', () => {
+  it('returns merge metrics rows', async () => {
+    db.incrementMetric('self_heal_attempts');
+
+    const result = await sendCommand('merge-metrics', {});
+    assert.strictEqual(result.ok, true);
+    assert.ok(Array.isArray(result.metrics));
+    assert.ok(result.metrics.some((row) => (
+      row.metric_name === 'self_heal_attempts' && row.metric_value === 1
+    )));
+  });
+
+  it('summarizes merge queue status counts', async () => {
+    const requestId = db.createRequest('merge health CLI test request');
+    const taskOne = db.createTask({ request_id: requestId, subject: 'Pending merge', description: 'pending' });
+    const taskTwo = db.createTask({ request_id: requestId, subject: 'Merged merge', description: 'merged' });
+    const taskThree = db.createTask({ request_id: requestId, subject: 'Failed merge', description: 'failed' });
+
+    db.enqueueMerge({ request_id: requestId, task_id: taskOne, pr_url: 'https://example.invalid/pr/1', branch: 'agent-1' });
+    const merged = db.enqueueMerge({ request_id: requestId, task_id: taskTwo, pr_url: 'https://example.invalid/pr/2', branch: 'agent-2' });
+    const failed = db.enqueueMerge({ request_id: requestId, task_id: taskThree, pr_url: 'https://example.invalid/pr/3', branch: 'agent-3' });
+    db.updateMerge(merged.lastInsertRowid, { status: 'merged' });
+    db.updateMerge(failed.lastInsertRowid, { status: 'failed' });
+
+    const result = await sendCommand('merge-health', {});
+    assert.strictEqual(result.ok, true);
+    assert.strictEqual(result.health.pending, 1);
+    assert.strictEqual(result.health.merged, 1);
+    assert.strictEqual(result.health.failed, 1);
+    assert.strictEqual(result.health.ready, 0);
+    assert.strictEqual(result.health.conflict, 0);
+  });
+});
+
 describe('memory-retrieval CLI commands', () => {
   it('memory-snapshots returns ok with empty list when no snapshots', async () => {
     const result = await sendCommand('memory-snapshots', {});
