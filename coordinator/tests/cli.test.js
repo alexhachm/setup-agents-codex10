@@ -4982,6 +4982,43 @@ describe('microvm CLI commands', () => {
   });
 });
 
+describe('knowledge CLI commands', () => {
+  it('reports knowledge status and health from the project directory', async () => {
+    fs.mkdirSync(path.join(tmpDir, '.claude', 'knowledge', 'codebase', 'domains'), { recursive: true });
+    fs.mkdirSync(path.join(tmpDir, '.claude', 'knowledge', 'research', 'topics'), { recursive: true });
+    fs.writeFileSync(path.join(tmpDir, '.claude', 'knowledge', 'codebase', 'domains', 'coordinator.md'), 'Coordinator notes\n');
+
+    const status = await sendCommand('knowledge-status', {});
+    assert.strictEqual(status.ok, true);
+    assert.strictEqual(status.pending_reviews_count, 0);
+    assert.strictEqual(status.domain_coverage.coordinator.exists, true);
+
+    const health = await sendCommand('knowledge-health', {});
+    assert.strictEqual(health.ok, false);
+    assert.ok(health.present.includes(path.join('.claude', 'knowledge', 'codebase', 'domains')));
+    assert.ok(health.missing.includes(path.join('.claude', 'knowledge', 'mistakes.md')));
+  });
+
+  it('increments knowledge metadata and resets the index timestamp', async () => {
+    const increment = await sendCommand('knowledge-increment', {
+      domain: 'coordinator',
+      worker_patch: true,
+    });
+    assert.strictEqual(increment.ok, true);
+    assert.strictEqual(increment.domain, 'coordinator');
+    assert.strictEqual(increment.changes_since_index, 1);
+
+    const metadataAfterIncrement = knowledgeMeta.getMetadata(tmpDir);
+    assert.strictEqual(metadataAfterIncrement.domains.coordinator.changes_since_research, 1);
+    assert.strictEqual(metadataAfterIncrement.domains.coordinator.worker_patches, 1);
+
+    const updated = await sendCommand('knowledge-update-index-timestamp', {});
+    assert.strictEqual(updated.ok, true);
+    assert.strictEqual(updated.changes_since_index, 0);
+    assert.ok(updated.last_indexed);
+  });
+});
+
 describe('memory-retrieval CLI commands', () => {
   it('memory-snapshots returns ok with empty list when no snapshots', async () => {
     const result = await sendCommand('memory-snapshots', {});

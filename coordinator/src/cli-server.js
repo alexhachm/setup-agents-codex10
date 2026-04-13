@@ -8,6 +8,7 @@ const { execFileSync } = require('child_process');
 const db = require('./db');
 const changeCommands = require('./commands/changes');
 const contextBundle = require('./context-bundle');
+const knowledgeCommands = require('./commands/knowledge');
 const memoryCommands = require('./commands/memory');
 const mergeObservabilityCommands = require('./commands/merge-observability');
 const microvmCommands = require('./commands/microvm');
@@ -4579,41 +4580,15 @@ function handleCommand(cmd, conn, handlers) {
       }
 
       // === KNOWLEDGE LAYER commands ===
-      case 'knowledge-status': {
-        const knowledgeMeta = require('./knowledge-metadata');
-        const status = knowledgeMeta.getKnowledgeStatus(_projectDir || process.cwd());
-        const pendingReviews = db.getPendingReviewItems({ limit: 100 });
-        const approvedAnalyses = db.listDomainAnalyses({ status: 'approved' });
-        const analysisCoverage = {};
-        for (const a of approvedAnalyses) {
-          analysisCoverage[a.domain] = { approved_at: a.approved_at, confidence: a.confidence_score };
-        }
-        respond(conn, { ok: true, ...status, pending_reviews_count: pendingReviews.length, domain_analysis_coverage: analysisCoverage });
-        break;
-      }
-      case 'knowledge-health': {
-        const knowledgeMeta = require('./knowledge-metadata');
-        const result = knowledgeMeta.knowledgeHealthCheck(_projectDir || process.cwd());
-        respond(conn, { ok: result.ok, missing: result.missing, present: result.present });
-        break;
-      }
-      case 'knowledge-increment': {
-        const knowledgeMeta = require('./knowledge-metadata');
-        const domain = args.domain || null;
-        const workerPatch = args.worker_patch || args['worker-patch'] || false;
-        const projDir = _projectDir || process.cwd();
-        knowledgeMeta.incrementChanges(projDir, domain);
-        if (workerPatch) {
-          knowledgeMeta.incrementWorkerPatches(projDir, domain);
-        }
-        const meta = knowledgeMeta.getMetadata(projDir);
-        respond(conn, { ok: true, changes_since_index: meta.changes_since_index, domain });
-        break;
-      }
+      case 'knowledge-status':
+      case 'knowledge-health':
+      case 'knowledge-increment':
       case 'knowledge-update-index-timestamp': {
-        const knowledgeMeta = require('./knowledge-metadata');
-        const meta = knowledgeMeta.updateIndexTimestamp(_projectDir || process.cwd());
-        respond(conn, { ok: true, last_indexed: meta.last_indexed, changes_since_index: meta.changes_since_index });
+        const result = knowledgeCommands.handleKnowledgeCommand(command, args, {
+          db,
+          projectDir: _projectDir || process.cwd(),
+        });
+        respond(conn, result);
         break;
       }
 
