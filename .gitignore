@@ -1,10 +1,39 @@
 node_modules/
+
+# Python bytecode
+__pycache__/
+**/__pycache__/
+*.py[cod]
+*$py.class
+
+# Local coordinator/agent runtime state
+.agent-loop/
 .claude/state/
+.claude/logs/
+.claude/signals/
+.claude/scripts/.ns-shims/
+.claude/scripts/.codex10-shims/
+**/.claude/state/
+coordinator/.claude/
+start/.claude/
 **/state/mac10.sock.path
 **/state/mac10.tcp.port
 *.db
 *.db-shm
 *.db-wal
+*.db.corrupt.bak
+*.db.bak
 *.log
+
+# Generated live E2E and repair output
+.live-e2e-workspaces/
+status/live-audit-fixtures/
+status/live-audit-registry.js
+status/live-debug/
+status/live-feature-manifest.json
+status/live-pipelines/
+status/live-repairs/
+status/live-runs/
+
 .worktrees/
 sandbox/.menv/
