@@ -572,11 +572,6 @@ mac10_prepare_cli_env() {
     esac
   done
 
-  # Compatibility fallback for older Claude manifests.
-  if [ "$provider" = "claude" ] && [ "${#env_ops[@]}" -eq 0 ]; then
-    unset CLAUDECODE 2>/dev/null || true
-    export CLAUDE_PROJECT_DIR="$worktree_dir"
-  fi
 }
 
 mac10_provider_launch_args() {

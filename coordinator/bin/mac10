@@ -120,7 +120,7 @@ function send(target, command, args) {
     const settle = (fn, val) => { if (!settled) { settled = true; fn(val); } };
 
     const onConnect = () => {
-      conn.write(JSON.stringify({ command, args }) + '\n');
+      conn.end(JSON.stringify({ command, args }) + '\n');
     };
     // Connect via TCP ({host, port}) or Unix socket/named pipe (string)
     const conn = typeof target === 'object'
@@ -137,7 +137,7 @@ function send(target, command, args) {
         } catch (e) {
           settle(reject, new Error('Invalid response from coordinator'));
         }
-        conn.end();
+        if (!conn.destroyed) conn.end();
       }
     });
     conn.on('error', (e) => {

@@ -91,6 +91,63 @@ bash scripts/take-screenshot.sh http://localhost:3000 /tmp/screenshot.png
 - Backend, API, config, or infrastructure tasks
 - Tasks with no visual component
 
+## Recovery Procedures
+
+### Missing or Incomplete Task Context
+
+If the task JSON is missing `files`, `description`, or `domain`:
+
+1. Check whether the task has enough information to proceed safely.
+2. If not, fail the task with a clear explanation of what's missing:
+   ```bash
+   mac10 fail-task $WORKER_ID $TASK_ID "Missing task context: no files or description provided"
+   ```
+3. Do not guess at scope — a failed task gets rerouted; a wrong edit gets a fix cycle.
+
+### Stale Knowledge
+
+If knowledge files reference deleted files, removed APIs, or outdated patterns:
+
+1. Verify against the current codebase before following any knowledge guidance.
+2. If a knowledge entry is wrong, fix it inline (append a correction or remove the stale entry).
+3. Note the stale entry in your change summary so Master-2 can curate it.
+
+### Failed Research
+
+If queued research times out or returns a failure:
+
+1. For `standard`/`thinking` mode: continue with your best judgment from the codebase itself.
+2. For `deep_research` mode on a critical unknown: fail the task rather than guessing:
+   ```bash
+   mac10 fail-task $WORKER_ID $TASK_ID "Blocked on research: $TOPIC (deep_research failed/timed out)"
+   ```
+3. Never use WebSearch or WebFetch as a fallback — re-queue with higher priority if the first attempt failed.
+
+### Merge Conflicts During Push
+
+If `git push` fails due to upstream changes:
+
+1. Fetch and attempt rebase: `git fetch origin main && git rebase origin/main`.
+2. If rebase succeeds, push again.
+3. If rebase has conflicts, abort and fail the task:
+   ```bash
+   git rebase --abort
+   mac10 fail-task $WORKER_ID $TASK_ID "Push conflict: rebase failed with conflicts"
+   ```
+4. Do not force-push or reset the worktree.
+
+### Unresolvable Validation Failures
+
+If validation fails and you cannot fix the issue after two attempts:
+
+1. Do not run broad cleanup commands such as `git checkout -- .` or `git reset --hard`.
+2. If you can identify only your own edited files and there are no unrelated edits, restore just those files with `git restore -- <file...>`.
+3. Fail the task with the validation output:
+   ```bash
+   mac10 fail-task $WORKER_ID $TASK_ID "Validation failed after 2 fix attempts: [brief error summary]"
+   ```
+4. Include the failing command, dirty paths if any, and error so the rerouted task has context.
+
 ## Context Budget
 
 Track your context usage. Reset triggers:

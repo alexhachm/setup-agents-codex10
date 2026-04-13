@@ -140,12 +140,13 @@ If `git push` fails due to upstream changes:
 
 If validation fails and you cannot fix the issue after two attempts:
 
-1. Revert your changes to leave the worktree clean: `git checkout -- .`
-2. Fail the task with the validation output:
+1. Do not run broad cleanup commands such as `git checkout -- .` or `git reset --hard`.
+2. If you can identify only your own edited files and there are no unrelated edits, restore just those files with `git restore -- <file...>`.
+3. Fail the task with the validation output:
    ```bash
    mac10 fail-task $WORKER_ID $TASK_ID "Validation failed after 2 fix attempts: [brief error summary]"
    ```
-3. Include the failing command and error so the rerouted task has context.
+4. Include the failing command, dirty paths if any, and error so the rerouted task has context.
 
 ## Context Budget
 

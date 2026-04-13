@@ -229,6 +229,9 @@ ensure_is_directory() {
 # safe_copy: warn and back up when overwriting a file that differs from its source
 safe_copy() {
   local src="$1" dest="$2"
+  if [ -e "$dest" ] && [ "$src" -ef "$dest" ] 2>/dev/null; then
+    return
+  fi
   if [ ! -f "$dest" ]; then
     cp "$src" "$dest"
     return
@@ -338,8 +341,11 @@ chmod +x "$MAC10_BIN"
 MAC10_CLI="$CLAUDE_DIR/scripts/mac10"
 MAC10_COMPAT="$MAC10_CLI"
 
-# Create a namespaced wrapper script in the project
-cat > "$MAC10_CLI" << 'WRAPPER'
+if [ "$PROJECT_DIR" = "$SCRIPT_DIR" ] && [ -f "$MAC10_CLI" ]; then
+  chmod +x "$MAC10_CLI"
+else
+  # Create a namespaced wrapper script in the project
+  cat > "$MAC10_CLI" << 'WRAPPER'
 #!/usr/bin/env bash
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # Derive project dir: scripts/ -> .claude/ -> project root
@@ -353,9 +359,10 @@ fi
 export MAC10_NAMESPACE="${MAC10_NAMESPACE:-PLACEHOLDER_NAMESPACE}"
 exec node "$MAC10_BIN" --project "$PROJECT_ROOT" "$@"
 WRAPPER
-# Substitute the actual path and namespace into the wrapper (quoted heredoc prevents expansion above)
-sed -i "s|PLACEHOLDER_MAC10_BIN|$MAC10_BIN|; s|PLACEHOLDER_NAMESPACE|$NAMESPACE|" "$MAC10_CLI"
-chmod +x "$MAC10_CLI"
+  # Substitute the actual path and namespace into the wrapper (quoted heredoc prevents expansion above)
+  sed -i "s|PLACEHOLDER_MAC10_BIN|$MAC10_BIN|; s|PLACEHOLDER_NAMESPACE|$NAMESPACE|" "$MAC10_CLI"
+  chmod +x "$MAC10_CLI"
+fi
 
 # Add to PATH for this project's agents
 export PATH="$SCRIPT_DIR/coordinator/bin:$CLAUDE_DIR/scripts:$PATH"
@@ -467,7 +474,9 @@ f, p = sys.argv[1], sys.argv[2]
 with open(f) as fp: d = json.load(fp)
 dirs = d.setdefault('trustedDirectories', [])
 if p not in dirs: dirs.append(p)
-with open(f, 'w') as fp: json.dump(d, fp, indent=2)
+with open(f, 'w') as fp:
+    json.dump(d, fp, indent=2)
+    fp.write("\n")
 PYEOF
   fi
 }
