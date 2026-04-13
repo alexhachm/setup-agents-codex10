@@ -5091,6 +5091,73 @@ describe('domain analysis CLI commands', () => {
   });
 });
 
+describe('extended research CLI commands', () => {
+  it('creates, lists, reviews, and exposes pending research topics', async () => {
+    const created = await sendCommand('create-research-topic', {
+      title: 'Study routing allocator',
+      description: 'Find allocator routing follow-up work',
+      category: 'pattern',
+      discovery_source: 'cli-test',
+      tags: '["routing","allocator"]',
+    });
+    assert.strictEqual(created.ok, true);
+    assert.strictEqual(created.topic.review_status, 'discovered');
+
+    const discoveredMail = listMailForRecipient('master-1')
+      .filter((mail) => mail.type === 'research_topic_discovered');
+    assert.ok(discoveredMail.some((mail) => mail.payload.topic_id === created.id));
+
+    const fetched = await sendCommand('research-topic', { id: created.id });
+    assert.strictEqual(fetched.ok, true);
+    assert.strictEqual(fetched.topic.title, 'Study routing allocator');
+
+    const pending = await sendCommand('pending-reviews', { limit: 10 });
+    assert.strictEqual(pending.ok, true);
+    assert.ok(pending.items.some((item) => item.item_type === 'research_topic' && item.id === created.id));
+
+    const listed = await sendCommand('research-topics', { review_status: 'discovered', category: 'pattern' });
+    assert.strictEqual(listed.ok, true);
+    assert.strictEqual(listed.count, 1);
+
+    const reviewed = await sendCommand('review-research-topic', {
+      id: created.id,
+      review_status: 'approved',
+      notes: 'Proceed after cli-server extraction',
+    });
+    assert.strictEqual(reviewed.ok, true);
+
+    const afterReview = await sendCommand('research-topic', { id: created.id });
+    assert.strictEqual(afterReview.topic.review_status, 'approved');
+    assert.strictEqual(afterReview.topic.human_notes, 'Proceed after cli-server extraction');
+  });
+
+  it('fill-knowledge queues research for stale uncovered domains and signals rescan', async () => {
+    knowledgeMeta.writeMetadata(tmpDir, {
+      last_indexed: null,
+      changes_since_index: 6,
+      domains: {
+        routing: { changes_since_research: 3, worker_patches: 0 },
+      },
+      last_external_research: null,
+      external_research_stale_topics: [],
+    });
+
+    const result = await sendCommand('fill-knowledge', {});
+    assert.strictEqual(result.ok, true);
+    assert.ok(result.actions.some((action) => (
+      action.type === 'research_queued' && action.domain === 'routing'
+    )));
+    assert.ok(result.actions.some((action) => action.type === 'rescan_signaled'));
+    assert.deepStrictEqual(result.status_summary.domains_with_gaps, ['routing']);
+    assert.deepStrictEqual(result.status_summary.stale_domains, ['routing']);
+    assert.strictEqual(result.status_summary.changes_since_index, 6);
+
+    const architectMail = listMailForRecipient('architect')
+      .filter((mail) => mail.type === 'rescan_requested');
+    assert.strictEqual(architectMail.length, 1);
+  });
+});
+
 describe('memory-retrieval CLI commands', () => {
   it('memory-snapshots returns ok with empty list when no snapshots', async () => {
     const result = await sendCommand('memory-snapshots', {});

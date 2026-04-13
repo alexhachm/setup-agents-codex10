@@ -9,6 +9,7 @@ const db = require('./db');
 const changeCommands = require('./commands/changes');
 const contextBundle = require('./context-bundle');
 const domainAnalysisCommands = require('./commands/domain-analysis');
+const extendedResearchCommands = require('./commands/extended-research');
 const knowledgeCommands = require('./commands/knowledge');
 const memoryCommands = require('./commands/memory');
 const mergeObservabilityCommands = require('./commands/merge-observability');
@@ -4611,110 +4612,17 @@ function handleCommand(cmd, conn, handlers) {
 
       // === EXTENDED RESEARCH TOPIC commands ===
 
-      case 'create-research-topic': {
-        const topic = db.createExtendedResearchTopic({
-          title: args.title,
-          description: args.description,
-          category: args.category || 'feature',
-          discovery_source: args.discovery_source || null,
-          loop_id: args.loop_id || null,
-          tags: args.tags ? (typeof args.tags === 'string' ? args.tags : JSON.stringify(args.tags)) : null,
-        });
-        db.sendMail('master-1', 'research_topic_discovered', { topic_id: topic.id, title: args.title, category: args.category || 'feature' });
-        respond(conn, { ok: true, id: topic.id, topic });
-        break;
-      }
-
-      case 'research-topic': {
-        const topic = db.getExtendedResearchTopic(args.id);
-        if (!topic) { respond(conn, { ok: false, error: 'Research topic not found' }); break; }
-        respond(conn, { ok: true, topic });
-        break;
-      }
-
-      case 'research-topics': {
-        const topics = db.listExtendedResearchTopics({
-          review_status: args.review_status,
-          category: args.category,
-          loop_id: args.loop_id,
-          limit: args.limit || 50,
-        });
-        respond(conn, { ok: true, topics, count: topics.length });
-        break;
-      }
-
-      case 'review-research-topic': {
-        const reviewed = db.reviewExtendedResearchTopic(args.id, args.review_status, args.notes || null);
-        if (!reviewed) { respond(conn, { ok: false, error: 'Invalid review_status or topic not found' }); break; }
-        respond(conn, { ok: true, id: args.id, review_status: args.review_status });
-        break;
-      }
-
-      case 'pending-reviews': {
-        const items = db.getPendingReviewItems({ limit: args.limit || 20 });
-        respond(conn, { ok: true, items, count: items.length });
-        break;
-      }
-
+      case 'create-research-topic':
+      case 'research-topic':
+      case 'research-topics':
+      case 'review-research-topic':
+      case 'pending-reviews':
       case 'fill-knowledge': {
-        const knowledgeMeta = require('./knowledge-metadata');
-        const projDir = _projectDir || process.cwd();
-        const status = knowledgeMeta.getKnowledgeStatus(projDir);
-        const actions = [];
-        const domainMeta = status.domains || {};
-        const domainCoverage = status.domain_coverage || {};
-
-        // Queue research for domains with no coverage or high staleness
-        for (const [domain, meta] of Object.entries(domainMeta)) {
-          const coverage = domainCoverage[domain];
-          const isUncovered = !coverage || !coverage.exists || !coverage.non_empty;
-          const isStale = (meta.changes_since_research || 0) >= 3;
-          if (isUncovered || isStale) {
-            try {
-              const result = db.enqueueResearchIntent({
-                intent_type: 'browser_research',
-                intent_payload: JSON.stringify({
-                  topic: domain,
-                  question: `What is the architecture, key files, and patterns of the ${domain} domain?`,
-                  mode: 'standard',
-                }),
-                priority: 'normal',
-              });
-              actions.push({ type: 'research_queued', domain, created: result.created, id: result.intent.id });
-            } catch (e) {
-              actions.push({ type: 'research_queue_error', domain, error: e.message });
-            }
-          }
-        }
-
-        // Signal Master-2 to rescan if codebase index is stale
-        if ((status.changes_since_index || 0) > 5) {
-          try {
-            db.sendMail('architect', 'rescan_requested', {
-              reason: 'fill-knowledge detected stale index',
-              changes: status.changes_since_index,
-            });
-            actions.push({ type: 'rescan_signaled', changes_since_index: status.changes_since_index });
-          } catch (e) {
-            actions.push({ type: 'rescan_signal_error', error: e.message });
-          }
-        }
-
-        const domainsWithGaps = Object.keys(domainMeta).filter(d => {
-          const c = domainCoverage[d];
-          return !c || !c.exists || !c.non_empty;
+        const result = extendedResearchCommands.handleExtendedResearchCommand(command, args, {
+          db,
+          projectDir: _projectDir || process.cwd(),
         });
-        const staleDomains = Object.keys(domainMeta).filter(d => (domainMeta[d].changes_since_research || 0) >= 3);
-
-        respond(conn, {
-          ok: true,
-          actions,
-          status_summary: {
-            domains_with_gaps: domainsWithGaps,
-            stale_domains: staleDomains,
-            changes_since_index: status.changes_since_index || 0,
-          },
-        });
+        respond(conn, result);
         break;
       }
 
