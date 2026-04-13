@@ -44,13 +44,14 @@ Provider command helpers:
 - `scripts/provider.sh output-schema [provider] [project_dir]`
 - `scripts/provider.sh select <provider> [project_dir]`
 - `scripts/provider.sh launch-dry-run <interactive|noninteractive> <project_dir> <model> <prompt_file>`
+- `mac10 sandbox-provider-smoke [provider] [--run] [--no-build]`
 
 To add a provider:
 
 1. Create `plugins/agents/<provider>/plugin.json`.
 2. Set `enabled` to `false` until the provider has local launch and health smokes. Disabled providers appear in `catalog` but not `list`, and cannot be selected.
 3. Define `cli.command`, `cli.auth_check`, role model defaults, provider environment, both launch modes, and `output.usage` aliases/columns for task usage telemetry.
-4. Run `scripts/provider.sh health <provider>`, `scripts/provider.sh output-schema <provider>`, and `scripts/provider.sh launch-dry-run noninteractive <project_dir> worker <prompt_file>`.
+4. Run `scripts/provider.sh health <provider>`, `scripts/provider.sh output-schema <provider>`, `scripts/provider.sh launch-dry-run noninteractive <project_dir> worker <prompt_file>`, and `mac10 sandbox-provider-smoke <provider>`.
 5. Enable the provider only after worker, loop, Master 1, and repair launch paths validate through the shared interface.
 
 Future provider work should add provider manifests here first, then extend the provider interface only when a provider needs a new capability that cannot be expressed by these fields.

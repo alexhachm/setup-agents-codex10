@@ -724,6 +724,10 @@ const COMMAND_SCHEMAS = {
     required: ['topic', 'question'],
     types: { topic: 'string', question: 'string', mode: 'string', priority: 'string', context: 'string', source_agent: 'string', source_task_id: 'number' },
   },
+  'sandbox-provider-smoke': {
+    required: [],
+    types: { provider: 'string', run_actual: 'boolean', build: 'boolean' },
+  },
   'research-status':     { required: [], types: { topic: 'string', status: 'string', limit: 'number' } },
   'research-requeue-stale': { required: [], types: { max_age_minutes: 'number' } },
   'research-start':      { required: ['id'], types: { id: 'number' } },
@@ -4759,6 +4763,25 @@ function handleCommand(cmd, conn, handlers) {
           respond(conn, { ok: true, image: sandboxManager.DEFAULT_IMAGE_NAME, message: 'Image built successfully' });
         } catch (e) {
           respond(conn, { error: `Image build failed: ${e.message}` });
+        }
+        break;
+      }
+      case 'sandbox-provider-smoke': {
+        const sandboxManager = require('./sandbox-manager');
+        try {
+          const result = sandboxManager.providerSmoke(_projectDir || process.cwd(), {
+            provider: args.provider || null,
+            runActual: args.run_actual === true,
+            build: args.build !== false,
+          });
+          respond(conn, result);
+        } catch (e) {
+          respond(conn, {
+            ok: false,
+            error: e.message,
+            output: e.output || '',
+            parsed: e.parsed || {},
+          });
         }
         break;
       }

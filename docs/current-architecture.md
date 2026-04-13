@@ -71,6 +71,8 @@ Provider checks in preflight resolve the selected/default provider through the p
 
 Provider launch coverage lives in `coordinator/tests/provider-interface.test.js`. It verifies dry-run and manifest-rendered launch args for Master 1, worker, loop, research-discovery, live-audit, and live-repair prompts without invoking the provider CLI.
 
+Docker worker provider coverage lives in `mac10 sandbox-provider-smoke [provider]`. It runs inside the worker image, loads the selected provider manifest, checks the provider CLI/auth command, and renders the noninteractive worker launch path. Passing `--run` additionally executes a tiny noninteractive provider prompt when credentials are available inside the container.
+
 Current expected source baseline:
 
 - tracked generated artifacts: 0

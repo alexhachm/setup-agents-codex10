@@ -1,6 +1,6 @@
 'use strict';
 
-const { describe, it, beforeEach, afterEach } = require('node:test');
+const { describe, it, beforeEach, afterEach, mock } = require('node:test');
 const assert = require('node:assert');
 const path = require('path');
 const fs = require('fs');
@@ -934,6 +934,41 @@ describe('CLI Server', () => {
     assert.strictEqual(cleanup.cleaned_count, 1);
     assert.deepStrictEqual(cleanup.ids, [sandbox.id]);
     assert.strictEqual(db.getTaskSandbox(sandbox.id).status, 'cleaned');
+  });
+
+  it('should expose Docker provider smoke through RPC', async () => {
+    const childProcess = require('child_process');
+    delete require.cache[require.resolve('../src/sandbox-manager')];
+    const execMock = mock.method(childProcess, 'execFileSync', (cmd, args) => {
+      if (cmd === 'docker' && args[0] === 'info') return '';
+      if (cmd === 'docker' && args[0] === 'images') return 'mac10-worker:latest\n';
+      if (cmd === 'docker' && args[0] === 'run') {
+        return [
+          'provider=claude',
+          'cli=claude',
+          'cli_available=true',
+          'auth_check=pass',
+          'noninteractive_launch=dry_run_pass',
+          'noninteractive_exec=skipped',
+          'provider_smoke=pass',
+        ].join('\n');
+      }
+      return '';
+    });
+
+    try {
+      const result = await sendCommand('sandbox-provider-smoke', {
+        provider: 'claude',
+        build: false,
+      });
+      assert.strictEqual(result.ok, true);
+      assert.strictEqual(result.provider, 'claude');
+      assert.strictEqual(result.parsed.auth_check, 'pass');
+      assert.strictEqual(result.parsed.noninteractive_launch, 'dry_run_pass');
+    } finally {
+      execMock.mock.restore();
+      delete require.cache[require.resolve('../src/sandbox-manager')];
+    }
   });
 
   it('should create worker worktree without copying runtime provider state', async () => {

@@ -2064,6 +2064,22 @@ async function main() {
         else { console.error(result.error); process.exit(1); }
         break;
 
+      case 'sandbox-provider-smoke': {
+        const smokeArgs = {
+          provider: undefined,
+          run_actual: argv.includes('--run'),
+          build: !argv.includes('--no-build'),
+        };
+        for (const rawArg of argv.slice(1)) {
+          if (rawArg === '--run' || rawArg === '--no-build') continue;
+          if (!smokeArgs.provider) smokeArgs.provider = rawArg;
+        }
+        result = await send(socketPath, 'sandbox-provider-smoke', smokeArgs);
+        if (result.ok) console.log(JSON.stringify(result, null, 2));
+        else { console.error(result.error); if (result.output) console.error(result.output); process.exit(1); }
+        break;
+      }
+
       case 'sandbox-build':
         console.log('Building sandbox Docker image (this may take a few minutes)...');
         result = await send(socketPath, 'sandbox-build', {});
@@ -2337,6 +2353,8 @@ SANDBOX (Docker):
   task-sandbox-cleanup [min] [--dry-run]
                                  Clean stopped/failed task sandboxes older than min
   sandbox-status                 Show Docker availability and containers
+  sandbox-provider-smoke [provider] [--run] [--no-build]
+                                 Verify provider CLI/auth and noninteractive launch inside worker image
   sandbox-build                  Build (or rebuild) the sandbox Docker image
   sandbox-cleanup                Stop all Docker sandbox containers
   sandbox-toggle                 Toggle auto-isolation on/off (affects both Docker and msb)
