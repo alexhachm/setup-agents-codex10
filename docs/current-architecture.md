@@ -21,6 +21,7 @@ The coordinator owns durable state and command contracts:
 - `coordinator/bin/mac10` is the CLI entrypoint
 - `coordinator/src/cli-server.js` handles RPC commands and command validation
 - `coordinator/src/commands/changes.js` handles change tracking command execution behind the existing RPC contract
+- `coordinator/src/commands/domain-analysis.js` handles domain analysis command execution and approved domain doc writes behind the existing RPC contract
 - `coordinator/src/commands/knowledge.js` handles knowledge metadata command execution behind the existing RPC contract
 - `coordinator/src/commands/merge-observability.js` handles merge metrics and health command execution behind the existing RPC contract
 - `coordinator/src/commands/microvm.js` handles `msb`/microVM command execution behind the existing RPC contract
@@ -33,7 +34,7 @@ The coordinator owns durable state and command contracts:
 - `coordinator/src/overlay.js` writes task-specific worker context
 - `coordinator/src/context-bundle.js` serves bounded task context through `mac10 task-context <task_id>`
 
-Large files remain in `cli-server.js` and `db.js`. Change tracking, knowledge metadata, merge observability, microVM, sandbox, and memory command execution are the first extracted command domains; remaining domains should move one at a time only after focused coverage is identified.
+Large files remain in `cli-server.js` and `db.js`. Change tracking, domain analysis, knowledge metadata, merge observability, microVM, sandbox, and memory command execution are the first extracted command domains; remaining domains should move one at a time only after focused coverage is identified.
 
 ## Agent Roles
 

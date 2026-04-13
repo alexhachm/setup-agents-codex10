@@ -8,6 +8,7 @@ const { execFileSync } = require('child_process');
 const db = require('./db');
 const changeCommands = require('./commands/changes');
 const contextBundle = require('./context-bundle');
+const domainAnalysisCommands = require('./commands/domain-analysis');
 const knowledgeCommands = require('./commands/knowledge');
 const memoryCommands = require('./commands/memory');
 const mergeObservabilityCommands = require('./commands/merge-observability');
@@ -4594,82 +4595,17 @@ function handleCommand(cmd, conn, handlers) {
 
       // === DOMAIN ANALYSIS commands ===
 
-      case 'analyze-domain': {
-        const fs = require('fs');
-        const path = require('path');
-        const projDir = _projectDir || process.cwd();
-        const mapPath = path.join(projDir, '.claude', 'state', 'codebase-map.json');
-        let mapHash = null;
-        try {
-          const mapContent = fs.readFileSync(mapPath, 'utf8');
-          mapHash = require('crypto').createHash('sha256').update(mapContent).digest('hex').slice(0, 16);
-        } catch {}
-        const analysis = db.createDomainAnalysis(args.domain, mapHash);
-        db.sendMail('architect', 'domain_analysis_requested', { analysis_id: analysis.id, domain: args.domain });
-        respond(conn, { ok: true, id: analysis.id, domain: args.domain });
-        break;
-      }
-
-      case 'domain-analysis': {
-        const analysis = db.getDomainAnalysis(args.id);
-        if (!analysis) { respond(conn, { ok: false, error: 'Domain analysis not found' }); break; }
-        respond(conn, { ok: true, analysis });
-        break;
-      }
-
-      case 'domain-analyses': {
-        const items = db.listDomainAnalyses({ domain: args.domain, status: args.status, limit: args.limit || 50 });
-        respond(conn, { ok: true, items, count: items.length });
-        break;
-      }
-
-      case 'submit-domain-draft': {
-        const updated = db.updateDomainAnalysis(args.id, {
-          status: 'review_pending',
-          draft_payload: args.draft_payload,
-          review_sheet: args.review_sheet,
-          analyzed_files: args.analyzed_files,
-        });
-        if (updated) {
-          db.sendMail('master-1', 'domain_review_ready', { analysis_id: args.id, domain: updated.domain, review_sheet: args.review_sheet });
-          db.log('coordinator', 'domain_draft_submitted', { id: args.id, domain: updated.domain });
-        }
-        respond(conn, { ok: true, analysis: updated });
-        break;
-      }
-
-      case 'approve-domain': {
-        const approved = db.approveDomainAnalysis(args.id, args.feedback || null);
-        if (!approved) { respond(conn, { ok: false, error: 'Analysis not in review_pending state' }); break; }
-        const analysis = db.getDomainAnalysis(args.id);
-        // Write final domain doc to disk
-        if (analysis) {
-          const fs = require('fs');
-          const path = require('path');
-          const projDir = _projectDir || process.cwd();
-          const domainDir = path.join(projDir, '.claude', 'knowledge', 'codebase', 'domains');
-          fs.mkdirSync(domainDir, { recursive: true });
-          let content = analysis.draft_payload || '';
-          if (analysis.human_feedback) {
-            content += '\n\n## Human-Confirmed Context\n' + analysis.human_feedback + '\n';
-          }
-          fs.writeFileSync(path.join(domainDir, `${analysis.domain}.md`), content);
-          const knowledgeMeta = require('./knowledge-metadata');
-          knowledgeMeta.resetDomainResearch(projDir, analysis.domain);
-          db.sendMail('master-1', 'domain_review_completed', { analysis_id: args.id, domain: analysis.domain, status: 'approved' });
-        }
-        respond(conn, { ok: true, id: args.id });
-        break;
-      }
-
+      case 'analyze-domain':
+      case 'domain-analysis':
+      case 'domain-analyses':
+      case 'submit-domain-draft':
+      case 'approve-domain':
       case 'reject-domain': {
-        const rejected = db.rejectDomainAnalysis(args.id, args.feedback || null);
-        if (!rejected) { respond(conn, { ok: false, error: 'Analysis not in review_pending state' }); break; }
-        const analysis = db.getDomainAnalysis(args.id);
-        if (analysis) {
-          db.sendMail('master-1', 'domain_review_completed', { analysis_id: args.id, domain: analysis.domain, status: 'rejected' });
-        }
-        respond(conn, { ok: true, id: args.id });
+        const result = domainAnalysisCommands.handleDomainAnalysisCommand(command, args, {
+          db,
+          projectDir: _projectDir || process.cwd(),
+        });
+        respond(conn, result);
         break;
       }
 

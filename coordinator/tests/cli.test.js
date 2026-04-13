@@ -5019,6 +5019,78 @@ describe('knowledge CLI commands', () => {
   });
 });
 
+describe('domain analysis CLI commands', () => {
+  it('creates, submits, lists, and approves domain analyses', async () => {
+    fs.writeFileSync(
+      path.join(tmpDir, '.claude', 'state', 'codebase-map.json'),
+      JSON.stringify({ domains: { coordinator: { files: ['coordinator/src/cli-server.js'] } } })
+    );
+
+    const created = await sendCommand('analyze-domain', { domain: 'coordinator' });
+    assert.strictEqual(created.ok, true);
+    assert.strictEqual(created.domain, 'coordinator');
+
+    const requestedMail = listMailForRecipient('architect')
+      .filter((mail) => mail.type === 'domain_analysis_requested');
+    assert.strictEqual(requestedMail.length, 1);
+    assert.strictEqual(requestedMail[0].payload.analysis_id, created.id);
+
+    const fetched = await sendCommand('domain-analysis', { id: created.id });
+    assert.strictEqual(fetched.ok, true);
+    assert.match(fetched.analysis.source_map_hash, /^[a-f0-9]{16}$/);
+
+    const submitted = await sendCommand('submit-domain-draft', {
+      id: created.id,
+      review_sheet: 'Review coordinator domain',
+      draft_payload: '## Coordinator\n\nCommand handling notes.',
+      analyzed_files: '["coordinator/src/cli-server.js"]',
+    });
+    assert.strictEqual(submitted.ok, true);
+    assert.strictEqual(submitted.analysis.status, 'review_pending');
+
+    const listed = await sendCommand('domain-analyses', { domain: 'coordinator', status: 'review_pending' });
+    assert.strictEqual(listed.ok, true);
+    assert.strictEqual(listed.count, 1);
+
+    const approved = await sendCommand('approve-domain', {
+      id: created.id,
+      feedback: 'Keep command boundaries focused.',
+    });
+    assert.strictEqual(approved.ok, true);
+
+    const domainDoc = fs.readFileSync(
+      path.join(tmpDir, '.claude', 'knowledge', 'codebase', 'domains', 'coordinator.md'),
+      'utf8'
+    );
+    assert.match(domainDoc, /Command handling notes/);
+    assert.match(domainDoc, /Human-Confirmed Context/);
+    assert.match(domainDoc, /Keep command boundaries focused/);
+
+    const completedMail = listMailForRecipient('master-1')
+      .filter((mail) => mail.type === 'domain_review_completed');
+    assert.ok(completedMail.some((mail) => mail.payload.status === 'approved'));
+  });
+
+  it('rejects domain analyses only from review_pending state', async () => {
+    const created = await sendCommand('analyze-domain', { domain: 'routing' });
+    const earlyReject = await sendCommand('reject-domain', { id: created.id, feedback: 'Too early' });
+    assert.strictEqual(earlyReject.ok, false);
+
+    await sendCommand('submit-domain-draft', {
+      id: created.id,
+      review_sheet: 'Review routing domain',
+      draft_payload: 'Routing draft',
+      analyzed_files: '[]',
+    });
+    const rejected = await sendCommand('reject-domain', { id: created.id, feedback: 'Needs more detail' });
+    assert.strictEqual(rejected.ok, true);
+
+    const fetched = await sendCommand('domain-analysis', { id: created.id });
+    assert.strictEqual(fetched.analysis.status, 'rejected');
+    assert.strictEqual(fetched.analysis.human_feedback, 'Needs more detail');
+  });
+});
+
 describe('memory-retrieval CLI commands', () => {
   it('memory-snapshots returns ok with empty list when no snapshots', async () => {
     const result = await sendCommand('memory-snapshots', {});
