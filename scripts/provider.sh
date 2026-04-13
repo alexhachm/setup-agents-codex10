@@ -15,6 +15,7 @@ Usage:
   provider.sh output-schema [provider] [project_dir]
   provider.sh select <provider> [project_dir]
   provider.sh launch-dry-run <interactive|noninteractive> <project_dir> <model> <prompt_file>
+  provider.sh validate [provider] [project_dir] [--runtime] [--json]
 EOF
 }
 
@@ -110,6 +111,36 @@ case "$command" in
     else
       MAC10_LAUNCH_DRY_RUN=1 mac10_run_noninteractive_prompt "$project_dir" "$prompt_file" "$resolved_model"
     fi
+    ;;
+  validate)
+    provider=""
+    project_arg=""
+    extra_args=()
+    while [ $# -gt 0 ]; do
+      case "$1" in
+        --runtime|--json)
+          extra_args+=("$1")
+          shift
+          ;;
+        *)
+          if [ -z "$provider" ] && [ ! -d "$1" ]; then
+            provider="$1"
+          elif [ -z "$project_arg" ]; then
+            project_arg="$1"
+          fi
+          shift
+          ;;
+      esac
+    done
+    project_dir="$(project_or_pwd "$project_arg")"
+    node_args=("$SCRIPT_DIR/../coordinator/bin/provider-validate.js" "--project-dir" "$project_dir")
+    if [ -n "$provider" ]; then
+      node_args+=("--provider" "$provider")
+    fi
+    if [ ${#extra_args[@]} -gt 0 ]; then
+      node_args+=("${extra_args[@]}")
+    fi
+    node "${node_args[@]}"
     ;;
   *)
     usage
