@@ -103,3 +103,12 @@ After each tranche: focused tests. After final tranche: full `scripts/preflight.
 
 - `10.1` preflight: 658 tests passing, 0 failures, 0 dirty paths, 0 tracked generated artifacts, 0 prunable worktrees
 - All knowledge/research dirt files committed as planning evidence
+
+## Post-Integration Upstream Delta - 2026-04-13
+
+After building `integrate-10.1`, `origin/main` advanced by two commits:
+
+- `45947a1` / PR `#359`: `feat(status): add live-e2e-20260409T113511Z audit marker fixture`
+- `9d5f6b1`: merge commit for PR `#359`
+
+Decision: **drop from the integration branch.** The `HEAD..origin/main` diff reintroduces the exact surfaces this migration removes or quarantines: GUI files, `.codex` runtime paths, generated status fixtures, old Codex command shims, and deletion of the new provider/preflight/workspace-hygiene files. This is also the stale branch/PR (`agent-1`, PR `#359`) that the live audit exposed during no-edit task completion. Keeping `integrate-10.1` behind these two commits is intentional; the landing branch is meant to replace that stale mainline state, not merge it.
