@@ -12,14 +12,14 @@ The startup path performs three high-level phases:
 - ensure the research sentinel/driver is running and healthy
 - leave coordinator, sentinels, masters, workers, and loops controlled through `mac10`
 
-Claude is the current built-in provider and now has the first enabled provider manifest at `plugins/agents/claude/plugin.json`. Provider identity, CLI command, health/auth check, role model defaults, launch argv, provider environment, and task usage output schema are resolved through the provider interface. Codex, DeepSeek, and Gemini exist only as disabled provider scaffold manifests until their local CLI/auth, launch, and output-schema smokes pass.
+Claude is the current built-in provider and now has the first enabled provider manifest at `plugins/agents/claude/plugin.json`. Provider identity, CLI command, health/auth check, role model defaults, launch argv, provider environment, and task usage output schema are resolved through the provider interface. `scripts/provider.sh validate [provider] [project_dir] [--runtime] [--json]` is the static/runtime gate for provider enablement. Codex, DeepSeek, and Gemini exist only as disabled provider scaffold manifests until their local CLI/auth, launch, noninteractive task, and output-schema smokes pass.
 
 ## Coordinator
 
 The coordinator owns durable state and command contracts:
 
 - `coordinator/bin/mac10` is the CLI entrypoint
-- `coordinator/src/cli-server.js` handles RPC commands and command validation
+- `coordinator/src/cli-server.js` handles the RPC socket loop and dispatches command execution through `coordinator/src/commands/`
 - `coordinator/src/commands/changes.js` handles change tracking command execution behind the existing RPC contract
 - `coordinator/src/commands/domain-analysis.js` handles domain analysis command execution and approved domain doc writes behind the existing RPC contract
 - `coordinator/src/commands/extended-research.js` handles extended research topic and `fill-knowledge` command execution behind the existing RPC contract
@@ -29,14 +29,15 @@ The coordinator owns durable state and command contracts:
 - `coordinator/src/commands/research-queue.js` handles research queue command execution behind the existing RPC contract
 - `coordinator/src/commands/sandbox.js` handles sandbox and task-sandbox command execution behind the existing RPC contract
 - `coordinator/src/commands/memory.js` handles memory retrieval command execution behind the existing RPC contract
-- `coordinator/src/db.js` and `coordinator/src/schema.sql` own persistent state
+- `coordinator/src/db.js` is the compatibility facade for persistent state; repository modules under `coordinator/src/db/` own migrations, requests, tasks, workers, merge queue, mail, config, log, browser, memory, research, changes, loops, domain analysis, and extended research
+- `coordinator/src/schema.sql` remains the schema source for new database installs
 - `coordinator/src/allocator.js` handles task availability and assignment signaling
 - `coordinator/src/watchdog.js` handles stale assignment, loop, and integration recovery
 - `coordinator/src/merger.js` handles merge queue processing and merge recovery
 - `coordinator/src/overlay.js` writes task-specific worker context
 - `coordinator/src/context-bundle.js` serves bounded task context through `mac10 task-context <task_id>`
 
-Large files remain in `cli-server.js` and `db.js`. Change tracking, domain analysis, extended research, knowledge metadata, merge observability, microVM, research queue, sandbox, and memory command execution are the first extracted command domains; remaining domains should move one at a time only after focused coverage is identified.
+The command and database splits are compatibility-preserving. `cli-server.js` remains the command router/protocol boundary, and `db.js` remains the exported facade for existing callers while domain repositories hold the implementation.
 
 ## Agent Roles
 
@@ -87,9 +88,9 @@ Latest local Docker provider evidence from 2026-04-13: rebuilding `mac10-worker:
 Current expected source baseline:
 
 - tracked generated artifacts: 0
-- registered worktrees observed: 30
+- registered worktrees observed: 42
 - stale prunable worktrees observed by dry-run: 0
-- coordinator tests: passing
+- coordinator tests: 692 passing
 
 ## Remaining Architecture Decisions
 
@@ -106,10 +107,10 @@ Selected defaults:
 
 Still deferred after the provider-interface slice:
 
-- non-Claude provider implementations
-- non-Claude local launch smokes, provider-specific local auth checks, and validated output schemas before enablement
+- non-Claude provider enablement
+- non-Claude real noninteractive task smokes before setting `enabled: true`
 - sandbox cleanup implementation
-- task-state schema migration
 - ~~coordinator-served task context bundles~~ (done)
 - ~~canonical knowledge layout and health checks~~ (done)
-- remaining module boundaries for splitting `cli-server.js` and `db.js`
+- ~~remaining command-domain boundaries for `cli-server.js`~~ (done)
+- ~~repository boundaries for `db.js`~~ (done)

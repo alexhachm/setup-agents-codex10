@@ -55,6 +55,7 @@ Database schema and lifecycle state:
 
 - `coordinator/src/schema.sql`
 - `coordinator/src/db.js`
+- `coordinator/src/db/`
 - `coordinator/tests/state-machine.test.js`
 - `coordinator/tests/security.test.js`
 
@@ -83,6 +84,9 @@ Startup, providers, and sentinels:
 - `scripts/start-common.sh`
 - `scripts/provider-utils.sh`
 - `scripts/provider.sh`
+- `coordinator/src/provider-enablement.js`
+- `coordinator/bin/provider-validate.js`
+- `coordinator/tests/provider-enablement.test.js`
 - `scripts/launch-agent.sh`
 - `scripts/launch-worker.sh`
 - `scripts/worker-sentinel.sh`
@@ -151,8 +155,11 @@ Startup/provider bundle:
 - `scripts/start-common.sh`
 - `scripts/provider-utils.sh`
 - `scripts/provider.sh`
+- `coordinator/src/provider-enablement.js`
+- `coordinator/bin/provider-validate.js`
 - `scripts/launch-agent.sh`
 - `scripts/launch-worker.sh`
+- `coordinator/tests/provider-enablement.test.js`
 - `plugins/agents/<provider>/plugin.json`
 - active `.claude/scripts/*` provider/sentinel files
 
