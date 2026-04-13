@@ -7,6 +7,7 @@ const crypto = require('crypto');
 const { execFileSync } = require('child_process');
 const db = require('./db');
 const contextBundle = require('./context-bundle');
+const memoryCommands = require('./commands/memory');
 const sandboxCommands = require('./commands/sandbox');
 const providerOutput = require('./provider-output');
 let modelRouter = null;
@@ -4553,78 +4554,13 @@ function handleCommand(cmd, conn, handlers) {
         break;
       }
 
-      case 'memory-snapshots': {
-        const snapshots = db.listProjectMemorySnapshots({
-          project_context_key: args.project_context_key || null,
-          request_id: args.request_id || null,
-          task_id: args.task_id || null,
-          run_id: args.run_id || null,
-          validation_status: args.validation_status || null,
-          min_relevance_score: args.min_relevance_score != null ? args.min_relevance_score : null,
-          limit: args.limit || 100,
-          offset: args.offset || 0,
-        });
-        respond(conn, { ok: true, snapshots });
-        break;
-      }
-
-      case 'memory-snapshot': {
-        const snap = db.getProjectMemorySnapshot(args.id);
-        if (!snap) {
-          respond(conn, { ok: false, error: `Snapshot ${args.id} not found` });
-          break;
-        }
-        let lineage = null;
-        if (args.include_lineage) {
-          lineage = db.listProjectMemoryLineageLinks({ snapshot_id: args.id });
-        }
-        respond(conn, { ok: true, snapshot: snap, lineage });
-        break;
-      }
-
-      case 'memory-insights': {
-        const artifacts = db.listInsightArtifacts({
-          project_context_key: args.project_context_key || null,
-          snapshot_id: args.snapshot_id || null,
-          artifact_type: args.artifact_type || null,
-          request_id: args.request_id || null,
-          task_id: args.task_id || null,
-          run_id: args.run_id || null,
-          validation_status: args.validation_status || null,
-          min_relevance_score: args.min_relevance_score != null ? args.min_relevance_score : null,
-          limit: args.limit || 100,
-          offset: args.offset || 0,
-        });
-        respond(conn, { ok: true, artifacts });
-        break;
-      }
-
-      case 'memory-insight': {
-        const artifact = db.getInsightArtifact(args.id);
-        if (!artifact) {
-          respond(conn, { ok: false, error: `Insight artifact ${args.id} not found` });
-          break;
-        }
-        let insightLineage = null;
-        if (args.include_lineage) {
-          insightLineage = db.listProjectMemoryLineageLinks({ insight_artifact_id: args.id });
-        }
-        respond(conn, { ok: true, artifact, lineage: insightLineage });
-        break;
-      }
-
+      case 'memory-snapshots':
+      case 'memory-snapshot':
+      case 'memory-insights':
+      case 'memory-insight':
       case 'memory-lineage': {
-        const links = db.listProjectMemoryLineageLinks({
-          snapshot_id: args.snapshot_id || null,
-          insight_artifact_id: args.insight_artifact_id || null,
-          request_id: args.request_id || null,
-          task_id: args.task_id || null,
-          run_id: args.run_id || null,
-          lineage_type: args.lineage_type || null,
-          limit: args.limit || 200,
-          offset: args.offset || 0,
-        });
-        respond(conn, { ok: true, links });
+        const result = memoryCommands.handleMemoryCommand(command, args, { db });
+        respond(conn, result);
         break;
       }
 
