@@ -26,6 +26,7 @@ The coordinator owns durable state and command contracts:
 - `coordinator/src/commands/knowledge.js` handles knowledge metadata command execution behind the existing RPC contract
 - `coordinator/src/commands/merge-observability.js` handles merge metrics and health command execution behind the existing RPC contract
 - `coordinator/src/commands/microvm.js` handles `msb`/microVM command execution behind the existing RPC contract
+- `coordinator/src/commands/research-queue.js` handles research queue command execution behind the existing RPC contract
 - `coordinator/src/commands/sandbox.js` handles sandbox and task-sandbox command execution behind the existing RPC contract
 - `coordinator/src/commands/memory.js` handles memory retrieval command execution behind the existing RPC contract
 - `coordinator/src/db.js` and `coordinator/src/schema.sql` own persistent state
@@ -35,7 +36,7 @@ The coordinator owns durable state and command contracts:
 - `coordinator/src/overlay.js` writes task-specific worker context
 - `coordinator/src/context-bundle.js` serves bounded task context through `mac10 task-context <task_id>`
 
-Large files remain in `cli-server.js` and `db.js`. Change tracking, domain analysis, extended research, knowledge metadata, merge observability, microVM, sandbox, and memory command execution are the first extracted command domains; remaining domains should move one at a time only after focused coverage is identified.
+Large files remain in `cli-server.js` and `db.js`. Change tracking, domain analysis, extended research, knowledge metadata, merge observability, microVM, research queue, sandbox, and memory command execution are the first extracted command domains; remaining domains should move one at a time only after focused coverage is identified.
 
 ## Agent Roles
 

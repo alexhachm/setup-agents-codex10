@@ -14,6 +14,7 @@ const knowledgeCommands = require('./commands/knowledge');
 const memoryCommands = require('./commands/memory');
 const mergeObservabilityCommands = require('./commands/merge-observability');
 const microvmCommands = require('./commands/microvm');
+const researchQueueCommands = require('./commands/research-queue');
 const sandboxCommands = require('./commands/sandbox');
 const providerOutput = require('./provider-output');
 let modelRouter = null;
@@ -4410,133 +4411,20 @@ function handleCommand(cmd, conn, handlers) {
         break;
       }
 
-      case 'queue-research': {
-        const result = db.enqueueResearchIntent({
-          intent_type: 'browser_research',
-          intent_payload: JSON.stringify({
-            topic: args.topic,
-            question: args.question,
-            mode: args.mode || 'standard',
-            context: args.context || null,
-          }),
-          priority: args.priority || 'normal',
-          task_id: args.source_task_id || null,
-        });
-        respond(conn, { ok: true, id: result.intent.id, created: result.created, deduplicated: result.deduplicated });
-        break;
-      }
-
-      case 'research-status': {
-        const items = db.getResearchQueueItems({
-          topic: args.topic || null,
-          status: args.status || null,
-          limit: args.limit || 50,
-        });
-        respond(conn, { ok: true, items, count: items.length });
-        break;
-      }
-
-      case 'research-requeue-stale': {
-        const requeued = db.requeueStaleResearch({
-          max_age_minutes: args.max_age_minutes || 60,
-        });
-        db.log('coordinator', 'research_requeued_stale', requeued);
-        respond(conn, { ok: true, ...requeued });
-        break;
-      }
-
-      case 'research-next': {
-        const nextItems = db.getResearchQueueItems({ status: 'queued', limit: 1 });
-        if (nextItems.length === 0) {
-          respond(conn, { ok: true, item: null });
-        } else {
-          respond(conn, { ok: true, item: nextItems[0] });
-        }
-        break;
-      }
-
-      case 'research-start': {
-        const started = db.startResearchItem(args.id);
-        if (!started) {
-          respond(conn, { ok: false, error: 'research item not in queued state' });
-          break;
-        }
-        db.log('coordinator', 'research_started', { id: args.id });
-        respond(conn, { ok: true });
-        break;
-      }
-
-      case 'research-complete': {
-        let resultText = null;
-        const researchItem = db.getResearchIntent(args.intent_id);
-        if (args.note_path) {
-          const fs = require('fs');
-          const path = require('path');
-          const projectDir = db.getConfig('project_dir') || process.cwd();
-          // Try: absolute, relative to cwd, then under .claude/knowledge/
-          const candidates = [
-            args.note_path,
-            path.resolve(projectDir, args.note_path),
-            path.resolve(projectDir, '.claude', 'knowledge', args.note_path),
-          ];
-          let found = false;
-          for (const p of candidates) {
-            try { resultText = fs.readFileSync(p, 'utf8'); found = true; break; } catch {}
-          }
-          if (!found) {
-            respond(conn, { ok: false, error: `Cannot read note_path: ${args.note_path} (tried ${candidates.length} locations)` });
-            break;
-          }
-        }
-        const completed = db.completeResearchItem(args.intent_id, resultText);
-        if (!completed) {
-          respond(conn, { ok: false, error: 'research item not in in_progress state' });
-          break;
-        }
-        db.log('coordinator', 'research_completed', { id: args.intent_id });
-        try {
-          const parsedPayload = researchItem && researchItem.intent_payload
-            ? JSON.parse(researchItem.intent_payload)
-            : null;
-          const topic = parsedPayload && typeof parsedPayload.topic === 'string'
-            ? parsedPayload.topic.trim()
-            : '';
-          if (topic) {
-            const knowledgeMeta = require('./knowledge-metadata');
-            knowledgeMeta.resetDomainResearch(db.getConfig('project_dir') || process.cwd(), topic);
-          }
-        } catch (e) {
-          db.log('coordinator', 'research_metadata_reset_error', { id: args.intent_id, error: e.message });
-        }
-        respond(conn, { ok: true });
-        break;
-      }
-
-      case 'research-fail': {
-        const failed = db.failResearchItem(args.intent_id, args.error || null);
-        if (!failed) {
-          respond(conn, { ok: false, error: 'research item not in in_progress state' });
-          break;
-        }
-        db.log('coordinator', 'research_failed', { id: args.intent_id, error: args.error });
-        respond(conn, { ok: true });
-        break;
-      }
-
-      case 'research-gaps': {
-        const items = db.getResearchQueueItems({ status: 'queued' });
-        const topics = [...new Set(items.map(i => i.topic))];
-        respond(conn, { ok: true, queued_count: items.length, topics });
-        break;
-      }
-
+      case 'queue-research':
+      case 'research-status':
+      case 'research-requeue-stale':
+      case 'research-next':
+      case 'research-start':
+      case 'research-complete':
+      case 'research-fail':
+      case 'research-gaps':
       case 'research-retry-failed': {
-        const requeued = db.requeueFailedResearch({
-          topic: args.topic || null,
-          include_running: args.include_running || false,
+        const result = researchQueueCommands.handleResearchQueueCommand(command, args, {
+          db,
+          projectDir: db.getConfig('project_dir') || process.cwd(),
         });
-        db.log('coordinator', 'research_retry_failed', requeued);
-        respond(conn, { ok: true, ...requeued });
+        respond(conn, result);
         break;
       }
 

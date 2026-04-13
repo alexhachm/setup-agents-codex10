@@ -5467,6 +5467,59 @@ describe('research-queue COMMAND_SCHEMAS validation', () => {
     assert.strictEqual(res.error, 'Field "id" must be of type number');
   });
 
+  it('runs research queue status, next, gaps, fail, and retry lifecycle', async () => {
+    const queued = await sendCommand('queue-research', {
+      topic: 'routing',
+      question: 'How should routing be tested?',
+      priority: 'urgent',
+    });
+    assert.strictEqual(queued.ok, true);
+
+    const status = await sendCommand('research-status', { topic: 'routing' });
+    assert.strictEqual(status.ok, true);
+    assert.strictEqual(status.count, 1);
+    assert.strictEqual(status.items[0].topic, 'routing');
+
+    const next = await sendCommand('research-next', {});
+    assert.strictEqual(next.ok, true);
+    assert.strictEqual(next.item.id, queued.id);
+
+    const gaps = await sendCommand('research-gaps', {});
+    assert.strictEqual(gaps.ok, true);
+    assert.strictEqual(gaps.queued_count, 1);
+    assert.deepStrictEqual(gaps.topics, ['routing']);
+
+    const started = await sendCommand('research-start', { id: queued.id });
+    assert.strictEqual(started.ok, true);
+    const failed = await sendCommand('research-fail', { intent_id: queued.id, error: 'network unavailable' });
+    assert.strictEqual(failed.ok, true);
+
+    const retry = await sendCommand('research-retry-failed', { topic: 'routing' });
+    assert.strictEqual(retry.ok, true);
+    assert.strictEqual(retry.requeued_count, 1);
+    assert.deepStrictEqual(retry.ids, [queued.id]);
+  });
+
+  it('requeues stale running research', async () => {
+    const queued = await sendCommand('queue-research', {
+      topic: 'stale-research',
+      question: 'What timed out?',
+    });
+    assert.strictEqual(queued.ok, true);
+    const started = await sendCommand('research-start', { id: queued.id });
+    assert.strictEqual(started.ok, true);
+    db.getDb().prepare("UPDATE research_intents SET updated_at = datetime('now', '-90 minutes') WHERE id = ?")
+      .run(queued.id);
+
+    const requeued = await sendCommand('research-requeue-stale', { max_age_minutes: 60 });
+    assert.strictEqual(requeued.ok, true);
+    assert.strictEqual(requeued.requeued_count, 1);
+    assert.deepStrictEqual(requeued.ids, [queued.id]);
+
+    const status = await sendCommand('research-status', { topic: 'stale-research', status: 'queued' });
+    assert.strictEqual(status.count, 1);
+  });
+
   it('research-complete resets staleness for the completed topic', async () => {
     knowledgeMeta.writeMetadata(tmpDir, {
       domains: {
