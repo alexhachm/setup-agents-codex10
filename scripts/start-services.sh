@@ -231,11 +231,13 @@ launch_master_agents() {
     elif [ "$IS_WSL" = true ]; then
       local wt_exe="/mnt/c/Users/$USER/AppData/Local/Microsoft/WindowsApps/wt.exe"
       if [ -f "$wt_exe" ]; then
-        "$wt_exe" -w 0 new-tab --title "$title" -- wsl.exe -d "$WSL_DISTRO_NAME" -- bash "$LAUNCH_SCRIPT" "$PROJECT_DIR" "$model" "$role" &
+        "$wt_exe" -w 0 new-tab --title "$title" -- wsl.exe -d "$WSL_DISTRO_NAME" -- \
+          env MAC10_NAMESPACE="$NAMESPACE" MAC10_AGENT_PROVIDER="$MAC10_AGENT_PROVIDER" \
+          bash "$LAUNCH_SCRIPT" "$PROJECT_DIR" "$model" "$role" &
         echo "  $title terminal opened."
       else
         echo "  Windows Terminal not found — start manually:"
-        echo "    bash $LAUNCH_SCRIPT $PROJECT_DIR $model $role"
+        echo "    MAC10_NAMESPACE=$NAMESPACE MAC10_AGENT_PROVIDER=$MAC10_AGENT_PROVIDER bash $LAUNCH_SCRIPT $PROJECT_DIR $model $role"
       fi
     else
       echo "  Start manually in a separate terminal:"

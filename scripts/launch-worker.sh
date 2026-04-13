@@ -45,7 +45,7 @@ if grep -qi microsoft /proc/version 2>/dev/null || [ -n "${WSL_DISTRO_NAME:-}" ]
   if [ -f "$WT_EXE" ]; then
     DISTRO="${WSL_DISTRO_NAME:-Ubuntu}"
     "$WT_EXE" -w workers new-tab --title "Worker-$WORKER_NUM" -- \
-      wsl.exe -d "$DISTRO" -- bash "$SENTINEL" "$WORKER_NUM" "$PROJECT_DIR" >/dev/null 2>&1 &
+      wsl.exe -d "$DISTRO" -- env MAC10_NAMESPACE="$NAMESPACE" bash "$SENTINEL" "$WORKER_NUM" "$PROJECT_DIR" >/dev/null 2>&1 &
     echo "[LAUNCH_WORKER] $WINDOW_NAME terminal opened via Windows Terminal"
     exit 0
   fi
