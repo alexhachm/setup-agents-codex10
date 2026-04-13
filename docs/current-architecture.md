@@ -20,6 +20,7 @@ The coordinator owns durable state and command contracts:
 
 - `coordinator/bin/mac10` is the CLI entrypoint
 - `coordinator/src/cli-server.js` handles RPC commands and command validation
+- `coordinator/src/commands/sandbox.js` handles sandbox and task-sandbox command execution behind the existing RPC contract
 - `coordinator/src/db.js` and `coordinator/src/schema.sql` own persistent state
 - `coordinator/src/allocator.js` handles task availability and assignment signaling
 - `coordinator/src/watchdog.js` handles stale assignment, loop, and integration recovery
@@ -27,7 +28,7 @@ The coordinator owns durable state and command contracts:
 - `coordinator/src/overlay.js` writes task-specific worker context
 - `coordinator/src/context-bundle.js` serves bounded task context through `mac10 task-context <task_id>`
 
-Large files remain in `cli-server.js` and `db.js`. They should be split only after each command/query domain has focused coverage.
+Large files remain in `cli-server.js` and `db.js`. Sandbox command execution is the first extracted command domain; remaining domains should move one at a time only after focused coverage is identified.
 
 ## Agent Roles
 
@@ -73,6 +74,8 @@ Provider launch coverage lives in `coordinator/tests/provider-interface.test.js`
 
 Docker worker provider coverage lives in `mac10 sandbox-provider-smoke [provider]`. It runs inside the worker image, loads the selected provider manifest, checks the provider CLI/auth command, and renders the noninteractive worker launch path. Passing `--run` additionally executes a tiny noninteractive provider prompt when credentials are available inside the container.
 
+Latest local Docker provider evidence from 2026-04-13: rebuilding `mac10-worker:latest` succeeded, and direct Claude `providerSmoke(..., { build: false })` passed with CLI availability, auth check, noninteractive dry-run launch, and provider smoke all green.
+
 Current expected source baseline:
 
 - tracked generated artifacts: 0
@@ -101,4 +104,4 @@ Still deferred after the provider-interface slice:
 - task-state schema migration
 - ~~coordinator-served task context bundles~~ (done)
 - ~~canonical knowledge layout and health checks~~ (done)
-- module boundaries for splitting `cli-server.js` and `db.js`
+- remaining module boundaries for splitting `cli-server.js` and `db.js`

@@ -7,6 +7,7 @@ const crypto = require('crypto');
 const { execFileSync } = require('child_process');
 const db = require('./db');
 const contextBundle = require('./context-bundle');
+const sandboxCommands = require('./commands/sandbox');
 const providerOutput = require('./provider-output');
 let modelRouter = null;
 try {
@@ -1693,16 +1694,6 @@ function resolveQueuePrTarget(prUrl, branch, cwd = _projectDir || process.cwd(),
     source: 'unresolved',
     resolvable: false,
   };
-}
-
-function extractTaskSandboxFields(args, keys = [
-  'backend', 'sandbox_name', 'sandbox_path', 'worktree_path', 'branch', 'metadata', 'error',
-]) {
-  const fields = {};
-  for (const key of keys) {
-    if (args[key] !== undefined) fields[key] = args[key];
-  }
-  return fields;
 }
 
 function parseWorkerId(rawWorkerId) {
@@ -3674,88 +3665,16 @@ function handleCommand(cmd, conn, handlers) {
         break;
       }
 
-      case 'task-sandbox-create': {
-        const sandbox = db.createTaskSandbox({
-          task_id: args.task_id,
-          worker_id: args.worker_id,
-          backend: args.backend,
-          sandbox_name: args.sandbox_name,
-          sandbox_path: args.sandbox_path,
-          worktree_path: args.worktree_path,
-          branch: args.branch,
-          metadata: args.metadata,
-        });
-        respond(conn, { ok: true, sandbox });
-        break;
-      }
-
-      case 'task-sandbox-status': {
-        const sandboxes = db.listTaskSandboxes({
-          id: args.id,
-          task_id: args.task_id,
-          worker_id: args.worker_id,
-          status: args.status,
-        });
-        respond(conn, { ok: true, sandboxes, count: sandboxes.length });
-        break;
-      }
-
-      case 'task-sandbox-ready': {
-        const sandbox = db.transitionTaskSandbox(
-          args.id,
-          'ready',
-          extractTaskSandboxFields(args, ['backend', 'sandbox_name', 'sandbox_path', 'worktree_path', 'branch', 'metadata'])
-        );
-        respond(conn, { ok: true, sandbox });
-        break;
-      }
-
-      case 'task-sandbox-start': {
-        const sandbox = db.transitionTaskSandbox(
-          args.id,
-          'running',
-          extractTaskSandboxFields(args, ['backend', 'sandbox_name', 'sandbox_path', 'worktree_path', 'branch', 'metadata'])
-        );
-        respond(conn, { ok: true, sandbox });
-        break;
-      }
-
-      case 'task-sandbox-stop': {
-        const sandbox = db.transitionTaskSandbox(
-          args.id,
-          'stopped',
-          extractTaskSandboxFields(args, ['error', 'metadata'])
-        );
-        respond(conn, { ok: true, sandbox });
-        break;
-      }
-
-      case 'task-sandbox-fail': {
-        const sandbox = db.transitionTaskSandbox(
-          args.id,
-          'failed',
-          extractTaskSandboxFields(args, ['error', 'metadata'])
-        );
-        respond(conn, { ok: true, sandbox });
-        break;
-      }
-
-      case 'task-sandbox-clean': {
-        const sandbox = db.transitionTaskSandbox(
-          args.id,
-          'cleaned',
-          extractTaskSandboxFields(args, ['metadata'])
-        );
-        respond(conn, { ok: true, sandbox });
-        break;
-      }
-
+      case 'task-sandbox-create':
+      case 'task-sandbox-status':
+      case 'task-sandbox-ready':
+      case 'task-sandbox-start':
+      case 'task-sandbox-stop':
+      case 'task-sandbox-fail':
+      case 'task-sandbox-clean':
       case 'task-sandbox-cleanup': {
-        const result = db.cleanupTaskSandboxes({
-          max_age_minutes: args.max_age_minutes,
-          dry_run: args.dry_run === true,
-        });
-        respond(conn, { ok: true, ...result });
+        const result = sandboxCommands.handleTaskSandboxCommand(command, args, { db });
+        respond(conn, result);
         break;
       }
 
@@ -4745,57 +4664,16 @@ function handleCommand(cmd, conn, handlers) {
       }
 
       // === SANDBOX commands ===
-      case 'sandbox-status': {
-        const sandboxManager = require('./sandbox-manager');
-        const status = sandboxManager.getStatus(_projectDir || process.cwd());
-        respond(conn, { ok: true, ...status });
-        break;
-      }
-      case 'sandbox-build': {
-        const sandboxManager = require('./sandbox-manager');
-        const projDir = _projectDir || process.cwd();
-        if (!sandboxManager.isDockerAvailable()) {
-          respond(conn, { error: 'Docker is not available on this system' });
-          break;
-        }
-        try {
-          sandboxManager.buildImage(projDir);
-          respond(conn, { ok: true, image: sandboxManager.DEFAULT_IMAGE_NAME, message: 'Image built successfully' });
-        } catch (e) {
-          respond(conn, { error: `Image build failed: ${e.message}` });
-        }
-        break;
-      }
-      case 'sandbox-provider-smoke': {
-        const sandboxManager = require('./sandbox-manager');
-        try {
-          const result = sandboxManager.providerSmoke(_projectDir || process.cwd(), {
-            provider: args.provider || null,
-            runActual: args.run_actual === true,
-            build: args.build !== false,
-          });
-          respond(conn, result);
-        } catch (e) {
-          respond(conn, {
-            ok: false,
-            error: e.message,
-            output: e.output || '',
-            parsed: e.parsed || {},
-          });
-        }
-        break;
-      }
-      case 'sandbox-cleanup': {
-        const sandboxManager = require('./sandbox-manager');
-        const stopped = sandboxManager.cleanupAll();
-        respond(conn, { ok: true, stopped });
-        break;
-      }
+      case 'sandbox-status':
+      case 'sandbox-build':
+      case 'sandbox-provider-smoke':
+      case 'sandbox-cleanup':
       case 'sandbox-toggle': {
-        const current = db.getConfig('auto_sandbox_enabled');
-        const newValue = current === 'false' ? 'true' : 'false';
-        db.setConfig('auto_sandbox_enabled', newValue);
-        respond(conn, { ok: true, auto_sandbox_enabled: newValue === 'true' });
+        const result = sandboxCommands.handleSandboxCommand(command, args, {
+          db,
+          projectDir: _projectDir || process.cwd(),
+        });
+        respond(conn, result);
         break;
       }
 

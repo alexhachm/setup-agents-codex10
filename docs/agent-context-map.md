@@ -46,6 +46,7 @@ If a task points at one of these paths, find the generator or canonical source b
 Coordinator CLI and command contracts:
 
 - `coordinator/src/cli-server.js`
+- `coordinator/src/commands/`
 - `coordinator/bin/mac10`
 - `coordinator/tests/cli.test.js`
 - `coordinator/tests/security.test.js`
@@ -167,6 +168,7 @@ Merge/recovery bundle:
 Research bundle:
 
 - `coordinator/src/cli-server.js`
+- `coordinator/src/commands/`
 - `coordinator/src/db.js`
 - `coordinator/src/research-driver-manager.js`
 - `scripts/research-sentinel.sh`
