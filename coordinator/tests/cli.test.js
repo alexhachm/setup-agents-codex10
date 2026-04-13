@@ -4,316 +4,48 @@ const { describe, it, beforeEach, afterEach, mock } = require('node:test');
 const assert = require('node:assert');
 const path = require('path');
 const fs = require('fs');
-const os = require('os');
-const net = require('net');
-const { execFile, execFileSync, spawn } = require('child_process');
 
 const db = require('../src/db');
 const cliServer = require('../src/cli-server');
 const knowledgeMeta = require('../src/knowledge-metadata');
+const { createCliTestHarness } = require('./helpers/cli-harness');
 
 let tmpDir;
 let server;
 let socketPath;
 let loopCreatedEvents;
-
-function waitForCliServerReady() {
-  return new Promise((resolve) => {
-    const check = () => {
-      const conn = net.createConnection(socketPath, () => {
-        conn.end();
-        resolve();
-      });
-      conn.on('error', () => setTimeout(check, 50));
-    };
-    setTimeout(check, 50);
-  });
-}
+const cliHarness = createCliTestHarness({ db, cliServer });
 
 beforeEach(async () => {
-  tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'mac10-cli-'));
-  fs.mkdirSync(path.join(tmpDir, '.claude', 'state'), { recursive: true });
-  db.init(tmpDir);
-  socketPath = cliServer.getSocketPath(tmpDir);
-  loopCreatedEvents = [];
-  server = cliServer.start(tmpDir, {
-    onTaskCompleted: () => {},
-    onLoopCreated: (loopId, prompt) => {
-      loopCreatedEvents.push({ loopId, prompt });
-    },
-  });
-  // Wait for server to be listening
-  await waitForCliServerReady();
+  const state = await cliHarness.start();
+  tmpDir = state.tmpDir;
+  server = state.server;
+  socketPath = state.socketPath;
+  loopCreatedEvents = state.loopCreatedEvents;
 });
 
 afterEach(() => {
-  cliServer.stop();
-  db.close();
-  fs.rmSync(tmpDir, { recursive: true, force: true });
+  cliHarness.stop();
 });
 
-function sendCommand(command, args) {
-  return new Promise((resolve, reject) => {
-    const conn = net.createConnection(socketPath, () => {
-      conn.write(JSON.stringify({ command, args }) + '\n');
-    });
-    let data = '';
-    conn.on('data', (chunk) => {
-      data += chunk.toString();
-      const idx = data.indexOf('\n');
-      if (idx >= 0) {
-        resolve(JSON.parse(data.slice(0, idx)));
-        conn.end();
-      }
-    });
-    conn.on('error', reject);
-    conn.setTimeout(5000, () => { conn.end(); reject(new Error('Timeout')); });
-  });
-}
-
-function listMailForRecipient(recipient) {
-  return db.getDb().prepare(`
-    SELECT id, type, payload, consumed
-    FROM mail
-    WHERE recipient = ?
-    ORDER BY id ASC
-  `).all(recipient).map((row) => {
-    let parsedPayload = null;
-    try {
-      parsedPayload = row.payload ? JSON.parse(row.payload) : null;
-    } catch {
-      parsedPayload = null;
-    }
-    return { ...row, payload: parsedPayload };
-  });
-}
-
-function getConsumedByMarker(recipient) {
-  return Object.fromEntries(
-    listMailForRecipient(recipient).map((row) => [row.payload && row.payload.marker, row.consumed])
-  );
-}
-
-function runMac10Command(args, cwd) {
-  return new Promise((resolve, reject) => {
-    execFile(
-      process.execPath,
-      [path.join(__dirname, '..', 'bin', 'mac10'), ...args],
-      {
-        cwd,
-        encoding: 'utf8',
-      },
-      (error, stdout, stderr) => {
-        if (error) {
-          error.stdout = stdout;
-          error.stderr = stderr;
-          reject(error);
-          return;
-        }
-        resolve({ stdout, stderr });
-      }
-    );
-  });
-}
-
-function runMac10Cli(args) {
-  const cliPath = path.join(__dirname, '..', 'bin', 'mac10');
-  return new Promise((resolve) => {
-    execFile(process.execPath, [cliPath, '--project', tmpDir, ...args], { encoding: 'utf8' }, (error, stdout, stderr) => {
-      resolve({
-        status: error ? (Number.isInteger(error.code) ? error.code : 1) : 0,
-        stdout,
-        stderr,
-      });
-    });
-  });
-}
-
-function runMac10CliWithStdin(args, stdinPayload) {
-  const cliPath = path.join(__dirname, '..', 'bin', 'mac10');
-  return new Promise((resolve) => {
-    const child = spawn(process.execPath, [cliPath, '--project', tmpDir, ...args], {
-      stdio: ['pipe', 'pipe', 'pipe'],
-    });
-    let stdout = '';
-    let stderr = '';
-    child.stdout.setEncoding('utf8');
-    child.stderr.setEncoding('utf8');
-    child.stdout.on('data', (chunk) => {
-      stdout += chunk;
-    });
-    child.stderr.on('data', (chunk) => {
-      stderr += chunk;
-    });
-    child.on('close', (code) => {
-      resolve({
-        status: Number.isInteger(code) ? code : 1,
-        stdout,
-        stderr,
-      });
-    });
-    child.stdin.end(stdinPayload);
-  });
-}
-
-function parseCliJsonOutput(rawOutput) {
-  const trimmed = String(rawOutput || '').trim();
-  if (!trimmed) return null;
-  return JSON.parse(trimmed);
-}
-
-function runGit(args, cwd = tmpDir) {
-  return execFileSync('git', args, {
-    cwd,
-    encoding: 'utf8',
-    stdio: ['ignore', 'pipe', 'pipe'],
-  }).trim();
-}
-
-function initStatusGitRepo({ divergeFromOriginMain = false, makeDirty = false } = {}) {
-  runGit(['init', '--initial-branch=main']);
-  runGit(['config', 'user.email', 'status-tests@example.com']);
-  runGit(['config', 'user.name', 'Status Tests']);
-
-  fs.writeFileSync(path.join(tmpDir, '.gitignore'), '.claude/\norigin.git/\n');
-  const trackedFile = path.join(tmpDir, 'status-telemetry.txt');
-  fs.writeFileSync(trackedFile, 'baseline\n');
-  runGit(['add', '.gitignore', 'status-telemetry.txt']);
-  runGit(['commit', '-m', 'initial status telemetry commit']);
-
-  const remotePath = path.join(tmpDir, 'origin.git');
-  runGit(['init', '--bare', remotePath]);
-  runGit(['remote', 'add', 'origin', remotePath]);
-  runGit(['push', '-u', 'origin', 'main']);
-
-  if (divergeFromOriginMain) {
-    fs.appendFileSync(trackedFile, 'local drift\n');
-    runGit(['add', 'status-telemetry.txt']);
-    runGit(['commit', '-m', 'local drift']);
-  }
-
-  if (makeDirty) {
-    fs.writeFileSync(path.join(tmpDir, 'dirty-status-file.txt'), 'dirty worktree\n');
-  }
-}
-
-async function setConfigValue(key, value) {
-  const result = await sendCommand('set-config', { key, value: String(value) });
-  assert.strictEqual(result.ok, true, `set-config should succeed for ${key}`);
-}
-
-function createReadyTask({
-  subject,
-  description,
-  priority = 'normal',
-  tier = 2,
-  domain = null,
-  files = null,
-  validation = null,
-}) {
-  const requestId = db.createRequest(`Req: ${subject}`);
-  const taskId = db.createTask({
-    request_id: requestId,
-    subject,
-    description,
-    domain,
-    files,
-    priority,
-    tier,
-    validation,
-  });
-  db.checkAndPromoteTasks();
-  return taskId;
-}
-
-function getAllocatorAssignmentDetails(taskId) {
-  const entries = db.getLog(200, 'allocator');
-  for (const entry of entries) {
-    if (entry.action !== 'task_assigned') continue;
-    let details = null;
-    try {
-      details = JSON.parse(entry.details);
-    } catch {
-      continue;
-    }
-    if (details && details.task_id === taskId) return details;
-  }
-  return null;
-}
-
-function getCoordinatorRequestQueuedEvents(requestId) {
-  const entries = db.getLog(500, 'coordinator');
-  return entries.filter((entry) => {
-    if (entry.action !== 'request_queued') return false;
-    try {
-      const details = JSON.parse(entry.details);
-      return details && details.request_id === requestId;
-    } catch {
-      return false;
-    }
-  });
-}
-
-function getWorkerTaskStartedEvents(workerId, taskId) {
-  const entries = db.getLog(200, `worker-${workerId}`);
-  const normalizedTaskId = taskId === undefined || taskId === null ? null : String(taskId);
-  return entries.filter((entry) => {
-    if (entry.action !== 'task_started') return false;
-    try {
-      const details = JSON.parse(entry.details);
-      if (!normalizedTaskId) return true;
-      return details && String(details.task_id) === normalizedTaskId;
-    } catch {
-      return false;
-    }
-  });
-}
-
-function getCoordinatorOwnershipMismatchEvents(command, workerId, taskId) {
-  const entries = db.getLog(500, 'coordinator');
-  const normalizedWorkerId = workerId === undefined || workerId === null ? null : String(workerId);
-  const normalizedTaskId = taskId === undefined || taskId === null ? null : String(taskId);
-  return entries.filter((entry) => {
-    if (entry.action !== 'ownership_mismatch') return false;
-    try {
-      const details = JSON.parse(entry.details);
-      if (!details || details.command !== command) return false;
-      if (normalizedWorkerId && String(details.worker_id) !== normalizedWorkerId) return false;
-      if (normalizedTaskId && String(details.task_id) !== normalizedTaskId) return false;
-      return true;
-    } catch {
-      return false;
-    }
-  });
-}
-
-function getWorkerResetEvents(workerId, action) {
-  const entries = db.getLog(500, `worker-${workerId}`);
-  return entries.filter((entry) => {
-    if (entry.action !== action) return false;
-    try {
-      JSON.parse(entry.details);
-      return true;
-    } catch {
-      return false;
-    }
-  });
-}
-
-function getCoordinatorRemediationRecoveryEvents(requestId, trigger = null) {
-  const entries = db.getLog(500, 'coordinator');
-  return entries
-    .filter((entry) => entry.action === 'request_reopened_for_active_remediation')
-    .map((entry) => {
-      try {
-        return { entry, details: JSON.parse(entry.details) };
-      } catch {
-        return null;
-      }
-    })
-    .filter((item) => item && item.details && item.details.request_id === requestId)
-    .filter((item) => !trigger || item.details.trigger === trigger);
-}
+const sendCommand = (...args) => cliHarness.sendCommand(...args);
+const waitForCliServerReady = (...args) => cliHarness.waitForCliServerReady(...args);
+const listMailForRecipient = (...args) => cliHarness.listMailForRecipient(...args);
+const getConsumedByMarker = (...args) => cliHarness.getConsumedByMarker(...args);
+const runMac10Command = (...args) => cliHarness.runMac10Command(...args);
+const runMac10Cli = (...args) => cliHarness.runMac10Cli(...args);
+const runMac10CliWithStdin = (...args) => cliHarness.runMac10CliWithStdin(...args);
+const parseCliJsonOutput = (...args) => cliHarness.parseCliJsonOutput(...args);
+const runGit = (...args) => cliHarness.runGit(...args);
+const initStatusGitRepo = (...args) => cliHarness.initStatusGitRepo(...args);
+const setConfigValue = (...args) => cliHarness.setConfigValue(...args);
+const createReadyTask = (...args) => cliHarness.createReadyTask(...args);
+const getAllocatorAssignmentDetails = (...args) => cliHarness.getAllocatorAssignmentDetails(...args);
+const getCoordinatorRequestQueuedEvents = (...args) => cliHarness.getCoordinatorRequestQueuedEvents(...args);
+const getWorkerTaskStartedEvents = (...args) => cliHarness.getWorkerTaskStartedEvents(...args);
+const getCoordinatorOwnershipMismatchEvents = (...args) => cliHarness.getCoordinatorOwnershipMismatchEvents(...args);
+const getWorkerResetEvents = (...args) => cliHarness.getWorkerResetEvents(...args);
+const getCoordinatorRemediationRecoveryEvents = (...args) => cliHarness.getCoordinatorRemediationRecoveryEvents(...args);
 
 describe('CLI Server', () => {
   it('should respond to ping', async () => {

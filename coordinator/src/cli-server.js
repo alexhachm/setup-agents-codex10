@@ -7,16 +7,19 @@ const crypto = require('crypto');
 const { execFileSync } = require('child_process');
 const db = require('./db');
 const changeCommands = require('./commands/changes');
+const cliProtocol = require('./cli-protocol');
 const contextBundle = require('./context-bundle');
 const domainAnalysisCommands = require('./commands/domain-analysis');
 const extendedResearchCommands = require('./commands/extended-research');
 const knowledgeCommands = require('./commands/knowledge');
 const memoryCommands = require('./commands/memory');
 const mergeObservabilityCommands = require('./commands/merge-observability');
+const mergeQueueService = require('./merge-queue-service');
 const microvmCommands = require('./commands/microvm');
 const researchQueueCommands = require('./commands/research-queue');
 const sandboxCommands = require('./commands/sandbox');
 const providerOutput = require('./provider-output');
+const runtimeHealth = require('./runtime-health');
 let modelRouter = null;
 try {
   modelRouter = require('./model-router');
@@ -324,150 +327,11 @@ let tcpServer = null;
 let _projectDir = null; // Set on start()
 let _serverStartedAt = null; // Set on start(), used by health-check
 
-function formatUptimeHuman(ms) {
-  if (ms == null || ms < 0) return 'unknown';
-  const totalSec = Math.floor(ms / 1000);
-  const h = Math.floor(totalSec / 3600);
-  const m = Math.floor((totalSec % 3600) / 60);
-  const s = totalSec % 60;
-  const parts = [];
-  if (h > 0) parts.push(`${h}h`);
-  if (m > 0) parts.push(`${m}m`);
-  parts.push(`${s}s`);
-  return parts.join(' ');
-}
-
-function readJsonFileSafe(filePath) {
-  try {
-    return JSON.parse(fs.readFileSync(filePath, 'utf8'));
-  } catch {
-    return null;
-  }
-}
-
-function isoAgeMs(value) {
-  if (!value) return null;
-  const ts = Date.parse(value);
-  if (!Number.isFinite(ts)) return null;
-  return Math.max(0, Date.now() - ts);
-}
-
-function countByStatus(rows) {
-  const counts = {};
-  for (const row of rows || []) {
-    const status = row && row.status ? String(row.status) : 'unknown';
-    counts[status] = (counts[status] || 0) + 1;
-  }
-  return counts;
-}
-
-function callHealthProbe(name, fn, fallback = {}) {
-  try {
-    return fn();
-  } catch (e) {
-    return { ...fallback, probe: name, error: e.message };
-  }
-}
-
-function collectRuntimeHealth(projectDir, workers) {
-  const sandboxManager = require('./sandbox-manager');
-  const microvmManager = require('./microvm-manager');
-  const workerBackend = require('./worker-backend');
-  const researchDriverManager = require('./research-driver-manager');
-  const sandbox = callHealthProbe('sandbox', () => sandboxManager.getStatus(projectDir), {
-    docker_available: false,
-    auto_sandbox_enabled: db.getConfig('auto_sandbox_enabled') !== 'false',
-  });
-  const microvm = callHealthProbe('microvm', () => microvmManager.getStatus(), {
-    msb_installed: false,
-    server_running: false,
-  });
-  const tmuxAvailable = callHealthProbe('tmux', () => {
-    const tmuxBackend = workerBackend.getBackend('tmux');
-    return { available: Boolean(tmuxBackend && tmuxBackend.isAvailable()) };
-  }, { available: false }).available === true;
-  const isolationEnabled = db.getConfig('auto_sandbox_enabled') !== 'false';
-  const msbAvailable = microvm.msb_installed === true && microvm.server_running === true;
-  const dockerAvailable = sandbox.docker_available === true;
-  const effectiveBackend = !isolationEnabled
-    ? (tmuxAvailable ? 'tmux' : 'none')
-    : (msbAvailable ? 'sandbox' : (dockerAvailable ? 'docker' : (tmuxAvailable ? 'tmux' : 'none')));
-  const researchRuntime = callHealthProbe('research-driver-runtime', () => (
-    researchDriverManager.getRuntimeStatus(projectDir)
-  ), { running: false, sentinel_running: false, driver_running: false });
-  const agentHealth = readJsonFileSafe(path.join(projectDir, '.claude', 'state', 'agent-health.json')) || {};
-  const researchHeartbeat = agentHealth['research-driver'] || {};
-
-  return {
-    isolation: {
-      enabled: isolationEnabled,
-      priority: ['sandbox', 'docker', 'tmux'],
-      effective_backend: effectiveBackend,
-      msb_available: msbAvailable,
-      docker_available: dockerAvailable,
-      tmux_available: tmuxAvailable,
-    },
-    sandbox,
-    microvm,
-    research: {
-      status: researchHeartbeat.status || null,
-      last_active: researchHeartbeat.last_active || null,
-      last_active_age_ms: isoAgeMs(researchHeartbeat.last_active),
-      runtime: researchRuntime,
-    },
-    worker_backends: countByStatus((workers || []).map((worker) => ({
-      status: worker.backend || 'tmux',
-    }))),
-  };
-}
-
-function collectCoordinatorHealth(projectDir = _projectDir || process.cwd()) {
-  const uptime_ms = db.coordinatorAgeMs(_serverStartedAt);
-  const allWorkers = db.getAllWorkers();
-  const idleWorkers = db.getIdleWorkers();
-  const assignedTasks = db.listTasks({ status: 'assigned' });
-  const inProgressTasks = db.listTasks({ status: 'in_progress' });
-  const taskRows = db.getDb().prepare('SELECT id, status FROM tasks').all();
-  const runtime = collectRuntimeHealth(projectDir, allWorkers);
-
-  return {
-    project_dir: projectDir,
-    namespace: NAMESPACE,
-    uptime_ms,
-    uptime_human: formatUptimeHuman(uptime_ms),
-    worker_count: allWorkers.length,
-    idle_workers: idleWorkers.length,
-    active_tasks: assignedTasks.length,
-    workers: {
-      total: allWorkers.length,
-      idle: idleWorkers.length,
-      status_counts: countByStatus(allWorkers),
-      backend_counts: runtime.worker_backends,
-    },
-    tasks: {
-      total: taskRows.length,
-      active: assignedTasks.length + inProgressTasks.length,
-      assigned: assignedTasks.length,
-      in_progress: inProgressTasks.length,
-      status_counts: countByStatus(taskRows),
-    },
-    runtime,
-    isolation: runtime.isolation,
-    sandbox: runtime.sandbox,
-    microvm: runtime.microvm,
-    research: runtime.research,
-  };
-}
 const NAMESPACE = process.env.MAC10_NAMESPACE || 'mac10';
 const WORKER_LIMIT_MIN = 1;
 const WORKER_LIMIT_MAX = 8;
 const DEFAULT_WORKERS = 4;
 const LEGACY_MAX_WORKERS_DEFAULT = 8;
-const BRANCH_RE = /^[a-zA-Z0-9._\/-]+$/;
-const PR_URL_RE = /^https:\/\/github\.com\/[a-zA-Z0-9._-]+\/[a-zA-Z0-9._-]+\/pull\/\d+$/;
-const PR_NUMBER_RE = /^#?(\d+)$/;
-const PR_REFERENCE_RE = /^(pull request|pull|pr)\s*#?(\d+)$/i;
-const WORKER_BRANCH_RE = /^agent-\d+$/;
 const ROUTING_BUDGET_STATE_KEY = 'routing_budget_state';
 const ROUTING_BUDGET_REMAINING_KEY = 'routing_budget_flagship_remaining';
 const ROUTING_BUDGET_THRESHOLD_KEY = 'routing_budget_flagship_threshold';
@@ -486,8 +350,6 @@ const LOOP_REQUEST_SET_CONFIG_SPECS = Object.freeze({
   loop_request_max_per_hour: Object.freeze({ type: 'int', min: 1, max: 1000 }),
   loop_request_similarity_threshold: Object.freeze({ type: 'float', min: 0.5, max: 0.99 }),
 });
-const PR_RESOLVE_ERROR_RE = /Could not resolve to a PullRequest/i;
-
 function namespacedFile(defaultName, namespacedName) {
   return NAMESPACE === 'mac10' ? defaultName : namespacedName;
 }
@@ -572,241 +434,6 @@ function extractInboxMailFilters(args = {}) {
   if (typeof args.request_id === 'string') filters.request_id = args.request_id;
   return filters;
 }
-
-const COMMAND_SCHEMAS = {
-  'request':           { required: ['description'], types: { description: 'string' } },
-  'fix':               { required: ['description'], types: { description: 'string' } },
-  'status':            { required: [], types: {} },
-  'clarify':           { required: ['request_id', 'message'], types: { request_id: 'string', message: 'string' } },
-  'log':               { required: [], types: { limit: 'number', actor: 'string' } },
-  'request-history':   { required: ['request_id'], types: { request_id: 'string', limit: 'number' } },
-  'triage':            { required: ['request_id', 'tier'], types: { request_id: 'string', tier: 'number', reasoning: 'string' } },
-  'create-task':       {
-    required: ['request_id', 'subject', 'description'],
-    types: { request_id: 'string', subject: 'string', description: 'string', domain: 'string', priority: 'string', tier: 'number', needs_sandbox: 'number' },
-    allowed: ['request_id', 'subject', 'description', 'domain', 'files', 'priority', 'tier', 'depends_on', 'validation', 'needs_sandbox'],
-  },
-  'tier1-complete':    { required: ['request_id', 'result'], types: { request_id: 'string', result: 'string' } },
-  'ask-clarification': { required: ['request_id', 'question'], types: { request_id: 'string', question: 'string' } },
-  'my-task':           { required: ['worker_id'], types: { worker_id: 'string' } },
-  'task-context':      { required: ['task_id'], types: { task_id: 'number' } },
-  'context-bundle':    { required: ['task_id'], types: { task_id: 'number' } },
-  'start-task':        { required: ['worker_id', 'task_id'], types: { worker_id: 'string' } },
-  'heartbeat':         { required: ['worker_id'], types: { worker_id: 'string' } },
-  'complete-task':     { required: ['worker_id', 'task_id'], types: { worker_id: 'string', usage: 'object' } },
-  'fail-task':         { required: ['worker_id', 'task_id', 'error'], types: { worker_id: 'string', error: 'string', usage: 'object' } },
-  'browser-create-session': {
-    required: ['task_id', 'workflow_url', 'idempotency_key'],
-    types: { task_id: 'number', workflow_url: 'string', idempotency_key: 'string', channel: 'string' },
-  },
-  'browser-attach-session': {
-    required: ['task_id', 'session_id', 'idempotency_key'],
-    types: { task_id: 'number', session_id: 'string', idempotency_key: 'string', channel: 'string' },
-  },
-  'browser-start-job': {
-    required: ['task_id', 'session_id', 'workflow_url', 'guidance', 'idempotency_key'],
-    types: {
-      task_id: 'number',
-      session_id: 'string',
-      workflow_url: 'string',
-      guidance: 'string',
-      idempotency_key: 'string',
-    },
-  },
-  'browser-callback-chunk': {
-    required: ['task_id', 'session_id', 'job_id', 'callback_token', 'idempotency_key', 'chunk_index', 'chunk'],
-    types: {
-      task_id: 'number',
-      session_id: 'string',
-      job_id: 'string',
-      callback_token: 'string',
-      idempotency_key: 'string',
-      chunk_index: 'number',
-      chunk: 'string',
-    },
-  },
-  'browser-complete-job': {
-    required: ['task_id', 'session_id', 'job_id', 'callback_token', 'idempotency_key'],
-    types: {
-      task_id: 'number',
-      session_id: 'string',
-      job_id: 'string',
-      callback_token: 'string',
-      idempotency_key: 'string',
-    },
-  },
-  'browser-fail-job': {
-    required: ['task_id', 'session_id', 'job_id', 'callback_token', 'idempotency_key', 'error'],
-    types: {
-      task_id: 'number',
-      session_id: 'string',
-      job_id: 'string',
-      callback_token: 'string',
-      idempotency_key: 'string',
-      error: 'string',
-    },
-  },
-  'browser-job-status': {
-    required: ['task_id', 'session_id', 'job_id'],
-    types: { task_id: 'number', session_id: 'string', job_id: 'string' },
-  },
-  'distill':           { required: ['worker_id'], types: { worker_id: 'string' } },
-  'inbox':             { required: ['recipient'], types: { recipient: 'string', peek: 'boolean', type: 'string', request_id: 'string' } },
-  'inbox-block':       { required: ['recipient'], types: { recipient: 'string', timeout: 'number', peek: 'boolean', type: 'string', request_id: 'string' } },
-  'ready-tasks':       { required: [], types: {} },
-  'assign-task':       { required: ['task_id', 'worker_id'], types: { task_id: 'number', worker_id: 'number' } },
-  'claim-worker':      { required: ['worker_id', 'claimer'], types: { worker_id: 'number', claimer: 'string' } },
-  'release-worker':    { required: ['worker_id'], types: { worker_id: 'number' } },
-  'worker-status':     { required: [], types: {} },
-  'check-completion':  { required: ['request_id'], types: { request_id: 'string' } },
-  'replan-dependency': { required: ['from_task_id', 'to_task_id'], types: { from_task_id: 'number', to_task_id: 'number', request_id: 'string' } },
-  'task-sandbox-create': {
-    required: ['task_id'],
-    types: {
-      task_id: 'number',
-      worker_id: 'number',
-      backend: 'string',
-      sandbox_name: 'string',
-      sandbox_path: 'string',
-      worktree_path: 'string',
-      branch: 'string',
-      metadata: 'object',
-    },
-  },
-  'task-sandbox-status': {
-    required: [],
-    types: { id: 'number', task_id: 'number', worker_id: 'number', status: 'string' },
-  },
-  'task-sandbox-ready': {
-    required: ['id'],
-    types: { id: 'number', backend: 'string', sandbox_name: 'string', sandbox_path: 'string', worktree_path: 'string', branch: 'string', metadata: 'object' },
-  },
-  'task-sandbox-start': {
-    required: ['id'],
-    types: { id: 'number', backend: 'string', sandbox_name: 'string', sandbox_path: 'string', worktree_path: 'string', branch: 'string', metadata: 'object' },
-  },
-  'task-sandbox-stop': {
-    required: ['id'],
-    types: { id: 'number', error: 'string', metadata: 'object' },
-  },
-  'task-sandbox-fail': {
-    required: ['id', 'error'],
-    types: { id: 'number', error: 'string', metadata: 'object' },
-  },
-  'task-sandbox-clean': {
-    required: ['id'],
-    types: { id: 'number', metadata: 'object' },
-  },
-  'task-sandbox-cleanup': {
-    required: [],
-    types: { max_age_minutes: 'number', dry_run: 'boolean' },
-  },
-  'register-worker':   { required: ['worker_id'], types: { worker_id: 'string', worktree_path: 'string', branch: 'string' } },
-  'repair':            { required: [], types: {} },
-  'purge-tasks':       { required: [], types: { status: 'string' } },
-  'ping':              { required: [], types: {} },
-  'health-check':      { required: [], types: {} },
-  'add-worker':        { required: [], types: {} },
-  'merge-status':      { required: [], types: { request_id: 'string' } },
-  'reset-worker':      { required: ['worker_id'], types: { worker_id: 'string' } },
-  'check-overlaps':    { required: ['request_id'], types: { request_id: 'string' } },
-  'log-change':        {
-    required: ['description'],
-    types: { description: 'string', domain: 'string', file_path: 'string', function_name: 'string', tooltip: 'string', status: 'string' },
-    allowed: ['description', 'domain', 'file_path', 'function_name', 'tooltip', 'status'],
-  },
-  'list-changes':      { required: [], types: { domain: 'string', status: 'string' } },
-  'update-change':     { required: ['id'], types: { id: 'number' } },
-  'integrate':         { required: ['request_id'], types: { request_id: 'string', retry_terminal: 'boolean', force_retry: 'boolean' } },
-  'loop':              { required: ['prompt'], types: { prompt: 'string' } },
-  'stop-loop':         { required: ['loop_id'], types: { loop_id: 'number' } },
-  'loop-status':       { required: [], types: {} },
-  'loop-checkpoint':   { required: ['loop_id', 'summary'], types: { loop_id: 'number', summary: 'string' } },
-  'loop-heartbeat':    { required: ['loop_id'], types: { loop_id: 'number' } },
-  'set-config':        { required: ['key', 'value'], types: { key: 'string', value: 'string' } },
-  'loop-prompt':       { required: ['loop_id'], types: { loop_id: 'number' } },
-  'loop-refresh-prompt': { required: ['loop_id', 'prompt'], types: { loop_id: 'number', prompt: 'string' } },
-  'loop-set-prompt':   { required: ['loop_id', 'prompt'], types: { loop_id: 'number', prompt: 'string' } },
-  'loop-request':      { required: ['loop_id', 'description'], types: { loop_id: 'number', description: 'string' } },
-  'loop-requests':     { required: ['loop_id'], types: { loop_id: 'number' } },
-  'queue-research':      {
-    required: ['topic', 'question'],
-    types: { topic: 'string', question: 'string', mode: 'string', priority: 'string', context: 'string', source_agent: 'string', source_task_id: 'number' },
-  },
-  'sandbox-provider-smoke': {
-    required: [],
-    types: { provider: 'string', run_actual: 'boolean', build: 'boolean' },
-  },
-  'research-status':     { required: [], types: { topic: 'string', status: 'string', limit: 'number' } },
-  'research-requeue-stale': { required: [], types: { max_age_minutes: 'number' } },
-  'research-start':      { required: ['id'], types: { id: 'number' } },
-  'research-complete':   { required: ['intent_id'], types: { intent_id: 'number', note_path: 'string' } },
-  'research-fail':       { required: ['intent_id'], types: { intent_id: 'number', error: 'string' } },
-  'research-next':       { required: [], types: {} },
-  'research-gaps':       { required: [], types: {} },
-  'research-retry-failed': { required: [], types: { topic: 'string', include_running: 'boolean' } },
-  'fill-knowledge':      { required: [], types: {} },
-  'analyze-domain':        { required: ['domain'], types: { domain: 'string' } },
-  'domain-analysis':       { required: ['id'], types: { id: 'number' } },
-  'domain-analyses':       { required: [], types: { domain: 'string', status: 'string', limit: 'number' } },
-  'approve-domain':        { required: ['id'], types: { id: 'number', feedback: 'string' } },
-  'reject-domain':         { required: ['id'], types: { id: 'number', feedback: 'string' } },
-  'submit-domain-draft':   { required: ['id'], types: { id: 'number', review_sheet: 'string', draft_payload: 'string', analyzed_files: 'string' } },
-  'create-research-topic': { required: ['title', 'description'], types: { title: 'string', description: 'string', category: 'string', discovery_source: 'string', loop_id: 'number', tags: 'string' } },
-  'research-topic':        { required: ['id'], types: { id: 'number' } },
-  'research-topics':       { required: [], types: { review_status: 'string', category: 'string', loop_id: 'number', limit: 'number' } },
-  'review-research-topic': { required: ['id', 'review_status'], types: { id: 'number', review_status: 'string', notes: 'string' } },
-  'pending-reviews':       { required: [], types: { limit: 'number' } },
-  'memory-snapshots': {
-    required: [],
-    types: {
-      project_context_key: 'string',
-      request_id: 'string',
-      task_id: 'number',
-      run_id: 'string',
-      validation_status: 'string',
-      min_relevance_score: 'number',
-      limit: 'number',
-      offset: 'number',
-    },
-  },
-  'memory-snapshot': {
-    required: ['id'],
-    types: { id: 'number', include_lineage: 'boolean' },
-  },
-  'memory-insights': {
-    required: [],
-    types: {
-      project_context_key: 'string',
-      snapshot_id: 'number',
-      artifact_type: 'string',
-      request_id: 'string',
-      task_id: 'number',
-      run_id: 'string',
-      validation_status: 'string',
-      min_relevance_score: 'number',
-      limit: 'number',
-      offset: 'number',
-    },
-  },
-  'memory-insight': {
-    required: ['id'],
-    types: { id: 'number', include_lineage: 'boolean' },
-  },
-  'memory-lineage': {
-    required: [],
-    types: {
-      snapshot_id: 'number',
-      insight_artifact_id: 'number',
-      request_id: 'string',
-      task_id: 'number',
-      run_id: 'string',
-      lineage_type: 'string',
-      limit: 'number',
-      offset: 'number',
-    },
-  },
-};
 
 function parseBudgetNumber(value) {
   if (value === undefined || value === null) return null;
@@ -1520,13 +1147,6 @@ function normalizeOverlapIdsField(overlapWith, selfId = null) {
   return normalized;
 }
 
-function sanitizeBranchName(rawBranch) {
-  if (typeof rawBranch !== 'string') return '';
-  const trimmed = rawBranch.trim();
-  if (!trimmed || !BRANCH_RE.test(trimmed)) return '';
-  return trimmed;
-}
-
 function createUnknownSourceRevision() {
   return {
     current_branch: null,
@@ -1559,7 +1179,7 @@ function parseGitCount(value) {
 function getSourceRevision(cwd = _projectDir || process.cwd()) {
   const sourceRevision = createUnknownSourceRevision();
   const currentBranch = runGitCommand(['branch', '--show-current'], cwd);
-  if (currentBranch) sourceRevision.current_branch = sanitizeBranchName(currentBranch) || currentBranch;
+  if (currentBranch) sourceRevision.current_branch = mergeQueueService.sanitizeBranchName(currentBranch) || currentBranch;
 
   const headCommit = runGitCommand(['rev-parse', 'HEAD'], cwd);
   if (headCommit) sourceRevision.head_commit = headCommit;
@@ -1578,130 +1198,6 @@ function getSourceRevision(cwd = _projectDir || process.cwd()) {
   if (statusPorcelain !== null) sourceRevision.dirty_worktree = statusPorcelain.length > 0;
 
   return sourceRevision;
-}
-
-function parseGitHubRepoFromRemoteUrl(remoteUrl) {
-  const trimmed = String(remoteUrl || '').trim();
-  if (!trimmed) return '';
-
-  try {
-    const parsed = new URL(trimmed);
-    const host = (parsed.hostname || '').toLowerCase();
-    if (!host.endsWith('github.com')) return '';
-    const parts = parsed.pathname.replace(/^\/+|\/+$/g, '').split('/');
-    if (parts.length < 2) return '';
-    return `${parts[0]}/${parts[1].replace(/\.git$/i, '')}`;
-  } catch {
-    const sshMatch = trimmed.match(/^git@[^:]+:([^/]+)\/([^/.]+)(?:\.git)?$/i);
-    if (sshMatch) return `${sshMatch[1]}/${sshMatch[2]}`;
-  }
-
-  return '';
-}
-
-function getProjectGitHubRepoPath(cwd = _projectDir || process.cwd()) {
-  try {
-    const remoteUrl = execFileSync('git', ['remote', 'get-url', 'origin'], {
-      encoding: 'utf8',
-      cwd,
-      stdio: ['ignore', 'pipe', 'ignore'],
-    }).trim();
-    return parseGitHubRepoFromRemoteUrl(remoteUrl);
-  } catch {
-    return '';
-  }
-}
-
-function extractPrNumber(rawPrUrl) {
-  if (typeof rawPrUrl !== 'string') return '';
-  const trimmed = rawPrUrl.trim();
-  if (!trimmed) return '';
-  const match = trimmed.match(PR_NUMBER_RE);
-  if (match) return match[1];
-  const refMatch = trimmed.match(PR_REFERENCE_RE);
-  if (refMatch) return refMatch[2];
-  return '';
-}
-
-function normalizePrUrl(rawPrUrl, cwd = _projectDir || process.cwd()) {
-  if (typeof rawPrUrl !== 'string') return '';
-  const trimmed = rawPrUrl.trim();
-  if (!trimmed) return '';
-  if (PR_URL_RE.test(trimmed)) return trimmed;
-
-  const normalizedMatch = extractPrNumber(trimmed);
-  if (!normalizedMatch) return trimmed;
-
-  const repoPath = getProjectGitHubRepoPath(cwd);
-  if (!repoPath) return trimmed;
-  return `https://github.com/${repoPath}/pull/${normalizedMatch}`;
-}
-
-function isValidGitHubPrUrl(value) {
-  return typeof value === 'string' && PR_URL_RE.test(value);
-}
-
-function isResolvableGitHubPrUrl(prUrl, cwd = _projectDir || process.cwd()) {
-  if (!isValidGitHubPrUrl(prUrl)) return false;
-  try {
-    execFileSync('gh', ['pr', 'view', prUrl, '--json', 'state'], {
-      encoding: 'utf8',
-      cwd,
-      stdio: ['ignore', 'ignore', 'pipe'],
-      timeout: 12000,
-    });
-    return true;
-  } catch (e) {
-    const errorText = String(e.message || '') + String(e.stderr || '') + String(e.stdout || '');
-    if (PR_RESOLVE_ERROR_RE.test(errorText)) return false;
-    return true;
-  }
-}
-
-function findOpenPrUrlForBranch(rawBranch, cwd = _projectDir || process.cwd()) {
-  const branch = sanitizeBranchName(rawBranch);
-  if (!branch) return '';
-  try {
-    const prUrl = execFileSync('gh', ['pr', 'list', '--state', 'open', '--head', branch, '--json', 'url', '--jq', '.[0].url'], {
-      encoding: 'utf8',
-      cwd,
-      stdio: ['ignore', 'pipe', 'pipe'],
-      timeout: 12000,
-    }).trim();
-    if (!isValidGitHubPrUrl(prUrl)) return '';
-    return prUrl;
-  } catch {
-    return '';
-  }
-}
-
-function resolveQueuePrTarget(prUrl, branch, cwd = _projectDir || process.cwd(), options = {}) {
-  const normalizedPrUrl = normalizePrUrl(prUrl, cwd);
-  if (isValidGitHubPrUrl(normalizedPrUrl) && isResolvableGitHubPrUrl(normalizedPrUrl, cwd)) {
-    const original = typeof prUrl === 'string' ? prUrl.trim() : '';
-    return {
-      pr_url: normalizedPrUrl,
-      source: normalizedPrUrl === original ? 'provided' : 'normalized',
-      resolvable: true,
-    };
-  }
-
-  if (options.allowBranchFallback === true) {
-    const branchPrUrl = findOpenPrUrlForBranch(branch, cwd);
-    if (branchPrUrl) {
-      return {
-        pr_url: branchPrUrl,
-        source: 'branch_fallback',
-        resolvable: true,
-      };
-    }
-  }
-
-  return {
-    pr_url: normalizedPrUrl,
-    source: 'unresolved',
-    resolvable: false,
-  };
 }
 
 function parseWorkerId(rawWorkerId) {
@@ -1811,433 +1307,6 @@ function validateWorkerTaskOwnership(command, rawWorkerId, rawTaskId, options = 
   };
 }
 
-function canonicalBranchForWorkerId(rawWorkerId) {
-  const workerId = parseWorkerId(rawWorkerId);
-  if (workerId === null) return '';
-  return `agent-${workerId}`;
-}
-
-function readWorkerBranchFromWorktree(worker) {
-  const worktreePath = worker && worker.worktree_path ? String(worker.worktree_path).trim() : '';
-  if (!worktreePath) return '';
-  try {
-    const branch = sanitizeBranchName(execFileSync('git', ['branch', '--show-current'], {
-      encoding: 'utf8',
-      cwd: worktreePath,
-      stdio: ['ignore', 'pipe', 'ignore'],
-    }));
-    return WORKER_BRANCH_RE.test(branch) ? branch : '';
-  } catch {
-    return '';
-  }
-}
-
-function branchExists(rawBranch, repositoryDir = process.cwd()) {
-  const branch = sanitizeBranchName(rawBranch);
-  if (!branch) return false;
-  try {
-    execFileSync('git', ['show-ref', '--verify', '--quiet', `refs/heads/${branch}`], {
-      encoding: 'utf8',
-      cwd: repositoryDir,
-      stdio: ['ignore', 'ignore', 'ignore'],
-    });
-    return true;
-  } catch {
-    return false;
-  }
-}
-
-function resolveWorkerBranch(worker, fallbackWorkerId = null) {
-  const workerId = worker && worker.id !== undefined && worker.id !== null
-    ? worker.id
-    : fallbackWorkerId;
-  const canonicalBranch = canonicalBranchForWorkerId(workerId);
-  const workerBranch = sanitizeBranchName(worker && worker.branch ? String(worker.branch) : '');
-  const worktreeBranch = readWorkerBranchFromWorktree(worker);
-  const worktreePath = worker && worker.worktree_path ? String(worker.worktree_path).trim() : '';
-
-  // Worker ID is the source of truth for branch identity.
-  // Keep canonical as a recovery-safe fallback when local refs are unavailable.
-  if (canonicalBranch && branchExists(canonicalBranch, worktreePath || process.cwd())) {
-    return canonicalBranch;
-  }
-
-  if (WORKER_BRANCH_RE.test(workerBranch) && branchExists(workerBranch, worktreePath || process.cwd())) return workerBranch;
-  if (worktreeBranch && branchExists(worktreeBranch, worktreePath || process.cwd())) return worktreeBranch;
-  if (canonicalBranch) return canonicalBranch;
-  if (WORKER_BRANCH_RE.test(workerBranch)) return workerBranch;
-  if (worktreeBranch) return worktreeBranch;
-  return '';
-}
-
-function resolveCompletionBranch(worker, reportedBranch, fallbackWorkerId = null) {
-  const workerBranch = resolveWorkerBranch(worker, fallbackWorkerId);
-  const requestedBranch = sanitizeBranchName(reportedBranch);
-
-  if (!requestedBranch) return { branch: workerBranch || null, mismatch: false, requestedBranch: null, workerBranch };
-  if (!workerBranch) {
-    // Fail closed when worker identity is unavailable. This prevents stale or
-    // caller-provided feature branches from entering merge_queue.
-    return { branch: null, mismatch: true, requestedBranch, workerBranch: null };
-  }
-
-  if (requestedBranch !== workerBranch) {
-    return { branch: workerBranch, mismatch: true, requestedBranch, workerBranch };
-  }
-
-  return { branch: requestedBranch, mismatch: false, requestedBranch, workerBranch };
-}
-
-function isMergeOwnershipCollisionReason(reason) {
-  return reason === 'existing_pr_owned_by_other_request' || reason === 'duplicate_pr_owned_by_other_request';
-}
-
-/**
- * Pre-queue overlap detection: check whether the files changed by a completing
- * task overlap with files referenced by other pending/ready merge_queue entries.
- * When overlap is detected the older entry is serialized behind the completing
- * task by resetting it to 'pending' so the merge processor handles them in order.
- */
-function preQueueOverlapCheck(taskId, changedFiles) {
-  if (!changedFiles || changedFiles.length === 0) return;
-
-  const normalize = (f) => String(f).replace(/^\.\//, '');
-  const normalizedChanged = changedFiles.map(normalize);
-
-  // Find other non-terminal merge_queue entries (exclude the task itself)
-  const entries = db.getDb().prepare(
-    "SELECT mq.id, mq.request_id, mq.task_id, mq.branch, mq.status, t.files " +
-    "FROM merge_queue mq LEFT JOIN tasks t ON t.id = mq.task_id " +
-    "WHERE mq.status IN ('pending', 'ready') AND mq.task_id != ?"
-  ).all(taskId);
-
-  for (const entry of entries) {
-    let entryFiles;
-    try {
-      entryFiles = entry.files ? JSON.parse(entry.files).map(normalize) : [];
-    } catch {
-      entryFiles = [];
-    }
-    if (entryFiles.length === 0) continue;
-
-    const shared = normalizedChanged.filter((f) => entryFiles.includes(f));
-    if (shared.length === 0) continue;
-
-    // Overlap detected — serialize by resetting the older entry to pending
-    db.updateMerge(entry.id, { status: 'pending', error: null });
-    db.incrementMetric('merge_queue_overlap_serializations');
-    db.log('coordinator', 'merge_queue_overlap_serialized', {
-      completing_task_id: taskId,
-      overlapping_merge_id: entry.id,
-      overlapping_task_id: entry.task_id,
-      overlapping_branch: entry.branch,
-      shared_files: shared,
-    });
-  }
-}
-
-function queueMergeWithRecovery({
-  request_id,
-  task_id,
-  pr_url,
-  branch,
-  priority = 0,
-  force_retry = false,
-  latest_completion_timestamp = undefined,
-  allow_branch_pr_fallback = false,
-}) {
-  const normalizedPriority = Number.isInteger(priority) ? priority : 0;
-  const queueCwd = _projectDir || process.cwd();
-  const resolvedPr = resolveQueuePrTarget(pr_url, branch, queueCwd, {
-    allowBranchFallback: allow_branch_pr_fallback === true,
-  });
-  const resolvedPrUrl = resolvedPr.pr_url;
-
-  if (resolvedPr.source === 'branch_fallback' && isValidGitHubPrUrl(resolvedPrUrl)) {
-    db.updateTask(task_id, { pr_url: resolvedPrUrl });
-    db.log('coordinator', 'merge_queue_pr_url_recovered_from_branch', {
-      request_id,
-      task_id,
-      branch,
-      original_pr_url: typeof pr_url === 'string' ? pr_url : null,
-      resolved_pr_url: resolvedPrUrl,
-    });
-  }
-
-  if (!resolvedPr.resolvable) {
-    const staleEntries = db.getDb().prepare(`
-      SELECT id, status
-      FROM merge_queue
-      WHERE request_id = ?
-        AND task_id = ?
-        AND status NOT IN ('merged', 'merging')
-    `).all(request_id, task_id);
-    for (const entry of staleEntries) {
-      if (entry.status === 'pending') {
-        db.updateMerge(entry.id, { status: 'failed', error: 'invalid_or_missing_pr' });
-      }
-    }
-    return {
-      queued: false,
-      inserted: false,
-      refreshed: false,
-      retried: false,
-      reason: 'invalid_or_missing_pr',
-      resolved_pr_url: isValidGitHubPrUrl(resolvedPrUrl) ? resolvedPrUrl : null,
-      pr_resolution_source: resolvedPr.source,
-    };
-  }
-
-  db.getDb().prepare(`
-    DELETE FROM merge_queue
-    WHERE request_id = ?
-      AND branch = ?
-      AND pr_url <> ?
-      AND status NOT IN ('merged', 'merging')
-  `).run(request_id, branch, resolvedPrUrl);
-
-  const getLatestCheckpoint = () => {
-    if (latest_completion_timestamp !== undefined) return latest_completion_timestamp;
-    return db.getRequestLatestCompletedTaskCursor(request_id);
-  };
-  const latestCheckpoint = getLatestCheckpoint();
-
-  const enqueueResult = db.enqueueMerge({
-    request_id,
-    task_id,
-    pr_url: resolvedPrUrl,
-    branch,
-    priority: normalizedPriority,
-    completion_checkpoint: latestCheckpoint,
-  });
-  if (enqueueResult.inserted) {
-    const existingDuplicatePrOwner = db.getDb().prepare(`
-      SELECT id, request_id, task_id, branch, status
-      FROM merge_queue
-      WHERE pr_url = ?
-        AND id != ?
-        AND (
-          request_id != ?
-          OR branch != ?
-        )
-      ORDER BY id DESC
-      LIMIT 1
-    `).get(resolvedPrUrl, enqueueResult.lastInsertRowid, request_id, branch);
-    if (existingDuplicatePrOwner) {
-      db.getDb().prepare('DELETE FROM merge_queue WHERE id = ?').run(enqueueResult.lastInsertRowid);
-      db.log('coordinator', 'merge_queue_duplicate_pr_ownership_rejected', {
-        request_id,
-        task_id,
-        pr_url: resolvedPrUrl,
-        branch,
-        duplicate_merge_id: enqueueResult.lastInsertRowid,
-        existing_merge_id: existingDuplicatePrOwner.id,
-        existing_request_id: existingDuplicatePrOwner.request_id,
-        existing_task_id: existingDuplicatePrOwner.task_id,
-        existing_branch: existingDuplicatePrOwner.branch,
-        existing_status: existingDuplicatePrOwner.status,
-      });
-      return {
-        queued: false,
-        inserted: false,
-        refreshed: false,
-        retried: false,
-        reason: 'duplicate_pr_owned_by_other_request',
-        merge_id: existingDuplicatePrOwner.id,
-        duplicate_merge_id: enqueueResult.lastInsertRowid,
-        existing_request_id: existingDuplicatePrOwner.request_id,
-        existing_task_id: existingDuplicatePrOwner.task_id,
-        existing_branch: existingDuplicatePrOwner.branch,
-        existing_status: existingDuplicatePrOwner.status,
-        resolved_pr_url: resolvedPrUrl,
-        pr_resolution_source: resolvedPr.source,
-      };
-    }
-    return {
-      queued: true,
-      inserted: true,
-      refreshed: false,
-      retried: false,
-      resolved_pr_url: resolvedPrUrl,
-      pr_resolution_source: resolvedPr.source,
-    };
-  }
-
-  const existing = db.getDb().prepare(`
-    SELECT id, request_id, task_id, branch, status, priority, pr_url, updated_at, completion_checkpoint
-    FROM merge_queue
-    WHERE request_id = ?
-      AND pr_url = ?
-      AND branch = ?
-    ORDER BY id DESC
-    LIMIT 1
-  `).get(request_id, resolvedPrUrl, branch);
-
-  if (!existing) {
-    const existingByPr = db.getDb().prepare(`
-      SELECT id, request_id, task_id, branch, status
-      FROM merge_queue
-      WHERE pr_url = ?
-        AND (
-          request_id != ?
-          OR branch != ?
-        )
-      ORDER BY id DESC
-      LIMIT 1
-    `).get(resolvedPrUrl, request_id, branch);
-    if (existingByPr) {
-      return {
-        queued: false,
-        inserted: false,
-        refreshed: false,
-        retried: false,
-        reason: 'existing_pr_owned_by_other_request',
-        merge_id: existingByPr.id,
-        existing_request_id: existingByPr.request_id,
-        existing_task_id: existingByPr.task_id,
-        existing_branch: existingByPr.branch,
-        existing_status: existingByPr.status,
-        resolved_pr_url: resolvedPrUrl,
-        pr_resolution_source: resolvedPr.source,
-      };
-    }
-    return {
-      queued: false,
-      inserted: false,
-      refreshed: false,
-      retried: false,
-      reason: 'missing_existing_entry',
-      resolved_pr_url: resolvedPrUrl,
-      pr_resolution_source: resolvedPr.source,
-    };
-  }
-  if (existing.status === 'merged' || existing.status === 'merging') {
-    return {
-      queued: false,
-      inserted: false,
-      refreshed: false,
-      retried: false,
-      reason: `status_${existing.status}`,
-      resolved_pr_url: resolvedPrUrl,
-      pr_resolution_source: resolvedPr.source,
-    };
-  }
-
-  const ownerTaskChanged = Number(existing.task_id) !== Number(task_id);
-  const currentPriority = Number.isInteger(existing.priority) ? existing.priority : 0;
-  const desiredPriority = Math.max(currentPriority, normalizedPriority);
-  const isTerminalRetryStatus = existing.status === 'failed' || existing.status === 'conflict';
-  const mergeIdentityChanged =
-    existing.branch !== branch ||
-    existing.pr_url !== resolvedPrUrl;
-  const hasFreshCompletionProgress = isTerminalRetryStatus && db.hasRequestCompletedTaskProgressSince(
-    request_id,
-    existing.completion_checkpoint,
-    latestCheckpoint
-  );
-  const shouldRetry = isTerminalRetryStatus && (force_retry || hasFreshCompletionProgress || mergeIdentityChanged || ownerTaskChanged);
-  const desiredStatus = shouldRetry ? 'pending' : existing.status;
-  const needsRefresh =
-    mergeIdentityChanged ||
-    ownerTaskChanged ||
-    currentPriority !== desiredPriority ||
-    existing.status !== desiredStatus;
-
-  if (!needsRefresh) {
-    if (isTerminalRetryStatus && !shouldRetry) {
-      return {
-        queued: false,
-        inserted: false,
-        refreshed: false,
-        retried: false,
-        reason: 'terminal_without_fresh_progress',
-        resolved_pr_url: resolvedPrUrl,
-        pr_resolution_source: resolvedPr.source,
-      };
-    }
-    return {
-      queued: false,
-      inserted: false,
-      refreshed: false,
-      retried: false,
-      reason: 'already_current',
-      resolved_pr_url: resolvedPrUrl,
-      pr_resolution_source: resolvedPr.source,
-    };
-  }
-
-  db.getDb().prepare(`
-    UPDATE merge_queue
-    SET task_id = ?,
-        branch = ?,
-        pr_url = ?,
-        priority = ?,
-        status = ?,
-        error = CASE WHEN ? = 1 THEN NULL ELSE error END,
-        completion_checkpoint = ?,
-        updated_at = strftime('%Y-%m-%dT%H:%M:%fZ','now')
-    WHERE id = ?
-  `).run(
-    task_id,
-    branch,
-    resolvedPrUrl,
-    desiredPriority,
-    desiredStatus,
-    shouldRetry ? 1 : 0,
-    shouldRetry ? (latestCheckpoint || null) : existing.completion_checkpoint,
-    existing.id
-  );
-
-  return {
-    queued: shouldRetry,
-    inserted: false,
-    refreshed: true,
-    retried: shouldRetry,
-    previous_status: existing.status,
-    merge_id: existing.id,
-    resolved_pr_url: resolvedPrUrl,
-    pr_resolution_source: resolvedPr.source,
-  };
-}
-
-function validateCommand(cmd) {
-  const { command, args } = cmd;
-  if (typeof command !== 'string') {
-    throw new Error('Missing or invalid "command" field');
-  }
-  const schema = COMMAND_SCHEMAS[command];
-  if (!schema) return; // unknown commands handled by switch default
-
-  const a = args || {};
-  for (const field of schema.required) {
-    if (a[field] === undefined || a[field] === null) {
-      throw new Error(`Missing required field "${field}" for command "${command}"`);
-    }
-  }
-  for (const [field, expectedType] of Object.entries(schema.types)) {
-    if (a[field] !== undefined && a[field] !== null && typeof a[field] !== expectedType) {
-      throw new Error(`Field "${field}" must be of type ${expectedType}`);
-    }
-  }
-  // Strip unknown keys for create-task
-  if (schema.allowed && args) {
-    for (const key of Object.keys(args)) {
-      if (!schema.allowed.includes(key)) {
-        delete args[key];
-      }
-    }
-  }
-
-  if (command === 'create-task' && Object.prototype.hasOwnProperty.call(a, 'domain')) {
-    const normalizedDomain = normalizeTaskDomain(a.domain);
-    if (normalizedDomain) a.domain = normalizedDomain;
-    else delete a.domain;
-  }
-  if ((command === 'complete-task' || command === 'fail-task') && Object.prototype.hasOwnProperty.call(a, 'usage')) {
-    a.usage = normalizeCompleteTaskUsagePayload(a.usage);
-  }
-}
-
 function getSocketPath(projectDir) {
   const dir = path.join(projectDir, '.claude', 'state');
   fs.mkdirSync(dir, { recursive: true });
@@ -2274,7 +1343,10 @@ function createConnectionHandler(handlers) {
         if (!line.trim()) continue;
         try {
           const cmd = JSON.parse(line);
-          validateCommand(cmd);
+          cliProtocol.validateCommand(cmd, {
+            normalizeTaskDomain,
+            normalizeCompleteTaskUsagePayload,
+          });
           handleCommand(cmd, conn, handlers);
         } catch (e) {
           respond(conn, { error: e.message });
@@ -2286,7 +1358,10 @@ function createConnectionHandler(handlers) {
       if (data.trim()) {
         try {
           const cmd = JSON.parse(data);
-          validateCommand(cmd);
+          cliProtocol.validateCommand(cmd, {
+            normalizeTaskDomain,
+            normalizeCompleteTaskUsagePayload,
+          });
           handleCommand(cmd, conn, handlers);
         } catch {} // connection closing — best effort
       }
@@ -2548,7 +1623,12 @@ function handleCommand(cmd, conn, handlers) {
       case 'task-context':
       case 'context-bundle': {
         const projectDir = _projectDir || process.cwd();
-        const health = collectCoordinatorHealth(projectDir);
+        const health = runtimeHealth.collectCoordinatorHealth({
+          db,
+          projectDir,
+          namespace: NAMESPACE,
+          serverStartedAt: _serverStartedAt,
+        });
         const bundle = contextBundle.buildTaskContextBundle({
           taskId: args.task_id,
           projectDir,
@@ -2654,8 +1734,8 @@ function handleCommand(cmd, conn, handlers) {
         const completionPrNormalizationCwd = worker && worker.worktree_path
           ? worker.worktree_path
           : (_projectDir || process.cwd());
-        const normalizedPrUrl = normalizePrUrl(pr_url, completionPrNormalizationCwd);
-        const resolvedBranch = resolveCompletionBranch(worker, branch, worker_id);
+        const normalizedPrUrl = mergeQueueService.normalizePrUrl(pr_url, completionPrNormalizationCwd);
+        const resolvedBranch = mergeQueueService.resolveCompletionBranch(worker, branch, worker_id);
         if (resolvedBranch.mismatch) {
           db.log('coordinator', 'complete_task_branch_overridden', {
             worker_id,
@@ -2677,14 +1757,16 @@ function handleCommand(cmd, conn, handlers) {
         if (completedTask) {
           let changedFiles = [];
           try { changedFiles = completedTask.files ? JSON.parse(completedTask.files) : []; } catch { changedFiles = []; }
-          preQueueOverlapCheck(task_id, changedFiles);
+          mergeQueueService.preQueueOverlapCheck({ db, taskId: task_id, changedFiles });
         }
         // Enqueue merge if PR exists (must be a valid URL, not a status string like "already_merged")
-        const queueBranch = sanitizeBranchName(resolvedBranch.branch || completedTask.branch || (worker && worker.branch) || '');
+        const queueBranch = mergeQueueService.sanitizeBranchName(resolvedBranch.branch || completedTask.branch || (worker && worker.branch) || '');
         let completionPrUrl = normalizedPrUrl;
         let queueResult = null;
-        if (completedTask && queueBranch && isValidGitHubPrUrl(normalizedPrUrl)) {
-          queueResult = queueMergeWithRecovery({
+        if (completedTask && queueBranch && mergeQueueService.isValidGitHubPrUrl(normalizedPrUrl)) {
+          queueResult = mergeQueueService.queueMergeWithRecovery({
+            db,
+            projectDir: _projectDir || process.cwd(),
             request_id: completedTask.request_id,
             task_id,
             pr_url: normalizedPrUrl,
@@ -2706,7 +1788,7 @@ function handleCommand(cmd, conn, handlers) {
               merge_id: queueResult.merge_id || null,
             });
           }
-        } else if (completedTask && queueBranch && !isValidGitHubPrUrl(normalizedPrUrl)) {
+        } else if (completedTask && queueBranch && !mergeQueueService.isValidGitHubPrUrl(normalizedPrUrl)) {
           db.log('coordinator', 'complete_task_merge_skipped_no_pr', {
             request_id: completedTask.request_id,
             task_id,
@@ -2714,7 +1796,7 @@ function handleCommand(cmd, conn, handlers) {
             pr_url: normalizedPrUrl || null,
           });
         }
-        if (queueResult && isMergeOwnershipCollisionReason(queueResult.reason)) {
+        if (queueResult && mergeQueueService.isMergeOwnershipCollisionReason(queueResult.reason)) {
           const failureReason = queueResult.reason;
           const failureError = `merge_queue:${failureReason}`;
           const failureTimestamp = new Date().toISOString();
@@ -3710,17 +2792,19 @@ function handleCommand(cmd, conn, handlers) {
           const taskPrNormalizationCwd = worker && worker.worktree_path
             ? worker.worktree_path
             : (_projectDir || process.cwd());
-          const normalizedPrUrl = normalizePrUrl(task.pr_url, taskPrNormalizationCwd);
-          const resolvedBranch = resolveCompletionBranch(worker, task.branch, task.assigned_to);
+          const normalizedPrUrl = mergeQueueService.normalizePrUrl(task.pr_url, taskPrNormalizationCwd);
+          const resolvedBranch = mergeQueueService.resolveCompletionBranch(worker, task.branch, task.assigned_to);
           if (task.pr_url !== normalizedPrUrl) {
             db.updateTask(task.id, { pr_url: normalizedPrUrl || task.pr_url });
           }
-          const mergeBranch = sanitizeBranchName(resolvedBranch.branch || task.branch || (worker && worker.branch) || '');
-          if (mergeBranch && isValidGitHubPrUrl(normalizedPrUrl)) {
+          const mergeBranch = mergeQueueService.sanitizeBranchName(resolvedBranch.branch || task.branch || (worker && worker.branch) || '');
+          if (mergeBranch && mergeQueueService.isValidGitHubPrUrl(normalizedPrUrl)) {
             if (resolvedBranch.mismatch || task.branch !== mergeBranch) {
               db.updateTask(task.id, { branch: mergeBranch });
             }
-            const queueResult = queueMergeWithRecovery({
+            const queueResult = mergeQueueService.queueMergeWithRecovery({
+              db,
+              projectDir: _projectDir || process.cwd(),
               request_id: reqId,
               task_id: task.id,
               branch: mergeBranch,
@@ -3733,7 +2817,7 @@ function handleCommand(cmd, conn, handlers) {
             if (queuedPrUrl && queuedPrUrl !== task.pr_url) {
               db.updateTask(task.id, { pr_url: queuedPrUrl });
             }
-            if (isMergeOwnershipCollisionReason(queueResult.reason)) {
+            if (mergeQueueService.isMergeOwnershipCollisionReason(queueResult.reason)) {
               const failureReason = queueResult.reason;
               const failureError = `merge_queue:${failureReason}`;
               const failureTimestamp = new Date().toISOString();
@@ -3809,7 +2893,7 @@ function handleCommand(cmd, conn, handlers) {
                 merge_id: queueResult.merge_id || null,
               });
             }
-          } else if (mergeBranch && !isValidGitHubPrUrl(normalizedPrUrl)) {
+          } else if (mergeBranch && !mergeQueueService.isValidGitHubPrUrl(normalizedPrUrl)) {
             db.log('coordinator', 'integrate_merge_skipped_no_pr', {
               request_id: reqId,
               task_id: task.id,
@@ -3939,7 +3023,15 @@ function handleCommand(cmd, conn, handlers) {
       }
 
       case 'health-check': {
-        respond(conn, { ok: true, ...collectCoordinatorHealth(_projectDir || process.cwd()) });
+        respond(conn, {
+          ok: true,
+          ...runtimeHealth.collectCoordinatorHealth({
+            db,
+            projectDir: _projectDir || process.cwd(),
+            namespace: NAMESPACE,
+            serverStartedAt: _serverStartedAt,
+          }),
+        });
         break;
       }
 
