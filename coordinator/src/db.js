@@ -24,7 +24,7 @@ const PRIORITY_OVERRIDE_MARKER_RE = /\bpriority\s+override\b/i;
 const REQUEST_ID_TOKEN_RE = /\breq-[a-f0-9]{8}\b/gi;
 const AUTONOMOUS_REQUEST_SIGNATURES = Object.freeze([
   Object.freeze({ id: 'master2_header', pattern: /You are \*\*Master-2: Architect\*\*/i }),
-  Object.freeze({ id: 'worker_header', pattern: /You are a coding worker in the (?:mac10|codex10) multi-agent system/i }),
+  Object.freeze({ id: 'worker_header', pattern: /You are a coding worker in the mac10 multi-agent system/i }),
   Object.freeze({ id: 'protocol_exact', pattern: /Follow this protocol exactly\./i }),
   Object.freeze({ id: 'internal_counters', pattern: /^##\s+Internal Counters\b/m }),
   Object.freeze({ id: 'step1_startup', pattern: /^##\s+Step 1: Startup\b/m }),
@@ -681,6 +681,14 @@ function ensureTaskBrowserOffloadColumns(database) {
   `);
 }
 
+function ensureTaskMergeHistoryColumn(database) {
+  const taskCols = database.prepare("PRAGMA table_info(tasks)").all().map((column) => column.name);
+  if (taskCols.length === 0) return;
+  if (!taskCols.includes('merge_history')) {
+    database.exec("ALTER TABLE tasks ADD COLUMN merge_history TEXT");
+  }
+}
+
 function ensureResearchBatchingSchema(database) {
   database.exec(`
     CREATE TABLE IF NOT EXISTS research_batches (
@@ -1036,6 +1044,7 @@ function init(projectDir) {
     ensureTaskRoutingTelemetryColumns(db);
     ensureTaskBrowserOffloadColumns(db);
     ensureTaskUsageTelemetryColumns(db);
+    ensureTaskMergeHistoryColumn(db);
   }
   if (existingTables.includes('requests')) {
     const reqCols = db.prepare("PRAGMA table_info(requests)").all().map(c => c.name);
@@ -1071,6 +1080,7 @@ function init(projectDir) {
   ensureTaskRoutingTelemetryColumns(db);
   ensureTaskBrowserOffloadColumns(db);
   ensureTaskUsageTelemetryColumns(db);
+  ensureTaskMergeHistoryColumn(db);
   ensureResearchBatchingSchema(db);
   ensureProjectMemoryPersistenceSchema(db);
   ensureBrowserOffloadPersistenceSchema(db);
@@ -1187,6 +1197,38 @@ function updateTask(id, fields) {
   sets.push("updated_at = datetime('now')");
   vals.push(id);
   getDb().prepare(`UPDATE tasks SET ${sets.join(', ')} WHERE id = ?`).run(...vals);
+}
+
+function appendTaskMergeHistory(taskId, entry) {
+  const task = getDb().prepare('SELECT merge_history FROM tasks WHERE id = ?').get(taskId);
+  if (!task) return;
+  let history;
+  try {
+    history = task.merge_history ? JSON.parse(task.merge_history) : [];
+  } catch {
+    history = [];
+  }
+  history.push({ ...entry, recorded_at: new Date().toISOString() });
+  getDb().prepare("UPDATE tasks SET merge_history = ?, updated_at = datetime('now') WHERE id = ?")
+    .run(JSON.stringify(history), taskId);
+}
+
+function getRequestMergeHistory(requestId) {
+  const rows = getDb().prepare(
+    'SELECT id, merge_history FROM tasks WHERE request_id = ? AND merge_history IS NOT NULL'
+  ).all(requestId);
+  const result = [];
+  for (const row of rows) {
+    let entries;
+    try { entries = JSON.parse(row.merge_history); } catch { continue; }
+    if (Array.isArray(entries)) {
+      for (const entry of entries) {
+        result.push({ task_id: row.id, ...entry });
+      }
+    }
+  }
+  result.sort((a, b) => (a.recorded_at || '').localeCompare(b.recorded_at || ''));
+  return result;
 }
 
 function normalizeBrowserOffloadStatus(value) {
@@ -3196,7 +3238,16 @@ function recoverStalledAssignments(options = {}) {
         if (!hasWorkerRow) {
           reason = 'worker_missing';
         } else if (includeOrphans) {
-          if (workerStatus === 'idle' && currentTaskId !== taskId) {
+          // Grace period: skip orphan detection if the worker's heartbeat is still
+          // fresh.  When a sentinel resets a worker after the agent exits, the
+          // heartbeat timestamp is updated to "now".  Without this guard the very
+          // next watchdog tick would mark the task as orphaned before the allocator
+          // has a chance to re-assign it.  A 60-second window covers the typical
+          // sentinel restart + agent spin-up time.
+          const orphanGraceSec = 60;
+          const withinGracePeriod = staleSec !== null && staleSec < orphanGraceSec;
+
+          if (workerStatus === 'idle' && currentTaskId !== taskId && !withinGracePeriod) {
             reason = 'worker_idle_orphan';
           } else if (currentTaskId !== null && currentTaskId !== taskId) {
             reason = 'worker_task_pointer_mismatch';
@@ -3425,10 +3476,10 @@ function checkRequestCompletion(requestId, options = {}) {
   const nonblockingFailed = Number(row.nonblocking_failed) || 0;
   const hardFailures = blockingFailed + failedFinal;
   const terminal = completed + failed + superseded + rerouted + failedFinal;
-  const allTerminal = total > 0 && terminal === total;
   const zeroTaskCompleted = total === 0 && requestStatus === 'completed';
   const zeroTaskFailed = total === 0 && requestStatus === 'failed';
   const allCompleted = (total > 0 && completed === total) || zeroTaskCompleted;
+  const allTerminal = total > 0 && terminal === total;
   const allFailed = (total > 0 && failed === total) || zeroTaskFailed;
   return {
     request_id: requestId,
@@ -3444,7 +3495,7 @@ function checkRequestCompletion(requestId, options = {}) {
     hard_failures: hardFailures,
     all_completed: allCompleted,
     all_terminal: allTerminal,
-    all_done: allTerminal || allCompleted || allFailed || zeroTaskCompleted || zeroTaskFailed,
+    all_done: allCompleted || allFailed,
     stale_decomposed_recovered: repaired.length > 0,
   };
 }
@@ -4392,7 +4443,7 @@ function reconcileRequestLifecycle(requestId) {
   const current = getDb().prepare('SELECT * FROM requests WHERE id = ?').get(requestId);
   if (!current) return changes;
 
-  // Invariant 2: 'in_progress' with all tasks in terminal state (completed or failed)
+  // Invariant 2: 'in_progress' with all tasks in terminal state
   //   and no pending/running merges → advance to 'integrating' so the merger can
   //   evaluate completion.  This repairs requests that got stuck in 'in_progress'
   //   after their tasks finished but before the merger observed the transition.
@@ -4401,7 +4452,7 @@ function reconcileRequestLifecycle(requestId) {
       .prepare(
         `SELECT
            COUNT(*) AS total,
-           SUM(CASE WHEN status IN ('completed','failed') THEN 1 ELSE 0 END) AS terminal
+           SUM(CASE WHEN status IN ('completed','failed','superseded','failed_needs_reroute','failed_final') THEN 1 ELSE 0 END) AS terminal
          FROM tasks WHERE request_id = ?`
       )
       .get(requestId);
@@ -4528,21 +4579,9 @@ function requeueFailedResearch({ topic = null, include_running = false } = {}) {
 function requeueStaleResearch({ max_age_minutes = 60 } = {}) {
   const d = getDb();
   const now = currentSqlTimestamp();
-  // max_age_minutes=0 is a special sentinel meaning "requeue ALL running items
-  // unconditionally" — used at driver startup to recover from a previous crash.
-  // The standard datetime arithmetic `< datetime('now', '-0 minutes')` uses
-  // strict less-than which misses items updated in the same second, so we use
-  // a dedicated branch for the zero case.
-  let stale;
-  if (Number(max_age_minutes) === 0) {
-    stale = d.prepare(
-      "SELECT id FROM research_intents WHERE status = 'running'"
-    ).all();
-  } else {
-    stale = d.prepare(
-      "SELECT id FROM research_intents WHERE status = 'running' AND updated_at < datetime('now', '-' || ? || ' minutes')"
-    ).all(max_age_minutes);
-  }
+  const stale = d.prepare(
+    "SELECT id FROM research_intents WHERE status = 'running' AND updated_at < datetime('now', '-' || ? || ' minutes')"
+  ).all(max_age_minutes);
   const ids = stale.map(r => r.id);
   if (ids.length > 0) {
     const placeholders = buildSqlInClause(ids);
@@ -4551,10 +4590,6 @@ function requeueStaleResearch({ max_age_minutes = 60 } = {}) {
     ).run(now, ...ids);
   }
   return { requeued_count: ids.length, ids };
-}
-
-function getQueuedResearchIntents({ limit = 50 } = {}) {
-  return getResearchQueueItems({ status: 'queued', limit });
 }
 
 // --- Domain analysis functions ---
@@ -4717,7 +4752,7 @@ module.exports = {
   init, close, getDb,
   coordinatorAgeMs,
   createRequest, getRequest, updateRequest, listRequests,
-  createTask, getTask, updateTask, transitionTaskBrowserOffload,
+  createTask, getTask, updateTask, transitionTaskBrowserOffload, appendTaskMergeHistory, getRequestMergeHistory,
   createProjectMemorySnapshot,
   getProjectMemorySnapshot,
   getLatestProjectMemorySnapshot,
@@ -4729,7 +4764,7 @@ module.exports = {
   listProjectMemoryLineageLinks,
   rebuildProjectMemorySnapshotIndex,
   enqueueResearchIntent, getResearchIntent, scoreResearchIntentCandidates, materializeResearchBatchPlan,
-  getResearchQueueItems, getQueuedResearchIntents, startResearchItem, completeResearchItem, failResearchItem, requeueFailedResearch, requeueStaleResearch,
+  getResearchQueueItems, startResearchItem, completeResearchItem, failResearchItem, requeueFailedResearch, requeueStaleResearch,
   getResearchBatch, listResearchBatchStages, listResearchIntentFanout, markResearchBatchStage,
   listTasks, getReadyTasks, checkAndPromoteTasks, replanTaskDependency,
   registerWorker, getWorker, updateWorker, getIdleWorkers, getAllWorkers, claimWorker, releaseWorker,

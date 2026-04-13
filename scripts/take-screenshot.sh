@@ -2,7 +2,7 @@
 # take-screenshot.sh — Platform visual testing: capture a PNG screenshot
 # Usage: bash scripts/take-screenshot.sh <url> [output_path]
 # Returns: path to the saved PNG
-# Works with any agent provider (Claude Code, Codex, etc.)
+# Works with the configured agent provider.
 set -euo pipefail
 
 URL="${1:?Usage: take-screenshot.sh <url> [output_path]}"

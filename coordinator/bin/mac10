@@ -6,6 +6,7 @@ const path = require('path');
 const fs = require('fs');
 const { execFileSync } = require('child_process');
 const { coordinatorAgeMs } = require('../src/db');
+const providerOutput = require('../src/provider-output');
 const NAMESPACE = process.env.MAC10_NAMESPACE || 'mac10';
 const STRICT_NAMESPACE = Boolean(process.env.MAC10_NAMESPACE) && process.env.MAC10_NAMESPACE !== 'mac10';
 const BRANCH_RE = /^[a-zA-Z0-9._\/-]+$/;
@@ -17,135 +18,6 @@ const INBOX_RECIPIENT_ALIASES = Object.freeze({
   'master-2': 'architect',
   'master-3': 'allocator',
 });
-const COMPLETE_TASK_USAGE_FIELDS = Object.freeze({
-  model: 'string',
-  input_tokens: 'number',
-  output_tokens: 'number',
-  input_audio_tokens: 'number',
-  output_audio_tokens: 'number',
-  reasoning_tokens: 'number',
-  accepted_prediction_tokens: 'number',
-  rejected_prediction_tokens: 'number',
-  cached_tokens: 'number',
-  cache_creation_tokens: 'number',
-  ephemeral_5m_input_tokens: 'number',
-  ephemeral_1h_input_tokens: 'number',
-  total_tokens: 'number',
-  cost_usd: 'number',
-});
-const COMPLETE_TASK_USAGE_ALIASES = Object.freeze({
-  prompt_tokens: 'input_tokens',
-  completion_tokens: 'output_tokens',
-  cache_creation_input_tokens: 'cache_creation_tokens',
-  cache_read_input_tokens: 'cached_tokens',
-});
-const COMPLETE_TASK_USAGE_CACHE_CREATION_OBJECT_ALIASES = Object.freeze([
-  'ephemeral_5m_input_tokens',
-  'ephemeral_1h_input_tokens',
-]);
-const COMPLETE_TASK_USAGE_DETAIL_ALIASES = Object.freeze({
-  input_tokens_details: Object.freeze([
-    { canonicalField: 'cached_tokens', detailField: 'cached_tokens' },
-    { canonicalField: 'input_audio_tokens', detailField: 'audio_tokens' },
-  ]),
-  prompt_tokens_details: Object.freeze([
-    { canonicalField: 'cached_tokens', detailField: 'cached_tokens' },
-    { canonicalField: 'input_audio_tokens', detailField: 'audio_tokens' },
-  ]),
-  completion_tokens_details: Object.freeze([
-    { canonicalField: 'reasoning_tokens', detailField: 'reasoning_tokens' },
-    { canonicalField: 'output_audio_tokens', detailField: 'audio_tokens' },
-    { canonicalField: 'accepted_prediction_tokens', detailField: 'accepted_prediction_tokens' },
-    { canonicalField: 'rejected_prediction_tokens', detailField: 'rejected_prediction_tokens' },
-  ]),
-  output_tokens_details: Object.freeze([
-    { canonicalField: 'reasoning_tokens', detailField: 'reasoning_tokens' },
-    { canonicalField: 'output_audio_tokens', detailField: 'audio_tokens' },
-  ]),
-});
-
-function validateCompleteTaskUsageIntegerField(field, value) {
-  if (typeof value !== 'number') {
-    throw new Error(`complete-task usage field "${field}" must be number`);
-  }
-  if (!Number.isFinite(value)) {
-    throw new Error(`complete-task usage field "${field}" must be a finite number`);
-  }
-  if (value < 0) {
-    throw new Error(`complete-task usage field "${field}" must be >= 0`);
-  }
-  if (!Number.isInteger(value)) {
-    throw new Error(`complete-task usage field "${field}" must be an integer`);
-  }
-}
-
-function normalizeCompleteTaskUsageEntries(rawField, rawValue) {
-  if (rawField === 'cache_creation') {
-    if (!rawValue || typeof rawValue !== 'object' || Array.isArray(rawValue)) {
-      throw new Error('complete-task usage field "cache_creation" must be an object');
-    }
-    const passthroughNestedFields = {};
-    for (const [nestedField, nestedValue] of Object.entries(rawValue)) {
-      if (!COMPLETE_TASK_USAGE_CACHE_CREATION_OBJECT_ALIASES.includes(nestedField)) {
-        passthroughNestedFields[nestedField] = nestedValue;
-      }
-    }
-    const cacheCreationEntries = [];
-    let cacheCreationTokens = 0;
-    for (const nestedField of COMPLETE_TASK_USAGE_CACHE_CREATION_OBJECT_ALIASES) {
-      if (!Object.prototype.hasOwnProperty.call(rawValue, nestedField)) continue;
-      const nestedValue = rawValue[nestedField];
-      validateCompleteTaskUsageIntegerField(`cache_creation.${nestedField}`, nestedValue);
-      cacheCreationTokens += nestedValue;
-      cacheCreationEntries.push({ canonicalField: nestedField, value: nestedValue });
-    }
-    if (cacheCreationEntries.length) {
-      cacheCreationEntries.push({ canonicalField: 'cache_creation_tokens', value: cacheCreationTokens });
-    }
-    return {
-      normalizedEntries: cacheCreationEntries,
-      passthroughUnknown: Object.keys(passthroughNestedFields).length ? passthroughNestedFields : null,
-    };
-  }
-
-  if (Object.prototype.hasOwnProperty.call(COMPLETE_TASK_USAGE_DETAIL_ALIASES, rawField)) {
-    const detailAliases = COMPLETE_TASK_USAGE_DETAIL_ALIASES[rawField];
-    if (rawValue === null) {
-      return {
-        normalizedEntries: detailAliases.map((detailAlias) => ({ canonicalField: detailAlias.canonicalField, value: null })),
-        passthroughUnknown: null,
-      };
-    }
-    if (!rawValue || typeof rawValue !== 'object' || Array.isArray(rawValue)) {
-      throw new Error(`complete-task usage field "${rawField}" must be an object`);
-    }
-    const normalizedEntries = [];
-    const detailAliasFields = new Set(detailAliases.map((detailAlias) => detailAlias.detailField));
-    const passthroughNestedFields = {};
-    for (const [detailField, detailValue] of Object.entries(rawValue)) {
-      if (!detailAliasFields.has(detailField)) {
-        passthroughNestedFields[detailField] = detailValue;
-      }
-    }
-    for (const detailAlias of detailAliases) {
-      if (!Object.prototype.hasOwnProperty.call(rawValue, detailAlias.detailField)) {
-        continue;
-      }
-      normalizedEntries.push({
-        canonicalField: detailAlias.canonicalField,
-        value: rawValue[detailAlias.detailField],
-      });
-    }
-    return {
-      normalizedEntries,
-      passthroughUnknown: Object.keys(passthroughNestedFields).length ? passthroughNestedFields : null,
-    };
-  }
-  return {
-    normalizedEntries: [{ canonicalField: COMPLETE_TASK_USAGE_ALIASES[rawField] || rawField, value: rawValue }],
-    passthroughUnknown: null,
-  };
-}
 
 function completionStatusLabel(completion) {
   const total = Number(completion && completion.total) || 0;
@@ -698,62 +570,11 @@ function parseCompleteTaskUsage(rawUsage) {
     throw new Error('complete-task usage must be a JSON object');
   }
 
-  const aliasNormalized = {};
-  const unknownUsageFields = {};
-  for (const [rawField, value] of Object.entries(parsed)) {
-    const { normalizedEntries, passthroughUnknown } = normalizeCompleteTaskUsageEntries(rawField, value);
-    if (passthroughUnknown && Object.keys(passthroughUnknown).length) {
-      unknownUsageFields[rawField] = passthroughUnknown;
-    }
-    for (const normalizedEntry of normalizedEntries) {
-      const { canonicalField, value: canonicalValue } = normalizedEntry;
-      if (!Object.prototype.hasOwnProperty.call(COMPLETE_TASK_USAGE_FIELDS, canonicalField)) {
-        unknownUsageFields[canonicalField] = canonicalValue;
-        continue;
-      }
-      if (
-        Object.prototype.hasOwnProperty.call(aliasNormalized, canonicalField)
-        && aliasNormalized[canonicalField] !== canonicalValue
-      ) {
-        throw new Error(`complete-task usage contains conflicting values for "${canonicalField}"`);
-      }
-      aliasNormalized[canonicalField] = canonicalValue;
-    }
-  }
-
-  const normalized = {};
-  for (const [field, expectedType] of Object.entries(COMPLETE_TASK_USAGE_FIELDS)) {
-    if (!Object.prototype.hasOwnProperty.call(aliasNormalized, field)) continue;
-    const value = aliasNormalized[field];
-    if (value === null) {
-      normalized[field] = null;
-      continue;
-    }
-    if (typeof value !== expectedType) {
-      throw new Error(`complete-task usage field "${field}" must be ${expectedType}`);
-    }
-    if (expectedType === 'string') {
-      const trimmed = value.trim();
-      if (!trimmed) throw new Error('complete-task usage field "model" cannot be empty');
-      normalized[field] = trimmed;
-      continue;
-    }
-    if (field !== 'cost_usd') {
-      validateCompleteTaskUsageIntegerField(field, value);
-      normalized[field] = value;
-      continue;
-    }
-    if (!Number.isFinite(value)) {
-      throw new Error('complete-task usage field "cost_usd" must be a finite number');
-    }
-    if (value < 0) {
-      throw new Error('complete-task usage field "cost_usd" must be >= 0');
-    }
-    normalized[field] = value;
-  }
-
-  if (!Object.keys(unknownUsageFields).length) return normalized;
-  return { ...normalized, ...unknownUsageFields };
+  return providerOutput.normalizeUsagePayload(parsed, {
+    projectDir: process.cwd(),
+    provider: process.env.MAC10_AGENT_PROVIDER,
+    errorStyle: 'cli',
+  });
 }
 
 function parseCompleteTaskArgs(optionalArgs, rawWorkerId, projectCwd = process.cwd()) {
@@ -1705,10 +1526,6 @@ async function main() {
         else { console.error(result.error); process.exit(1); }
         break;
 
-      case 'gui':
-        console.log('Dashboard: http://localhost:3100');
-        break;
-
       case 'ping':
         result = await send(socketPath, 'ping', {});
         if (result.ok) console.log(`pong (${Date.now() - result.ts}ms)`);
@@ -2433,7 +2250,6 @@ SYSTEM:
   purge-tasks                    Remove all failed tasks and their merge queue entries
   add-worker                     Create a new worker worktree (up to max_workers)
   merge-status [request_id]      Show merge queue entries
-  gui                            Show dashboard URL
   ping                           Check coordinator health
 
 FLAGS:

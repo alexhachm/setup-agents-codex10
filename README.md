@@ -1,6 +1,32 @@
-# mac10 — Multi-Agent Orchestration for Codex
+# mac10 — Multi-Agent Orchestration
 
-A deterministic coordination system for multiple Codex agents. LLMs do coding work; Node.js does coordination.
+A deterministic coordination system for Claude worker agents. LLMs do coding work; Node.js does coordination.
+
+## Start Here
+
+For normal operation from this checkout, run the provider-neutral startup wrapper:
+
+```bash
+bash START_HERE.sh
+```
+
+That is the same as:
+
+```bash
+bash start.sh
+```
+
+`START_HERE.sh` is the supported one-command startup. It starts or reuses the project coordinator, starts one set of master agents, starts or reuses the ChatGPT research driver, and prints system status.
+
+Use the project wrapper for health checks and requests:
+
+```bash
+./.claude/scripts/mac10 ping
+./.claude/scripts/mac10 status
+./.claude/scripts/mac10 request "Add user authentication"
+```
+
+When using the global `mac10` wrapper, run it from inside the configured project so it can resolve the local `.claude/scripts/mac10` wrapper.
 
 ## Architecture
 
@@ -16,108 +42,30 @@ User ──mac10 CLI──→ Coordinator (Node.js) ──tmux──→ Workers 
 - **Architect**: Single deep-model agent. Triages requests into Tier 1/2/3, decomposes complex work into tasks.
 - **Workers 1-8**: Deep-model agents in git worktrees. Receive tasks, code, create PRs.
 
-## Prerequisites
-
-Before running setup, ensure the following are installed:
-
-| Tool | Version | Required | Notes |
-|------|---------|----------|-------|
-| **Node.js** | 22+ | Yes | Use `nvm install 22 && nvm use 22`. Node v22 is required — `better-sqlite3` is compiled against it. |
-| **Git** | Any recent | Yes | Workers commit and push via git. |
-| **GitHub CLI (`gh`)** | Any recent | Yes | Must be authenticated (`gh auth login`) for the PR workflow. |
-| **tmux** | Any recent | Yes | All workers and the coordinator run in tmux windows. |
-| **xvfb** | Any | Optional | Required only for headless browser testing (visual verification tasks). |
-| **Python** | 3.12+ | Optional | Required only for the research pipeline (`codex10 queue-research`). |
-
-Quick check:
-```bash
-node --version   # must be v22.x
-git --version
-gh auth status   # must show "Logged in"
-tmux -V
-```
-
 ## Quick Start
 
 ```bash
+# Normal daily startup from this checkout
+bash START_HERE.sh
+
+# Explicit provider startup
+bash start.sh --provider claude
+
+# First-time setup/bootstrap only
 bash setup.sh /path/to/your-project 4
 
-# Or use provider-specific full launchers (defaults to current repo + 4 workers)
-./start-codex.sh [project_dir] [num_workers]
-./start-claude.sh [project_dir] [num_workers]
+./start.sh [project_dir] [num_workers]
 
-# Built-in lifecycle controls (supported by both provider launchers)
-./start-codex.sh --help
-./start-codex.sh --stop [project_dir]
-./start-codex.sh --pause [project_dir]
-# Equivalent: ./start-claude.sh --stop|--pause [project_dir]
+# Built-in lifecycle controls
+bash START_HERE.sh --stop
+bash START_HERE.sh --pause
 
 # Submit a request
-mac10 request "Add user authentication"
-
-# Start the architect
-cd /path/to/your-project
-codex exec --dangerously-bypass-approvals-and-sandbox -m gpt-5.3-codex -C "$(pwd)" - < .claude/commands/architect-loop.md
+./.claude/scripts/mac10 request "Add user authentication"
 
 # Check status
-mac10 status
-
-# View dashboard
-open http://localhost:3100
+./.claude/scripts/mac10 status
 ```
-
-## First Run Walkthrough
-
-Follow these steps after running `setup.sh` for the first time.
-
-### 1. Clone and run setup
-
-```bash
-git clone <your-repo-url>
-cd <your-repo>
-bash setup.sh . 4        # sets up coordinator + 4 workers in current repo
-```
-
-`setup.sh` is idempotent — safe to re-run if setup fails midway.
-
-### 2. Verify the coordinator started
-
-```bash
-mac10 ping                # should return "pong"
-open http://localhost:3100  # web dashboard
-```
-
-If `ping` fails, check [Coordinator won't start](#coordinator-wont-start) below.
-
-### 3. Submit your first request
-
-```bash
-mac10 request "Add a health check endpoint"
-```
-
-The coordinator stores the request and mails the Architect, which triages it and assigns worker tasks automatically.
-
-### 4. Check status
-
-```bash
-mac10 status
-```
-
-Shows all active requests, tasks, and worker states.
-
-### 5. View logs
-
-```bash
-mac10 log
-```
-
-Streams coordinator log output. Useful for watching task progress in real time.
-
-### 6. Wait for completion
-
-Workers create PRs automatically. The coordinator merges them. When all PRs for a request are merged, the request moves to `completed`.
-
----
 
 ## CLI Reference
 
@@ -125,25 +73,29 @@ Workers create PRs automatically. The coordinator merges them. When all PRs for 
 USER:      request, fix, status, clarify, log
 ARCHITECT: triage, create-task, tier1-complete, ask-clarification, inbox
 WORKER:    my-task, start-task, heartbeat, complete-task, fail-task, distill, inbox
-SYSTEM:    start, stop, repair, gui, ping
+SYSTEM:    start, stop, repair, ping
 ```
 
-## Autonomous Loop (Codex)
+## Autonomous Loop
 
-For codex10 projects, use the namespaced wrapper:
+The SQL-backed loop machinery exists, but it is not the recommended operator path while this cleanup branch is repairing agent coordination. Use normal request/fix/status flows until loop reliability is fixed and validated.
+
+For now, do not use `mac10 loop` for codebase cleanup work.
+
+For bounded local cleanup passes, use the separate file-controlled wrapper:
 
 ```bash
-cd /path/to/your-project
-./.claude/scripts/codex10 loop "Continuously audit UX and implement top-priority fixes until stopped"
-./.claude/scripts/codex10 loop-status
-./.claude/scripts/codex10 stop-loop <loop_id>
+scripts/basic-agent-loop.sh --dry-run
+scripts/basic-agent-loop.sh --max-iterations 1 --sleep 0 --turn-timeout 900 -- "Continue the checklist safely."
 ```
 
-Runtime path is:
-1. `codex10 loop "<prompt>"` sends CLI command `loop`.
+This wrapper runs provider turns through the provider manifest path and can be stopped, paused, or redirected with files under `.agent-loop/basic-agent-loop/control/`. It does not create coordinator loop rows and does not invoke `scripts/loop-sentinel.sh`.
+
+The disabled `mac10 loop` runtime path is:
+1. `mac10 loop "<prompt>"` sends CLI command `loop`.
 2. Coordinator calls `createLoop()` (in `coordinator/src/db.js`) and stores an `active` row in `loops`.
 3. `onLoopCreated` fires and spawns `scripts/loop-sentinel.sh` in tmux (`loop-<id>` window).
-4. Sentinel repeatedly runs one `codex exec` loop iteration and reports heartbeat/checkpoints.
+4. Sentinel repeatedly runs one agent loop iteration and reports heartbeat/checkpoints.
 
 ## How It Works
 
@@ -157,33 +109,9 @@ Runtime path is:
 
 ## Operator Runbook
 
-### Diagnostics API
+### Diagnostics
 
-The coordinator exposes operator-facing health counters at:
-
-```bash
-curl http://localhost:3100/api/diagnostics
-```
-
-Response shape (rolling 24-hour window):
-
-```json
-{
-  "window_hours": 24,
-  "failure_counts": {
-    "merge_timeouts": 0,
-    "merge_conflicts_unresolved": 0,
-    "stall_recoveries": 0,
-    "worker_deaths": 0,
-    "loop_restarts": 0,
-    "stale_integrations_recovered": 0
-  },
-  "merge_queue_snapshot": { "pending": 0, "merging": 0, "conflict": 0, "merged": 0, "failed": 0 },
-  "request_status_snapshot": { "failed": 0, "integrating": 0 }
-}
-```
-
-The same `operator_diagnostics` block is embedded in the `/api/status` response.
+Use the CLI and Master 1 for supported operator diagnostics.
 
 ### Failure Taxonomy
 
@@ -224,73 +152,13 @@ The same `operator_diagnostics` block is embedded in the `/api/status` response.
 2. Watchdog auto-resolves after 15 min (no-merge case) or after all merges settle.
 3. Force recovery: `mac10 repair` (restarts coordinator with startup sweep).
 
-### Browser Offload Smoke Harness (Controlled Lifecycle)
-
-Use a dedicated Tier-2 smoke task for browser offload lifecycle testing:
-- Subject: `Browser offload smoke harness`
-- Description: `Use this task only for browser offload lifecycle smoke testing.`
-
-Run the command chain against that task:
-
-```bash
-# Required inputs
-TASK_ID=<task_id>
-WORKFLOW_URL='https://chatgpt.com/g/guided-research'
-
-# 1) Create session (task status: requested)
-mac10 browser-create-session "$TASK_ID" "$WORKFLOW_URL" smoke-create-001
-
-# 2) Attach session (task status advances queued -> launching -> attached)
-mac10 browser-attach-session "$TASK_ID" <session_id> smoke-attach-001
-
-# 3) Start job (task status advances running -> awaiting_callback)
-mac10 browser-start-job "$TASK_ID" <session_id> "$WORKFLOW_URL" smoke-start-001 "Smoke harness lifecycle probe"
-
-# 4) Stream callback chunks while awaiting callback
-mac10 browser-callback-chunk "$TASK_ID" <session_id> <job_id> <callback_token> smoke-chunk-001 0 "chunk one "
-mac10 browser-callback-chunk "$TASK_ID" <session_id> <job_id> <callback_token> smoke-chunk-002 1 "chunk two"
-
-# 5) Check status (expected: awaiting_callback until complete/fail)
-mac10 browser-job-status "$TASK_ID" <session_id> <job_id>
-
-# 6a) Complete path (terminal status: completed)
-mac10 browser-complete-job "$TASK_ID" <session_id> <job_id> <callback_token> smoke-complete-001 '{"summary":"ok"}'
-
-# 6b) Failure path (terminal status: failed)
-mac10 browser-fail-job "$TASK_ID" <session_id> <job_id> <callback_token> smoke-fail-001 "intentional smoke failure"
-```
-
-Expected browser-offload status progression (from `coordinator/src/db.js`):
-
-| Stage | Allowed progression |
-|---|---|
-| Session bring-up | `not_requested -> requested -> queued -> launching -> attached` |
-| Job execution | `attached -> running -> awaiting_callback` |
-| Terminal | `awaiting_callback -> completed` or `awaiting_callback -> failed` (`cancelled` is also terminal) |
-
-Notes:
-1. `idempotency_key` should be stable for retries of the same operation and unique across distinct operations.
-2. `browser-job-status` is read-only and safe to poll while waiting for callback chunks.
-3. CLI enforces forward-only lifecycle transitions; backward transitions fail.
-
-### Liveness Recovery for Browser Smoke Tasks
-
-If the worker hosting the smoke task dies (`worker_death:msb_sandbox_dead`), watchdog reassigns the task with bounded retries:
-- Retry cap: `watchdog_task_reassign_limit` (default `2`)
-- Exhaustion result text: `Liveness recovery exhausted after <N> reassignments (<reason>)`
-
-When retries are exhausted:
-1. Confirm failure context: `mac10 status` and `mac10 log`
-2. Check diagnostics counters: `failure_counts.worker_deaths` and `failure_counts.stall_recoveries`
-3. Repair worker runtime cause first (sandbox availability, sentinel health), then re-run the dedicated smoke harness task with fresh idempotency keys.
-
 ## Key Design Decisions
 
 - **SQLite WAL** replaces 7 JSON files + jq — concurrent reads, serialized writes, no race conditions
 - **Mail table** replaces 10+ signal files — reliable, ordered, read-once semantics
 - **mac10 CLI** is the only interface between agents and coordinator — no file manipulation
 - **tmux** replaces platform-specific terminals — works everywhere including WSL
-- **Web dashboard** replaces Electron GUI — simpler, no build step
+- **Headless coordinator** replaces UI-owned state — supported operator flows go through the CLI and Master 1
 
 ## Project Memory
 
@@ -355,17 +223,17 @@ validated    →  superseded
 
 #### Instruction-Refinement Approval Workflow
 
-The governed pipeline in `.codex/scripts/patch-pipeline.js` converts validated memory insights into instruction patches:
+The governed pipeline converts validated memory insights into instruction patches:
 
-1. **Proposal**: A worker or distill cycle emits a `codex10 queue-patch` signal with the suggested change and target doc.
+1. **Proposal**: A worker or distill cycle emits a `mac10 queue-patch` signal with the suggested change and target doc.
 2. **Observation accumulation**: Patches accumulate observations from distill summaries and vote signals.
 3. **Threshold gate**:
    - Role/agent doc patches (`*-role.md`, `worker`, `architect`): **≥ 3 observations** required.
    - Knowledge/domain patches: **≥ 1 observation** required.
-4. **Human approval**: A named reviewer (non-anonymous) must approve via `codex10 approve-patch <id> --reviewer <name>`.
+4. **Human approval**: A named reviewer (non-anonymous) must approve via `mac10 approve-patch <id> --reviewer <name>`.
 5. **Application**: Only approved patches may be applied. No bypassing.
 
-All state transitions are recorded in `.codex/knowledge/patches.json` (audit trail).
+All state transitions are recorded in the coordinator database and `.claude/knowledge` audit artifacts.
 
 #### Lineage Types
 
@@ -377,76 +245,3 @@ All state transitions are recorded in `.codex/knowledge/patches.json` (audit tra
 | `supersedes` | Replaces an older snapshot or artifact. |
 | `validated_by` | Validated by the referenced request or run. |
 | `consumed_by` | The insight was consumed (e.g. applied) in this request/run. |
-
-## Troubleshooting
-
-### Coordinator won't start
-
-**Symptom:** `mac10 ping` returns an error or times out.
-
-1. **Check Node version.** The coordinator requires Node v22:
-   ```bash
-   node --version   # must be v22.x
-   nvm use 22
-   ```
-2. **Port already bound.** If a previous run crashed and left port 3100 open:
-   ```bash
-   lsof -i :3100     # find the PID
-   kill <PID>
-   mac10 start
-   ```
-3. **Rebuild native modules** after switching Node versions:
-   ```bash
-   cd coordinator && npm rebuild better-sqlite3
-   ```
-4. **Re-run setup.sh** — it is idempotent and will repair most install issues:
-   ```bash
-   bash setup.sh . <num_workers>
-   ```
-
-### Workers stuck / not picking up tasks
-
-**Symptom:** `mac10 status` shows tasks in `ready` state with no worker activity.
-
-1. **Trigger repair** — restarts the coordinator and runs a startup recovery sweep:
-   ```bash
-   mac10 repair
-   ```
-2. **Reset a specific worker** if it is in a bad state:
-   ```bash
-   mac10 reset-worker <N>   # e.g. mac10 reset-worker 2
-   ```
-3. **Check tmux** for error output in the worker's window:
-   ```bash
-   tmux attach
-   # Then switch to the worker window: Ctrl-b N (by number)
-   ```
-4. **Nested session crash** — if a worker window shows a "nested session" error, ensure `unset CLAUDECODE` is present in `scripts/worker-sentinel.sh` and `.claude/scripts/worker-sentinel.sh`.
-
-### Setup fails midway
-
-`setup.sh` is fully idempotent — simply re-run it:
-
-```bash
-bash setup.sh . <num_workers>
-```
-
-It will skip already-completed steps and retry the failed ones.
-
-### `gh` authentication errors
-
-Workers create PRs using the GitHub CLI. If you see auth errors:
-
-```bash
-gh auth login    # follow the prompts
-gh auth status   # verify
-```
-
-### `mac10` command not found
-
-Ensure the coordinator's `bin` directory is on your `PATH`, or call it directly:
-
-```bash
-export PATH="$(pwd)/coordinator/bin:$PATH"
-mac10 ping
-```

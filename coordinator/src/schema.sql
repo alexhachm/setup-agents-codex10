@@ -83,7 +83,8 @@ CREATE TABLE IF NOT EXISTS tasks (
   started_at TEXT,
   completed_at TEXT,
   result TEXT,  -- outcome summary
-  needs_sandbox INTEGER NOT NULL DEFAULT 0
+  needs_sandbox INTEGER NOT NULL DEFAULT 0,
+  merge_history TEXT  -- JSON array of merge event records
 );
 
 -- Browser research batching: intents, staged plans, and per-intent fan-out
@@ -459,7 +460,7 @@ CREATE TABLE IF NOT EXISTS presets (
 CREATE TABLE IF NOT EXISTS changes (
   id INTEGER PRIMARY KEY AUTOINCREMENT,
   description TEXT NOT NULL,
-  domain TEXT,            -- coordinator, gui, cli, infra, etc.
+  domain TEXT,            -- coordinator, cli, infra, research, etc.
   file_path TEXT,         -- file that was modified
   function_name TEXT,     -- function that was improved
   tooltip TEXT,           -- detailed explanation of the change

@@ -8,6 +8,7 @@ const os = require('os');
 
 const db = require('../src/db');
 const allocator = require('../src/allocator');
+const researchDriverManager = require('../src/research-driver-manager');
 
 // insightIngestion is required by allocator; mock it to avoid side effects in tests
 const insightIngestion = require('../src/insight-ingestion');
@@ -16,6 +17,7 @@ if (typeof insightIngestion.ingestAllocatorEvent !== 'function') {
 }
 
 let tmpDir;
+const spawnedResearchPids = new Set();
 
 beforeEach(() => {
   tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'mac10-alloc-'));
@@ -25,9 +27,22 @@ beforeEach(() => {
 
 afterEach(() => {
   allocator.stop();
+  for (const pid of spawnedResearchPids) {
+    try { process.kill(pid, 'SIGTERM'); } catch {}
+  }
+  spawnedResearchPids.clear();
   db.close();
   fs.rmSync(tmpDir, { recursive: true, force: true });
 });
+
+async function waitFor(condition, timeoutMs = 1000) {
+  const started = Date.now();
+  while (Date.now() - started < timeoutMs) {
+    if (condition()) return true;
+    await new Promise((resolve) => setTimeout(resolve, 25));
+  }
+  return false;
+}
 
 describe('Allocator tick (thin notifier)', () => {
   it('should promote pending tasks to ready', () => {
@@ -529,6 +544,41 @@ describe('signalResearchBatchAvailability', () => {
     const signals = mail.filter(m => m.type === 'research_batch_available');
     assert.strictEqual(signals.length, 1);
     assert.ok(signals[0].payload.queued_intent_count >= 1);
+  });
+
+  it('auto-starts the research sentinel when queued intents exist and no driver is running', async () => {
+    const scriptPath = path.join(tmpDir, '.claude', 'scripts', 'research-sentinel.sh');
+    const pidPath = path.join(tmpDir, '.claude', 'state', 'research-sentinel.pid');
+    fs.mkdirSync(path.dirname(scriptPath), { recursive: true });
+    fs.writeFileSync(scriptPath, [
+      '#!/usr/bin/env bash',
+      'set -euo pipefail',
+      'PROJECT_DIR="$1"',
+      'mkdir -p "$PROJECT_DIR/.claude/state"',
+      'printf "%s\\n" "$$" > "$PROJECT_DIR/.claude/state/research-sentinel.pid"',
+      'sleep 30',
+      '',
+    ].join('\n'));
+
+    db.enqueueResearchIntent({
+      intent_type: 'browser_research',
+      intent_payload: { q: 'auto-start-driver' },
+      priority_score: 500,
+      batch_size_cap: 5,
+      timeout_window_ms: 120000,
+    });
+
+    db.checkMail('allocator');
+    allocator.tick(tmpDir);
+
+    const sawPid = await waitFor(() => fs.existsSync(pidPath));
+    assert.strictEqual(sawPid, true, 'sentinel pid file should be written');
+    const pid = Number.parseInt(fs.readFileSync(pidPath, 'utf8'), 10);
+    spawnedResearchPids.add(pid);
+    assert.strictEqual(researchDriverManager.isPidAlive(pid), true);
+
+    const logs = db.getLog(10).filter((entry) => entry.action === 'research_driver_auto_started');
+    assert.strictEqual(logs.length, 1);
   });
 
   it('does not send mail when no queued intents exist', () => {

@@ -11,7 +11,7 @@ MAX_WORKERS=8
 
 # Derive namespace from project name for multi-project isolation (override with MAC10_NAMESPACE)
 PROJECT_BASENAME="$(basename "$PROJECT_DIR" 2>/dev/null || echo 'project')"
-NAMESPACE="${MAC10_NAMESPACE:-codex10-${PROJECT_BASENAME}}"
+NAMESPACE="${MAC10_NAMESPACE:-mac10-${PROJECT_BASENAME}}"
 # Sanitize: lowercase, replace non-alnum with dash, truncate to 20 chars
 NAMESPACE="$(echo "$NAMESPACE" | tr '[:upper:]' '[:lower:]' | sed 's/[^a-z0-9-]/-/g' | cut -c1-20)"
 # Export COMPOSE_PROJECT_NAME for Docker Compose multi-project isolation
@@ -54,8 +54,6 @@ if grep -qi microsoft /proc/version 2>/dev/null; then
     fi
   }
   _wsl_shim gh
-  _wsl_shim codex
-  _wsl_shim claude
   # Ensure nvm node is on PATH
   [ -s "$HOME/.nvm/nvm.sh" ] && . "$HOME/.nvm/nvm.sh" 2>/dev/null
 fi
@@ -87,23 +85,33 @@ if [ -f "$AGENT_LAUNCHER_CONFIG" ]; then
   . "$AGENT_LAUNCHER_CONFIG"
 fi
 
-DEFAULT_PROVIDER="${MAC10_AGENT_PROVIDER:-codex}"
+mapfile -t AVAILABLE_PROVIDERS < <(mac10_list_provider_ids "$PROJECT_DIR")
+if [ "${#AVAILABLE_PROVIDERS[@]}" -eq 0 ]; then
+  echo "ERROR: no installed agent provider plugins found"
+  exit 1
+fi
+DEFAULT_PROVIDER="$(mac10_requested_provider_id "$PROJECT_DIR" "${MAC10_AGENT_PROVIDER:-}")"
+if ! mac10_provider_available "$DEFAULT_PROVIDER" "$PROJECT_DIR"; then
+  DEFAULT_PROVIDER="${AVAILABLE_PROVIDERS[0]}"
+fi
 FORCED_PROVIDER="$(printf '%s' "${MAC10_FORCE_PROVIDER:-}" | tr '[:upper:]' '[:lower:]' | tr -d '[:space:]')"
 if [ -n "$FORCED_PROVIDER" ]; then
-  case "$FORCED_PROVIDER" in
-    codex|claude)
-      MAC10_AGENT_PROVIDER="$FORCED_PROVIDER"
-      ;;
-    *)
-      echo "ERROR: MAC10_FORCE_PROVIDER must be 'codex' or 'claude' (got: ${MAC10_FORCE_PROVIDER})"
-      exit 1
-      ;;
-  esac
+  if ! mac10_provider_available "$FORCED_PROVIDER" "$PROJECT_DIR"; then
+    echo "ERROR: MAC10_FORCE_PROVIDER must be an installed provider ($(mac10_list_provider_ids "$PROJECT_DIR" | paste -sd ', ' -); got: ${MAC10_FORCE_PROVIDER})"
+    exit 1
+  fi
+  MAC10_AGENT_PROVIDER="$FORCED_PROVIDER"
   echo "  Provider forced by MAC10_FORCE_PROVIDER: $MAC10_AGENT_PROVIDER"
 else
   echo "  Select agent provider:"
-  echo "    1) codex  - OpenAI Codex CLI (default)"
-  echo "    2) claude - Anthropic Claude Code CLI"
+  for provider_index in "${!AVAILABLE_PROVIDERS[@]}"; do
+    provider_id="${AVAILABLE_PROVIDERS[$provider_index]}"
+    default_marker=""
+    if [ "$provider_id" = "$DEFAULT_PROVIDER" ]; then
+      default_marker=" (default)"
+    fi
+    echo "    $((provider_index + 1))) $provider_id - $(mac10_provider_display_name "$provider_id" "$PROJECT_DIR")$default_marker"
+  done
   printf "  Provider [%s]: " "$DEFAULT_PROVIDER"
   if [ -t 0 ]; then
     read -r PROVIDER_INPUT
@@ -111,14 +119,29 @@ else
     PROVIDER_INPUT=""
   fi
   PROVIDER_INPUT="$(printf '%s' "${PROVIDER_INPUT:-}" | tr '[:upper:]' '[:lower:]' | tr -d '[:space:]')"
-  case "$PROVIDER_INPUT" in
-    1|codex)  MAC10_AGENT_PROVIDER="codex" ;;
-    2|claude) MAC10_AGENT_PROVIDER="claude" ;;
-    *)        MAC10_AGENT_PROVIDER="${DEFAULT_PROVIDER:-codex}" ;;
-  esac
+  if [ -z "$PROVIDER_INPUT" ]; then
+    MAC10_AGENT_PROVIDER="$DEFAULT_PROVIDER"
+  elif printf '%s' "$PROVIDER_INPUT" | grep -Eq '^[0-9]+$'; then
+    provider_index=$((PROVIDER_INPUT - 1))
+    if [ "$provider_index" -ge 0 ] && [ "$provider_index" -lt "${#AVAILABLE_PROVIDERS[@]}" ]; then
+      MAC10_AGENT_PROVIDER="${AVAILABLE_PROVIDERS[$provider_index]}"
+    else
+      echo "ERROR: Unknown provider selection: $PROVIDER_INPUT"
+      exit 1
+    fi
+  elif mac10_provider_available "$PROVIDER_INPUT" "$PROJECT_DIR"; then
+    MAC10_AGENT_PROVIDER="$PROVIDER_INPUT"
+  else
+    echo "ERROR: Unknown provider: $PROVIDER_INPUT"
+    exit 1
+  fi
 fi
 export MAC10_AGENT_PROVIDER
 printf 'MAC10_AGENT_PROVIDER=%s\n' "$MAC10_AGENT_PROVIDER" > "$AGENT_LAUNCHER_CONFIG"
+mac10_load_provider_config "$PROJECT_DIR"
+if [ "$IS_WSL" = true ] && declare -F _wsl_shim >/dev/null 2>&1; then
+  _wsl_shim "$(mac10_provider_cli)"
+fi
 echo "  Selected provider: $MAC10_AGENT_PROVIDER"
 echo ""
 
@@ -129,13 +152,6 @@ echo "[1/8] Preflight checks..."
 check_cmd() {
   if ! command -v "$1" &>/dev/null; then
     echo "ERROR: '$1' not found. Please install it first."
-    case "$1" in
-      node)  echo "  Install Node.js 22+: https://nodejs.org/" ;;
-      gh)    echo "  Install GitHub CLI: https://cli.github.com/" ;;
-      tmux)  echo "  Install tmux: sudo apt install tmux (Linux) or brew install tmux (macOS)" ;;
-      codex) echo "  Install Codex CLI: npm install -g @openai/codex" ;;
-      claude) echo "  Install Claude Code: npm install -g @anthropic-ai/claude-code" ;;
-    esac
     exit 1
   fi
 }
@@ -148,11 +164,14 @@ if [ "$IS_WSL" = true ]; then
   check_cmd tmux
 fi
 check_cmd "$(mac10_provider_cli)"
+if ! mac10_provider_auth_check "$PROJECT_DIR" "$MAC10_AGENT_PROVIDER"; then
+  echo "ERROR: provider health/auth check failed for $MAC10_AGENT_PROVIDER"
+  exit 1
+fi
 
 NODE_VER=$(node -v | sed 's/v//' | cut -d. -f1)
 if [ "$NODE_VER" -lt 18 ]; then
   echo "ERROR: Node.js 18+ required (found v$(node -v))"
-  echo "  Install Node.js 22+: https://nodejs.org/"
   exit 1
 fi
 
@@ -171,7 +190,7 @@ fi
 # Optional: Xvfb for headless research driver (Chrome runs invisibly)
 if ! command -v xvfb-run &>/dev/null; then
   echo "  WARNING: xvfb-run not found. Research driver will require a real display."
-  echo "  Install: sudo apt-get install -y xvfb libxi6 libgconf-2-4 fonts-liberation libappindicator3-1 libnss3 libatk-bridge2.0-0 libgtk-3-0"
+  echo "  Install with: sudo apt-get install -y xvfb libxi6 libgconf-2-4 fonts-liberation libappindicator3-1 libnss3 libatk-bridge2.0-0 libgtk-3-0"
 fi
 
 # Optional: Playwright MCP for visual testing (non-blocking)
@@ -207,11 +226,26 @@ ensure_is_directory() {
   fi
 }
 
+# safe_copy: warn and back up when overwriting a file that differs from its source
+safe_copy() {
+  local src="$1" dest="$2"
+  if [ ! -f "$dest" ]; then
+    cp "$src" "$dest"
+    return
+  fi
+  if cmp -s "$src" "$dest"; then
+    cp "$src" "$dest"
+    return
+  fi
+  local bak="${dest}.setup-backup"
+  cp "$dest" "$bak"
+  cp "$src" "$dest"
+  echo "  WARNING: $dest was modified — backup saved to $bak"
+}
+
 mkdir -p "$CLAUDE_DIR/commands"
-mkdir -p "$CLAUDE_DIR/commands-codex10"
 mkdir -p "$CLAUDE_DIR/state"
 ensure_is_directory "$CLAUDE_DIR/knowledge"
-mkdir -p "$CLAUDE_DIR/knowledge/domain"
 mkdir -p "$CLAUDE_DIR/knowledge/codebase/domains"
 mkdir -p "$CLAUDE_DIR/scripts"
 
@@ -223,11 +257,6 @@ echo "[4/8] Copying templates..."
 for f in "$SCRIPT_DIR/templates/commands/"*.md; do
   dest="$CLAUDE_DIR/commands/$(basename "$f")"
   [ -f "$dest" ] || cp "$f" "$dest"
-done
-
-# Commands (codex10-isolated) — always refresh to keep codex10 protocol in sync.
-for f in "$SCRIPT_DIR/templates/commands/"*.md; do
-  cp "$f" "$CLAUDE_DIR/commands-codex10/$(basename "$f")"
 done
 
 # Agent templates — only copy if not already present
@@ -245,97 +274,47 @@ done
 
 # Docs
 mkdir -p "$CLAUDE_DIR/docs"
-cp "$SCRIPT_DIR/templates/docs/"*.md "$CLAUDE_DIR/docs/"
+for f in "$SCRIPT_DIR/templates/docs/"*.md; do
+  safe_copy "$f" "$CLAUDE_DIR/docs/$(basename "$f")"
+done
 
 # Force-refresh key orchestration prompts/guidance on setup reruns.
 # NOTE: allocate-loop.md is NOT force-copied — it may contain runtime corrections
 # (e.g. merge_failed handling, functional_conflict subagent logic) that diverge from
 # the template. Only copy if the file does not yet exist.
 [ -f "$CLAUDE_DIR/commands/allocate-loop.md" ]         || cp "$SCRIPT_DIR/templates/commands/allocate-loop.md" "$CLAUDE_DIR/commands/allocate-loop.md"
-[ -f "$CLAUDE_DIR/commands-codex10/allocate-loop.md" ] || cp "$SCRIPT_DIR/templates/commands/allocate-loop.md" "$CLAUDE_DIR/commands-codex10/allocate-loop.md"
-cp "$SCRIPT_DIR/templates/commands/architect-loop.md" "$CLAUDE_DIR/commands/architect-loop.md"
-cp "$SCRIPT_DIR/templates/commands/architect-loop.md" "$CLAUDE_DIR/commands-codex10/architect-loop.md"
-cp "$SCRIPT_DIR/templates/docs/master-3-role.md" "$CLAUDE_DIR/docs/master-3-role.md"
+safe_copy "$SCRIPT_DIR/templates/commands/architect-loop.md" "$CLAUDE_DIR/commands/architect-loop.md"
+safe_copy "$SCRIPT_DIR/templates/docs/master-3-role.md" "$CLAUDE_DIR/docs/master-3-role.md"
 
-# CLAUDE.md for architect (root) — only if not already present
+# Root instruction files. AGENTS.md is provider-neutral; CLAUDE.md is kept as
+# a compatibility copy for Claude Code.
+if [ ! -f "$PROJECT_DIR/AGENTS.md" ]; then
+  cp "$SCRIPT_DIR/templates/root-agents.md" "$PROJECT_DIR/AGENTS.md"
+fi
 if [ ! -f "$PROJECT_DIR/CLAUDE.md" ]; then
-  cp "$SCRIPT_DIR/templates/root-claude.md" "$PROJECT_DIR/CLAUDE.md"
+  cp "$SCRIPT_DIR/templates/root-agents.md" "$PROJECT_DIR/CLAUDE.md"
 else
   echo "  CLAUDE.md already exists, keeping existing."
 fi
 
-# Worker CLAUDE.md template
-cp "$SCRIPT_DIR/templates/worker-claude.md" "$CLAUDE_DIR/worker-claude.md"
-
-# AGENTS.md compatibility for Codex
-if [ ! -f "$PROJECT_DIR/AGENTS.md" ]; then
-  cp "$SCRIPT_DIR/templates/root-claude.md" "$PROJECT_DIR/AGENTS.md"
-fi
-cp "$SCRIPT_DIR/templates/worker-claude.md" "$CLAUDE_DIR/worker-agents.md"
+# Worker instruction files. worker-agents.md is canonical; worker-claude.md is
+# generated as a compatibility copy for Claude Code.
+safe_copy "$SCRIPT_DIR/templates/worker-agents.md" "$CLAUDE_DIR/worker-agents.md"
+cp "$CLAUDE_DIR/worker-agents.md" "$CLAUDE_DIR/worker-claude.md"
 
 # Scripts
-extract_loop_precheck_signature() {
-  local file="$1"
-  awk '
-    /# Pre-check: skip Codex spawn if requests are still in-flight/ { in_block=1 }
-    in_block {
-      gsub(/[[:space:]]+/, "", $0)
-      printf "%s", $0
-    }
-    in_block && /ACTIVE_COUNT="\$\{ACTIVE_COUNT:-0\}"/ { exit }
-  ' "$file" 2>/dev/null || true
-}
+for s in worker-sentinel.sh loop-sentinel.sh launch-worker.sh signal-wait.sh state-lock.sh provider-utils.sh research-sentinel.sh chatgpt-driver.py ingest-research.py compose-research-prompt.py requirements-research.txt; do
+  [ -f "$SCRIPT_DIR/scripts/$s" ] && cp "$SCRIPT_DIR/scripts/$s" "$CLAUDE_DIR/scripts/"
+done
+chmod +x "$CLAUDE_DIR/scripts/"*.sh 2>/dev/null || true
 
-detect_loop_precheck_mode() {
-  local file="$1"
-  if grep -Eq 'loop-requests[[:space:]]+"\$LOOP_ID"[[:space:]]+--json' "$file" 2>/dev/null && \
-     grep -Eq 'node[[:space:]]+-e' "$file" 2>/dev/null; then
-    echo "json-node"
-    return
-  fi
-
-  if grep -Eq 'loop-requests[[:space:]]+"\$LOOP_ID"' "$file" 2>/dev/null && \
-     grep -Eq 'grep[[:space:]]+-c' "$file" 2>/dev/null; then
-    echo "grep-text"
-    return
-  fi
-
-  echo "unknown"
-}
-
-LOOP_SENTINEL_SOURCE="$SCRIPT_DIR/scripts/loop-sentinel.sh"
-RUNTIME_LOOP_SENTINEL="$SCRIPT_DIR/.codex/scripts/loop-sentinel.sh"
-if [ -f "$RUNTIME_LOOP_SENTINEL" ]; then
-  TRACKED_LOOP_MODE="$(detect_loop_precheck_mode "$LOOP_SENTINEL_SOURCE")"
-  RUNTIME_LOOP_MODE="$(detect_loop_precheck_mode "$RUNTIME_LOOP_SENTINEL")"
-  TRACKED_LOOP_SIG="$(extract_loop_precheck_signature "$LOOP_SENTINEL_SOURCE")"
-  RUNTIME_LOOP_SIG="$(extract_loop_precheck_signature "$RUNTIME_LOOP_SENTINEL")"
-
-  if [ "$RUNTIME_LOOP_MODE" = "json-node" ] && [ "$TRACKED_LOOP_MODE" != "json-node" ]; then
-    echo "  WARNING: loop-sentinel parser mode drift detected (tracked=$TRACKED_LOOP_MODE runtime=$RUNTIME_LOOP_MODE); preserving .codex mirror parser during setup copy."
-    LOOP_SENTINEL_SOURCE="$RUNTIME_LOOP_SENTINEL"
-  elif [ -n "$TRACKED_LOOP_SIG" ] && [ -n "$RUNTIME_LOOP_SIG" ] && [ "$TRACKED_LOOP_SIG" != "$RUNTIME_LOOP_SIG" ]; then
-    echo "  WARNING: loop-sentinel parser drift detected (tracked=$TRACKED_LOOP_MODE runtime=$RUNTIME_LOOP_MODE); preserving .codex mirror parser during setup copy."
-    LOOP_SENTINEL_SOURCE="$RUNTIME_LOOP_SENTINEL"
-  fi
+# Provider plugin manifests. Installed projects use the same root path as the
+# setup repo so copied runtime scripts can resolve providers without hardcoded
+# setup-repo paths.
+if [ -d "$SCRIPT_DIR/plugins/agents" ] && [ "$PROJECT_DIR" != "$SCRIPT_DIR" ]; then
+  mkdir -p "$PROJECT_DIR/plugins/agents"
+  cp -R "$SCRIPT_DIR/plugins/agents/"* "$PROJECT_DIR/plugins/agents/" 2>/dev/null || true
 fi
-
-for s in worker-sentinel.sh loop-sentinel.sh launch-worker.sh signal-wait.sh state-lock.sh provider-utils.sh; do
-  SRC="$SCRIPT_DIR/scripts/$s"
-  if [ "$s" = "loop-sentinel.sh" ]; then
-    SRC="$LOOP_SENTINEL_SOURCE"
-  fi
-  cp "$SRC" "$CLAUDE_DIR/scripts/"
-done
-chmod +x "$CLAUDE_DIR/scripts/"*.sh
-
-# Research scripts → .codex/scripts/ (for research-sentinel / chatgpt-driver pipeline)
-CODEX_SCRIPTS_DIR="$PROJECT_DIR/.codex/scripts"
-mkdir -p "$CODEX_SCRIPTS_DIR"
-for s in research-sentinel.sh chatgpt-driver.py ingest-research.py compose-research-prompt.py requirements-research.txt; do
-  [ -f "$SCRIPT_DIR/scripts/$s" ] && cp "$SCRIPT_DIR/scripts/$s" "$CODEX_SCRIPTS_DIR/"
-done
-chmod +x "$CODEX_SCRIPTS_DIR/"*.sh 2>/dev/null || true
 
 # Hooks
 mkdir -p "$CLAUDE_DIR/hooks"
@@ -350,18 +329,14 @@ fi
 
 echo "  Templates copied."
 
-# --- Add codex10 wrapper to PATH ---
+# --- Add mac10 wrapper to PATH ---
 
-echo "[5/8] Setting up codex10 CLI wrapper..."
+echo "[5/8] Setting up mac10 CLI wrapper..."
 
 MAC10_BIN="$SCRIPT_DIR/coordinator/bin/mac10"
 chmod +x "$MAC10_BIN"
-MAC10_CLI="$CLAUDE_DIR/scripts/mac10-codex10"
-CODEX10_CLI="$CLAUDE_DIR/scripts/codex10"
-MAC10_COMPAT="$CLAUDE_DIR/scripts/mac10"
-CLAUDE_COMPAT="$CLAUDE_DIR/scripts/mac10"
-CLAUDE_CODEX10="$CLAUDE_DIR/scripts/codex10"
-CLAUDE_NAMESPACED="$CLAUDE_DIR/scripts/mac10-codex10"
+MAC10_CLI="$CLAUDE_DIR/scripts/mac10"
+MAC10_COMPAT="$MAC10_CLI"
 
 # Create a namespaced wrapper script in the project
 cat > "$MAC10_CLI" << 'WRAPPER'
@@ -375,86 +350,22 @@ if [ ! -f "$MAC10_BIN" ]; then
   echo "  Has the setup-agents repo moved? Re-run setup.sh to fix." >&2
   exit 1
 fi
-export MAC10_NAMESPACE="PLACEHOLDER_NAMESPACE"
+export MAC10_NAMESPACE="${MAC10_NAMESPACE:-PLACEHOLDER_NAMESPACE}"
 exec node "$MAC10_BIN" --project "$PROJECT_ROOT" "$@"
 WRAPPER
 # Substitute the actual path and namespace into the wrapper (quoted heredoc prevents expansion above)
 sed -i "s|PLACEHOLDER_MAC10_BIN|$MAC10_BIN|; s|PLACEHOLDER_NAMESPACE|$NAMESPACE|" "$MAC10_CLI"
 chmod +x "$MAC10_CLI"
 
-# Primary codex wrapper name used by codex-specific prompts/scripts
-cp "$MAC10_CLI" "$CODEX10_CLI"
-chmod +x "$CODEX10_CLI"
-
-# Compatibility compat shim: mac10 command — always uses derived namespace, never defaults to mac10
-cat > "$MAC10_COMPAT" <<'WRAPPER'
-#!/usr/bin/env bash
-SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-PROJECT_ROOT="$(cd "$SCRIPT_DIR/../.." && pwd)"
-MAC10_BIN="PLACEHOLDER_MAC10_BIN"
-if [ ! -f "$MAC10_BIN" ]; then
-  echo "ERROR: mac10 CLI not found at $MAC10_BIN" >&2
-  echo "  Has the setup-agents repo moved? Re-run setup.sh to fix." >&2
-  exit 1
-fi
-export MAC10_NAMESPACE="PLACEHOLDER_NAMESPACE"
-exec node "$MAC10_BIN" --project "$PROJECT_ROOT" "$@"
-WRAPPER
-sed -i "s|PLACEHOLDER_MAC10_BIN|$MAC10_BIN|; s|PLACEHOLDER_NAMESPACE|$NAMESPACE|" "$MAC10_COMPAT"
-chmod +x "$MAC10_COMPAT"
-
-# Claude-side wrappers: use the namespaced mac10-codex10 path (enforces codex10 namespace)
-# CLAUDE_COMPAT uses MAC10_CLI (hardcoded codex10), not the plain compat shim
-copy_if_distinct_path() {
-  local src="$1"
-  local dst="$2"
-  if [ "$src" != "$dst" ]; then
-    cp "$src" "$dst"
-  fi
-}
-copy_if_distinct_path "$MAC10_CLI" "$CLAUDE_COMPAT"
-copy_if_distinct_path "$CODEX10_CLI" "$CLAUDE_CODEX10"
-copy_if_distinct_path "$MAC10_CLI" "$CLAUDE_NAMESPACED"
-chmod +x "$CLAUDE_COMPAT" "$CLAUDE_CODEX10" "$CLAUDE_NAMESPACED"
-
 # Add to PATH for this project's agents
 export PATH="$SCRIPT_DIR/coordinator/bin:$CLAUDE_DIR/scripts:$PATH"
 export MAC10_NAMESPACE="$NAMESPACE"
 
-echo "  codex10 wrapper ready: $CODEX10_CLI"
+echo "  mac10 wrapper ready: $MAC10_CLI"
 
 # Global wrappers in ~/.local/bin for shell-wide access
 LOCAL_BIN_DIR="$HOME/.local/bin"
 mkdir -p "$LOCAL_BIN_DIR"
-
-cat > "$LOCAL_BIN_DIR/mac10-codex10" <<'WRAPPER'
-#!/usr/bin/env bash
-set -euo pipefail
-TARGET="PLACEHOLDER_CODEX10_WRAPPER"
-if [ ! -x "$TARGET" ]; then
-  echo "ERROR: codex10 wrapper missing at $TARGET" >&2
-  echo "  Re-run setup.sh to refresh wrappers." >&2
-  exit 1
-fi
-exec "$TARGET" "$@"
-WRAPPER
-sed -i "s|PLACEHOLDER_CODEX10_WRAPPER|$CODEX10_CLI|" "$LOCAL_BIN_DIR/mac10-codex10"
-chmod +x "$LOCAL_BIN_DIR/mac10-codex10"
-
-cat > "$LOCAL_BIN_DIR/mac10-claude10" <<'WRAPPER'
-#!/usr/bin/env bash
-set -euo pipefail
-TARGET="PLACEHOLDER_CLAUDE10_WRAPPER"
-if [ ! -x "$TARGET" ]; then
-  echo "ERROR: claude10 wrapper missing at $TARGET" >&2
-  echo "  Re-run setup.sh to refresh wrappers." >&2
-  exit 1
-fi
-exec "$TARGET" "$@"
-WRAPPER
-# Point mac10-claude10 to the namespaced codex10 wrapper — enforces codex10 namespace
-sed -i "s|PLACEHOLDER_CLAUDE10_WRAPPER|$CLAUDE_NAMESPACED|" "$LOCAL_BIN_DIR/mac10-claude10"
-chmod +x "$LOCAL_BIN_DIR/mac10-claude10"
 
 cat > "$LOCAL_BIN_DIR/mac10" <<'WRAPPER'
 #!/usr/bin/env bash
@@ -463,10 +374,6 @@ set -euo pipefail
 pick_by_cwd() {
   local dir="$PWD"
   while [ "$dir" != "/" ]; do
-    if [ -x "$dir/.claude/scripts/mac10-codex10" ]; then
-      echo "$dir/.claude/scripts/mac10-codex10"
-      return 0
-    fi
     if [ -x "$dir/.claude/scripts/mac10" ]; then
       echo "$dir/.claude/scripts/mac10"
       return 0
@@ -476,40 +383,21 @@ pick_by_cwd() {
   return 1
 }
 
-if [ "${MAC10_TARGET:-}" = "codex10" ]; then
-  exec mac10-codex10 "$@"
-fi
-if [ "${MAC10_TARGET:-}" = "claude10" ]; then
-  exec mac10-claude10 "$@"
-fi
-
 if target="$(pick_by_cwd)"; then
   exec "$target" "$@"
 fi
 
-if command -v mac10-codex10 >/dev/null 2>&1 && ! command -v mac10-claude10 >/dev/null 2>&1; then
-  exec mac10-codex10 "$@"
-fi
-if command -v mac10-claude10 >/dev/null 2>&1 && ! command -v mac10-codex10 >/dev/null 2>&1; then
-  exec mac10-claude10 "$@"
-fi
-
-echo "ERROR: mac10 target is ambiguous outside a project directory." >&2
-echo "  Use one of:" >&2
-echo "    mac10-codex10 <command>" >&2
-echo "    mac10-claude10 <command>" >&2
-echo "  Or set MAC10_TARGET=codex10|claude10." >&2
+echo "ERROR: mac10 must be run inside a configured project directory." >&2
 exit 1
 WRAPPER
 chmod +x "$LOCAL_BIN_DIR/mac10"
-echo "  Global wrappers ready: $LOCAL_BIN_DIR/mac10, $LOCAL_BIN_DIR/mac10-codex10, $LOCAL_BIN_DIR/mac10-claude10"
+echo "  Global wrapper ready: $LOCAL_BIN_DIR/mac10"
 
 # --- Create worktrees ---
 
 echo "[6/8] Creating $NUM_WORKERS worktrees..."
 
 WORKTREE_DIR="$PROJECT_DIR/.worktrees"
-CODEX_SOURCE_DIR="$PROJECT_DIR/.codex"
 mkdir -p "$WORKTREE_DIR"
 
 cd "$PROJECT_DIR"
@@ -530,21 +418,20 @@ for i in $(seq 1 "$NUM_WORKERS"); do
     }
   fi
 
-  # Copy CLAUDE.md for worker
-  cp "$CLAUDE_DIR/worker-claude.md" "$WT_PATH/CLAUDE.md"
-  cp "$CLAUDE_DIR/worker-agents.md" "$WT_PATH/AGENTS.md"
+  # Copy canonical worker instructions plus the Claude compatibility filename.
+  safe_copy "$CLAUDE_DIR/worker-agents.md" "$WT_PATH/AGENTS.md"
+  safe_copy "$CLAUDE_DIR/worker-agents.md" "$WT_PATH/CLAUDE.md"
 
-  # Link/copy knowledge, commands, agents, hooks to worktree
+  # Copy only source/config assets to the worktree. Runtime state directories
+  # such as .claude/state, .claude/logs, and .claude/signals are intentionally
+  # not copied so workers do not inherit stale provider or coordinator state.
   mkdir -p "$WT_PATH/.claude/commands"
-  mkdir -p "$WT_PATH/.claude/knowledge/domain"
   mkdir -p "$WT_PATH/.claude/knowledge/codebase/domains"
   mkdir -p "$WT_PATH/.claude/scripts"
   mkdir -p "$WT_PATH/.claude/agents"
   mkdir -p "$WT_PATH/.claude/hooks"
   cp "$CLAUDE_DIR/commands/"*.md "$WT_PATH/.claude/commands/"
-  cp "$MAC10_CLI" "$WT_PATH/.claude/scripts/mac10-codex10"
-  cp "$CODEX10_CLI" "$WT_PATH/.claude/scripts/codex10"
-  cp "$MAC10_COMPAT" "$WT_PATH/.claude/scripts/mac10"
+  cp "$MAC10_CLI" "$WT_PATH/.claude/scripts/mac10"
   cp "$CLAUDE_DIR/scripts/"*.sh "$WT_PATH/.claude/scripts/" 2>/dev/null || true
   chmod +x "$WT_PATH/.claude/scripts/"*.sh 2>/dev/null || true
   cp "$CLAUDE_DIR/agents/"*.md "$WT_PATH/.claude/agents/"
@@ -552,23 +439,15 @@ for i in $(seq 1 "$NUM_WORKERS"); do
   chmod +x "$WT_PATH/.claude/hooks/"*.sh 2>/dev/null || true
 
   # Copy knowledge files (will be updated via main project junction/copy)
-  cp -r "$CLAUDE_DIR/knowledge/"* "$WT_PATH/.claude/knowledge/" 2>/dev/null || true
+  while IFS= read -r -d '' kf; do
+    [ -f "$kf" ] || continue
+    rel="${kf#"$CLAUDE_DIR/knowledge/"}"
+    mkdir -p "$WT_PATH/.claude/knowledge/$(dirname "$rel")"
+    safe_copy "$kf" "$WT_PATH/.claude/knowledge/$rel"
+  done < <(find "$CLAUDE_DIR/knowledge" -type f -print0 2>/dev/null)
 
   # Copy settings.json to worktree so hooks are active
-  cp "$SETTINGS_FILE" "$WT_PATH/.claude/settings.json" 2>/dev/null || true
-
-  # Ensure each worktree has a real .codex directory (never a symlink).
-  if [ -d "$CODEX_SOURCE_DIR" ]; then
-    if [ -L "$WT_PATH/.codex" ] || [ -d "$WT_PATH/.codex" ] || [ -e "$WT_PATH/.codex" ]; then
-      rm -rf "$WT_PATH/.codex"
-    fi
-    cp -a "$CODEX_SOURCE_DIR" "$WT_PATH/.codex"
-    # Ensure knowledge dir exists even if the source .codex lacks one
-    ensure_is_directory "$WT_PATH/.codex/knowledge"
-    mkdir -p "$WT_PATH/.codex/knowledge"
-  else
-    echo "  WARNING: $CODEX_SOURCE_DIR not found; skipped .codex copy for wt-$i"
-  fi
+  safe_copy "$SETTINGS_FILE" "$WT_PATH/.claude/settings.json" 2>/dev/null || true
 
   echo "  Worktree wt-$i ready (branch: $BRANCH)"
 done
@@ -617,171 +496,14 @@ fi
 
 echo "  Trusted directories configured."
 
-# --- Initialize coordinator ---
-
-echo "[8/8] Starting coordinator..."
-
-# Check if coordinator is already running (e.g. launched by GUI)
-ALREADY_RUNNING=false
-SOCK_PATH_FILE="$CLAUDE_DIR/state/${NAMESPACE}.sock.path"
-if "$CODEX10_CLI" ping &>/dev/null; then
-  ALREADY_RUNNING=true
-  echo "  Coordinator already running, skipping start."
-elif [ -f "$SOCK_PATH_FILE" ]; then
-  # Stale namespaced socket pointer from a dead coordinator
-  rm -f "$SOCK_PATH_FILE" 2>/dev/null || true
-fi
-
-if [ "$ALREADY_RUNNING" = false ]; then
-  nohup env MAC10_NAMESPACE="$NAMESPACE" MAC10_SCRIPT_DIR="$SCRIPT_DIR" \
-    node "$SCRIPT_DIR/coordinator/src/index.js" "$PROJECT_DIR" \
-    > "$CLAUDE_DIR/state/${NAMESPACE}.coordinator.log" 2>&1 &
-  COORD_PID=$!
-
-  # Wait for socket (on WSL, socket is in /tmp/ — check via mac10.sock.path)
-  for i in $(seq 1 30); do
-    if [ -f "$SOCK_PATH_FILE" ] && [ -S "$(cat "$SOCK_PATH_FILE" 2>/dev/null)" ]; then
-      break
-    fi
-    sleep 0.2
-  done
-
-  if ! [ -f "$SOCK_PATH_FILE" ] || ! [ -S "$(cat "$SOCK_PATH_FILE" 2>/dev/null)" ]; then
-    echo "WARNING: Coordinator didn't create socket within 6s"
-    echo "  Check logs or run: node $SCRIPT_DIR/coordinator/src/index.js $PROJECT_DIR"
-  else
-    echo "  Coordinator running (PID: $COORD_PID)"
-  fi
-fi
-
-# Wait for coordinator to be responsive (regardless of who started it)
-COORD_READY=false
-for attempt in $(seq 1 10); do
-  if "$CODEX10_CLI" ping &>/dev/null; then
-    COORD_READY=true
-    break
-  fi
-  sleep 1
-done
-
-if [ "$COORD_READY" = true ]; then
-  # Register workers (with retry) — always runs even if coordinator was pre-started
-  for i in $(seq 1 "$NUM_WORKERS"); do
-    for attempt in 1 2 3; do
-      if "$CODEX10_CLI" register-worker "$i" "$WORKTREE_DIR/wt-$i" "agent-$i" 2>/dev/null; then
-        echo "  Registered worker $i"
-        break
-      fi
-      sleep 1
-    done
-  done
-else
-  echo "WARNING: Coordinator not responsive — workers not registered"
-  echo "  Run manually: $CODEX10_CLI register-worker <id> <worktree_path> <branch>"
-fi
-
-# --- Clean stale agent processes from prior runs ---
-pkill -f "launch-agent.sh.*$(echo "$PROJECT_DIR" | sed 's/[[\.*^$()+?{|]/\\&/g')" 2>/dev/null || true
-sleep 1
-
-# --- Launch all 3 masters ---
-
-echo "Launching master agents..."
-
-LAUNCH_SCRIPT="$SCRIPT_DIR/scripts/launch-agent.sh"
-
-if [ "$IS_MSYS" = true ]; then
-  # Native Windows (Git Bash) — use wt.exe with bash.exe, no wsl.exe
-  WIN_LAUNCH_SCRIPT="$(cygpath -w "$LAUNCH_SCRIPT" 2>/dev/null || printf '%s' "$LAUNCH_SCRIPT")"
-  if command -v wt.exe >/dev/null 2>&1; then
-    wt.exe -w 0 new-tab --title "Master-1 (Interface)" bash.exe -l "$WIN_LAUNCH_SCRIPT" "$PROJECT_DIR" fast /master-loop &
-    echo "  Master-1 (Interface/Fast) terminal opened."
-    sleep 1
-    wt.exe -w 0 new-tab --title "Master-2 (Architect)" bash.exe -l "$WIN_LAUNCH_SCRIPT" "$PROJECT_DIR" deep /architect-loop &
-    echo "  Master-2 (Architect/Deep) terminal opened."
-    sleep 1
-    wt.exe -w 0 new-tab --title "Master-3 (Allocator)" bash.exe -l "$WIN_LAUNCH_SCRIPT" "$PROJECT_DIR" fast /allocate-loop &
-    echo "  Master-3 (Allocator/Fast) terminal opened."
-  else
-    echo "  Windows Terminal not found — start manually:"
-    echo "    bash $WIN_LAUNCH_SCRIPT $PROJECT_DIR fast /master-loop"
-    echo "    bash $WIN_LAUNCH_SCRIPT $PROJECT_DIR deep /architect-loop"
-    echo "    bash $WIN_LAUNCH_SCRIPT $PROJECT_DIR fast /allocate-loop"
-  fi
-elif [ "$IS_WSL" = true ]; then
-  # WSL — use wt.exe with wsl.exe
-  WT_EXE="/mnt/c/Users/$USER/AppData/Local/Microsoft/WindowsApps/wt.exe"
-  if [ -f "$WT_EXE" ]; then
-    "$WT_EXE" -w 0 new-tab --title "Master-1 (Interface)" -- wsl.exe -d "$WSL_DISTRO_NAME" -- bash "$LAUNCH_SCRIPT" "$PROJECT_DIR" fast /master-loop &
-    echo "  Master-1 (Interface/Fast) terminal opened."
-    sleep 1
-    "$WT_EXE" -w 0 new-tab --title "Master-2 (Architect)" -- wsl.exe -d "$WSL_DISTRO_NAME" -- bash "$LAUNCH_SCRIPT" "$PROJECT_DIR" deep /architect-loop &
-    echo "  Master-2 (Architect/Deep) terminal opened."
-    sleep 1
-    "$WT_EXE" -w 0 new-tab --title "Master-3 (Allocator)" -- wsl.exe -d "$WSL_DISTRO_NAME" -- bash "$LAUNCH_SCRIPT" "$PROJECT_DIR" fast /allocate-loop &
-    echo "  Master-3 (Allocator/Fast) terminal opened."
-  else
-    echo "  Windows Terminal not found — start manually:"
-    echo "    bash $LAUNCH_SCRIPT $PROJECT_DIR fast /master-loop"
-    echo "    bash $LAUNCH_SCRIPT $PROJECT_DIR deep /architect-loop"
-    echo "    bash $LAUNCH_SCRIPT $PROJECT_DIR fast /allocate-loop"
-  fi
-else
-  # macOS / Linux — use native terminal
-  echo "  Start manually in separate terminals:"
-  echo "    bash $LAUNCH_SCRIPT $PROJECT_DIR fast /master-loop"
-  echo "    bash $LAUNCH_SCRIPT $PROJECT_DIR deep /architect-loop"
-  echo "    bash $LAUNCH_SCRIPT $PROJECT_DIR fast /allocate-loop"
-fi
-
-echo ""
-echo "========================================"
-echo " mac10 Setup Complete!"
-echo "========================================"
-echo ""
-DASHBOARD_URL="$(node - "$PROJECT_DIR" "$NAMESPACE" <<'NODE'
-const fs = require('fs');
-const os = require('os');
-const path = require('path');
-const projectDir = path.resolve(process.argv[2] || '.');
-const namespace = (process.argv[3] || 'mac10').trim() || 'mac10';
-const registryPath = path.join(os.tmpdir(), 'mac10-instances.json');
-try {
-  const entries = JSON.parse(fs.readFileSync(registryPath, 'utf8'));
-  const match = entries.find((e) =>
-    path.resolve(e.projectDir || '') === projectDir &&
-    ((e.namespace || 'mac10') === namespace) &&
-    Number.isInteger(e.port)
-  );
-  if (match) process.stdout.write(`http://localhost:${match.port}`);
-} catch {}
-NODE
-)"
-if [ -z "$DASHBOARD_URL" ]; then
-  DASHBOARD_URL="http://localhost:3100"
-fi
-
-echo "3 Masters launched:"
-echo "  Master-1 (Interface/Fast)  — user's contact point"
-echo "  Master-2 (Architect/Deep)  — triage & decomposition"
-echo "  Master-3 (Allocator/Fast)  — task-worker matching"
-echo ""
-echo "Dashboard:    $DASHBOARD_URL"
-echo ""
-echo "========================================"
-echo " Getting Started"
-echo "========================================"
-echo ""
-echo "Send your first request:"
-echo "  $CODEX10_CLI request \"your first task description\""
-echo ""
-echo "Example:"
-echo "  $CODEX10_CLI request \"Add a hello-world endpoint to the API\""
-echo ""
-echo "Other commands:"
-echo "  $CODEX10_CLI status          — show active tasks and workers"
-echo "  $CODEX10_CLI log             — tail recent logs"
-echo "  $CODEX10_CLI workers         — list worker agents"
-echo ""
-echo "Workers will be spawned automatically when tasks are assigned."
-echo ""
+# --- Runtime service startup (coordinator, workers, masters) ---
+# Sourced from a separate file so runtime restart doesn't require re-running
+# the full install. Variables are already set; _START_SERVICES_SOURCED tells
+# the script to skip its own variable derivation.
+_START_SERVICES_SOURCED=1
+export _START_SERVICES_SOURCED
+# shellcheck disable=SC1091
+. "$SCRIPT_DIR/scripts/start-services.sh"
+start_coordinator
+launch_master_agents
+print_completion_banner

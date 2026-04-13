@@ -6,12 +6,11 @@ const path = require('path');
 const fs = require('fs');
 const os = require('os');
 const net = require('net');
-const http = require('http');
 const { execFile, execFileSync, spawn } = require('child_process');
 
 const db = require('../src/db');
 const cliServer = require('../src/cli-server');
-const webServer = require('../src/web-server');
+const knowledgeMeta = require('../src/knowledge-metadata');
 
 let tmpDir;
 let server;
@@ -114,30 +113,6 @@ function runMac10Command(args, cwd) {
         resolve({ stdout, stderr });
       }
     );
-  });
-}
-
-function requestWebJson(port, reqPath) {
-  return new Promise((resolve, reject) => {
-    const req = http.request({
-      host: '127.0.0.1',
-      port,
-      path: reqPath,
-      method: 'GET',
-    }, (res) => {
-      let data = '';
-      res.on('data', (chunk) => {
-        data += chunk.toString();
-      });
-      res.on('end', () => {
-        resolve({
-          status: res.statusCode,
-          body: data ? JSON.parse(data) : {},
-        });
-      });
-    });
-    req.on('error', reject);
-    req.end();
   });
 }
 
@@ -426,13 +401,13 @@ describe('CLI Server', () => {
       '```',
       '',
       '## Step 1: Startup',
-      './.claude/scripts/codex10 inbox architect',
+      './.claude/scripts/mac10 inbox architect',
       '',
       '## Phase: Follow-Up Check',
       'sleep 15',
       '',
       '## Phase: Budget/Reset Exit',
-      './.claude/scripts/codex10 distill 2 "orchestration" "Full distillation"',
+      './.claude/scripts/mac10 distill 2 "orchestration" "Full distillation"',
     ].join('\n');
 
     const result = await sendCommand('request', { description: autonomousPromptPayload });
@@ -771,6 +746,67 @@ describe('CLI Server', () => {
     assert.strictEqual(completedTask.usage_cost_usd, null);
     assert.strictEqual(completedTask.usage_payload_json, null);
     assert.strictEqual(db.getWorker(1).status, 'completed_task');
+  });
+
+  it('should create worker worktree without copying runtime provider state', async () => {
+    runGit(['init', '--initial-branch=main']);
+    runGit(['config', 'user.email', 'add-worker@example.com']);
+    runGit(['config', 'user.name', 'Add Worker Test']);
+    fs.writeFileSync(
+      path.join(tmpDir, '.gitignore'),
+      '.worktrees/\n.claude/state/\n.claude/logs/\n.claude/signals/\n'
+    );
+    fs.writeFileSync(path.join(tmpDir, 'README.md'), 'baseline\n');
+    runGit(['add', '.gitignore', 'README.md']);
+    runGit(['commit', '-m', 'initial commit']);
+
+    const sourceFiles = {
+      '.claude/commands/worker-loop.md': '# Worker Loop\n',
+      '.claude/knowledge/mistakes.md': '# Mistakes\n',
+      '.claude/knowledge/domain/coordinator.md': '# Coordinator\n',
+      '.claude/scripts/mac10': '#!/usr/bin/env bash\n',
+      '.claude/agents/worker.md': '# Worker Agent\n',
+      '.claude/hooks/pre-tool.sh': '#!/usr/bin/env bash\n',
+      '.claude/settings.json': '{ "hooks": {} }\n',
+      '.claude/worker-claude.md': '# Worker Claude\n',
+      '.claude/worker-agents.md': '# Worker Agents\n',
+    };
+    for (const [relativePath, content] of Object.entries(sourceFiles)) {
+      const filePath = path.join(tmpDir, relativePath);
+      fs.mkdirSync(path.dirname(filePath), { recursive: true });
+      fs.writeFileSync(filePath, content);
+    }
+
+    const runtimeFiles = [
+      '.claude/state/agent-launcher.env',
+      '.claude/logs/research-driver.log',
+      '.claude/signals/.mac10.restart-signal',
+    ];
+    for (const relativePath of runtimeFiles) {
+      const filePath = path.join(tmpDir, relativePath);
+      fs.mkdirSync(path.dirname(filePath), { recursive: true });
+      fs.writeFileSync(filePath, 'runtime\n');
+    }
+
+    db.setConfig('project_dir', tmpDir);
+    db.setConfig('primary_branch', 'main');
+
+    const result = await sendCommand('add-worker', {});
+    assert.strictEqual(result.ok, true, result.error);
+    assert.strictEqual(result.worker_id, 1);
+
+    const worktreePath = result.worktree_path;
+    assert.ok(fs.existsSync(path.join(worktreePath, '.claude', 'commands', 'worker-loop.md')));
+    assert.ok(fs.existsSync(path.join(worktreePath, '.claude', 'knowledge', 'mistakes.md')));
+    assert.ok(fs.existsSync(path.join(worktreePath, '.claude', 'knowledge', 'domain', 'coordinator.md')));
+    assert.ok(fs.existsSync(path.join(worktreePath, 'CLAUDE.md')));
+    assert.ok(fs.existsSync(path.join(worktreePath, 'AGENTS.md')));
+    assert.strictEqual(fs.readFileSync(path.join(worktreePath, 'AGENTS.md'), 'utf8'), '# Worker Agents\n');
+    assert.strictEqual(fs.readFileSync(path.join(worktreePath, 'CLAUDE.md'), 'utf8'), '# Worker Agents\n');
+    assert.strictEqual(fs.existsSync(path.join(worktreePath, '.claude', 'state')), false);
+    assert.strictEqual(fs.existsSync(path.join(worktreePath, '.claude', 'logs')), false);
+    assert.strictEqual(fs.existsSync(path.join(worktreePath, '.claude', 'signals')), false);
+    assert.strictEqual(db.getWorker(1).worktree_path, worktreePath);
   });
 
   it('should orchestrate browser research lifecycle with idempotent command replays', async () => {
@@ -1193,7 +1229,7 @@ describe('CLI Server', () => {
     db.updateWorker(1, { status: 'assigned', current_task_id: taskId });
 
     const usage = {
-      model: '  gpt-5-codex  ',
+      model: '  claude-sonnet  ',
       input_tokens: 1200,
       output_tokens: 345,
       input_audio_tokens: 45,
@@ -1219,7 +1255,7 @@ describe('CLI Server', () => {
 
     const completedTask = db.getTask(taskId);
     assert.strictEqual(completedTask.status, 'completed');
-    assert.strictEqual(completedTask.usage_model, 'gpt-5-codex');
+    assert.strictEqual(completedTask.usage_model, 'claude-sonnet');
     assert.strictEqual(completedTask.usage_input_tokens, usage.input_tokens);
     assert.strictEqual(completedTask.usage_output_tokens, usage.output_tokens);
     assert.strictEqual(completedTask.usage_input_audio_tokens, usage.input_audio_tokens);
@@ -1232,7 +1268,7 @@ describe('CLI Server', () => {
     assert.strictEqual(completedTask.usage_total_tokens, usage.total_tokens);
     assert.strictEqual(completedTask.usage_cost_usd, usage.cost_usd);
     assert.deepStrictEqual(JSON.parse(completedTask.usage_payload_json), {
-      model: 'gpt-5-codex',
+      model: 'claude-sonnet',
       input_tokens: usage.input_tokens,
       output_tokens: usage.output_tokens,
       input_audio_tokens: usage.input_audio_tokens,
@@ -1411,6 +1447,53 @@ describe('CLI Server', () => {
     assert.strictEqual(failedTaskAfter.result, null);
   });
 
+  it('should reroute blocking tasks on failure by creating a fix task', async () => {
+    db.registerWorker(1, '/wt-1', 'agent-1');
+    const reqId = db.createRequest('Blocking reroute test');
+    const taskId = db.createTask({ request_id: reqId, subject: 'Critical feature', description: 'Must complete', domain: 'core' });
+    db.updateTask(taskId, { status: 'in_progress', assigned_to: 1 });
+    db.updateWorker(1, { status: 'busy', current_task_id: taskId });
+
+    const result = await sendCommand('fail-task', {
+      worker_id: '1',
+      task_id: String(taskId),
+      error: 'Build failed due to missing dependency',
+    });
+    assert.strictEqual(result.ok, true);
+    assert.ok(result.reroute_task_id, 'should return reroute task id');
+
+    const failedTask = db.getTask(taskId);
+    assert.strictEqual(failedTask.status, 'failed_needs_reroute', 'blocking task should be failed_needs_reroute');
+
+    const fixTask = db.getTask(result.reroute_task_id);
+    assert.ok(fixTask, 'fix task should exist');
+    assert.strictEqual(fixTask.request_id, reqId);
+    assert.strictEqual(fixTask.status, 'ready');
+    assert.strictEqual(fixTask.domain, 'core');
+    assert.strictEqual(fixTask.priority, 'urgent');
+    assert.ok(fixTask.subject.startsWith('[fix]'));
+    assert.ok(fixTask.description.includes('Build failed due to missing dependency'));
+  });
+
+  it('should not reroute non-blocking tasks on failure', async () => {
+    db.registerWorker(1, '/wt-1', 'agent-1');
+    const reqId = db.createRequest('Non-blocking fail test');
+    const taskId = db.createTask({ request_id: reqId, subject: 'Optional cleanup', description: 'Nice to have' });
+    db.updateTask(taskId, { status: 'in_progress', assigned_to: 1, blocking: 0 });
+    db.updateWorker(1, { status: 'busy', current_task_id: taskId });
+
+    const result = await sendCommand('fail-task', {
+      worker_id: '1',
+      task_id: String(taskId),
+      error: 'Could not clean up',
+    });
+    assert.strictEqual(result.ok, true);
+    assert.strictEqual(result.reroute_task_id, null, 'non-blocking should not reroute');
+
+    const failedTask = db.getTask(taskId);
+    assert.strictEqual(failedTask.status, 'failed', 'non-blocking task stays plain failed');
+  });
+
   it('should persist and propagate identical usage values for canonical, Anthropic alias, and OpenAI alias fail-task payloads', async () => {
     db.registerWorker(1, '/wt-1', 'agent-1');
     db.registerWorker(2, '/wt-2', 'agent-2');
@@ -1419,15 +1502,15 @@ describe('CLI Server', () => {
     const canonicalTaskId = db.createTask({ request_id: reqId, subject: 'Canonical fail', description: 'Canonical fail-task usage payload' });
     const anthropicAliasTaskId = db.createTask({ request_id: reqId, subject: 'Anthropic alias fail', description: 'Anthropic fail-task usage payload' });
     const openAiAliasTaskId = db.createTask({ request_id: reqId, subject: 'OpenAI alias fail', description: 'OpenAI fail-task usage payload' });
-    db.updateTask(canonicalTaskId, { status: 'assigned', assigned_to: 1 });
-    db.updateTask(anthropicAliasTaskId, { status: 'assigned', assigned_to: 2 });
-    db.updateTask(openAiAliasTaskId, { status: 'assigned', assigned_to: 3 });
+    db.updateTask(canonicalTaskId, { status: 'assigned', assigned_to: 1, blocking: 0 });
+    db.updateTask(anthropicAliasTaskId, { status: 'assigned', assigned_to: 2, blocking: 0 });
+    db.updateTask(openAiAliasTaskId, { status: 'assigned', assigned_to: 3, blocking: 0 });
     db.updateWorker(1, { status: 'assigned', current_task_id: canonicalTaskId });
     db.updateWorker(2, { status: 'assigned', current_task_id: anthropicAliasTaskId });
     db.updateWorker(3, { status: 'assigned', current_task_id: openAiAliasTaskId });
 
     const canonicalUsage = {
-      model: '  gpt-5-codex  ',
+      model: '  claude-sonnet  ',
       input_tokens: 1200,
       output_tokens: 345,
       input_audio_tokens: 45,
@@ -1441,7 +1524,7 @@ describe('CLI Server', () => {
       cost_usd: 0.0456,
     };
     const anthropicAliasUsage = {
-      model: 'gpt-5-codex',
+      model: 'claude-sonnet',
       input_tokens: 1200,
       output_tokens: 345,
       input_audio_tokens: 45,
@@ -1455,7 +1538,7 @@ describe('CLI Server', () => {
       cost_usd: 0.0456,
     };
     const openAiAliasUsage = {
-      model: 'gpt-5-codex',
+      model: 'claude-sonnet',
       prompt_tokens: 1200,
       completion_tokens: 345,
       input_tokens_details: { cached_tokens: 67, audio_tokens: 45 },
@@ -1529,7 +1612,7 @@ describe('CLI Server', () => {
     }
 
     const expectedUsage = {
-      model: 'gpt-5-codex',
+      model: 'claude-sonnet',
       input_tokens: 1200,
       output_tokens: 345,
       input_audio_tokens: 45,
@@ -1580,11 +1663,11 @@ describe('CLI Server', () => {
     db.registerWorker(1, '/wt-1', 'agent-1');
     const reqId = db.createRequest('Fail-task usage forward compatibility');
     const taskId = db.createTask({ request_id: reqId, subject: 'Fail unknown key', description: 'Should accept unknown fail-task usage keys' });
-    db.updateTask(taskId, { status: 'assigned', assigned_to: 1 });
+    db.updateTask(taskId, { status: 'assigned', assigned_to: 1, blocking: 0 });
     db.updateWorker(1, { status: 'assigned', current_task_id: taskId });
 
     const usage = {
-      model: 'gpt-5-codex',
+      model: 'claude-sonnet',
       input_tokens: 123,
       output_tokens: 45,
       cache_creation_input_tokens: 11,
@@ -1724,7 +1807,7 @@ describe('CLI Server', () => {
     db.updateWorker(3, { status: 'assigned', current_task_id: openAiAliasTaskId });
 
     const canonicalUsage = {
-      model: 'gpt-5-codex',
+      model: 'claude-sonnet',
       input_tokens: 1200,
       output_tokens: 345,
       input_audio_tokens: 45,
@@ -1738,7 +1821,7 @@ describe('CLI Server', () => {
       cost_usd: 0.0456,
     };
     const anthropicAliasUsage = {
-      model: 'gpt-5-codex',
+      model: 'claude-sonnet',
       input_tokens: 1200,
       output_tokens: 345,
       input_audio_tokens: 45,
@@ -1752,7 +1835,7 @@ describe('CLI Server', () => {
       cost_usd: 0.0456,
     };
     const openAiAliasUsage = {
-      model: 'gpt-5-codex',
+      model: 'claude-sonnet',
       prompt_tokens: 1200,
       completion_tokens: 345,
       input_tokens_details: { cached_tokens: 67, audio_tokens: 45 },
@@ -1830,19 +1913,19 @@ describe('CLI Server', () => {
     const completeTaskId = db.createTask({ request_id: reqId, subject: 'Complete cache object', description: 'Complete-task usage cache object alias payload' });
     const failTaskId = db.createTask({ request_id: reqId, subject: 'Fail cache object', description: 'Fail-task usage cache object alias payload' });
     db.updateTask(completeTaskId, { status: 'assigned', assigned_to: 1 });
-    db.updateTask(failTaskId, { status: 'assigned', assigned_to: 2 });
+    db.updateTask(failTaskId, { status: 'assigned', assigned_to: 2, blocking: 0 });
     db.updateWorker(1, { status: 'assigned', current_task_id: completeTaskId });
     db.updateWorker(2, { status: 'assigned', current_task_id: failTaskId });
 
     const completeUsage = {
-      model: 'gpt-5-codex',
+      model: 'claude-sonnet',
       cache_creation: {
         ephemeral_5m_input_tokens: 12,
         ephemeral_1h_input_tokens: 33,
       },
     };
     const failUsage = {
-      model: 'gpt-5-codex',
+      model: 'claude-sonnet',
       cache_creation: {
         ephemeral_5m_input_tokens: 9,
       },
@@ -1883,13 +1966,13 @@ describe('CLI Server', () => {
     const expectedTaskIds = new Set([completeTaskId, failTaskId].map((taskId) => String(taskId)));
     const expectedUsageByTaskId = new Map([
       [String(completeTaskId), {
-        model: 'gpt-5-codex',
+        model: 'claude-sonnet',
         ephemeral_5m_input_tokens: 12,
         ephemeral_1h_input_tokens: 33,
         cache_creation_tokens: 45,
       }],
       [String(failTaskId), {
-        model: 'gpt-5-codex',
+        model: 'claude-sonnet',
         ephemeral_5m_input_tokens: 9,
         cache_creation_tokens: 9,
       }],
@@ -1912,12 +1995,12 @@ describe('CLI Server', () => {
     const completeTaskId = db.createTask({ request_id: reqId, subject: 'Complete nested usage details', description: 'Preserve unknown nested usage detail keys on complete-task' });
     const failTaskId = db.createTask({ request_id: reqId, subject: 'Fail nested usage details', description: 'Preserve unknown nested usage detail keys on fail-task' });
     db.updateTask(completeTaskId, { status: 'assigned', assigned_to: 1 });
-    db.updateTask(failTaskId, { status: 'assigned', assigned_to: 2 });
+    db.updateTask(failTaskId, { status: 'assigned', assigned_to: 2, blocking: 0 });
     db.updateWorker(1, { status: 'assigned', current_task_id: completeTaskId });
     db.updateWorker(2, { status: 'assigned', current_task_id: failTaskId });
 
     const completeUsage = {
-      model: 'gpt-5-codex',
+      model: 'claude-sonnet',
       prompt_tokens: 120,
       completion_tokens: 30,
       input_tokens_details: { cached_tokens: 50, audio_tokens: 11, provider_cached_bonus_tokens: 7 },
@@ -1939,7 +2022,7 @@ describe('CLI Server', () => {
       cost_usd: 0.015,
     };
     const failUsage = {
-      model: 'gpt-5-codex',
+      model: 'claude-sonnet',
       prompt_tokens: 95,
       completion_tokens: 22,
       input_tokens_details: { cached_tokens: 33, audio_tokens: 10, input_detail_extra_tokens: 4 },
@@ -2095,7 +2178,7 @@ describe('CLI Server', () => {
     db.updateWorker(1, { status: 'assigned', current_task_id: taskId });
 
     const usage = {
-      model: 'gpt-5-codex',
+      model: 'claude-sonnet',
       prompt_tokens: 144,
       completion_tokens: 55,
       cache_creation_input_tokens: 13,
@@ -2403,6 +2486,8 @@ describe('CLI Server', () => {
     assert.strictEqual(completion.total, 2);
     assert.strictEqual(completion.completed, 1);
     assert.strictEqual(completion.failed, 1);
+    assert.strictEqual(completion.hard_failures, 1);
+    assert.strictEqual(completion.all_terminal, true);
     assert.strictEqual(completion.all_completed, false);
     assert.strictEqual(completion.all_done, false);
 
@@ -2412,6 +2497,8 @@ describe('CLI Server', () => {
     assert.strictEqual(integrate.total, 2);
     assert.strictEqual(integrate.completed, 1);
     assert.strictEqual(integrate.failed, 1);
+    assert.strictEqual(integrate.hard_failures, 1);
+    assert.strictEqual(integrate.all_terminal, true);
     assert.strictEqual(integrate.all_completed, false);
     assert.strictEqual(integrate.all_done, false);
 
@@ -2821,11 +2908,14 @@ describe('CLI Server', () => {
     assert.strictEqual(promptResult.status, 'paused');
     assert.strictEqual(promptResult.iteration_count, 4);
     assert.strictEqual(promptResult.last_checkpoint, 'checkpoint-before-update');
+    assert.strictEqual(promptResult.loop_sync_with_origin, true);
   });
 
   it('should refresh active loop prompt and return refreshed prompt via loop-prompt', async () => {
     const created = await sendCommand('loop', { prompt: 'Refresh prompt baseline' });
     assert.strictEqual(created.ok, true);
+    const syncConfig = await sendCommand('set-config', { key: 'loop_sync_with_origin', value: 'false' });
+    assert.strictEqual(syncConfig.ok, true);
 
     db.updateLoop(created.loop_id, {
       status: 'active',
@@ -2844,6 +2934,7 @@ describe('CLI Server', () => {
     assert.strictEqual(refreshed.status, 'active');
     assert.strictEqual(refreshed.iteration_count, 6);
     assert.strictEqual(refreshed.last_checkpoint, 'checkpoint-before-refresh');
+    assert.strictEqual(refreshed.loop_sync_with_origin, false);
   });
 
   it('should reject loop-refresh-prompt for missing loop and invalid loop_id input', async () => {
@@ -3035,6 +3126,7 @@ describe('CLI Server', () => {
 
   it('should allow loop request quality and rate config keys via set-config', async () => {
     const updates = [
+      ['loop_sync_with_origin', 'FALSE', 'false'],
       ['loop_request_quality_gate', 'FALSE', 'false'],
       ['loop_request_min_description_chars', ' 220 ', '220'],
       ['loop_request_min_interval_sec', '900', '900'],
@@ -3053,6 +3145,7 @@ describe('CLI Server', () => {
 
   it('should reject out-of-range loop request config values in set-config', async () => {
     const baseline = [
+      ['loop_sync_with_origin', 'true'],
       ['loop_request_quality_gate', 'true'],
       ['loop_request_min_description_chars', '220'],
       ['loop_request_min_interval_sec', '600'],
@@ -3066,6 +3159,7 @@ describe('CLI Server', () => {
     }
 
     const invalidUpdates = [
+      ['loop_sync_with_origin', 'sometimes', /expected true or false/],
       ['loop_request_quality_gate', 'sometimes', /expected true or false/],
       ['loop_request_min_description_chars', '79', /between 80 and 5000/],
       ['loop_request_min_interval_sec', '86401', /between 0 and 86400/],
@@ -3079,6 +3173,7 @@ describe('CLI Server', () => {
       assert.match(result.error, expectedError);
     }
 
+    assert.strictEqual(db.getConfig('loop_sync_with_origin'), 'true');
     assert.strictEqual(db.getConfig('loop_request_quality_gate'), 'true');
     assert.strictEqual(db.getConfig('loop_request_min_description_chars'), '220');
     assert.strictEqual(db.getConfig('loop_request_min_interval_sec'), '600');
@@ -3501,11 +3596,10 @@ describe('CLI Server', () => {
     assert.strictEqual(sparkAssignmentLog.model_source, 'config-fallback');
   });
 
-  it('should prefer model_codex_spark for spark routing when both spark aliases are set', async () => {
+  it('should use model_spark for spark routing', async () => {
     db.registerWorker(1, '/wt-1', 'agent-1');
 
-    db.setConfig('model_spark', 'spark-legacy-model');
-    db.setConfig('model_codex_spark', 'spark-codex-model');
+    db.setConfig('model_spark', 'spark-model');
 
     const sparkTaskId = createReadyTask({
       subject: 'Minor cleanup',
@@ -3516,20 +3610,19 @@ describe('CLI Server', () => {
 
     const sparkAssignment = await sendCommand('assign-task', { task_id: sparkTaskId, worker_id: 1 });
     assert.strictEqual(sparkAssignment.ok, true);
-    assert.strictEqual(sparkAssignment.routing.model, 'spark-codex-model');
+    assert.strictEqual(sparkAssignment.routing.model, 'spark-model');
     assert.strictEqual(sparkAssignment.routing.model_source, 'config-fallback');
 
     const sparkAssignmentLog = getAllocatorAssignmentDetails(sparkTaskId);
     assert.ok(sparkAssignmentLog);
-    assert.strictEqual(sparkAssignmentLog.model, 'spark-codex-model');
+    assert.strictEqual(sparkAssignmentLog.model, 'spark-model');
     assert.strictEqual(sparkAssignmentLog.model_source, 'config-fallback');
   });
 
-  it('should remain compatible with model_spark when model_codex_spark is unset', async () => {
+  it('should fall back to the default spark model when model_spark is unset', async () => {
     db.registerWorker(1, '/wt-1', 'agent-1');
 
-    db.setConfig('model_codex_spark', '');
-    db.setConfig('model_spark', 'spark-legacy-model');
+    db.setConfig('model_spark', '');
 
     const sparkTaskId = createReadyTask({
       subject: 'Minor cleanup',
@@ -3540,48 +3633,31 @@ describe('CLI Server', () => {
 
     const sparkAssignment = await sendCommand('assign-task', { task_id: sparkTaskId, worker_id: 1 });
     assert.strictEqual(sparkAssignment.ok, true);
-    assert.strictEqual(sparkAssignment.routing.model, 'spark-legacy-model');
-    assert.strictEqual(sparkAssignment.routing.model_source, 'config-fallback');
+    assert.strictEqual(sparkAssignment.routing.model, 'haiku');
+    assert.strictEqual(sparkAssignment.routing.model_source, 'fallback-default');
 
     const sparkAssignmentLog = getAllocatorAssignmentDetails(sparkTaskId);
     assert.ok(sparkAssignmentLog);
-    assert.strictEqual(sparkAssignmentLog.model, 'spark-legacy-model');
-    assert.strictEqual(sparkAssignmentLog.model_source, 'config-fallback');
+    assert.strictEqual(sparkAssignmentLog.model, 'haiku');
+    assert.strictEqual(sparkAssignmentLog.model_source, 'fallback-default');
   });
 
-  it('should mirror spark model alias writes for set-config and route using either spark key', async () => {
+  it('should route using model_spark set through set-config', async () => {
     db.registerWorker(1, '/wt-1', 'agent-1');
-    db.registerWorker(2, '/wt-2', 'agent-2');
 
-    await setConfigValue('model_codex_spark', 'spark-model-via-codex-key');
-    assert.strictEqual(db.getConfig('model_codex_spark'), 'spark-model-via-codex-key');
-    assert.strictEqual(db.getConfig('model_spark'), 'spark-model-via-codex-key');
+    await setConfigValue('model_spark', 'spark-model-via-config');
+    assert.strictEqual(db.getConfig('model_spark'), 'spark-model-via-config');
 
-    const sparkTaskViaCodexKey = createReadyTask({
+    const sparkTaskId = createReadyTask({
       subject: 'Minor cleanup',
       description: 'Small log update',
       priority: 'low',
       tier: 1,
     });
-    const sparkAssignmentViaCodexKey = await sendCommand('assign-task', { task_id: sparkTaskViaCodexKey, worker_id: 1 });
-    assert.strictEqual(sparkAssignmentViaCodexKey.ok, true);
-    assert.strictEqual(sparkAssignmentViaCodexKey.routing.model, 'spark-model-via-codex-key');
-    assert.strictEqual(sparkAssignmentViaCodexKey.routing.model_source, 'config-fallback');
-
-    await setConfigValue('model_spark', 'spark-model-via-spark-key');
-    assert.strictEqual(db.getConfig('model_spark'), 'spark-model-via-spark-key');
-    assert.strictEqual(db.getConfig('model_codex_spark'), 'spark-model-via-spark-key');
-
-    const sparkTaskViaSparkKey = createReadyTask({
-      subject: 'Minor cleanup 2',
-      description: 'Small log update 2',
-      priority: 'low',
-      tier: 1,
-    });
-    const sparkAssignmentViaSparkKey = await sendCommand('assign-task', { task_id: sparkTaskViaSparkKey, worker_id: 2 });
-    assert.strictEqual(sparkAssignmentViaSparkKey.ok, true);
-    assert.strictEqual(sparkAssignmentViaSparkKey.routing.model, 'spark-model-via-spark-key');
-    assert.strictEqual(sparkAssignmentViaSparkKey.routing.model_source, 'config-fallback');
+    const sparkAssignment = await sendCommand('assign-task', { task_id: sparkTaskId, worker_id: 1 });
+    assert.strictEqual(sparkAssignment.ok, true);
+    assert.strictEqual(sparkAssignment.routing.model, 'spark-model-via-config');
+    assert.strictEqual(sparkAssignment.routing.model_source, 'config-fallback');
   });
 
   it('should downscale high and mid routing when flagship budget is constrained', async () => {
@@ -3624,7 +3700,7 @@ describe('CLI Server', () => {
     assert.strictEqual(midAssignment.ok, true);
     assert.strictEqual(midAssignment.routing.class, 'mid');
     assert.strictEqual(midAssignment.routing.model, 'spark-model');
-    assert.strictEqual(midAssignment.routing.model_source, 'budget-downgrade:model_codex_spark');
+    assert.strictEqual(midAssignment.routing.model_source, 'budget-downgrade:model_spark');
     assert.strictEqual(midAssignment.routing.reasoning_effort, 'spark-effort');
     assert.strictEqual(midAssignment.routing.routing_reason, 'fallback-budget-downgrade:mid->spark');
     assert.strictEqual(midAssignment.routing.reason, 'fallback-budget-downgrade:mid->spark');
@@ -3643,52 +3719,34 @@ describe('CLI Server', () => {
     assert.strictEqual(highAssignmentLog.reasoning_effort, 'mini-effort');
   });
 
-  it('should attribute constrained mid-to-spark downgrades to the selected spark alias key', async () => {
+  it('should attribute constrained mid-to-spark downgrades to model_spark', async () => {
     db.registerWorker(1, '/wt-1', 'agent-1');
-    db.registerWorker(2, '/wt-2', 'agent-2');
 
     await setConfigValue('reasoning_spark', 'spark-effort');
     await setConfigValue('routing_budget_state', JSON.stringify({
       flagship: { remaining: 5, threshold: 10 },
     }));
 
-    db.setConfig('model_codex_spark', '');
-    db.setConfig('model_spark', 'spark-legacy-model');
+    db.setConfig('model_spark', 'spark-model');
 
-    const legacyAliasTaskId = createReadyTask({
+    const taskId = createReadyTask({
       subject: 'Resolve merge backlog',
       description: 'Routine helper cleanup',
       tier: 2,
     });
-    const legacyAliasAssignment = await sendCommand('assign-task', { task_id: legacyAliasTaskId, worker_id: 1 });
-    assert.strictEqual(legacyAliasAssignment.ok, true);
-    assert.strictEqual(legacyAliasAssignment.routing.class, 'mid');
-    assert.strictEqual(legacyAliasAssignment.routing.model, 'spark-legacy-model');
-    assert.strictEqual(legacyAliasAssignment.routing.model_source, 'budget-downgrade:model_spark');
-    assert.strictEqual(legacyAliasAssignment.routing.reasoning_effort, 'spark-effort');
-    assert.strictEqual(legacyAliasAssignment.routing.routing_reason, 'fallback-budget-downgrade:mid->spark');
+    const assignment = await sendCommand('assign-task', { task_id: taskId, worker_id: 1 });
+    assert.strictEqual(assignment.ok, true);
+    assert.strictEqual(assignment.routing.class, 'mid');
+    assert.strictEqual(assignment.routing.model, 'spark-model');
+    assert.strictEqual(assignment.routing.model_source, 'budget-downgrade:model_spark');
+    assert.strictEqual(assignment.routing.reasoning_effort, 'spark-effort');
+    assert.strictEqual(assignment.routing.routing_reason, 'fallback-budget-downgrade:mid->spark');
 
-    db.setConfig('model_codex_spark', 'spark-codex-model');
-    db.setConfig('model_spark', 'spark-legacy-model-2');
-
-    const codexAliasTaskId = createReadyTask({
-      subject: 'Resolve conflict backlog',
-      description: 'Routine helper cleanup',
-      tier: 2,
-    });
-    const codexAliasAssignment = await sendCommand('assign-task', { task_id: codexAliasTaskId, worker_id: 2 });
-    assert.strictEqual(codexAliasAssignment.ok, true);
-    assert.strictEqual(codexAliasAssignment.routing.class, 'mid');
-    assert.strictEqual(codexAliasAssignment.routing.model, 'spark-codex-model');
-    assert.strictEqual(codexAliasAssignment.routing.model_source, 'budget-downgrade:model_codex_spark');
-    assert.strictEqual(codexAliasAssignment.routing.reasoning_effort, 'spark-effort');
-    assert.strictEqual(codexAliasAssignment.routing.routing_reason, 'fallback-budget-downgrade:mid->spark');
-
-    const codexAliasLog = getAllocatorAssignmentDetails(codexAliasTaskId);
-    assert.ok(codexAliasLog);
-    assert.strictEqual(codexAliasLog.model, 'spark-codex-model');
-    assert.strictEqual(codexAliasLog.model_source, 'budget-downgrade:model_codex_spark');
-    assert.strictEqual(codexAliasLog.routing_reason, 'fallback-budget-downgrade:mid->spark');
+    const assignmentLog = getAllocatorAssignmentDetails(taskId);
+    assert.ok(assignmentLog);
+    assert.strictEqual(assignmentLog.model, 'spark-model');
+    assert.strictEqual(assignmentLog.model_source, 'budget-downgrade:model_spark');
+    assert.strictEqual(assignmentLog.routing_reason, 'fallback-budget-downgrade:mid->spark');
   });
 
   it('should restore normal routing after flagship budget recovers above threshold', async () => {
@@ -3832,7 +3890,7 @@ describe('CLI Server', () => {
     assert.strictEqual(descriptionConflictAssignment.routing.reasoning_effort, subjectConflictAssignment.routing.reasoning_effort);
     assert.strictEqual(descriptionConflictAssignment.routing.routing_reason, subjectConflictAssignment.routing.routing_reason);
     assert.strictEqual(descriptionConflictAssignment.routing.model, 'spark-model');
-    assert.strictEqual(descriptionConflictAssignment.routing.model_source, 'budget-downgrade:model_codex_spark');
+    assert.strictEqual(descriptionConflictAssignment.routing.model_source, 'budget-downgrade:model_spark');
     assert.strictEqual(descriptionConflictAssignment.routing.reasoning_effort, 'spark-effort');
     assert.strictEqual(descriptionConflictAssignment.routing.routing_reason, 'fallback-budget-downgrade:mid->spark');
   });
@@ -4051,7 +4109,7 @@ describe('CLI Server', () => {
     assert.strictEqual(midAssignment.ok, true);
     assert.strictEqual(midAssignment.routing.class, 'mid');
     assert.strictEqual(midAssignment.routing.model, 'spark-model');
-    assert.strictEqual(midAssignment.routing.model_source, 'budget-downgrade:model_codex_spark');
+    assert.strictEqual(midAssignment.routing.model_source, 'budget-downgrade:model_spark');
     assert.strictEqual(midAssignment.routing.reasoning_effort, 'spark-effort');
     assert.strictEqual(midAssignment.routing.routing_reason, 'fallback-budget-downgrade:mid->spark');
 
@@ -4093,7 +4151,7 @@ describe('CLI Server', () => {
     db.registerWorker(1, '/wt-1', 'agent-1');
 
     await setConfigValue('model_mid', 'mid-model');
-    await setConfigValue('model_codex_spark', 'spark-model');
+    await setConfigValue('model_spark', 'spark-model');
     await setConfigValue('reasoning_spark', 'spark-effort');
 
     db.setConfig('routing_budget_state', JSON.stringify({
@@ -4112,7 +4170,7 @@ describe('CLI Server', () => {
     assert.strictEqual(assignment.ok, true);
     assert.strictEqual(assignment.routing.class, 'mid');
     assert.strictEqual(assignment.routing.model, 'spark-model');
-    assert.strictEqual(assignment.routing.model_source, 'budget-downgrade:model_codex_spark');
+    assert.strictEqual(assignment.routing.model_source, 'budget-downgrade:model_spark');
     assert.strictEqual(assignment.routing.reasoning_effort, 'spark-effort');
     assert.strictEqual(assignment.routing.routing_reason, 'fallback-budget-downgrade:mid->spark');
   });
@@ -4150,194 +4208,6 @@ describe('CLI Server', () => {
     assert.strictEqual(assignmentLog.model_source, 'budget-upgrade:model_xhigh');
     assert.strictEqual(assignmentLog.routing_reason, 'fallback-budget-upgrade:high->xhigh');
     assert.strictEqual(assignmentLog.reasoning_effort, 'xhigh-effort');
-  });
-
-  it('should expose legacy scalar fallback budget snapshot in /api/status when routing scalar values are blank', async () => {
-    const reqId = db.createRequest('Legacy scalar snapshot parity request');
-    const taskId = db.createTask({
-      request_id: reqId,
-      subject: 'Task with allocator telemetry',
-      description: 'Used to verify task hydration alongside budget snapshot fallback',
-      domain: 'coordinator-surface',
-      tier: 2,
-    });
-
-    db.log('allocator', 'task_assigned', {
-      task_id: taskId,
-      routing_class: 'mini',
-      model: 'gpt-5.3-mini',
-      model_source: 'fallback-default',
-      reasoning_effort: 'low',
-      budget_state: { flagship: { remaining: 3, threshold: 10 } },
-      budget_source: 'activity_log:allocator.task_assigned',
-    });
-
-    db.setConfig('routing_budget_flagship_remaining', '   ');
-    db.setConfig('routing_budget_flagship_threshold', '\t');
-    db.setConfig('flagship_budget_remaining', ' 35 ');
-    db.setConfig('flagship_budget_threshold', '20');
-
-    const web = await webServer.start(tmpDir, 0);
-    const webPort = web.address().port;
-
-    try {
-      const statusResult = await requestWebJson(webPort, '/api/status');
-      assert.strictEqual(statusResult.status, 200);
-      assert.strictEqual(statusResult.body.routing_budget_source, 'config:budget_thresholds');
-      assert.deepStrictEqual(statusResult.body.routing_budget_state, {
-        source: 'config:budget_thresholds',
-        parsed: { flagship: { remaining: 35, threshold: 20 } },
-        remaining: 35,
-        threshold: 20,
-      });
-
-      const task = statusResult.body.tasks.find((entry) => entry.id === taskId);
-      assert.ok(task);
-      assert.strictEqual(task.routing_class, 'mini');
-      assert.strictEqual(task.routed_model, 'gpt-5.3-mini');
-      assert.strictEqual(task.model_source, 'fallback-default');
-      assert.strictEqual(task.reasoning_effort, 'low');
-    } finally {
-      webServer.stop();
-    }
-  });
-
-  it('should expose scalar fallback budget snapshot in /api/status when routing_budget_state JSON has invalid array shape', async () => {
-    db.setConfig('routing_budget_state', '[]');
-    db.setConfig('routing_budget_flagship_remaining', '8');
-    db.setConfig('routing_budget_flagship_threshold', '10');
-
-    const web = await webServer.start(tmpDir, 0);
-    const webPort = web.address().port;
-
-    try {
-      const statusResult = await requestWebJson(webPort, '/api/status');
-      assert.strictEqual(statusResult.status, 200);
-      assert.strictEqual(statusResult.body.routing_budget_source, 'config:budget_thresholds');
-      assert.deepStrictEqual(statusResult.body.routing_budget_state, {
-        source: 'config:budget_thresholds',
-        parsed: { flagship: { remaining: 8, threshold: 10 } },
-        remaining: 8,
-        threshold: 10,
-      });
-    } finally {
-      webServer.stop();
-    }
-  });
-
-  it('should merge scalar fallback into partial routing_budget_state snapshot in /api/status', async () => {
-    db.setConfig('routing_budget_state', JSON.stringify({
-      flagship: { remaining: 7 },
-    }));
-    db.setConfig('routing_budget_flagship_remaining', '50');
-    db.setConfig('routing_budget_flagship_threshold', '10');
-
-    const web = await webServer.start(tmpDir, 0);
-    const webPort = web.address().port;
-
-    try {
-      const statusResult = await requestWebJson(webPort, '/api/status');
-      assert.strictEqual(statusResult.status, 200);
-      assert.strictEqual(statusResult.body.routing_budget_source, 'config:routing_budget_state');
-      assert.deepStrictEqual(statusResult.body.routing_budget_state, {
-        source: 'config:routing_budget_state',
-        parsed: { flagship: { remaining: 7, threshold: 10 } },
-        remaining: 7,
-        threshold: 10,
-      });
-    } finally {
-      webServer.stop();
-    }
-  });
-
-  it('should expose non-zero usage burn-rate telemetry in /api/status via db helper', async () => {
-    const requestOne = db.createRequest('Usage burn-rate request one');
-    const requestTwo = db.createRequest('Usage burn-rate request two');
-    const requestTotals = {
-      [requestOne]: 3.5,
-      [requestTwo]: 1.25,
-    };
-    const burnSnapshot = {
-      usd_15m: 1.5,
-      usd_60m: 2.75,
-      usd_24h: 4.75,
-      request_id: null,
-      request_total_usd: 0,
-    };
-
-    const hadBurnRateHelper = Object.prototype.hasOwnProperty.call(db, 'getUsageCostBurnRate');
-    const originalBurnRateHelper = db.getUsageCostBurnRate;
-    db.getUsageCostBurnRate = (requestId = null) => {
-      if (requestId === null || requestId === undefined) return { ...burnSnapshot };
-      const normalizedRequestId = String(requestId).trim();
-      return {
-        ...burnSnapshot,
-        request_id: normalizedRequestId || null,
-        request_total_usd: requestTotals[normalizedRequestId] || 0,
-      };
-    };
-
-    const web = await webServer.start(tmpDir, 0);
-    const webPort = web.address().port;
-
-    try {
-      const statusResult = await requestWebJson(webPort, '/api/status');
-      assert.strictEqual(statusResult.status, 200);
-      assert.deepStrictEqual(statusResult.body.usage_cost_burn_rate, burnSnapshot);
-      assert.strictEqual(statusResult.body.usage_cost_usd_15m, burnSnapshot.usd_15m);
-      assert.strictEqual(statusResult.body.usage_cost_usd_60m, burnSnapshot.usd_60m);
-      assert.strictEqual(statusResult.body.usage_cost_usd_24h, burnSnapshot.usd_24h);
-      assert.strictEqual(statusResult.body.usage_cost_request_id, null);
-      assert.strictEqual(statusResult.body.usage_cost_request_total_usd, 0);
-      assert.deepStrictEqual(statusResult.body.usage_cost_request_totals_usd, {
-        [requestOne]: 3.5,
-        [requestTwo]: 1.25,
-      });
-    } finally {
-      webServer.stop();
-      if (hadBurnRateHelper) {
-        db.getUsageCostBurnRate = originalBurnRateHelper;
-      } else {
-        delete db.getUsageCostBurnRate;
-      }
-    }
-  });
-
-  it('should expose safe-zero usage burn-rate telemetry defaults in /api/status', async () => {
-    const requestId = db.createRequest('Zero usage burn-rate request');
-    const hadBurnRateHelper = Object.prototype.hasOwnProperty.call(db, 'getUsageCostBurnRate');
-    const originalBurnRateHelper = db.getUsageCostBurnRate;
-    delete db.getUsageCostBurnRate;
-
-    const web = await webServer.start(tmpDir, 0);
-    const webPort = web.address().port;
-
-    try {
-      const statusResult = await requestWebJson(webPort, '/api/status');
-      assert.strictEqual(statusResult.status, 200);
-      assert.deepStrictEqual(statusResult.body.usage_cost_burn_rate, {
-        usd_15m: 0,
-        usd_60m: 0,
-        usd_24h: 0,
-        request_id: null,
-        request_total_usd: 0,
-      });
-      assert.strictEqual(statusResult.body.usage_cost_usd_15m, 0);
-      assert.strictEqual(statusResult.body.usage_cost_usd_60m, 0);
-      assert.strictEqual(statusResult.body.usage_cost_usd_24h, 0);
-      assert.strictEqual(statusResult.body.usage_cost_request_id, null);
-      assert.strictEqual(statusResult.body.usage_cost_request_total_usd, 0);
-      assert.deepStrictEqual(statusResult.body.usage_cost_request_totals_usd, {
-        [requestId]: 0,
-      });
-    } finally {
-      webServer.stop();
-      if (hadBurnRateHelper) {
-        db.getUsageCostBurnRate = originalBurnRateHelper;
-      } else {
-        delete db.getUsageCostBurnRate;
-      }
-    }
   });
 
   it('should keep routing_budget_state JSON precedence over scalar fallback keys', async () => {
@@ -4959,176 +4829,32 @@ describe('research-queue COMMAND_SCHEMAS validation', () => {
     const res = await sendCommand('research-start', { id: 'abc' });
     assert.strictEqual(res.error, 'Field "id" must be of type number');
   });
-});
 
-describe('PID lock semantics', () => {
-  const { makeLock, isPidAlive } = require('../src/pid-lock');
+  it('research-complete resets staleness for the completed topic', async () => {
+    knowledgeMeta.writeMetadata(tmpDir, {
+      domains: {
+        status: {
+          changes_since_research: 4,
+          worker_patches: 0,
+          last_changed: '2026-01-02T00:00:00.000Z',
+        },
+      },
+    });
 
-  it('acquire creates pid file with current pid', () => {
-    const lockDir = fs.mkdtempSync(path.join(os.tmpdir(), 'pid-lock-test-'));
-    try {
-      const lock = makeLock(lockDir, 'mac10');
-      const acquired = lock.acquire();
-      assert.strictEqual(acquired, true);
-      const written = parseInt(fs.readFileSync(lock.pidFile, 'utf8').trim(), 10);
-      assert.strictEqual(written, process.pid);
-      lock.release();
-    } finally {
-      fs.rmSync(lockDir, { recursive: true, force: true });
-    }
-  });
+    const queued = await sendCommand('queue-research', {
+      topic: 'status',
+      question: 'What is the status domain architecture?',
+    });
+    assert.strictEqual(queued.ok, true);
 
-  it('release removes pid file', () => {
-    const lockDir = fs.mkdtempSync(path.join(os.tmpdir(), 'pid-lock-test-'));
-    try {
-      const lock = makeLock(lockDir, 'mac10');
-      lock.acquire();
-      lock.release();
-      assert.strictEqual(fs.existsSync(lock.pidFile), false);
-    } finally {
-      fs.rmSync(lockDir, { recursive: true, force: true });
-    }
-  });
+    const started = await sendCommand('research-start', { id: queued.id });
+    assert.strictEqual(started.ok, true);
 
-  it('acquire returns false when live process holds the lock', () => {
-    const lockDir = fs.mkdtempSync(path.join(os.tmpdir(), 'pid-lock-test-'));
-    try {
-      // Write current process's own PID — it is guaranteed alive
-      fs.mkdirSync(lockDir, { recursive: true });
-      const pidFilePath = path.join(lockDir, 'mac10.pid');
-      fs.writeFileSync(pidFilePath, String(process.pid));
+    const completed = await sendCommand('research-complete', { intent_id: queued.id });
+    assert.strictEqual(completed.ok, true);
 
-      // A second lock object trying to acquire the same file should fail
-      const lock2 = makeLock(lockDir, 'mac10');
-      const acquired = lock2.acquire();
-      assert.strictEqual(acquired, false);
-      // PID file still contains the original pid
-      const written = parseInt(fs.readFileSync(pidFilePath, 'utf8').trim(), 10);
-      assert.strictEqual(written, process.pid);
-    } finally {
-      fs.rmSync(lockDir, { recursive: true, force: true });
-    }
-  });
-
-  it('acquire clears stale pid file and succeeds', () => {
-    const lockDir = fs.mkdtempSync(path.join(os.tmpdir(), 'pid-lock-test-'));
-    try {
-      // Write a PID that is guaranteed to not be alive (PID 0 is never a real process)
-      fs.mkdirSync(lockDir, { recursive: true });
-      const pidFilePath = path.join(lockDir, 'mac10.pid');
-      fs.writeFileSync(pidFilePath, '0');
-
-      const lock = makeLock(lockDir, 'mac10');
-      const acquired = lock.acquire();
-      assert.strictEqual(acquired, true);
-      const written = parseInt(fs.readFileSync(lock.pidFile, 'utf8').trim(), 10);
-      assert.strictEqual(written, process.pid);
-      lock.release();
-    } finally {
-      fs.rmSync(lockDir, { recursive: true, force: true });
-    }
-  });
-
-  it('isPidAlive returns false for invalid pids', () => {
-    assert.strictEqual(isPidAlive(0), false);
-    assert.strictEqual(isPidAlive(-1), false);
-    assert.strictEqual(isPidAlive(NaN), false);
-    assert.strictEqual(isPidAlive(null), false);
-  });
-
-  it('isPidAlive returns true for current process', () => {
-    assert.strictEqual(isPidAlive(process.pid), true);
-  });
-});
-
-describe('mac10 CLI start/stop orchestration', () => {
-  // Use MAC10_NAMESPACE='mac10' so the CLI looks for 'mac10.pid' regardless of
-  // the ambient namespace set in the test runner's environment.
-  const CLI_ENV = { ...process.env, MAC10_NAMESPACE: 'mac10' };
-
-  it('mac10 stop exits 0 when no coordinator is running and no pid file exists', async () => {
-    const projectDir2 = fs.mkdtempSync(path.join(os.tmpdir(), 'mac10-stop-test-'));
-    fs.mkdirSync(path.join(projectDir2, '.claude', 'state'), { recursive: true });
-    try {
-      const cliPath = path.join(__dirname, '..', 'bin', 'mac10');
-      const result = await new Promise((resolve) => {
-        execFile(
-          process.execPath,
-          [cliPath, '--project', projectDir2, 'stop'],
-          { encoding: 'utf8', env: CLI_ENV },
-          (error, stdout, stderr) => {
-            resolve({
-              status: error ? (Number.isInteger(error.code) ? error.code : 1) : 0,
-              stdout,
-              stderr,
-            });
-          }
-        );
-      });
-      assert.strictEqual(result.status, 0);
-      assert.match(result.stdout, /Coordinator stopped/);
-    } finally {
-      fs.rmSync(projectDir2, { recursive: true, force: true });
-    }
-  });
-
-  it('mac10 stop cleans up a stale pid file and exits 0', async () => {
-    const projectDir2 = fs.mkdtempSync(path.join(os.tmpdir(), 'mac10-stop-test-'));
-    const stateDir2 = path.join(projectDir2, '.claude', 'state');
-    fs.mkdirSync(stateDir2, { recursive: true });
-    // Write a stale PID (pid 0 is never alive) using the 'mac10' namespace filename
-    fs.writeFileSync(path.join(stateDir2, 'mac10.pid'), '0');
-    try {
-      const cliPath = path.join(__dirname, '..', 'bin', 'mac10');
-      const result = await new Promise((resolve) => {
-        execFile(
-          process.execPath,
-          [cliPath, '--project', projectDir2, 'stop'],
-          { encoding: 'utf8', env: CLI_ENV },
-          (error, stdout, stderr) => {
-            resolve({
-              status: error ? (Number.isInteger(error.code) ? error.code : 1) : 0,
-              stdout,
-              stderr,
-            });
-          }
-        );
-      });
-      assert.strictEqual(result.status, 0);
-      // Stale pid file should be removed
-      assert.strictEqual(fs.existsSync(path.join(stateDir2, 'mac10.pid')), false);
-      assert.match(result.stdout, /Coordinator stopped/);
-    } finally {
-      fs.rmSync(projectDir2, { recursive: true, force: true });
-    }
-  });
-
-  it('mac10 start detects existing running coordinator and exits 0 without spawning duplicate', async () => {
-    const projectDir2 = fs.mkdtempSync(path.join(os.tmpdir(), 'mac10-start-test-'));
-    const stateDir2 = path.join(projectDir2, '.claude', 'state');
-    fs.mkdirSync(stateDir2, { recursive: true });
-    // Simulate a live coordinator by writing the current process's PID to 'mac10.pid'
-    fs.writeFileSync(path.join(stateDir2, 'mac10.pid'), String(process.pid));
-    try {
-      const cliPath = path.join(__dirname, '..', 'bin', 'mac10');
-      const result = await new Promise((resolve) => {
-        execFile(
-          process.execPath,
-          [cliPath, 'start', projectDir2],
-          { encoding: 'utf8', env: CLI_ENV },
-          (error, stdout, stderr) => {
-            resolve({
-              status: error ? (Number.isInteger(error.code) ? error.code : 1) : 0,
-              stdout,
-              stderr,
-            });
-          }
-        );
-      });
-      assert.strictEqual(result.status, 0);
-      assert.match(result.stdout, /already running/i);
-    } finally {
-      fs.rmSync(projectDir2, { recursive: true, force: true });
-    }
+    const meta = knowledgeMeta.getMetadata(tmpDir);
+    assert.strictEqual(meta.domains.status.changes_since_research, 0);
+    assert.ok(meta.domains.status.last_researched);
   });
 });

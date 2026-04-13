@@ -6,11 +6,9 @@ const path = require('path');
 const fs = require('fs');
 const os = require('os');
 const net = require('net');
-const http = require('http');
 
 const db = require('../src/db');
 const cliServer = require('../src/cli-server');
-const webServer = require('../src/web-server');
 const overlay = require('../src/overlay');
 
 let tmpDir;
@@ -153,12 +151,12 @@ describe('SQL column whitelist enforcement', () => {
       status: 'ready',
       domain: 'backend',
       pr_url: 'https://github.com/o/r/pull/1',
-      usage_payload_json: '{"model":"gpt-5-codex","service_tier":"priority"}',
+      usage_payload_json: '{"model":"claude-sonnet","service_tier":"priority"}',
     });
     const task = db.getTask(taskId);
     assert.strictEqual(task.status, 'ready');
     assert.strictEqual(task.domain, 'backend');
-    assert.strictEqual(task.usage_payload_json, '{"model":"gpt-5-codex","service_tier":"priority"}');
+    assert.strictEqual(task.usage_payload_json, '{"model":"claude-sonnet","service_tier":"priority"}');
   });
 
   it('should accept routing telemetry columns in updateTask', () => {
@@ -166,12 +164,12 @@ describe('SQL column whitelist enforcement', () => {
     const taskId = db.createTask({ request_id: reqId, subject: 'T', description: 'D' });
     db.updateTask(taskId, {
       routing_class: 'high',
-      routed_model: 'gpt-5.3-codex',
+      routed_model: 'sonnet',
       reasoning_effort: 'high',
     });
     const task = db.getTask(taskId);
     assert.strictEqual(task.routing_class, 'high');
-    assert.strictEqual(task.routed_model, 'gpt-5.3-codex');
+    assert.strictEqual(task.routed_model, 'sonnet');
     assert.strictEqual(task.reasoning_effort, 'high');
   });
 });
@@ -487,111 +485,6 @@ describe('CLI server security', () => {
       perms === '600' || perms === '755',
       `Expected socket permissions 600, got ${perms}`
     );
-  });
-});
-
-describe('Web mutation route ID validation', () => {
-  let server;
-  let port;
-
-  beforeEach(async () => {
-    server = await webServer.start(tmpDir, 0);
-    port = server.address().port;
-  });
-
-  afterEach(() => {
-    webServer.stop();
-  });
-
-  function requestJson(method, routePath, payload) {
-    const body = payload === undefined ? null : JSON.stringify(payload);
-    return new Promise((resolve, reject) => {
-      const req = http.request({
-        host: '127.0.0.1',
-        port,
-        path: routePath,
-        method,
-        headers: body ? {
-          'Content-Type': 'application/json',
-          'Content-Length': Buffer.byteLength(body),
-        } : {},
-      }, (res) => {
-        let data = '';
-        res.on('data', (chunk) => {
-          data += chunk.toString();
-        });
-        res.on('end', () => {
-          resolve({ status: res.statusCode, body: data ? JSON.parse(data) : {} });
-        });
-      });
-      req.on('error', reject);
-      if (body) req.write(body);
-      req.end();
-    });
-  }
-
-  it('rejects malformed preset delete IDs and does not delete matching numeric prefix row', async () => {
-    db.savePreset('preset-1', '/tmp/project-1', 'owner/repo', 4);
-    const preset = db.listPresets().find((p) => p.name === 'preset-1');
-    assert.ok(preset);
-    assert.strictEqual(preset.id, 1);
-
-    const result = await requestJson('DELETE', '/api/presets/1abc');
-    assert.strictEqual(result.status, 400);
-    assert.strictEqual(result.body.ok, false);
-    assert.ok(db.getPreset(1));
-  });
-
-  it('rejects out-of-range preset delete IDs', async () => {
-    db.savePreset('preset-1', '/tmp/project-1', 'owner/repo', 4);
-    const preset = db.listPresets().find((p) => p.name === 'preset-1');
-    assert.ok(preset);
-
-    const outOfRange = String(Number.MAX_SAFE_INTEGER + 1);
-    const result = await requestJson('DELETE', `/api/presets/${outOfRange}`);
-    assert.strictEqual(result.status, 400);
-    assert.ok(db.getPreset(preset.id));
-  });
-
-  it('allows valid preset delete IDs', async () => {
-    db.savePreset('preset-1', '/tmp/project-1', 'owner/repo', 4);
-    const preset = db.listPresets().find((p) => p.name === 'preset-1');
-    assert.ok(preset);
-
-    const result = await requestJson('DELETE', `/api/presets/${preset.id}`);
-    assert.strictEqual(result.status, 200);
-    assert.strictEqual(result.body.ok, true);
-    assert.strictEqual(db.getPreset(preset.id), undefined);
-  });
-
-  it('rejects malformed change patch IDs and does not update matching numeric prefix row', async () => {
-    const id = db.createChange({ description: 'd', domain: 'coordinator', status: 'active' });
-    assert.strictEqual(id, 1);
-
-    const result = await requestJson('PATCH', '/api/changes/1abc', { status: 'pending_user_action' });
-    assert.strictEqual(result.status, 400);
-    assert.strictEqual(result.body.ok, false);
-    assert.strictEqual(db.getChange(1).status, 'active');
-  });
-
-  it('rejects out-of-range change patch IDs', async () => {
-    const id = db.createChange({ description: 'd', domain: 'coordinator', status: 'active' });
-    assert.ok(id > 0);
-
-    const outOfRange = String(Number.MAX_SAFE_INTEGER + 1);
-    const result = await requestJson('PATCH', `/api/changes/${outOfRange}`, { status: 'pending_user_action' });
-    assert.strictEqual(result.status, 400);
-    assert.strictEqual(db.getChange(id).status, 'active');
-  });
-
-  it('allows valid change patch IDs', async () => {
-    const id = db.createChange({ description: 'd', domain: 'coordinator', status: 'active' });
-    assert.ok(id > 0);
-
-    const result = await requestJson('PATCH', `/api/changes/${id}`, { status: 'pending_user_action' });
-    assert.strictEqual(result.status, 200);
-    assert.strictEqual(result.body.ok, true);
-    assert.strictEqual(db.getChange(id).status, 'pending_user_action');
   });
 });
 

@@ -113,6 +113,24 @@ describe('knowledge-metadata', () => {
       assert.strictEqual(meta.changes_since_index, 0);
       assert.ok(meta.last_indexed);
     });
+
+    it('reconciles stale index counters from successful scan artifacts', () => {
+      const metaPath = knowledgeMeta.getMetadataPath(tmpDir);
+      fs.mkdirSync(path.dirname(metaPath), { recursive: true });
+      fs.writeFileSync(metaPath, JSON.stringify({
+        last_indexed: '2026-01-01T00:00:00.000Z',
+        changes_since_index: 9,
+        domains: {},
+      }));
+
+      const mapPath = path.join(tmpDir, '.claude', 'state', 'codebase-map.json');
+      fs.mkdirSync(path.dirname(mapPath), { recursive: true });
+      fs.writeFileSync(mapPath, JSON.stringify({ domains: { coordinator: ['coordinator/src'] } }));
+
+      const status = knowledgeMeta.getKnowledgeStatus(tmpDir);
+      assert.strictEqual(status.changes_since_index, 0);
+      assert.ok(Date.parse(status.last_indexed) > Date.parse('2026-01-01T00:00:00.000Z'));
+    });
   });
 
   describe('getDomainCoverage', () => {
@@ -172,7 +190,7 @@ describe('knowledge-metadata', () => {
     });
 
     it('detects research topics with rollups', () => {
-      const topicDir = path.join(tmpDir, '.codex', 'knowledge', 'research', 'topics', 'api-design');
+      const topicDir = path.join(tmpDir, '.claude', 'knowledge', 'research', 'topics', 'api-design');
       fs.mkdirSync(topicDir, { recursive: true });
       fs.writeFileSync(path.join(topicDir, '_rollup.md'), '# API Design\nBest practices...');
 
@@ -182,11 +200,55 @@ describe('knowledge-metadata', () => {
     });
 
     it('marks topics without rollups', () => {
-      const topicDir = path.join(tmpDir, '.codex', 'knowledge', 'research', 'topics', 'empty-topic');
+      const topicDir = path.join(tmpDir, '.claude', 'knowledge', 'research', 'topics', 'empty-topic');
       fs.mkdirSync(topicDir, { recursive: true });
 
       const coverage = knowledgeMeta.getResearchCoverage(tmpDir);
       assert.strictEqual(coverage.topics['empty-topic'].exists, false);
+    });
+  });
+
+  describe('research staleness reconciliation', () => {
+    it('resets legacy stale domain counters when research rollup coverage exists', () => {
+      const metaPath = knowledgeMeta.getMetadataPath(tmpDir);
+      fs.mkdirSync(path.dirname(metaPath), { recursive: true });
+      fs.writeFileSync(metaPath, JSON.stringify({
+        domains: {
+          status: { changes_since_research: 5, worker_patches: 0 },
+        },
+      }));
+
+      const topicDir = path.join(tmpDir, '.claude', 'knowledge', 'research', 'topics', 'status');
+      fs.mkdirSync(topicDir, { recursive: true });
+      fs.writeFileSync(path.join(topicDir, '_rollup.md'), '# Status\nresearched');
+
+      const status = knowledgeMeta.getKnowledgeStatus(tmpDir);
+      assert.strictEqual(status.domains.status.changes_since_research, 0);
+      assert.ok(status.domains.status.last_researched);
+    });
+
+    it('keeps a domain stale when code changed after its research rollup', () => {
+      const topicDir = path.join(tmpDir, '.claude', 'knowledge', 'research', 'topics', 'status');
+      fs.mkdirSync(topicDir, { recursive: true });
+      const rollupPath = path.join(topicDir, '_rollup.md');
+      fs.writeFileSync(rollupPath, '# Status\nresearched');
+      const old = new Date('2026-01-01T00:00:00.000Z');
+      fs.utimesSync(rollupPath, old, old);
+
+      const metaPath = knowledgeMeta.getMetadataPath(tmpDir);
+      fs.mkdirSync(path.dirname(metaPath), { recursive: true });
+      fs.writeFileSync(metaPath, JSON.stringify({
+        domains: {
+          status: {
+            changes_since_research: 2,
+            worker_patches: 0,
+            last_changed: '2026-01-02T00:00:00.000Z',
+          },
+        },
+      }));
+
+      const status = knowledgeMeta.getKnowledgeStatus(tmpDir);
+      assert.strictEqual(status.domains.status.changes_since_research, 2);
     });
   });
 
@@ -217,6 +279,47 @@ describe('knowledge-metadata', () => {
 
       const status = knowledgeMeta.getKnowledgeStatus(tmpDir);
       assert.strictEqual(status.intent_exists, true);
+    });
+  });
+
+  describe('knowledgeHealthCheck', () => {
+    it('reports all missing when knowledge dir is empty', () => {
+      const result = knowledgeMeta.knowledgeHealthCheck(tmpDir);
+      assert.strictEqual(result.ok, false);
+      assert.strictEqual(result.missing.length > 0, true);
+      assert.strictEqual(result.present.length, 0);
+    });
+
+    it('reports ok when all expected files and dirs exist', () => {
+      for (const rel of knowledgeMeta.EXPECTED_KNOWLEDGE_FILES) {
+        const full = path.join(tmpDir, rel);
+        fs.mkdirSync(path.dirname(full), { recursive: true });
+        fs.writeFileSync(full, '');
+      }
+      for (const rel of knowledgeMeta.EXPECTED_KNOWLEDGE_DIRS) {
+        fs.mkdirSync(path.join(tmpDir, rel), { recursive: true });
+      }
+
+      const result = knowledgeMeta.knowledgeHealthCheck(tmpDir);
+      assert.strictEqual(result.ok, true);
+      assert.strictEqual(result.missing.length, 0);
+    });
+
+    it('detects a single missing file', () => {
+      for (const rel of knowledgeMeta.EXPECTED_KNOWLEDGE_FILES) {
+        const full = path.join(tmpDir, rel);
+        fs.mkdirSync(path.dirname(full), { recursive: true });
+        fs.writeFileSync(full, '');
+      }
+      for (const rel of knowledgeMeta.EXPECTED_KNOWLEDGE_DIRS) {
+        fs.mkdirSync(path.join(tmpDir, rel), { recursive: true });
+      }
+      const removed = knowledgeMeta.EXPECTED_KNOWLEDGE_FILES[0];
+      fs.unlinkSync(path.join(tmpDir, removed));
+
+      const result = knowledgeMeta.knowledgeHealthCheck(tmpDir);
+      assert.strictEqual(result.ok, false);
+      assert.deepStrictEqual(result.missing, [removed]);
     });
   });
 });

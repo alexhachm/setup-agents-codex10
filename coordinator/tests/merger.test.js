@@ -365,6 +365,38 @@ describe('Request completion tracking', () => {
   });
 });
 
+describe('onTaskCompleted with extended terminal statuses', () => {
+  it('should complete request when sibling tasks are superseded or failed_final', () => {
+    const reqId = db.createRequest('Extended terminal');
+    const t1 = db.createTask({ request_id: reqId, subject: 'Active', description: 'Will complete' });
+    const t2 = db.createTask({ request_id: reqId, subject: 'Superseded', description: 'Was superseded' });
+    const t3 = db.createTask({ request_id: reqId, subject: 'Final fail', description: 'Permanent failure' });
+    db.updateRequest(reqId, { status: 'integrating' });
+    db.updateTask(t2, { status: 'superseded' });
+    db.updateTask(t3, { status: 'failed_final' });
+    db.updateTask(t1, { status: 'completed' });
+
+    merger.onTaskCompleted(t1);
+
+    const after = db.getRequest(reqId);
+    assert.strictEqual(after.status, 'completed');
+  });
+
+  it('should not complete request when a sibling is still assigned', () => {
+    const reqId = db.createRequest('Stale assigned sibling');
+    const t1 = db.createTask({ request_id: reqId, subject: 'Done', description: 'Completed' });
+    const t2 = db.createTask({ request_id: reqId, subject: 'Stuck', description: 'Still assigned' });
+    db.updateRequest(reqId, { status: 'integrating' });
+    db.updateTask(t1, { status: 'completed' });
+    db.updateTask(t2, { status: 'assigned' });
+
+    merger.onTaskCompleted(t1);
+
+    const after = db.getRequest(reqId);
+    assert.notStrictEqual(after.status, 'completed');
+  });
+});
+
 describe('Assignment-priority merge deferral', () => {
   function seedAssignmentPriorityMergeTask() {
     const reqId = db.createRequest('Feature');
@@ -890,10 +922,54 @@ describe('stale conflict recovery sweep', () => {
 
     // Recovery sweep should have reset the entry; getNextMerge should then pick it up
     assert.strictEqual(mergeAttempts, 1, 'merge should be attempted after recovery resets the entry to pending');
+    const recoveredEntry = db.getDb().prepare('SELECT status, retry_count FROM merge_queue WHERE id = ?').get(mergeId);
+    assert.strictEqual(recoveredEntry.status, 'merged');
+    assert.strictEqual(recoveredEntry.retry_count, 1, 'retry_count should increment when stale conflict is retried');
 
     const recoveryLogs = readCoordinatorLogEntries('stale_conflict_recovery_sweep');
     assert.strictEqual(recoveryLogs.length, 1);
     assert.ok(Array.isArray(recoveryLogs[0].merge_ids) && recoveryLogs[0].merge_ids.includes(mergeId));
+
+    const lessonLogs = readCoordinatorLogEntries('conflict_resolution_lesson_written');
+    assert.strictEqual(lessonLogs.length, 1, 'should write a conflict resolution lesson on retry success');
+    assert.strictEqual(lessonLogs[0].merge_id, mergeId);
+    assert.strictEqual(lessonLogs[0].retry_count, 1);
+
+    const lessons = db.listInsightArtifacts({
+      project_context_key: 'coordinator:merge_conflict_lessons',
+      artifact_type: 'conflict_resolution_lesson',
+    });
+    assert.strictEqual(lessons.length, 1, 'should create exactly one conflict resolution lesson insight');
+    const payload = JSON.parse(lessons[0].artifact_payload);
+    assert.strictEqual(payload.merge_id, mergeId);
+    assert.strictEqual(payload.retry_count, 1);
+    assert.strictEqual(payload.branch, 'agent-1');
+  });
+
+  it('should NOT write a conflict resolution lesson when retry_count is 0', () => {
+    const reqId = db.createRequest('Feature');
+    const taskId = db.createTask({ request_id: reqId, subject: 'T1', description: 'D1' });
+
+    db.updateTask(taskId, { status: 'completed' });
+    db.updateRequest(reqId, { status: 'integrating' });
+
+    db.enqueueMerge({
+      request_id: reqId,
+      task_id: taskId,
+      pr_url: 'https://github.com/org/repo/pull/350',
+      branch: 'agent-5',
+    });
+
+    merger.processQueue(tmpDir, () => ({ success: true }));
+
+    const lessonLogs = readCoordinatorLogEntries('conflict_resolution_lesson_written');
+    assert.strictEqual(lessonLogs.length, 0, 'should not write a lesson for first-attempt success');
+
+    const lessons = db.listInsightArtifacts({
+      project_context_key: 'coordinator:merge_conflict_lessons',
+      artifact_type: 'conflict_resolution_lesson',
+    });
+    assert.strictEqual(lessons.length, 0, 'no insight should be created for non-retry merge');
   });
 
   it('should NOT reset functional_conflict failed entries that are less than 5 minutes old', () => {
@@ -978,10 +1054,66 @@ describe('stale conflict recovery sweep', () => {
 
     // Recovery sweep should have reset the entry; getNextMerge should then pick it up
     assert.strictEqual(mergeAttempts, 1, 'merge should be attempted after recovery resets the conflict entry to pending');
+    const recoveredEntry = db.getDb().prepare('SELECT status, retry_count FROM merge_queue WHERE id = ?').get(mergeId);
+    assert.strictEqual(recoveredEntry.status, 'merged');
+    assert.strictEqual(recoveredEntry.retry_count, 1, 'retry_count should increment when stale conflict is retried');
 
     const recoveryLogs = readCoordinatorLogEntries('stale_conflict_recovery_sweep');
     assert.strictEqual(recoveryLogs.length, 1);
     assert.ok(Array.isArray(recoveryLogs[0].merge_ids) && recoveryLogs[0].merge_ids.includes(mergeId));
+  });
+
+  it('should create a follow-up task instead of retrying exhausted stale conflicts', () => {
+    const reqId = db.createRequest('Feature');
+    const taskId = db.createTask({
+      request_id: reqId,
+      subject: 'T1',
+      description: 'D1',
+      domain: 'merge',
+      files: ['src/conflicted.js'],
+    });
+
+    db.updateTask(taskId, { status: 'completed' });
+    db.updateRequest(reqId, { status: 'integrating' });
+
+    const enqueueResult = db.enqueueMerge({
+      request_id: reqId,
+      task_id: taskId,
+      pr_url: 'https://github.com/org/repo/pull/306',
+      branch: 'agent-1',
+    });
+    const mergeId = enqueueResult.lastInsertRowid;
+
+    db.updateMerge(mergeId, { status: 'conflict', error: 'merge conflict: cannot be automatically merged' });
+    db.getDb().prepare(
+      "UPDATE merge_queue SET retry_count = ?, updated_at = datetime('now', '-6 minutes') WHERE id = ?"
+    ).run(merger.MAX_MERGE_CONFLICT_RETRIES, mergeId);
+
+    let mergeAttempts = 0;
+    merger.processQueue(tmpDir, () => { mergeAttempts += 1; return { success: true }; });
+
+    assert.strictEqual(mergeAttempts, 0, 'merge should not be attempted after retry cap is exhausted');
+
+    const entry = db.getDb().prepare('SELECT status, error, retry_count FROM merge_queue WHERE id = ?').get(mergeId);
+    assert.strictEqual(entry.status, 'failed');
+    assert.ok(entry.error.startsWith('conflict_retries_exhausted:'), 'entry should record retry exhaustion');
+    assert.strictEqual(entry.retry_count, merger.MAX_MERGE_CONFLICT_RETRIES);
+
+    const tasks = db.listTasks({ request_id: reqId });
+    const followUp = tasks.find((task) => task.subject === `Resolve exhausted merge conflict for merge ${mergeId}`);
+    assert.ok(followUp, 'targeted follow-up task should be created');
+    assert.strictEqual(followUp.status, 'pending');
+    assert.strictEqual(followUp.priority, 'urgent');
+    assert.strictEqual(followUp.tier, 2);
+    assert.strictEqual(followUp.domain, 'merge');
+
+    const mail = db.checkMail('master-2', false).filter((m) => m.type === 'merge_conflict_exhausted');
+    assert.strictEqual(mail.length, 1);
+    assert.strictEqual(mail[0].payload.follow_up_task_id, followUp.id);
+
+    const exhaustedLogs = readCoordinatorLogEntries('merge_conflict_retries_exhausted');
+    assert.strictEqual(exhaustedLogs.length, 1);
+    assert.strictEqual(exhaustedLogs[0].follow_up_task_id, followUp.id);
   });
 
   it('should NOT reset conflict status entries that are less than 5 minutes old', () => {
@@ -1037,15 +1169,68 @@ describe('stale conflict recovery sweep', () => {
     merger.onTaskCompleted(taskId2);
 
     // The failed functional_conflict entry should be reset to pending
-    const entry = db.getDb().prepare('SELECT status, error FROM merge_queue WHERE id = ?').get(mergeId);
+    const entry = db.getDb().prepare('SELECT status, error, retry_count FROM merge_queue WHERE id = ?').get(mergeId);
     assert.strictEqual(entry.status, 'pending', 'functional_conflict failed entry should be reset to pending');
     assert.strictEqual(entry.error, null, 'error should be cleared');
+    assert.strictEqual(entry.retry_count, 1, 'retry_count should increment for completion-triggered retries');
 
     // Request should remain integrating, not completed
     const requestAfter = db.getRequest(reqId);
     assert.strictEqual(requestAfter.status, 'integrating');
     assert.strictEqual(getRequestCompletionMailCount(reqId), 0);
     assert.strictEqual(getRequestCompletionLogCount(reqId), 0);
+  });
+
+  it('onTaskCompleted should create a follow-up task when recoverable merges exhausted retry cap', () => {
+    const reqId = db.createRequest('Feature');
+    const taskId1 = db.createTask({
+      request_id: reqId,
+      subject: 'T1',
+      description: 'D1',
+      domain: 'merge',
+      files: ['src/conflicted.js'],
+    });
+    const taskId2 = db.createTask({ request_id: reqId, subject: 'T2', description: 'D2' });
+
+    db.updateTask(taskId1, { status: 'completed' });
+    db.updateTask(taskId2, { status: 'completed' });
+    db.updateRequest(reqId, { status: 'integrating' });
+
+    const enqueueResult = db.enqueueMerge({
+      request_id: reqId,
+      task_id: taskId1,
+      pr_url: 'https://github.com/org/repo/pull/307',
+      branch: 'agent-1',
+    });
+    const mergeId = enqueueResult.lastInsertRowid;
+
+    db.updateMerge(mergeId, { status: 'failed', error: 'functional_conflict: build failed after merge' });
+    db.getDb().prepare('UPDATE merge_queue SET retry_count = ? WHERE id = ?')
+      .run(merger.MAX_MERGE_CONFLICT_RETRIES, mergeId);
+
+    merger.onTaskCompleted(taskId2);
+
+    const entry = db.getDb().prepare('SELECT status, error, retry_count FROM merge_queue WHERE id = ?').get(mergeId);
+    assert.strictEqual(entry.status, 'failed');
+    assert.ok(entry.error.startsWith('conflict_retries_exhausted:'), 'entry should record retry exhaustion');
+    assert.strictEqual(entry.retry_count, merger.MAX_MERGE_CONFLICT_RETRIES);
+
+    const tasks = db.listTasks({ request_id: reqId });
+    const followUp = tasks.find((task) => task.subject === `Resolve exhausted merge conflict for merge ${mergeId}`);
+    assert.ok(followUp, 'targeted follow-up task should be created');
+    assert.strictEqual(followUp.status, 'pending');
+    assert.strictEqual(followUp.priority, 'urgent');
+    assert.strictEqual(followUp.tier, 2);
+    assert.strictEqual(followUp.domain, 'merge');
+
+    const requestAfter = db.getRequest(reqId);
+    assert.strictEqual(requestAfter.status, 'integrating');
+    assert.strictEqual(getRequestCompletionMailCount(reqId), 0);
+    assert.strictEqual(getRequestCompletionLogCount(reqId), 0);
+
+    const mail = db.checkMail('master-2', false).filter((m) => m.type === 'merge_conflict_exhausted');
+    assert.strictEqual(mail.length, 1);
+    assert.strictEqual(mail[0].payload.follow_up_task_id, followUp.id);
   });
 });
 

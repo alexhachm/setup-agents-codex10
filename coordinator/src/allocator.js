@@ -2,6 +2,7 @@
 
 const db = require('./db');
 const insightIngestion = require('./insight-ingestion');
+const researchDriverManager = require('./research-driver-manager');
 
 let intervalId = null;
 let lastNotifyTs = 0;
@@ -29,12 +30,12 @@ function stop() {
   lastResearchNotifyTs = 0;
 }
 
-function tick() {
+function tick(projectDir = null) {
   // 1. Promote pending tasks whose dependencies are met
   db.checkAndPromoteTasks();
 
   // 1c. Signal allocator when queued research intents need batch planning
-  signalResearchBatchAvailability();
+  signalResearchBatchAvailability(projectDir);
 
   // 1b. Recover stalled or orphaned assignments so throughput can resume.
   const recoveredAssignments = db.recoverStalledAssignments({
@@ -86,7 +87,7 @@ function runTickSafely(projectDir, phase = 'interval') {
   }
 }
 
-function signalResearchBatchAvailability() {
+function signalResearchBatchAvailability(projectDir = null) {
   // Check for queued research intents that have no active batch run
   let queuedIntentCount = 0;
   try {
@@ -110,6 +111,21 @@ function signalResearchBatchAvailability() {
     return;
   }
   if (runningBatchCount > 0) return;
+
+  if (projectDir) {
+    const driverResult = researchDriverManager.ensureResearchDriver(projectDir);
+    if (driverResult.started) {
+      db.log('allocator', 'research_driver_auto_started', {
+        queued_intent_count: queuedIntentCount,
+        sentinel_pid: driverResult.sentinel_pid || null,
+      });
+    } else if (!driverResult.ok) {
+      db.log('allocator', 'research_driver_auto_start_failed', {
+        queued_intent_count: queuedIntentCount,
+        error: driverResult.error || 'unknown_error',
+      });
+    }
+  }
 
   const now = Date.now();
   if (now - lastResearchNotifyTs < RESEARCH_NOTIFY_DEDUP_MS) return;

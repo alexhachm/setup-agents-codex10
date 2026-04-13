@@ -6,6 +6,7 @@ const path = require('path');
 const crypto = require('crypto');
 const { execFileSync } = require('child_process');
 const db = require('./db');
+const providerOutput = require('./provider-output');
 let modelRouter = null;
 try {
   modelRouter = require('./model-router');
@@ -29,7 +30,28 @@ function getExplicitConfigValue(getConfig, key) {
   return trimmed === '' ? null : trimmed;
 }
 
-const SPARK_MODEL_KEYS = Object.freeze(['model_codex_spark', 'model_spark']);
+function parseBooleanConfig(value, fallback = false) {
+  if (value === undefined || value === null) return fallback;
+  const normalized = String(value).trim().toLowerCase();
+  if (!normalized) return fallback;
+  if (normalized === 'true' || normalized === '1' || normalized === 'yes' || normalized === 'on') {
+    return true;
+  }
+  if (normalized === 'false' || normalized === '0' || normalized === 'no' || normalized === 'off') {
+    return false;
+  }
+  return fallback;
+}
+
+function getLoopSyncWithOriginConfig() {
+  const envFallback = parseBooleanConfig(
+    process.env.MAC10_LOOP_SYNC_WITH_ORIGIN ?? process.env.MAC10_LOOP_SYNC,
+    true
+  );
+  return parseBooleanConfig(db.getConfig(LOOP_SYNC_WITH_ORIGIN_KEY), envFallback);
+}
+
+const SPARK_MODEL_KEYS = Object.freeze(['model_spark']);
 
 function getExplicitSparkModelSelection(getConfig) {
   for (const key of SPARK_MODEL_KEYS) {
@@ -44,10 +66,10 @@ function getSparkModelConfigValue(getConfig, fallback) {
 }
 
 function getFallbackDefaultModel(getConfig, routingClass) {
-  const sparkModel = getSparkModelConfigValue(getConfig, 'gpt-5.3-codex-spark');
+  const sparkModel = getSparkModelConfigValue(getConfig, 'haiku');
   if (routingClass === 'spark') return sparkModel;
   if (routingClass === 'mini') return getConfigValue(getConfig, 'model_mini', sparkModel);
-  return getConfigValue(getConfig, 'model_flagship', 'gpt-5.3-codex');
+  return getConfigValue(getConfig, 'model_flagship', 'sonnet');
 }
 
 function parseTaskMetadataValue(value) {
@@ -109,7 +131,7 @@ function hasCodeHeavyMetadataSignals(task) {
   ));
   const hasCodeDomainSignal = Boolean(domain) && !/(^|[-_])(docs?|documentation|content)([-_]|$)/i.test(domain);
   const hasNonTrivialValidationSignal = (
-    /(tier[\s_-]*2|tier[\s_-]*3|build-validator|verify-app|npm\s+test|node\s+--test|jest|vitest|mocha|pytest|go\s+test|cargo\s+test|mvn\s+test|gradle\s+test)/i
+    /(tier[\s_-]*2|tier[\s_-]*3|build|lint|integration|e2e|npm\s+test|node\s+--test|jest|vitest|mocha|pytest|go\s+test|cargo\s+test|mvn\s+test|gradle\s+test)/i
   ).test(validationSignals);
 
   if (hasCodeFileSignal && (hasCodeDomainSignal || hasNonTrivialValidationSignal)) return true;
@@ -319,11 +341,13 @@ const ROUTING_BUDGET_REMAINING_KEY = 'routing_budget_flagship_remaining';
 const ROUTING_BUDGET_THRESHOLD_KEY = 'routing_budget_flagship_threshold';
 const LEGACY_BUDGET_REMAINING_KEY = 'flagship_budget_remaining';
 const LEGACY_BUDGET_THRESHOLD_KEY = 'flagship_budget_threshold';
+const LOOP_SYNC_WITH_ORIGIN_KEY = 'loop_sync_with_origin';
 const ROUTING_BUDGET_SCALAR_LEGACY_KEY_MAP = Object.freeze({
   [ROUTING_BUDGET_REMAINING_KEY]: LEGACY_BUDGET_REMAINING_KEY,
   [ROUTING_BUDGET_THRESHOLD_KEY]: LEGACY_BUDGET_THRESHOLD_KEY,
 });
 const LOOP_REQUEST_SET_CONFIG_SPECS = Object.freeze({
+  [LOOP_SYNC_WITH_ORIGIN_KEY]: Object.freeze({ type: 'boolean' }),
   loop_request_quality_gate: Object.freeze({ type: 'boolean' }),
   loop_request_min_description_chars: Object.freeze({ type: 'int', min: 80, max: 5000 }),
   loop_request_min_interval_sec: Object.freeze({ type: 'int', min: 0, max: 86400 }),
@@ -605,70 +629,6 @@ const COMMAND_SCHEMAS = {
   },
 };
 
-const COMPLETE_TASK_USAGE_FIELD_TYPES = Object.freeze({
-  model: 'string',
-  input_tokens: 'number',
-  output_tokens: 'number',
-  input_audio_tokens: 'number',
-  output_audio_tokens: 'number',
-  reasoning_tokens: 'number',
-  accepted_prediction_tokens: 'number',
-  rejected_prediction_tokens: 'number',
-  cached_tokens: 'number',
-  cache_creation_tokens: 'number',
-  ephemeral_5m_input_tokens: 'number',
-  ephemeral_1h_input_tokens: 'number',
-  total_tokens: 'number',
-  cost_usd: 'number',
-});
-const COMPLETE_TASK_USAGE_FIELD_ALIASES = Object.freeze({
-  prompt_tokens: 'input_tokens',
-  completion_tokens: 'output_tokens',
-  cache_creation_input_tokens: 'cache_creation_tokens',
-  cache_read_input_tokens: 'cached_tokens',
-});
-const COMPLETE_TASK_USAGE_CACHE_CREATION_OBJECT_ALIASES = Object.freeze([
-  'ephemeral_5m_input_tokens',
-  'ephemeral_1h_input_tokens',
-]);
-const COMPLETE_TASK_USAGE_DETAIL_ALIASES = Object.freeze({
-  input_tokens_details: Object.freeze([
-    { canonicalField: 'cached_tokens', detailField: 'cached_tokens' },
-    { canonicalField: 'input_audio_tokens', detailField: 'audio_tokens' },
-  ]),
-  prompt_tokens_details: Object.freeze([
-    { canonicalField: 'cached_tokens', detailField: 'cached_tokens' },
-    { canonicalField: 'input_audio_tokens', detailField: 'audio_tokens' },
-  ]),
-  completion_tokens_details: Object.freeze([
-    { canonicalField: 'reasoning_tokens', detailField: 'reasoning_tokens' },
-    { canonicalField: 'output_audio_tokens', detailField: 'audio_tokens' },
-    { canonicalField: 'accepted_prediction_tokens', detailField: 'accepted_prediction_tokens' },
-    { canonicalField: 'rejected_prediction_tokens', detailField: 'rejected_prediction_tokens' },
-  ]),
-  output_tokens_details: Object.freeze([
-    { canonicalField: 'reasoning_tokens', detailField: 'reasoning_tokens' },
-    { canonicalField: 'output_audio_tokens', detailField: 'audio_tokens' },
-  ]),
-});
-
-const COMPLETE_TASK_USAGE_COLUMN_MAP = Object.freeze({
-  model: 'usage_model',
-  input_tokens: 'usage_input_tokens',
-  output_tokens: 'usage_output_tokens',
-  input_audio_tokens: 'usage_input_audio_tokens',
-  output_audio_tokens: 'usage_output_audio_tokens',
-  reasoning_tokens: 'usage_reasoning_tokens',
-  accepted_prediction_tokens: 'usage_accepted_prediction_tokens',
-  rejected_prediction_tokens: 'usage_rejected_prediction_tokens',
-  cached_tokens: 'usage_cached_tokens',
-  cache_creation_tokens: 'usage_cache_creation_tokens',
-  ephemeral_5m_input_tokens: 'usage_cache_creation_ephemeral_5m_input_tokens',
-  ephemeral_1h_input_tokens: 'usage_cache_creation_ephemeral_1h_input_tokens',
-  total_tokens: 'usage_total_tokens',
-  cost_usd: 'usage_cost_usd',
-});
-
 function parseBudgetNumber(value) {
   if (value === undefined || value === null) return null;
   if (typeof value === 'number') return Number.isFinite(value) ? value : null;
@@ -762,21 +722,6 @@ function syncBudgetStateFromScalarFallback(raw, getConfig) {
   return state;
 }
 
-function validateCompleteTaskUsageIntegerField(fieldPath, value) {
-  if (typeof value !== 'number') {
-    throw new Error(`Field "${fieldPath}" must be of type number`);
-  }
-  if (!Number.isFinite(value)) {
-    throw new Error(`Field "${fieldPath}" must be a finite number`);
-  }
-  if (value < 0) {
-    throw new Error(`Field "${fieldPath}" must be >= 0`);
-  }
-  if (!Number.isInteger(value)) {
-    throw new Error(`Field "${fieldPath}" must be an integer`);
-  }
-}
-
 function normalizeLoopRequestSetConfigValue(key, rawValue) {
   const spec = LOOP_REQUEST_SET_CONFIG_SPECS[key];
   if (!spec) return { ok: true, value: String(rawValue) };
@@ -831,169 +776,20 @@ function normalizeLoopRequestSetConfigValue(key, rawValue) {
   return { ok: true, value: String(rawValue) };
 }
 
-function normalizeCompleteTaskUsageAliasEntries(rawUsage) {
-  const aliasNormalized = {};
-  const unknownFields = {};
-  for (const [rawField, rawValue] of Object.entries(rawUsage)) {
-    if (rawField === 'cache_creation') {
-      if (!rawValue || typeof rawValue !== 'object' || Array.isArray(rawValue)) {
-        throw new Error('Field "usage.cache_creation" must be an object');
-      }
-      const passthroughNestedFields = {};
-      for (const [nestedField, nestedValue] of Object.entries(rawValue)) {
-        if (!COMPLETE_TASK_USAGE_CACHE_CREATION_OBJECT_ALIASES.includes(nestedField)) {
-          passthroughNestedFields[nestedField] = nestedValue;
-        }
-      }
-      const cacheCreationEntries = [];
-      let cacheCreationTokens = 0;
-      for (const nestedField of COMPLETE_TASK_USAGE_CACHE_CREATION_OBJECT_ALIASES) {
-        if (!Object.prototype.hasOwnProperty.call(rawValue, nestedField)) continue;
-        const nestedValue = rawValue[nestedField];
-        validateCompleteTaskUsageIntegerField(`usage.cache_creation.${nestedField}`, nestedValue);
-        cacheCreationTokens += nestedValue;
-        cacheCreationEntries.push({
-          canonicalField: nestedField,
-          canonicalValue: nestedValue,
-        });
-      }
-      if (cacheCreationEntries.length) {
-        cacheCreationEntries.push({
-          canonicalField: 'cache_creation_tokens',
-          canonicalValue: cacheCreationTokens,
-        });
-        for (const { canonicalField, canonicalValue } of cacheCreationEntries) {
-          if (
-            Object.prototype.hasOwnProperty.call(aliasNormalized, canonicalField)
-            && aliasNormalized[canonicalField] !== canonicalValue
-          ) {
-            throw new Error(`Field "usage" contains conflicting values for key "${canonicalField}"`);
-          }
-          aliasNormalized[canonicalField] = canonicalValue;
-        }
-      }
-      if (Object.keys(passthroughNestedFields).length) {
-        unknownFields[rawField] = passthroughNestedFields;
-      }
-      continue;
-    }
-
-    if (Object.prototype.hasOwnProperty.call(COMPLETE_TASK_USAGE_DETAIL_ALIASES, rawField)) {
-      const detailAliases = COMPLETE_TASK_USAGE_DETAIL_ALIASES[rawField];
-      const detailEntries = [];
-      const detailAliasFields = new Set(detailAliases.map((detailAlias) => detailAlias.detailField));
-      const passthroughNestedFields = {};
-      if (rawValue === null) {
-        for (const detailAlias of detailAliases) {
-          detailEntries.push({ canonicalField: detailAlias.canonicalField, canonicalValue: null });
-        }
-      } else {
-        if (!rawValue || typeof rawValue !== 'object' || Array.isArray(rawValue)) {
-          throw new Error(`Field "usage.${rawField}" must be an object`);
-        }
-        for (const [nestedField, nestedValue] of Object.entries(rawValue)) {
-          if (!detailAliasFields.has(nestedField)) {
-            passthroughNestedFields[nestedField] = nestedValue;
-          }
-        }
-        for (const detailAlias of detailAliases) {
-          if (!Object.prototype.hasOwnProperty.call(rawValue, detailAlias.detailField)) {
-            continue;
-          }
-          detailEntries.push({
-            canonicalField: detailAlias.canonicalField,
-            canonicalValue: rawValue[detailAlias.detailField],
-          });
-        }
-      }
-      for (const { canonicalField, canonicalValue } of detailEntries) {
-        if (
-          Object.prototype.hasOwnProperty.call(aliasNormalized, canonicalField)
-          && aliasNormalized[canonicalField] !== canonicalValue
-        ) {
-          throw new Error(`Field "usage" contains conflicting values for key "${canonicalField}"`);
-        }
-        aliasNormalized[canonicalField] = canonicalValue;
-      }
-      if (Object.keys(passthroughNestedFields).length) {
-        unknownFields[rawField] = passthroughNestedFields;
-      }
-      continue;
-    }
-
-    const canonicalField = COMPLETE_TASK_USAGE_FIELD_ALIASES[rawField] || rawField;
-    const canonicalValue = rawValue;
-    if (!Object.prototype.hasOwnProperty.call(COMPLETE_TASK_USAGE_FIELD_TYPES, canonicalField)) {
-      unknownFields[canonicalField] = canonicalValue;
-      continue;
-    }
-    if (
-      Object.prototype.hasOwnProperty.call(aliasNormalized, canonicalField)
-      && aliasNormalized[canonicalField] !== canonicalValue
-    ) {
-      throw new Error(`Field "usage" contains conflicting values for key "${canonicalField}"`);
-    }
-    aliasNormalized[canonicalField] = canonicalValue;
-  }
-  return { aliasNormalized, unknownFields };
-}
-
 function normalizeCompleteTaskUsagePayload(rawUsage) {
-  if (rawUsage === undefined || rawUsage === null) return null;
-  if (!rawUsage || typeof rawUsage !== 'object' || Array.isArray(rawUsage)) {
-    throw new Error('Field "usage" must be an object');
-  }
-
-  const { aliasNormalized, unknownFields } = normalizeCompleteTaskUsageAliasEntries(rawUsage);
-
-  const normalized = {};
-  for (const [field, expectedType] of Object.entries(COMPLETE_TASK_USAGE_FIELD_TYPES)) {
-    if (!Object.prototype.hasOwnProperty.call(aliasNormalized, field)) continue;
-    const value = aliasNormalized[field];
-    if (value === null) {
-      normalized[field] = null;
-      continue;
-    }
-    if (typeof value !== expectedType) {
-      throw new Error(`Field "usage.${field}" must be of type ${expectedType}`);
-    }
-    if (expectedType === 'string') {
-      const trimmed = value.trim();
-      if (!trimmed) throw new Error('Field "usage.model" cannot be empty');
-      normalized[field] = trimmed;
-      continue;
-    }
-    if (field !== 'cost_usd') {
-      validateCompleteTaskUsageIntegerField(`usage.${field}`, value);
-      normalized[field] = value;
-      continue;
-    }
-    if (!Number.isFinite(value)) {
-      throw new Error('Field "usage.cost_usd" must be a finite number');
-    }
-    if (value < 0) {
-      throw new Error('Field "usage.cost_usd" must be >= 0');
-    }
-    normalized[field] = value;
-  }
-
-  if (!Object.keys(unknownFields).length) return normalized;
-  return { ...normalized, ...unknownFields };
+  return providerOutput.normalizeUsagePayload(rawUsage, {
+    projectDir: _projectDir || process.cwd(),
+    provider: process.env.MAC10_AGENT_PROVIDER,
+    errorStyle: 'server',
+  });
 }
 
 function mapUsagePayloadToTaskFields(usage, taskRow = null) {
-  const normalizedUsage = normalizeCompleteTaskUsagePayload(usage);
-  if (!normalizedUsage || typeof normalizedUsage !== 'object') return {};
-  const mapped = {};
-  for (const [usageKey, columnName] of Object.entries(COMPLETE_TASK_USAGE_COLUMN_MAP)) {
-    if (!Object.prototype.hasOwnProperty.call(normalizedUsage, usageKey)) continue;
-    if (taskRow && !Object.prototype.hasOwnProperty.call(taskRow, columnName)) continue;
-    mapped[columnName] = normalizedUsage[usageKey];
-  }
-  if (!taskRow || Object.prototype.hasOwnProperty.call(taskRow, 'usage_payload_json')) {
-    mapped.usage_payload_json = JSON.stringify(normalizedUsage);
-  }
-  return mapped;
+  return providerOutput.mapUsagePayloadToTaskFields(usage, taskRow, {
+    projectDir: _projectDir || process.cwd(),
+    provider: process.env.MAC10_AGENT_PROVIDER,
+    errorStyle: 'server',
+  });
 }
 
 /** Parse a files field into an array. Handles arrays, JSON strings, and comma-separated strings. */
@@ -2846,13 +2642,38 @@ function handleCommand(cmd, conn, handlers) {
           tier: failedTask.tier,
           assigned_to: failedTask.assigned_to,
         } : null;
+        const isBlocking = failedTask && failedTask.blocking !== 0;
+        const failStatus = isBlocking ? 'failed_needs_reroute' : 'failed';
         db.updateTask(tid, {
-          status: 'failed',
+          status: failStatus,
           result: error,
           completed_at: new Date().toISOString(),
           ...usageTaskFields,
         });
         db.updateWorker(wid, { status: 'idle', current_task_id: null });
+
+        let rerouteTaskId = null;
+        if (isBlocking && failedTask.request_id) {
+          const fixDescription = `Fix: ${failedTask.subject || 'task ' + tid}\n\nOriginal task ${tid} failed with: ${error}`;
+          let parsedFiles = null;
+          try { parsedFiles = failedTask.files ? JSON.parse(failedTask.files) : null; } catch (_) { /* ignore */ }
+          rerouteTaskId = db.createTask({
+            request_id: failedTask.request_id,
+            subject: `[fix] ${failedTask.subject || 'task ' + tid}`,
+            description: fixDescription,
+            domain: failedTask.domain,
+            files: parsedFiles,
+            priority: 'urgent',
+            tier: failedTask.tier || 3,
+          });
+          db.updateTask(rerouteTaskId, { status: 'ready' });
+          db.log('coordinator', 'blocking_task_rerouted', {
+            failed_task_id: tid,
+            fix_task_id: rerouteTaskId,
+            request_id: failedTask.request_id,
+          });
+        }
+
         db.sendMail('allocator', 'task_failed', {
           worker_id: wid,
           task_id: tid,
@@ -2865,8 +2686,8 @@ function handleCommand(cmd, conn, handlers) {
           tier: routingMeta ? routingMeta.tier : null,
           assigned_to: routingMeta ? routingMeta.assigned_to : null,
           original_task: routingMeta,
+          reroute_task_id: rerouteTaskId,
         });
-        // Also notify architect so it has visibility into failures
         db.sendMail('architect', 'task_failed', {
           worker_id: wid,
           task_id: tid,
@@ -2874,9 +2695,10 @@ function handleCommand(cmd, conn, handlers) {
           error,
           usage,
           original_task: routingMeta,
+          reroute_task_id: rerouteTaskId,
         });
-        db.log(`worker-${wid}`, 'task_failed', { task_id: tid, error, usage });
-        respond(conn, { ok: true });
+        db.log(`worker-${wid}`, 'task_failed', { task_id: tid, error, usage, reroute_task_id: rerouteTaskId });
+        respond(conn, { ok: true, reroute_task_id: rerouteTaskId });
         break;
       }
       case 'browser-create-session': {
@@ -3583,9 +3405,10 @@ function handleCommand(cmd, conn, handlers) {
         const reqId = args.request_id;
         const forceRetry = args.retry_terminal === true || args.force_retry === true;
         const completion = db.checkRequestCompletion(reqId, { source: 'integrate_guard' });
-        const canIntegrate = completion.all_completed === true && completion.failed === 0;
+        const hardFailures = Number(completion.hard_failures) || 0;
+        const canIntegrate = completion.all_terminal === true && completion.completed > 0 && hardFailures === 0;
         if (!canIntegrate) {
-          const error = completion.failed > 0
+          const error = hardFailures > 0
             ? 'Request has failed tasks'
             : 'Not all tasks completed';
           respond(conn, { ok: false, error, ...completion });
@@ -3919,7 +3742,9 @@ function handleCommand(cmd, conn, handlers) {
           }
           execFileSync('git', ['worktree', 'add', wtPath, branchName], { cwd: projDir, encoding: 'utf8' });
 
-          // Copy .claude structure to worktree
+          // Copy only source/config assets into the worker worktree. Runtime
+          // state such as .claude/state, .claude/logs, and .claude/signals
+          // must stay local to the main coordinator process.
           const srcClaude = path.join(projDir, '.claude');
           const dstClaude = path.join(wtPath, '.claude');
           const copyDir = (rel) => {
@@ -3938,16 +3763,14 @@ function handleCommand(cmd, conn, handlers) {
           copyDir('scripts');
           copyDir('agents');
           copyDir('hooks');
-          // Copy worker role docs for both legacy and Codex-compatible runtimes.
-          const workerClaude = path.join(srcClaude, 'worker-claude.md');
-          if (fs.existsSync(workerClaude)) {
-            fs.copyFileSync(workerClaude, path.join(wtPath, 'CLAUDE.md'));
-          }
           const workerAgents = path.join(srcClaude, 'worker-agents.md');
-          if (fs.existsSync(workerAgents)) {
-            fs.copyFileSync(workerAgents, path.join(wtPath, 'AGENTS.md'));
-          } else if (fs.existsSync(workerClaude)) {
-            fs.copyFileSync(workerClaude, path.join(wtPath, 'AGENTS.md'));
+          const workerClaude = path.join(srcClaude, 'worker-claude.md');
+          const workerInstructions = fs.existsSync(workerAgents) ? workerAgents : workerClaude;
+          // AGENTS.md is canonical; CLAUDE.md is kept as a compatibility copy
+          // for Claude Code until all providers consume AGENTS.md directly.
+          if (fs.existsSync(workerInstructions)) {
+            fs.copyFileSync(workerInstructions, path.join(wtPath, 'AGENTS.md'));
+            fs.copyFileSync(workerInstructions, path.join(wtPath, 'CLAUDE.md'));
           }
           // Copy settings.json
           const settingsFile = path.join(srcClaude, 'settings.json');
@@ -4164,12 +3987,13 @@ function handleCommand(cmd, conn, handlers) {
           'watchdog_warn_sec', 'watchdog_nudge_sec', 'watchdog_triage_sec', 'watchdog_terminate_sec',
           'watchdog_interval_ms', 'allocator_interval_ms', 'max_workers',
           'primary_branch',
+          LOOP_SYNC_WITH_ORIGIN_KEY,
           'loop_request_quality_gate',
           'loop_request_min_description_chars',
           'loop_request_min_interval_sec',
           'loop_request_max_per_hour',
           'loop_request_similarity_threshold',
-          'model_flagship', 'model_codex_spark', 'model_spark', 'model_mini',
+          'model_flagship', 'model_spark', 'model_mini',
           'model_xhigh', 'model_high', 'model_mid',
           'reasoning_xhigh', 'reasoning_high', 'reasoning_mid', 'reasoning_spark', 'reasoning_mini',
           ROUTING_BUDGET_STATE_KEY,
@@ -4247,6 +4071,7 @@ function handleCommand(cmd, conn, handlers) {
           status: promptLoop.status,
           last_checkpoint: promptLoop.last_checkpoint,
           iteration_count: promptLoop.iteration_count,
+          loop_sync_with_origin: getLoopSyncWithOriginConfig(),
         });
         break;
       }
@@ -4352,7 +4177,7 @@ function handleCommand(cmd, conn, handlers) {
 
       case 'research-requeue-stale': {
         const requeued = db.requeueStaleResearch({
-          max_age_minutes: args.max_age_minutes != null ? args.max_age_minutes : 60,
+          max_age_minutes: args.max_age_minutes || 60,
         });
         db.log('coordinator', 'research_requeued_stale', requeued);
         respond(conn, { ok: true, ...requeued });
@@ -4382,15 +4207,16 @@ function handleCommand(cmd, conn, handlers) {
 
       case 'research-complete': {
         let resultText = null;
+        const researchItem = db.getResearchIntent(args.intent_id);
         if (args.note_path) {
           const fs = require('fs');
           const path = require('path');
           const projectDir = db.getConfig('project_dir') || process.cwd();
-          // Try: absolute, relative to cwd, then under .codex/knowledge/
+          // Try: absolute, relative to cwd, then under .claude/knowledge/
           const candidates = [
             args.note_path,
             path.resolve(projectDir, args.note_path),
-            path.resolve(projectDir, '.codex', 'knowledge', args.note_path),
+            path.resolve(projectDir, '.claude', 'knowledge', args.note_path),
           ];
           let found = false;
           for (const p of candidates) {
@@ -4407,6 +4233,20 @@ function handleCommand(cmd, conn, handlers) {
           break;
         }
         db.log('coordinator', 'research_completed', { id: args.intent_id });
+        try {
+          const parsedPayload = researchItem && researchItem.intent_payload
+            ? JSON.parse(researchItem.intent_payload)
+            : null;
+          const topic = parsedPayload && typeof parsedPayload.topic === 'string'
+            ? parsedPayload.topic.trim()
+            : '';
+          if (topic) {
+            const knowledgeMeta = require('./knowledge-metadata');
+            knowledgeMeta.resetDomainResearch(db.getConfig('project_dir') || process.cwd(), topic);
+          }
+        } catch (e) {
+          db.log('coordinator', 'research_metadata_reset_error', { id: args.intent_id, error: e.message });
+        }
         respond(conn, { ok: true });
         break;
       }
@@ -4627,6 +4467,12 @@ function handleCommand(cmd, conn, handlers) {
         respond(conn, { ok: true, ...status, pending_reviews_count: pendingReviews.length, domain_analysis_coverage: analysisCoverage });
         break;
       }
+      case 'knowledge-health': {
+        const knowledgeMeta = require('./knowledge-metadata');
+        const result = knowledgeMeta.knowledgeHealthCheck(_projectDir || process.cwd());
+        respond(conn, { ok: result.ok, missing: result.missing, present: result.present });
+        break;
+      }
       case 'knowledge-increment': {
         const knowledgeMeta = require('./knowledge-metadata');
         const domain = args.domain || null;
@@ -4643,7 +4489,7 @@ function handleCommand(cmd, conn, handlers) {
       case 'knowledge-update-index-timestamp': {
         const knowledgeMeta = require('./knowledge-metadata');
         const meta = knowledgeMeta.updateIndexTimestamp(_projectDir || process.cwd());
-        respond(conn, { ok: true, last_indexed: meta.last_indexed });
+        respond(conn, { ok: true, last_indexed: meta.last_indexed, changes_since_index: meta.changes_since_index });
         break;
       }
 
@@ -4710,7 +4556,7 @@ function handleCommand(cmd, conn, handlers) {
           }
           fs.writeFileSync(path.join(domainDir, `${analysis.domain}.md`), content);
           const knowledgeMeta = require('./knowledge-metadata');
-          knowledgeMeta.incrementChanges(projDir, analysis.domain);
+          knowledgeMeta.resetDomainResearch(projDir, analysis.domain);
           db.sendMail('master-1', 'domain_review_completed', { analysis_id: args.id, domain: analysis.domain, status: 'approved' });
         }
         respond(conn, { ok: true, id: args.id });

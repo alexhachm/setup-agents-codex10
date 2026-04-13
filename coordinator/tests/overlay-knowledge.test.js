@@ -161,7 +161,26 @@ describe('overlay-knowledge: domain knowledge injection', () => {
     fs.rmSync(tmpDir, { recursive: true, force: true });
   });
 
-  it('injects legacy domain/<domain>.md knowledge', () => {
+  it('injects codebase/domains/<domain>.md as canonical domain knowledge', () => {
+    mkFile('.claude/knowledge/codebase/domains/primary-dom.md', 'canonical-domain-content');
+
+    const result = overlay.buildTaskOverlay(makeTask({ domain: 'primary-dom' }), makeWorker(), tmpDir);
+    assert.ok(result.includes('## Domain Knowledge'));
+    assert.ok(result.includes('canonical-domain-content'));
+  });
+
+  it('prefers codebase/domains/ over legacy domain/ and domains/', () => {
+    mkFile('.claude/knowledge/codebase/domains/multi-path.md', 'canonical-wins');
+    mkFile('.claude/knowledge/domains/multi-path/README.md', 'readme-loses');
+    mkFile('.claude/knowledge/domain/multi-path.md', 'legacy-loses');
+
+    const result = overlay.buildTaskOverlay(makeTask({ domain: 'multi-path' }), makeWorker(), tmpDir);
+    assert.ok(result.includes('canonical-wins'));
+    assert.ok(!result.includes('readme-loses'));
+    assert.ok(!result.includes('legacy-loses'));
+  });
+
+  it('falls back to legacy domain/<domain>.md knowledge', () => {
     mkFile('.claude/knowledge/domain/my-domain.md', 'legacy-domain-content');
 
     const result = overlay.buildTaskOverlay(makeTask({ domain: 'my-domain' }), makeWorker(), tmpDir);
@@ -169,7 +188,7 @@ describe('overlay-knowledge: domain knowledge injection', () => {
     assert.ok(result.includes('legacy-domain-content'));
   });
 
-  it('injects domains/<domain>/README.md knowledge (preferred path)', () => {
+  it('falls back to domains/<domain>/README.md knowledge', () => {
     mkFile('.claude/knowledge/domains/api-layer/README.md', 'api-layer-readme-content');
 
     const result = overlay.buildTaskOverlay(makeTask({ domain: 'api-layer' }), makeWorker(), tmpDir);

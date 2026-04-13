@@ -273,7 +273,7 @@ responses are JSON over TCP on port 31000-31999. Pattern: parse → validate →
 → broadcast via WebSocket. See coordinator/src/cli-server.js:47 for the main handler.
 
 ## Relevant Research
-Express rate limiting: use express-rate-limit with MemoryStore for single-process.
+HTTP rate limiting: use an in-process limiter for single-process deployments.
 Our stack is CommonJS + no Redis, so in-memory is correct. Window: 15min, max: 100
 per IP is standard. (Researched 2026-03-25, grounded against our Express setup.)
 
@@ -338,7 +338,7 @@ Master-3 is a **consumer** of the knowledge layer. The three drivers are the pro
 
 Separate from the knowledge redesign, visual testing was implemented and pushed. The design principle applies here too: platform scripts are the primary interface, not provider-specific tools.
 
-**Primary interface (both Claude and Codex):**
+**Primary interface (both Claude and Claude):**
 ```bash
 bash scripts/take-dom-snapshot.sh http://localhost:PORT    # DOM check, ~4k tokens
 bash scripts/take-screenshot.sh http://localhost:PORT /tmp/out.png  # Screenshot, ~50k tokens
@@ -354,7 +354,7 @@ bash scripts/take-screenshot.sh http://localhost:PORT /tmp/out.png  # Screenshot
 - `sandbox/Dockerfile.worker`, `sandbox/Sandboxfile`, `sandbox/docker-compose.sandbox.yml`
 - `templates/settings.json`, `.claude/settings.json`
 - `scripts/worker-sentinel.sh`
-- `templates/worker-claude.md`, `templates/commands/worker-loop.md`
+- `templates/worker-agents.md`, `templates/commands/worker-loop.md`
 - `coordinator/src/overlay.js`
 - `scripts/take-screenshot.sh`, `scripts/take-dom-snapshot.sh` (new)
 - `setup.sh`
@@ -363,12 +363,12 @@ bash scripts/take-screenshot.sh http://localhost:PORT /tmp/out.png  # Screenshot
 
 ## Sandboxfile Note
 
-The `sandbox/Sandboxfile` is NOT a real Codex format. Research confirmed:
-- Codex CLI sandboxes via OS-level mechanisms (Seatbelt/Landlock), not containers
-- Codex Cloud uses a fixed `universal` image, not custom Dockerfiles
-- There is no "Sandboxfile" spec in the Codex ecosystem
+The `sandbox/Sandboxfile` is NOT a real Claude format. Research confirmed:
+- Claude CLI sandboxes via OS-level mechanisms (Seatbelt/Landlock), not containers
+- Claude Cloud uses a fixed `universal` image, not custom Dockerfiles
+- There is no "Sandboxfile" spec in the Claude ecosystem
 
-The file in our repo is either dead config or aspirational. Codex workers in mac10 currently run through `worker-sentinel.sh` in tmux, same as Claude workers, just with a different CLI binary.
+The file in our repo is either dead config or aspirational. Claude workers in mac10 currently run through `worker-sentinel.sh` in tmux, same as Claude workers, just with a different CLI binary.
 
 ---
 
@@ -378,6 +378,6 @@ The file in our repo is either dead config or aspirational. Codex workers in mac
 - [ ] Router: single `mac10 research` command that auto-routes internal vs external, or explicit separate commands?
 - [ ] Index driver prompt design (what questions to ask at each level)
 - [ ] How codebase research agent decides what to investigate on each run
-- [ ] Integration with existing `codex10 queue-research` command
+- [ ] Integration with existing `mac10 queue-research` command
 - [ ] Whether existing knowledge files (domain/*.md, codebase-insights.md) get migrated into new structure or coexist
 - [ ] Metadata file format for staleness tracking

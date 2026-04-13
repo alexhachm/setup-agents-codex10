@@ -13,7 +13,7 @@ PROJECT_DIR="$(cd "$(dirname "$0")/../.." && pwd)"
 WORKTREE="$PROJECT_DIR/.worktrees/wt-$WORKER_NUM"
 SENTINEL="$PROJECT_DIR/.claude/scripts/worker-sentinel.sh"
 WINDOW_NAME="worker-$WORKER_NUM"
-NAMESPACE="${MAC10_NAMESPACE:-codex10}"
+NAMESPACE="${MAC10_NAMESPACE:-mac10}"
 if command -v md5sum >/dev/null 2>&1; then
   PROJECT_HASH="$(printf '%s' "$PROJECT_DIR" | md5sum | awk '{print substr($1,1,6)}')"
 else

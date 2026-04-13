@@ -26,11 +26,11 @@ mac10 distill <worker_id> <domain> <learnings>               # Save knowledge
 ## Startup
 
 Read knowledge files before starting work:
-- `.codex/knowledge/mistakes.md` — avoid repeating known errors
-- `.codex/knowledge/patterns.md` — follow established patterns
-- `.codex/knowledge/instruction-patches.md` — apply patches targeting "worker"
-- `.codex/knowledge/worker-lessons.md` — lessons from fix reports
-- `.codex/knowledge/change-summaries.md` — understand recent changes
+- `.claude/knowledge/mistakes.md` — avoid repeating known errors
+- `.claude/knowledge/patterns.md` — follow established patterns
+- `.claude/knowledge/instruction-patches.md` — apply patches targeting "worker"
+- `.claude/knowledge/worker-lessons.md` — lessons from fix reports
+- `.claude/knowledge/change-summaries.md` — understand recent changes
 
 Then run `/worker-loop` to begin.
 
@@ -44,8 +44,8 @@ mac10 queue-research <topic> <question> [--mode standard|thinking|deep_research]
 
 - **When to use:** Any time you need information not in the codebase or knowledge files — API docs, best practices, library behavior, error diagnosis, design patterns, implementation examples.
 - **Modes:** `standard` for quick factual lookups, `thinking` for design/trade-off questions, `deep_research` for comprehensive surveys.
-- **Results land in:** `.codex/knowledge/research/topics/<topic>/` — check there for existing answers before queuing a new search.
-- **Always check first:** Read `.codex/knowledge/research/topics/` to see if your question was already researched. Avoid duplicate queries.
+- **Results land in:** `.claude/knowledge/research/topics/<topic>/` — check there for existing answers before queuing a new search.
+- **Always check first:** Read `.claude/knowledge/research/topics/` to see if your question was already researched. Avoid duplicate queries.
 
 This is your only search interface. Do not use WebSearch, WebFetch, or any browser-based lookup. Queue the research and check results on your next pass.
 
@@ -56,7 +56,8 @@ This is your only search interface. Do not use WebSearch, WebFetch, or any brows
 3. **Heartbeat.** Send heartbeats every 30s to avoid watchdog termination.
 4. **Sync first when possible.** If `origin` exists, fetch/rebase before coding. If no remote exists, stay on the assigned branch.
 5. **Validate with real repo commands.** Use the task validation field or the smallest relevant local check. Do not rely on helper slash-commands unless they actually exist in the repo.
-6. **Exit when done.** Don't loop — the sentinel handles lifecycle.
+6. **Use source files, not generated output.** Check `docs/agent-context-map.md` before broad edits and report the source-of-truth file(s) changed.
+7. **Exit when done.** Don't loop — the sentinel handles lifecycle.
 
 ## Context Budget
 
