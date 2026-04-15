@@ -1,24 +1,23 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+REPO_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
+# shellcheck disable=SC1091
+. "$SCRIPT_DIR/provider-utils.sh"
+
 if [ $# -lt 1 ]; then
-  echo "ERROR: provider argument is required (codex|claude)" >&2
+  echo "ERROR: provider argument is required ($(mac10_list_provider_ids "$REPO_ROOT" | paste -sd ', ' -))" >&2
   exit 1
 fi
 
-PROVIDER="$(printf '%s' "$1" | tr '[:upper:]' '[:lower:]' | tr -d '[:space:]')"
+PROVIDER="$(mac10_normalize_provider_id "$1")"
 shift || true
 
-case "$PROVIDER" in
-  codex|claude) ;;
-  *)
-    echo "ERROR: provider must be 'codex' or 'claude' (got: $PROVIDER)" >&2
-    exit 1
-    ;;
-esac
-
-SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-REPO_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
+if ! mac10_provider_available "$PROVIDER" "$REPO_ROOT"; then
+  echo "ERROR: provider must be installed and enabled ($(mac10_list_provider_ids "$REPO_ROOT" | paste -sd ', ' -); got: $PROVIDER)" >&2
+  exit 1
+fi
 
 is_pid_alive() {
   local pid="${1:-}"
@@ -39,7 +38,7 @@ extract_remote_debugging_port() {
 
 find_driver_pid() {
   local project_dir="$1"
-  local lock_file="$project_dir/.codex/state/research-driver.lock"
+  local lock_file="$project_dir/.claude/state/research-driver.lock"
   local pid
   local args
 
@@ -52,12 +51,12 @@ find_driver_pid() {
     fi
   fi
 
-  pgrep -f "$project_dir/.codex/scripts/chatgpt-driver.py" 2>/dev/null | head -n 1 || true
+  pgrep -f "$project_dir/.claude/scripts/chatgpt-driver.py" 2>/dev/null | head -n 1 || true
 }
 
 find_sentinel_pid() {
   local project_dir="$1"
-  local pid_file="$project_dir/.codex/state/research-sentinel.pid"
+  local pid_file="$project_dir/.claude/state/research-sentinel.pid"
   local pid
   local args
 
@@ -70,7 +69,7 @@ find_sentinel_pid() {
     fi
   fi
 
-  pgrep -f "$project_dir/.codex/scripts/research-sentinel.sh" 2>/dev/null | head -n 1 || true
+  pgrep -f "$project_dir/.claude/scripts/research-sentinel.sh" 2>/dev/null | head -n 1 || true
 }
 
 discover_cdp_port() {
@@ -79,7 +78,10 @@ discover_cdp_port() {
   local child_pid
   local args
   local port
-  local log_file="$project_dir/.codex/logs/research-driver.log"
+  local log_file="$project_dir/.claude/logs/research-driver.log"
+  local profile_name
+  profile_name="$(project_chrome_profile_name "$project_dir")"
+  profile_name="${profile_name:-chatgpt-mac10-profile}"
 
   if is_pid_alive "$driver_pid"; then
     while IFS= read -r child_pid; do
@@ -99,7 +101,7 @@ discover_cdp_port() {
       printf '%s\n' "$port"
       return
     fi
-  done < <(ps -eo args= 2>/dev/null | grep -E '(chrome|chromium)' | grep 'chatgpt-codex-profile' || true)
+  done < <(ps -eo args= 2>/dev/null | grep -E '(chrome|chromium)' | grep "$profile_name" || true)
 
   if [ -f "$log_file" ]; then
     port="$(grep -oE '127\.0\.0\.1:[0-9]{2,5}' "$log_file" | tail -n 1 | cut -d: -f2 || true)"
@@ -119,28 +121,43 @@ probe_cdp_port() {
   curl -fsS --connect-timeout 2 --max-time 3 "http://127.0.0.1:${port}/json/version" >/dev/null 2>&1
 }
 
+project_chrome_profile_name() {
+  local project_dir="$1"
+  python3 - "$project_dir" <<'PY' 2>/dev/null || true
+import hashlib
+import sys
+print(f".chatgpt-mac10-profile-{hashlib.sha256(sys.argv[1].encode()).hexdigest()[:12]}")
+PY
+}
+
 kill_profile_chrome_processes() {
+  local project_dir="${1:-}"
+  local profile_name="chatgpt-mac10-profile"
   local pid
+  if [ -n "$project_dir" ]; then
+    profile_name="$(project_chrome_profile_name "$project_dir")"
+    profile_name="${profile_name:-chatgpt-mac10-profile}"
+  fi
 
   while IFS= read -r pid; do
     [ -n "$pid" ] || continue
     kill "$pid" 2>/dev/null || true
-  done < <(ps -eo pid=,args= 2>/dev/null | awk '/(chrome|chromium)/ && /chatgpt-codex-profile/ {print $1}')
+  done < <(ps -eo pid=,args= 2>/dev/null | awk -v profile="$profile_name" '/(chrome|chromium)/ && index($0, profile) {print $1}')
 
   sleep 1
 
   while IFS= read -r pid; do
     [ -n "$pid" ] || continue
     kill -9 "$pid" 2>/dev/null || true
-  done < <(ps -eo pid=,args= 2>/dev/null | awk '/(chrome|chromium)/ && /chatgpt-codex-profile/ {print $1}')
+  done < <(ps -eo pid=,args= 2>/dev/null | awk -v profile="$profile_name" '/(chrome|chromium)/ && index($0, profile) {print $1}')
 }
 
 cleanup_stale_research_runtime() {
   local project_dir="$1"
   local stale_driver_pid="${2:-}"
-  local lock_file="$project_dir/.codex/state/research-driver.lock"
-  local driver_pid_file="$project_dir/.codex/state/research-driver.pid"
-  local sentinel_pid_file="$project_dir/.codex/state/research-sentinel.pid"
+  local lock_file="$project_dir/.claude/state/research-driver.lock"
+  local driver_pid_file="$project_dir/.claude/state/research-driver.pid"
+  local sentinel_pid_file="$project_dir/.claude/state/research-sentinel.pid"
   local pid
 
   echo "  Cleaning stale research runtime (driver PID ${stale_driver_pid:-unknown})"
@@ -162,45 +179,19 @@ cleanup_stale_research_runtime() {
   while IFS= read -r pid; do
     [ -n "$pid" ] || continue
     kill "$pid" 2>/dev/null || true
-  done < <(pgrep -f "$project_dir/.codex/scripts/chatgpt-driver.py" 2>/dev/null || true)
+  done < <(pgrep -f "$project_dir/.claude/scripts/chatgpt-driver.py" 2>/dev/null || true)
 
   sleep 1
 
   while IFS= read -r pid; do
     [ -n "$pid" ] || continue
     kill -9 "$pid" 2>/dev/null || true
-  done < <(pgrep -f "$project_dir/.codex/scripts/chatgpt-driver.py" 2>/dev/null || true)
+  done < <(pgrep -f "$project_dir/.claude/scripts/chatgpt-driver.py" 2>/dev/null || true)
 
-  kill_profile_chrome_processes
+  kill_profile_chrome_processes "$project_dir"
 
   rm -f "$driver_pid_file" "$lock_file"
   echo "  Removed stale lock file: $lock_file"
-}
-
-start_research_sentinel() {
-  local project_dir="$1"
-  local sentinel_script="$project_dir/.codex/scripts/research-sentinel.sh"
-  local sentinel_log="$project_dir/.codex/logs/research-sentinel.log"
-  local sentinel_pid_file="$project_dir/.codex/state/research-sentinel.pid"
-  local pid
-
-  if [ ! -x "$sentinel_script" ]; then
-    echo "ERROR: research sentinel not found or not executable: $sentinel_script" >&2
-    return 1
-  fi
-
-  pid="$(find_sentinel_pid "$project_dir")"
-  if is_pid_alive "$pid"; then
-    echo "  Research sentinel already running (PID $pid)."
-    printf '%s\n' "$pid" > "$sentinel_pid_file"
-    return 0
-  fi
-
-  mkdir -p "$(dirname "$sentinel_log")" "$(dirname "$sentinel_pid_file")"
-  nohup bash "$sentinel_script" "$project_dir" >> "$sentinel_log" 2>&1 < /dev/null &
-  pid=$!
-  printf '%s\n' "$pid" > "$sentinel_pid_file"
-  echo "  Research sentinel started (PID $pid)"
 }
 
 read_research_health_status() {
@@ -220,7 +211,7 @@ NODE
 
 wait_for_research_health() {
   local project_dir="$1"
-  local health_file="$project_dir/.codex/state/codex10.agent-health.json"
+  local health_file="$project_dir/.claude/state/agent-health.json"
   local attempts="${2:-10}"
   local i
   local status
@@ -266,7 +257,10 @@ ensure_research_driver() {
     cleanup_stale_research_runtime "$project_dir" "$driver_pid"
   fi
 
-  start_research_sentinel "$project_dir"
+  if ! start_research_sentinel "$project_dir"; then
+    echo "ERROR: research sentinel could not be started." >&2
+    return 1
+  fi
   echo "  Waiting for research driver to become healthy..."
   sleep 6
 
@@ -284,16 +278,16 @@ ensure_research_driver() {
 usage() {
   cat <<EOF2
 Usage:
-  ./start-${PROVIDER}.sh [project_dir] [num_workers]
-  ./start-${PROVIDER}.sh --stop [project_dir]
-  ./start-${PROVIDER}.sh --pause [project_dir]
-  ./start-${PROVIDER}.sh --help
+  ./start.sh [--provider ${PROVIDER}] [project_dir] [num_workers]
+  ./start.sh [--provider ${PROVIDER}] --stop [project_dir]
+  ./start.sh [--provider ${PROVIDER}] --pause [project_dir]
+  ./start.sh --help
 
 Examples:
-  ./start-${PROVIDER}.sh
-  ./start-${PROVIDER}.sh /path/to/project 6
-  ./start-${PROVIDER}.sh --stop
-  ./start-${PROVIDER}.sh --pause /path/to/project
+  ./start.sh
+  ./start.sh --provider ${PROVIDER} /path/to/project 6
+  ./start.sh --stop
+  ./start.sh --pause /path/to/project
 EOF2
 }
 
@@ -311,9 +305,43 @@ kill_matching_processes() {
   fi
 }
 
+kill_project_processes() {
+  local project_dir="$1"
+  local pattern="$2"
+  local label="$3"
+  local pids pid
+
+  pids="$(ps -eww -o pid= -o args= 2>/dev/null \
+    | awk -v project="$project_dir" -v pattern="$pattern" 'index($0, project) && index($0, pattern) { print $1 }')"
+  if [ -z "$pids" ]; then
+    echo "  No $label processes found for this project"
+    return 0
+  fi
+
+  while IFS= read -r pid; do
+    [ -n "$pid" ] || continue
+    kill "$pid" 2>/dev/null || true
+  done <<< "$pids"
+  sleep 0.5
+  while IFS= read -r pid; do
+    [ -n "$pid" ] || continue
+    kill -9 "$pid" 2>/dev/null || true
+  done <<< "$pids"
+  echo "  Cleared $label process(es) for this project"
+}
+
+stop_master_agents() {
+  local project_dir="$1"
+  local runtime_dir="$project_dir/.claude/state/agent-runtimes"
+
+  kill_project_processes "$project_dir" "launch-agent.sh" "master launcher"
+  rm -f "$runtime_dir"/*.pid "$runtime_dir"/*.env 2>/dev/null || true
+  rm -rf "$runtime_dir"/*.lock 2>/dev/null || true
+}
+
 force_reset_research_runtime() {
   local project_dir="$1"
-  local state_dir="$project_dir/.codex/state"
+  local state_dir="$project_dir/.claude/state"
   local driver_pid_file="$state_dir/research-driver.pid"
   local sentinel_pid_file="$state_dir/research-sentinel.pid"
   local driver_lock_file="$state_dir/research-driver.lock"
@@ -321,11 +349,11 @@ force_reset_research_runtime() {
   echo "Force-clearing stale research runtime state..."
 
   # Stop old sentinel first to prevent it from immediately respawning the driver.
-  kill_matching_processes "[r]esearch-sentinel.sh" "research sentinel"
-  kill_matching_processes "[c]hatgpt-driver.py" "research driver"
+  kill_project_processes "$project_dir" "research-sentinel.sh" "research sentinel"
+  kill_project_processes "$project_dir" "chatgpt-driver.py" "research driver"
 
   # Driver Chrome processes are tied to the dedicated profile path.
-  kill_matching_processes "chatgpt-codex-profile" "driver Chrome/chromium"
+  kill_profile_chrome_processes "$project_dir"
 
   rm -f "$driver_lock_file" "$driver_pid_file" "$sentinel_pid_file"
   echo "  Cleared lock/PID files"
@@ -333,64 +361,56 @@ force_reset_research_runtime() {
 
 start_research_sentinel() {
   local project_dir="$1"
-  local state_dir="$project_dir/.codex/state"
-  local log_dir="$project_dir/.codex/logs"
-  local sentinel_script="$project_dir/.codex/scripts/research-sentinel.sh"
+  local state_dir="$project_dir/.claude/state"
+  local log_dir="$project_dir/.claude/logs"
+  local sentinel_script="$project_dir/.claude/scripts/research-sentinel.sh"
   local sentinel_pid_file="$state_dir/research-sentinel.pid"
+  local sentinel_lock_dir="$state_dir/research-sentinel.lock"
+  local existing_pid
 
   if [ ! -f "$sentinel_script" ]; then
-    echo "WARNING: research sentinel script not found at $sentinel_script (skip startup)" >&2
-    return
+    echo "ERROR: research sentinel script not found at $sentinel_script" >&2
+    return 1
   fi
 
   mkdir -p "$state_dir" "$log_dir"
   chmod +x "$sentinel_script" >/dev/null 2>&1 || true
 
-  nohup bash "$sentinel_script" "$project_dir" >/dev/null 2>&1 < /dev/null &
-  local sentinel_pid=$!
-  echo "$sentinel_pid" > "$sentinel_pid_file"
-
-  echo "Started research sentinel (PID $sentinel_pid)"
-  echo "  Log: $project_dir/.codex/logs/research-sentinel.log"
-}
-
-ensure_worktree_codex_copies() {
-  local project_dir="$1"
-  local num_workers="${2:-4}"
-  local source_codex="$project_dir/.codex"
-  local i wt_path wt_codex
-
-  if [ ! -d "$source_codex" ]; then
-    echo "WARNING: .codex source directory not found at $source_codex (skip worktree sync)" >&2
+  existing_pid="$(find_sentinel_pid "$project_dir")"
+  if is_pid_alive "$existing_pid"; then
+    printf '%s\n' "$existing_pid" > "$sentinel_pid_file"
+    echo "Research sentinel already running (PID $existing_pid)"
     return 0
   fi
 
-  for i in $(seq 1 "$num_workers"); do
-    wt_path="$project_dir/.worktrees/wt-$i"
-    [ -d "$wt_path" ] || continue
-    wt_codex="$wt_path/.codex"
+  rm -rf "$sentinel_lock_dir"
+  rm -f "$sentinel_pid_file"
 
-    if [ -L "$wt_codex" ] || [ ! -d "$wt_codex/knowledge" ]; then
-      rm -rf "$wt_codex"
-      cp -a "$source_codex" "$wt_codex"
-      echo "  Refreshed $wt_codex"
-    fi
-  done
+  if command -v setsid >/dev/null 2>&1; then
+    setsid bash "$sentinel_script" "$project_dir" >/dev/null 2>&1 < /dev/null &
+  else
+    nohup bash "$sentinel_script" "$project_dir" >/dev/null 2>&1 < /dev/null &
+  fi
+  local sentinel_pid=$!
+
+  echo "Started research sentinel (PID $sentinel_pid)"
+  echo "  Log: $project_dir/.claude/logs/research-sentinel.log"
 }
 
 stop_services() {
   local project_dir="$1"
-  local lock_file="$project_dir/.codex/state/research-driver.lock"
-  local coordinator_cli="$project_dir/.codex/scripts/codex10"
+  local lock_file="$project_dir/.claude/state/research-driver.lock"
+  local coordinator_cli="$project_dir/.claude/scripts/mac10"
 
   echo "Stopping mac10 services for project: $project_dir"
 
+  stop_master_agents "$project_dir"
   force_reset_research_runtime "$project_dir"
 
   while IFS= read -r pid; do
     [ -n "$pid" ] || continue
     kill "$pid" 2>/dev/null || true
-  done < <(pgrep -f "$project_dir/.codex/scripts/chatgpt-driver.py" 2>/dev/null || true)
+  done < <(pgrep -f "$project_dir/.claude/scripts/chatgpt-driver.py" 2>/dev/null || true)
 
   kill_profile_chrome_processes
   rm -f "$lock_file"
@@ -405,8 +425,8 @@ stop_services() {
 
 pause_services() {
   local project_dir="$1"
-  local db_file="$project_dir/.codex/state/codex10.db"
-  local health_file="$project_dir/.codex/state/codex10.agent-health.json"
+  local db_file="$project_dir/.claude/state/mac10.db"
+  local health_file="$project_dir/.claude/state/agent-health.json"
 
   stop_services "$project_dir"
 
@@ -479,17 +499,73 @@ if [ ! -d "$PROJECT_DIR" ]; then
 fi
 PROJECT_DIR="$(cd "$PROJECT_DIR" && pwd)"
 
+PHASE_RESULTS=()
+phase_record() {
+  local phase="$1" result="$2"
+  PHASE_RESULTS+=("$phase:$result")
+}
+
+startup_summary() {
+  local failed=0
+  echo ""
+  echo "=== Startup Summary ==="
+  for entry in "${PHASE_RESULTS[@]}"; do
+    local phase="${entry%%:*}" result="${entry#*:}"
+    if [ "$result" = "ok" ]; then
+      echo "  [ok]   $phase"
+    else
+      echo "  [FAIL] $phase — $result"
+      failed=1
+    fi
+  done
+  echo "======================="
+  if [ "$failed" -eq 1 ]; then
+    echo "Some startup phases failed. Check output above for details."
+    return 1
+  fi
+  echo "All startup phases succeeded."
+}
+
 echo "Starting mac10 setup with provider='$PROVIDER' project='$PROJECT_DIR'${NUM_WORKERS:+ workers='$NUM_WORKERS'}"
 
-if [ -n "$NUM_WORKERS" ]; then
-  MAC10_FORCE_PROVIDER="$PROVIDER" bash "$REPO_ROOT/setup.sh" "$PROJECT_DIR" "$NUM_WORKERS"
+echo ""
+echo "--- Phase 1/3: Provider validation ---"
+if mac10_provider_available "$PROVIDER" "$REPO_ROOT"; then
+  echo "  Provider '$PROVIDER' is available."
+  phase_record "provider-validation" "ok"
 else
-  MAC10_FORCE_PROVIDER="$PROVIDER" bash "$REPO_ROOT/setup.sh" "$PROJECT_DIR"
+  echo "  ERROR: Provider '$PROVIDER' is not available." >&2
+  phase_record "provider-validation" "provider not available"
+  startup_summary || true
+  exit 1
 fi
 
-mkdir -p "$PROJECT_DIR/.codex/logs"
-echo "[$(date -u +%Y-%m-%dT%H:%M:%SZ)] Startup validation passed" >> "$PROJECT_DIR/.codex/logs/startup-validation.log"
+echo ""
+echo "--- Phase 2/3: Setup (coordinator, files, workers) ---"
+if [ -n "$NUM_WORKERS" ]; then
+  if MAC10_FORCE_PROVIDER="$PROVIDER" bash "$REPO_ROOT/setup.sh" "$PROJECT_DIR" "$NUM_WORKERS"; then
+    phase_record "setup" "ok"
+  else
+    phase_record "setup" "setup.sh exited with error"
+    startup_summary || true
+    exit 1
+  fi
+else
+  if MAC10_FORCE_PROVIDER="$PROVIDER" bash "$REPO_ROOT/setup.sh" "$PROJECT_DIR"; then
+    phase_record "setup" "ok"
+  else
+    phase_record "setup" "setup.sh exited with error"
+    startup_summary || true
+    exit 1
+  fi
+fi
 
-ensure_worktree_codex_copies "$PROJECT_DIR" "${NUM_WORKERS:-4}"
-force_reset_research_runtime "$PROJECT_DIR"
-start_research_sentinel "$PROJECT_DIR"
+echo ""
+echo "--- Phase 3/3: Research driver ---"
+if ensure_research_driver "$PROJECT_DIR"; then
+  phase_record "research-driver" "ok"
+else
+  phase_record "research-driver" "driver did not become healthy"
+fi
+
+startup_summary

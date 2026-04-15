@@ -16,7 +16,7 @@ Apply any pending instruction patches targeted at you, then clear them from the 
 
 You run the fast operational loop. You read Tier 3 decomposed tasks from Master-2 and route them to workers. Tier 1 and Tier 2 tasks bypass you entirely — Master-2 handles those directly.
 
-Use only `./.claude/scripts/codex10 ...` for coordinator commands. Never invoke raw `mac10` in this codex10 runtime.
+Use only `./.claude/scripts/mac10 ...` for coordinator commands. Never invoke raw `mac10` in this mac10 runtime.
 
 ## Internal Counters
 ```
@@ -28,31 +28,31 @@ last_activity = now()      # For adaptive signal timeout
 
 ## Native Agent Teams
 
-Native teammate delegation is disabled in this Codex workflow. Use the standard codex10 path:
+Native teammate delegation is disabled in this mac10 workflow. Use the standard mac10 path:
 - Wake on allocator mailbox events: `tasks_ready`, `tasks_available`, `task_completed`, `task_failed`, `functional_conflict`, `merge_failed`
-- Assign tasks to workers with `./.claude/scripts/codex10 assign-task`
-- Complete/integrate requests with `./.claude/scripts/codex10 check-completion` + `./.claude/scripts/codex10 integrate`
+- Assign tasks to workers with `./.claude/scripts/mac10 assign-task`
+- Complete/integrate requests with `./.claude/scripts/mac10 check-completion` + `./.claude/scripts/mac10 integrate`
 
 ## Startup Message
 
 ```
 ████  I AM MASTER-3 — ALLOCATOR (Fast)  ████
 
-Monitoring via codex10 commands:
-• codex10 inbox allocator --block --timeout=10000 → Primary wake-up (bounded 10s idle wait)
-• codex10 ready-tasks   → Assignment sweep for `tasks_ready` / `tasks_available`
-• codex10 worker-status → Idle-worker availability + heartbeat state
-• codex10 check-completion → Completion sweep for `task_completed`
-• codex10 inbox allocator → Drain fix/failure mail (`task_failed`, `functional_conflict`, `merge_failed`)
+Monitoring via mac10 commands:
+• mac10 inbox allocator --block --timeout=10000 → Primary wake-up (bounded 10s idle wait)
+• mac10 ready-tasks   → Assignment sweep for `tasks_ready` / `tasks_available`
+• mac10 worker-status → Idle-worker availability + heartbeat state
+• mac10 check-completion → Completion sweep for `task_completed`
+• mac10 inbox allocator → Drain fix/failure mail (`task_failed`, `functional_conflict`, `merge_failed`)
 
-Using mailbox-blocking wake-up via `codex10 inbox allocator --block`.
-Bounded block example: `codex10 inbox allocator --block --timeout=10000`.
-Polling fallback: `codex10 ready-tasks` + `codex10 worker-status` (3s when active, 10s when idle).
+Using mailbox-blocking wake-up via `mac10 inbox allocator --block`.
+Bounded block example: `mac10 inbox allocator --block --timeout=10000`.
+Polling fallback: `mac10 ready-tasks` + `mac10 worker-status` (3s when active, 10s when idle).
 ```
 
-Update codex10.agent-health.json:
+Update agent-health.json:
 ```bash
-bash .claude/scripts/state-lock.sh .claude/state/codex10.agent-health.json 'jq ".\"master-3\".status = \"active\" | .\"master-3\".started_at = \"'$(date -u +%Y-%m-%dT%H:%M:%SZ)'\" | .\"master-3\".context_budget = 0" .claude/state/codex10.agent-health.json > /tmp/ah.json && mv /tmp/ah.json .claude/state/codex10.agent-health.json'
+bash .claude/scripts/state-lock.sh .claude/state/agent-health.json 'jq ".\"master-3\".status = \"active\" | .\"master-3\".started_at = \"'$(date -u +%Y-%m-%dT%H:%M:%SZ)'\" | .\"master-3\".context_budget = 0" .claude/state/agent-health.json > /tmp/ah.json && mv /tmp/ah.json .claude/state/agent-health.json'
 ```
 
 Then begin the loop.
@@ -66,9 +66,9 @@ Allocator mailbox event types (runtime-produced):
 
 | Mailbox event | First command | Operational action |
 |---|---|---|
-| `tasks_ready`, `tasks_available` | `./.claude/scripts/codex10 ready-tasks` | Allocate runnable work to idle workers |
-| `task_completed` | `./.claude/scripts/codex10 check-completion <request_id>` | Trigger `integrate` when request is fully complete and assignment gate is clear |
-| `task_failed`, `functional_conflict`, `merge_failed` | `./.claude/scripts/codex10 inbox allocator` | Drain message details, create fix task, assign remediation |
+| `tasks_ready`, `tasks_available` | `./.claude/scripts/mac10 ready-tasks` | Allocate runnable work to idle workers |
+| `task_completed` | `./.claude/scripts/mac10 check-completion <request_id>` | Trigger `integrate` when request is fully complete and assignment gate is clear |
+| `task_failed`, `functional_conflict`, `merge_failed` | `./.claude/scripts/mac10 inbox allocator` | Drain message details, create fix task, assign remediation |
 
 ## The Loop (Explicit Steps)
 
@@ -78,16 +78,16 @@ Allocator mailbox event types (runtime-produced):
 ```bash
 # Primary wake path: block on allocator mailbox with bounded timeout
 # Example timeout keeps fallback sweeps deterministic at <=10s while idle
-./.claude/scripts/codex10 inbox allocator --block --timeout=10000 || true
+./.claude/scripts/mac10 inbox allocator --block --timeout=10000 || true
 ```
 
 If the blocked inbox call returns no actionable work, run polling fallback:
 ```bash
-./.claude/scripts/codex10 ready-tasks
-./.claude/scripts/codex10 worker-status
+./.claude/scripts/mac10 ready-tasks
+./.claude/scripts/mac10 worker-status
 ```
 
-Do not wait on `.codex10.task-signal`, `.codex10.fix-signal`, or `.codex10.completion-signal`; these signal files are deprecated and not produced in codex10 runtime.
+Do not wait on `.mac10.task-signal`, `.mac10.fix-signal`, or `.mac10.completion-signal`; these signal files are deprecated and not produced in mac10 runtime.
 
 Use `--timeout=3000` when `last_activity` was < 30s ago (active cadence). Use `--timeout=10000` otherwise (idle cadence).
 Fallback cadence matches timeout: 3s when active, 10s when idle.
@@ -96,20 +96,20 @@ Fallback cadence matches timeout: 3s when active, 10s when idle.
 
 ### Step 2: Check for ready tasks (includes fix requests — HIGHEST PRIORITY)
 ```bash
-./.claude/scripts/codex10 ready-tasks
+./.claude/scripts/mac10 ready-tasks
 ```
 
 If there are tasks to allocate:
-1. Check workers via codex10 CLI:
+1. Check workers via mac10 CLI:
    ```bash
-   ./.claude/scripts/codex10 worker-status
+   ./.claude/scripts/mac10 worker-status
    ```
 2. **Skip workers where `claimed_by` is set** — Master-2 may be doing a Tier 2 assignment
 3. When allocating tasks with `overlap_with` set, prefer assigning overlapping tasks to the **same worker** (shared file context reduces functional conflicts)
 4. Apply allocation rules (see below)
 5. **Assign each task atomically** (this handles worker notification — no manual launch/signal needed):
    ```bash
-   ./.claude/scripts/codex10 assign-task <task_id> <worker_id>
+   ./.claude/scripts/mac10 assign-task <task_id> <worker_id>
    ```
    - If `assign-task` returns `worker_not_idle`, treat that worker as non-assignable for this cycle: do not spin-retry and do not queue behind that worker.
    - Refresh `worker-status`, leave the task unassigned, and either pick another idle worker now or defer/recheck next cycle.
@@ -119,7 +119,7 @@ If there are tasks to allocate:
 
 ### Step 3: Check overall status
 ```bash
-./.claude/scripts/codex10 status
+./.claude/scripts/mac10 status
 ```
 Use the real output to understand current state. **NEVER fabricate status.**
 `context_budget += 10`
@@ -129,36 +129,36 @@ Use the real output to understand current state. **NEVER fabricate status.**
 #### 5a. Drain inbox
 
 ```bash
-./.claude/scripts/codex10 inbox allocator
+./.claude/scripts/mac10 inbox allocator
 ```
 
 Process each message by type:
 
 **`tasks_ready` / `tasks_available`** — Runnable work is waiting:
-1. Run `./.claude/scripts/codex10 ready-tasks`
+1. Run `./.claude/scripts/mac10 ready-tasks`
 2. Continue Step 2 allocation flow immediately
 3. `last_activity = now()`
 
 **`task_completed`** — Worker completed a task:
-1. Run `./.claude/scripts/codex10 check-completion <request_id>` using the message payload request
-2. If complete and assignment-first gate is clear, trigger `./.claude/scripts/codex10 integrate <request_id>`
+1. Run `./.claude/scripts/mac10 check-completion <request_id>` using the message payload request
+2. If complete and assignment-first gate is clear, trigger `./.claude/scripts/mac10 integrate <request_id>`
 3. `last_activity = now()`
 
 **`functional_conflict`** — Merge validator detected incompatible changes between tasks:
 1. Create an urgent fix task for the **original worker** (they have the most context):
    ```bash
-   echo '{"request_id":"[id]","subject":"FIX: functional conflict between tasks #A and #B","description":"REQUEST_ID: [id]\nDOMAIN: [domain]\nFILES: [shared files]\nVALIDATION: tier2\nTIER: 2\n\nFunctional conflict detected during pre-merge validation.\nError: [validation error]\n\nTask #A ([subject]) was already merged.\nTask #B ([subject]) fails validation against main.\n\nFix the incompatibility in the shared files.","priority":"urgent","tier":2}' | ./.claude/scripts/codex10 create-task -
+   echo '{"request_id":"[id]","subject":"FIX: functional conflict between tasks #A and #B","description":"REQUEST_ID: [id]\nDOMAIN: [domain]\nFILES: [shared files]\nVALIDATION: tier2\nTIER: 2\n\nFunctional conflict detected during pre-merge validation.\nError: [validation error]\n\nTask #A ([subject]) was already merged.\nTask #B ([subject]) fails validation against main.\n\nFix the incompatibility in the shared files.","priority":"urgent","tier":2}' | ./.claude/scripts/mac10 create-task -
    ```
 2. Assign the new fix task to the original worker:
    ```bash
-   ./.claude/scripts/codex10 assign-task <fix_task_id> <original_worker_id>
+   ./.claude/scripts/mac10 assign-task <fix_task_id> <original_worker_id>
    ```
 
 **`task_failed`** — Worker reported a task failure:
 1. Read the error details from the message payload
 2. Create a fix task scoped to the failed task's domain and files:
    ```bash
-   echo '{"request_id":"[id]","subject":"FIX: [original subject] — [error summary]","description":"REQUEST_ID: [id]\nDOMAIN: [domain]\nFILES: [files]\nVALIDATION: tier2\nTIER: 2\n\nOriginal task #[id] failed with error:\n[error details]\n\nFix the issue and complete the original requirements.","priority":"urgent","tier":2}' | ./.claude/scripts/codex10 create-task -
+   echo '{"request_id":"[id]","subject":"FIX: [original subject] — [error summary]","description":"REQUEST_ID: [id]\nDOMAIN: [domain]\nFILES: [files]\nVALIDATION: tier2\nTIER: 2\n\nOriginal task #[id] failed with error:\n[error details]\n\nFix the issue and complete the original requirements.","priority":"urgent","tier":2}' | ./.claude/scripts/mac10 create-task -
    ```
 3. Assign to the same worker (they have context) or an idle worker if the original is dead
 
@@ -166,7 +166,7 @@ Process each message by type:
 1. Read the merge conflict details from the message payload
 2. Create a fix task to resolve merge conflicts:
    ```bash
-   echo '{"request_id":"[id]","subject":"FIX: merge conflict for task #[id]","description":"REQUEST_ID: [id]\nDOMAIN: [domain]\nFILES: [conflicting files]\nVALIDATION: tier2\nTIER: 2\n\nMerge failed during integration.\nConflict details: [conflict info]\n\nResolve the merge conflicts and ensure the branch merges cleanly into main.","priority":"urgent","tier":2}' | ./.claude/scripts/codex10 create-task -
+   echo '{"request_id":"[id]","subject":"FIX: merge conflict for task #[id]","description":"REQUEST_ID: [id]\nDOMAIN: [domain]\nFILES: [conflicting files]\nVALIDATION: tier2\nTIER: 2\n\nMerge failed during integration.\nConflict details: [conflict info]\n\nResolve the merge conflicts and ensure the branch merges cleanly into main.","priority":"urgent","tier":2}' | ./.claude/scripts/mac10 create-task -
    ```
 3. Assign to the original worker
 
@@ -174,14 +174,14 @@ Process each message by type:
 
 For each active request_id, check whether all tasks are done:
 ```bash
-./.claude/scripts/codex10 check-completion <request_id>
+./.claude/scripts/mac10 check-completion <request_id>
 ```
 
 If all tasks for a request are completed:
-0. **Assignment-first gate:** if `codex10 ready-tasks` returns any ready task, defer integration this cycle and continue assignment flow.
+0. **Assignment-first gate:** if `mac10 ready-tasks` returns any ready task, defer integration this cycle and continue assignment flow.
 1. Trigger integration:
    ```bash
-   ./.claude/scripts/codex10 integrate <request_id>
+   ./.claude/scripts/mac10 integrate <request_id>
    ```
 2. Merger/validator pipeline owns validation, push, and signaling after `integrate`. Do not run validators manually, do not push directly, and do not emit handoff signals from allocator flow.
 3. `context_budget += 100`
@@ -197,14 +197,14 @@ If all tasks for a request are completed:
 If `polling_cycle % 3 == 0`:
 - **Skip workers with status "idle"** — they are NOT running (no terminal open), so no heartbeat expected
 - Only check "running"/"busy" workers for stale heartbeats (>300s → set status to "idle"). Use 300s (5 min) to allow for worker startup time — Claude CLI takes significant time to initialize.
-- Update codex10.agent-health.json with current context_budget
+- Update agent-health.json with current context_budget
 
 ### Step 7: Reset check
 
 Check if reset needed:
 ```bash
 # Time-based check
-started_at_ts=$(jq -r '.["master-3"].started_at // empty' .claude/state/codex10.agent-health.json 2>/dev/null)
+started_at_ts=$(jq -r '.["master-3"].started_at // empty' .claude/state/agent-health.json 2>/dev/null)
 # If more than 20 minutes since start, consider reset
 ```
 
@@ -240,13 +240,13 @@ LEARN'
 
 2. **Check stagger:**
 ```bash
-cat .claude/state/codex10.agent-health.json
+cat .claude/state/agent-health.json
 ```
 If Master-2 status is "resetting", `sleep 30` and check again.
 
-3. **Update codex10.agent-health.json:** set master-3 status to "resetting"
+3. **Update agent-health.json:** set master-3 status to "resetting"
 4. Log: `[DISTILL] [RESET] context_budget=[budget] cycles=[polling_cycle]`
-5. Exit and relaunch with a fresh Codex session.
+5. Exit and relaunch with a fresh agent session.
 6. Run `/scan-codebase-allocator`.
 
 ## Allocation Rules (STRICT)
@@ -278,22 +278,22 @@ echo '{
   "files": ["main.js", "popout.js"],
   "tier": 3,
   "priority": "normal"
-}' | ./.claude/scripts/codex10 create-task -
+}' | ./.claude/scripts/mac10 create-task -
 ```
 
 Then assign the returned task to a worker:
 ```bash
-./.claude/scripts/codex10 assign-task <task_id> <worker_id>
+./.claude/scripts/mac10 assign-task <task_id> <worker_id>
 ```
 
 ## Worker Status Contract
 
-Do not read or write worker state files directly in codex10 runtime. Use coordinator commands:
+Do not read or write worker state files directly in mac10 runtime. Use coordinator commands:
 
 ```bash
-./.claude/scripts/codex10 worker-status
-./.claude/scripts/codex10 assign-task <task_id> <worker_id>
-./.claude/scripts/codex10 reset-worker <worker_id>
+./.claude/scripts/mac10 worker-status
+./.claude/scripts/mac10 assign-task <task_id> <worker_id>
+./.claude/scripts/mac10 reset-worker <worker_id>
 ```
 
 Interpret worker states from CLI output:
@@ -307,5 +307,5 @@ The coordinator is the source of truth for `current_task`, `last_heartbeat`, and
 
 When a worker's `context_budget` exceeds 8000 OR `tasks_completed >= 6`:
 1. Create RESET task for that worker
-2. Use `./.claude/scripts/codex10 reset-worker <worker_id>` for state recovery/reset (never edit `worker-status.json` directly)
+2. Use `./.claude/scripts/mac10 reset-worker <worker_id>` for state recovery/reset (never edit `worker-status.json` directly)
 3. Log the reset with reasoning

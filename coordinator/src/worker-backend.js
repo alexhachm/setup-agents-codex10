@@ -54,6 +54,16 @@ function getSandboxfilePath() {
   return SANDBOXFILE_TEMPLATE;
 }
 
+function getMsbStartupVerifyDelayMs() {
+  const raw = parseInt(process.env.MAC10_MSB_STARTUP_VERIFY_DELAY_MS || '1000', 10);
+  return Number.isFinite(raw) && raw >= 0 ? raw : 1000;
+}
+
+function sleepSync(ms) {
+  if (!Number.isFinite(ms) || ms <= 0) return;
+  Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, ms);
+}
+
 // ---------------------------------------------------------------------------
 // tmux backend (delegates to tmux.js as-is)
 // ---------------------------------------------------------------------------
@@ -127,9 +137,14 @@ const dockerBackend = {
       '--name', containerName,
       '--label', 'mac10-worker=true',
       '--label', _projectLabel(),
+      '--entrypoint', '',
       '-v', `${cwd}:/workspace`,
       '-w', '/workspace',
     ];
+
+    if (_projectDir && path.resolve(_projectDir) !== path.resolve(cwd)) {
+      args.push('-v', `${_projectDir}:${_projectDir}`);
+    }
 
     if (envVars && typeof envVars === 'object') {
       for (const [k, v] of Object.entries(envVars)) {
@@ -237,6 +252,12 @@ const sandboxBackend = {
     const args = ['run', name, '-f', getSandboxfilePath(), '-d', '-e', cmd];
 
     execFileSync('msb', args, { encoding: 'utf8', timeout: 30000, stdio: 'pipe' });
+    sleepSync(getMsbStartupVerifyDelayMs());
+    if (!sandboxBackend.isWorkerAlive(name)) {
+      const output = sandboxBackend.captureOutput(name, 80);
+      const detail = output ? `: ${output.slice(0, 1000)}` : '';
+      throw new Error(`msb sandbox ${name} failed to stay running${detail}`);
+    }
   },
 
   isWorkerAlive(name) {

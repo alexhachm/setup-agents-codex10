@@ -12,7 +12,7 @@ cat .claude/knowledge/user-preferences.md
 
 Your context is CLEAN. You do NOT read code. You handle all user communication and relay clarifications from Master-2 (Architect).
 
-Use only `./.claude/scripts/codex10 ...` for coordinator commands. Never invoke raw `mac10` in this codex10 runtime.
+Use only `./.claude/scripts/mac10 ...` for coordinator commands. Never invoke raw `mac10` in this mac10 runtime.
 
 ## Startup Message
 
@@ -41,7 +41,7 @@ What would you like to do?
 After showing the startup banner, check knowledge layer health:
 
 ```bash
-./.claude/scripts/codex10 knowledge-status
+./.claude/scripts/mac10 knowledge-status
 ```
 
 Parse the JSON output. Check for gaps:
@@ -79,34 +79,34 @@ Options:
 **For "fill research":**
 For each gap domain:
 ```bash
-./.claude/scripts/codex10 queue-research "$domain" "What is the architecture, key files, and patterns of the $domain domain?" --mode standard --priority normal
+./.claude/scripts/mac10 queue-research "$domain" "What is the architecture, key files, and patterns of the $domain domain?" --mode standard --priority normal
 ```
 
 **For "rescan codebase":**
 ```bash
-./.claude/scripts/codex10 request "Rescan codebase: run /scan-codebase to refresh codebase-insights.md and codebase-map.json"
-touch .claude/signals/.codex10.handoff-signal
+./.claude/scripts/mac10 request "Rescan codebase: run /scan-codebase to refresh codebase-insights.md and codebase-map.json"
+touch .claude/signals/.mac10.handoff-signal
 ```
 
 **For "fill domains":**
 For each uncovered domain:
 ```bash
-./.claude/scripts/codex10 request "Document the $domain domain: read key files, identify patterns, write findings to .claude/knowledge/codebase/domains/$domain.md"
-touch .claude/signals/.codex10.handoff-signal
+./.claude/scripts/mac10 request "Document the $domain domain: read key files, identify patterns, write findings to .claude/knowledge/codebase/domains/$domain.md"
+touch .claude/signals/.mac10.handoff-signal
 ```
 
 **For "fill all":** run all three options above.
 
 **One-shot alternative:** Or the user can say "fill all" at any time (not just startup), which runs:
 ```bash
-./.claude/scripts/codex10 fill-knowledge
+./.claude/scripts/mac10 fill-knowledge
 ```
 
 If no gaps: say "Knowledge layer is healthy. All domains documented, codebase index fresh."
 
 Also check for pending reviews:
 ```bash
-./.claude/scripts/codex10 pending-reviews --limit 5
+./.claude/scripts/mac10 pending-reviews --limit 5
 ```
 
 If items pending, show: "You have N items awaiting review (domain analyses, research discoveries). Say 'pending reviews' to see them."
@@ -116,27 +116,21 @@ If items pending, show: "You have N items awaiting review (domain analyses, rese
 For EVERY user message, determine the type and respond:
 
 **Routing priority (IMPORTANT):**
-1. If the user asks for a persistent/autonomous/continuous loop ("run until I stop", "autonomous loop", "keep iterating"), use **Type 0: Autonomous Loop**.
+1. If the user asks for a persistent/autonomous/continuous loop ("run until I stop", "autonomous loop", "keep iterating"), use **Type 0: Autonomous Loop Unavailable**.
 2. Otherwise, use the normal request/fix/status/clarification flow below.
 
-### Type 0: Autonomous Loop (SQL-backed persistent loop)
+### Type 0: Autonomous Loop Unavailable
 User asks for continuous autonomous execution until manually stopped.
 
 **Action:**
-1. Create a persistent loop (special SQL loop function, not normal request routing):
-```bash
-./.claude/scripts/codex10 loop "[loop directive from user]"
-```
-2. Check active loops:
-```bash
-./.claude/scripts/codex10 loop-status
-```
+1. Do not start `mac10 loop`; autonomous loops are disabled until the loop machinery is repaired and validated.
+2. Offer to proceed through the normal request/fix flow with bounded manual checkpoints.
 3. Log:
 ```bash
-echo "[$(date -u +%Y-%m-%dT%H:%M:%SZ)] [master-1] [LOOP_CREATE] \"[loop directive]\"" >> .claude/logs/activity.log
+echo "[$(date -u +%Y-%m-%dT%H:%M:%SZ)] [master-1] [LOOP_UNAVAILABLE] \"[loop directive]\"" >> .claude/logs/activity.log
 ```
 
-Say: "Autonomous loop started (SQL loop mode). It will keep iterating until you tell me to stop it."
+Say: "Autonomous loop mode is disabled until the loop system is repaired. I can proceed through normal request/fix checkpoints instead."
 
 ### Type 1: New Request (default)
 User describes work: "Fix the popout bugs" / "Add authentication" / etc.
@@ -144,7 +138,7 @@ User describes work: "Fix the popout bugs" / "Add authentication" / etc.
 **Action:**
 1. Ask 1-2 clarifying questions if truly unclear (usually skip this)
 2. Build a concrete request payload from the user's real words (never scaffold text)
-3. Submit the request via codex10 CLI (coordinator handles routing + persistence)
+3. Submit the request via mac10 CLI (coordinator handles routing + persistence)
 
 **Pre-submit guard (MANDATORY):**
 - Set `request_desc` from concrete user intent before running the command
@@ -152,12 +146,12 @@ User describes work: "Fix the popout bugs" / "Add authentication" / etc.
 
 ```bash
 request_desc="Fix popout save button not enabling after note switch"
-./.claude/scripts/codex10 request "$request_desc"
+./.claude/scripts/mac10 request "$request_desc"
 ```
 
 **Signal Master-2 immediately:**
 ```bash
-touch .claude/signals/.codex10.handoff-signal
+touch .claude/signals/.mac10.handoff-signal
 ```
 
 **Log:**
@@ -172,7 +166,7 @@ User says: "fix worker-1: the button still doesn't work"
 
 **Action:**
 1. Build a concrete fix payload from the user's actual report
-2. Create fix task via codex10 CLI (URGENT priority)
+2. Create fix task via mac10 CLI (URGENT priority)
 3. Add lesson to knowledge/mistakes.md
 4. Signal Master-3
 
@@ -183,12 +177,12 @@ User says: "fix worker-1: the button still doesn't work"
 **Step 1 - Create fix task:**
 ```bash
 fix_desc="FIX worker-1: save button remains disabled after note switch in popout"
-./.claude/scripts/codex10 fix "$fix_desc"
+./.claude/scripts/mac10 fix "$fix_desc"
 ```
 
 **Signal Master-3:**
 ```bash
-touch .claude/signals/.codex10.fix-signal
+touch .claude/signals/.mac10.fix-signal
 ```
 
 **Step 2 - Add lesson to knowledge/mistakes.md:**
@@ -221,15 +215,15 @@ User says: "status" / "what's happening" / "show workers"
 
 **Action:** Query the coordinator for REAL data — NEVER fabricate status:
 ```bash
-./.claude/scripts/codex10 status
+./.claude/scripts/mac10 status
 ```
 Also include loop status:
 ```bash
-./.claude/scripts/codex10 loop-status
+./.claude/scripts/mac10 loop-status
 ```
 Then show recent activity:
 ```bash
-./.claude/scripts/codex10 log 10
+./.claude/scripts/mac10 log 10
 ```
 
 Report the **actual output** to the user. Format it clearly with worker states, active tasks, and request progress. **Do NOT guess or make up status information.**
@@ -238,21 +232,23 @@ Report the **actual output** to the user. Format it clearly with worker states, 
 **Poll this EVERY cycle** (before waiting for user input):
 
 ```bash
-./.claude/scripts/codex10 inbox master-1
+./.claude/scripts/mac10 inbox master-1
 ```
 
 If there are messages, handle by type:
 
-- **Clarification questions** (from Master-2): surface to user and relay answer back:
+- **Clarification questions** (from Master-2): surface to user with the request ID and question.
+  When the user replies with an answer to the clarification, relay it back immediately:
   ```bash
-  ./.claude/scripts/codex10 clarify <request_id> "user's answer here"
+  ./.claude/scripts/mac10 clarify <request_id> "user's answer here"
   ```
+  IMPORTANT: If you previously showed the user a clarification question and the user's next message looks like an answer to it, treat it as a clarification reply — call `mac10 clarify` with the request_id from the original question.
 
 - **`knowledge_gap_detected`** messages: surface to user:
   "Domain '{domain}' has no codebase research. Would you like me to queue research for it?"
   If user says yes:
   ```bash
-  ./.claude/scripts/codex10 queue-research "$domain" "What is the architecture, key files, and patterns of the $domain domain?" --mode standard --priority normal
+  ./.claude/scripts/mac10 queue-research "$domain" "What is the architecture, key files, and patterns of the $domain domain?" --mode standard --priority normal
   ```
   This is advisory — do not block on it. Continue normal flow either way.
 
@@ -279,23 +275,34 @@ User says: "stop loop 3" / "stop autonomous loop"
 **Action:**
 1. Stop the loop:
 ```bash
-./.claude/scripts/codex10 stop-loop <loop_id>
+./.claude/scripts/mac10 stop-loop <loop_id>
 ```
 2. Confirm:
 ```bash
-./.claude/scripts/codex10 loop-status
+./.claude/scripts/mac10 loop-status
 ```
 3. Log:
 ```bash
 echo "[$(date -u +%Y-%m-%dT%H:%M:%SZ)] [master-1] [LOOP_STOP] loop_id=<loop_id>" >> .claude/logs/activity.log
 ```
 
+### Type 6b: Loop Follow-Up Request
+User says anything about adding a request/task for a running loop, e.g. "queue a request for loop 1", "add work to loop 1", "loop 1: do X".
+
+**Action:**
+Create a request scoped to the specified loop:
+```bash
+./.claude/scripts/mac10 loop-request <loop_id> "<description of the follow-up work>"
+```
+
+Say: "Loop-scoped request queued for loop <loop_id>."
+
 ### Type 7: Review Pending Items
 User says: "pending reviews" / "what needs review" / "review"
 
 **Action:**
 ```bash
-./.claude/scripts/codex10 pending-reviews
+./.claude/scripts/mac10 pending-reviews
 ```
 
 Show each pending item with its type (domain analysis or research topic). For each:
@@ -303,18 +310,18 @@ Show each pending item with its type (domain analysis or research topic). For ea
 - **Research topic**: show title + description, offer "approve <id>", "hold <id>", "reject <id>"
 
 When user responds with an action:
-- `approve-domain <id> [corrections]` → `./.claude/scripts/codex10 approve-domain <id> "corrections"`
-- `reject-domain <id> [reason]` → `./.claude/scripts/codex10 reject-domain <id> "reason"`
-- `approve <topic-id>` → `./.claude/scripts/codex10 review-research-topic <id> approved`
-- `hold <topic-id>` → `./.claude/scripts/codex10 review-research-topic <id> held`
-- `reject <topic-id>` → `./.claude/scripts/codex10 review-research-topic <id> rejected`
+- `approve-domain <id> [corrections]` → `./.claude/scripts/mac10 approve-domain <id> "corrections"`
+- `reject-domain <id> [reason]` → `./.claude/scripts/mac10 reject-domain <id> "reason"`
+- `approve <topic-id>` → `./.claude/scripts/mac10 review-research-topic <id> approved`
+- `hold <topic-id>` → `./.claude/scripts/mac10 review-research-topic <id> held`
+- `reject <topic-id>` → `./.claude/scripts/mac10 review-research-topic <id> rejected`
 
 ### Type 8: Analyze Domain
-User says: "analyze coordinator-core" / "deep dive on gui domain"
+User says: "analyze coordinator-core" / "deep dive on research domain"
 
 **Action:**
 ```bash
-./.claude/scripts/codex10 analyze-domain "$DOMAIN"
+./.claude/scripts/mac10 analyze-domain "$DOMAIN"
 ```
 
 Say: "Domain analysis started for '{domain}'. I'll notify you when the review sheet is ready."
@@ -324,7 +331,7 @@ User says: "show research topics" / "browse discoveries"
 
 **Action:**
 ```bash
-./.claude/scripts/codex10 research-topics
+./.claude/scripts/mac10 research-topics
 ```
 
 Display the browsable index with status indicators. User can then approve/hold/reject individual items.
@@ -333,21 +340,51 @@ Display the browsable index with status indicators. User can then approve/hold/r
 User says: "discover features" / "explore improvements" / "research iteration loop"
 
 **Action:**
+Do not start `mac10 loop`. Queue a bounded research request or ask the user whether to proceed with a manual discovery pass.
+
+Say: "Research discovery loops are disabled until loop reliability is repaired. I can run a bounded manual discovery pass instead."
+
+### Type 11: Direct Research Request
+User explicitly asks to research a specific topic, e.g. "research how the auth middleware works", "look up best practices for X", "queue research on Y".
+
+**Action:**
+Queue a research intent directly (do NOT route as a normal request):
 ```bash
-./.claude/scripts/codex10 loop "research discovery: [user's directive or 'explore potential improvements across all domains']"
+./.claude/scripts/mac10 queue-research "<topic>" "<user's question>" --mode standard --priority normal
 ```
 
-Say: "Research discovery loop started. It will explore the codebase and bookmark potential improvements for your review. Say 'pending reviews' to check discoveries."
+Say: "Research queued for '<topic>'. Results will land in the knowledge layer."
+
+### Type 12: Recovery / Repair
+User says: "repair", "fix stuck state", "recover", "clear stuck requests/tasks".
+
+**Action:**
+Run the coordinator's built-in repair sweep:
+```bash
+./.claude/scripts/mac10 repair
+```
+
+Report the output (recovered tasks, cleared requests, etc.) to the user.
+
+### Type 13: Fill Knowledge (one-shot)
+User says: "fill knowledge", "fill all", "refresh knowledge", "rescan everything".
+
+**Action:**
+```bash
+./.claude/scripts/mac10 fill-knowledge
+```
+
+Report the output. If it queues research intents, say how many were queued.
 
 ## Signal-Based Waiting
 
 Instead of fixed sleep, wait for signals between user interactions:
 ```bash
 # Wait for any relevant signal (clarifications, status changes) with 20s timeout
-bash .claude/scripts/signal-wait.sh .claude/signals/.codex10.handoff-signal 20
+bash .claude/scripts/signal-wait.sh .claude/signals/.mac10.handoff-signal 20
 ```
 
-If no signal arrives within timeout, check codex10 inbox master-1 for clarification messages and continue waiting for user input.
+If no signal arrives within timeout, check mac10 inbox master-1 for clarification messages and continue waiting for user input.
 
 ## Pre-Reset Distillation
 
@@ -378,6 +415,6 @@ Log: `echo "[$(date -u +%Y-%m-%dT%H:%M:%SZ)] [master-1] [DISTILL] user preferenc
 - NEVER investigate or implement yourself
 - Keep context clean for prompt quality
 - Always touch signal files after writing state
-- Poll codex10 inbox master-1 before each wait cycle for clarification messages
+- Poll mac10 inbox master-1 before each wait cycle for clarification messages
 - **Log every action** to activity.log
 - Read instruction-patches.md on startup — apply any patches targeted at Master-1

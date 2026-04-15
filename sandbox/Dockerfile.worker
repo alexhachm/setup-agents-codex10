@@ -1,5 +1,7 @@
 FROM node:20-slim
 
+ARG MAC10_WORKER_PROVIDER_NPM_PACKAGES="@anthropic-ai/claude-code"
+
 RUN apt-get update && apt-get install -y --no-install-recommends \
     git curl tmux ca-certificates \
     xvfb \
@@ -12,10 +14,13 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 
 # Install Playwright MCP server and Chromium browser
 RUN npm install -g @playwright/mcp@latest && npx playwright install chromium
+RUN if [ -n "$MAC10_WORKER_PROVIDER_NPM_PACKAGES" ]; then \
+      npm install -g $MAC10_WORKER_PROVIDER_NPM_PACKAGES; \
+    fi
 
 WORKDIR /workspace
 
 # Worker sentinel script is mounted via volume or copied at build time
 # COPY scripts/worker-sentinel.sh /usr/local/bin/
 
-ENTRYPOINT ["bash"]
+CMD ["bash"]

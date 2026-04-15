@@ -6,6 +6,7 @@ const path = require('path');
 const fs = require('fs');
 const { execFileSync } = require('child_process');
 const { coordinatorAgeMs } = require('../src/db');
+const providerOutput = require('../src/provider-output');
 const NAMESPACE = process.env.MAC10_NAMESPACE || 'mac10';
 const STRICT_NAMESPACE = Boolean(process.env.MAC10_NAMESPACE) && process.env.MAC10_NAMESPACE !== 'mac10';
 const BRANCH_RE = /^[a-zA-Z0-9._\/-]+$/;
@@ -17,135 +18,6 @@ const INBOX_RECIPIENT_ALIASES = Object.freeze({
   'master-2': 'architect',
   'master-3': 'allocator',
 });
-const COMPLETE_TASK_USAGE_FIELDS = Object.freeze({
-  model: 'string',
-  input_tokens: 'number',
-  output_tokens: 'number',
-  input_audio_tokens: 'number',
-  output_audio_tokens: 'number',
-  reasoning_tokens: 'number',
-  accepted_prediction_tokens: 'number',
-  rejected_prediction_tokens: 'number',
-  cached_tokens: 'number',
-  cache_creation_tokens: 'number',
-  ephemeral_5m_input_tokens: 'number',
-  ephemeral_1h_input_tokens: 'number',
-  total_tokens: 'number',
-  cost_usd: 'number',
-});
-const COMPLETE_TASK_USAGE_ALIASES = Object.freeze({
-  prompt_tokens: 'input_tokens',
-  completion_tokens: 'output_tokens',
-  cache_creation_input_tokens: 'cache_creation_tokens',
-  cache_read_input_tokens: 'cached_tokens',
-});
-const COMPLETE_TASK_USAGE_CACHE_CREATION_OBJECT_ALIASES = Object.freeze([
-  'ephemeral_5m_input_tokens',
-  'ephemeral_1h_input_tokens',
-]);
-const COMPLETE_TASK_USAGE_DETAIL_ALIASES = Object.freeze({
-  input_tokens_details: Object.freeze([
-    { canonicalField: 'cached_tokens', detailField: 'cached_tokens' },
-    { canonicalField: 'input_audio_tokens', detailField: 'audio_tokens' },
-  ]),
-  prompt_tokens_details: Object.freeze([
-    { canonicalField: 'cached_tokens', detailField: 'cached_tokens' },
-    { canonicalField: 'input_audio_tokens', detailField: 'audio_tokens' },
-  ]),
-  completion_tokens_details: Object.freeze([
-    { canonicalField: 'reasoning_tokens', detailField: 'reasoning_tokens' },
-    { canonicalField: 'output_audio_tokens', detailField: 'audio_tokens' },
-    { canonicalField: 'accepted_prediction_tokens', detailField: 'accepted_prediction_tokens' },
-    { canonicalField: 'rejected_prediction_tokens', detailField: 'rejected_prediction_tokens' },
-  ]),
-  output_tokens_details: Object.freeze([
-    { canonicalField: 'reasoning_tokens', detailField: 'reasoning_tokens' },
-    { canonicalField: 'output_audio_tokens', detailField: 'audio_tokens' },
-  ]),
-});
-
-function validateCompleteTaskUsageIntegerField(field, value) {
-  if (typeof value !== 'number') {
-    throw new Error(`complete-task usage field "${field}" must be number`);
-  }
-  if (!Number.isFinite(value)) {
-    throw new Error(`complete-task usage field "${field}" must be a finite number`);
-  }
-  if (value < 0) {
-    throw new Error(`complete-task usage field "${field}" must be >= 0`);
-  }
-  if (!Number.isInteger(value)) {
-    throw new Error(`complete-task usage field "${field}" must be an integer`);
-  }
-}
-
-function normalizeCompleteTaskUsageEntries(rawField, rawValue) {
-  if (rawField === 'cache_creation') {
-    if (!rawValue || typeof rawValue !== 'object' || Array.isArray(rawValue)) {
-      throw new Error('complete-task usage field "cache_creation" must be an object');
-    }
-    const passthroughNestedFields = {};
-    for (const [nestedField, nestedValue] of Object.entries(rawValue)) {
-      if (!COMPLETE_TASK_USAGE_CACHE_CREATION_OBJECT_ALIASES.includes(nestedField)) {
-        passthroughNestedFields[nestedField] = nestedValue;
-      }
-    }
-    const cacheCreationEntries = [];
-    let cacheCreationTokens = 0;
-    for (const nestedField of COMPLETE_TASK_USAGE_CACHE_CREATION_OBJECT_ALIASES) {
-      if (!Object.prototype.hasOwnProperty.call(rawValue, nestedField)) continue;
-      const nestedValue = rawValue[nestedField];
-      validateCompleteTaskUsageIntegerField(`cache_creation.${nestedField}`, nestedValue);
-      cacheCreationTokens += nestedValue;
-      cacheCreationEntries.push({ canonicalField: nestedField, value: nestedValue });
-    }
-    if (cacheCreationEntries.length) {
-      cacheCreationEntries.push({ canonicalField: 'cache_creation_tokens', value: cacheCreationTokens });
-    }
-    return {
-      normalizedEntries: cacheCreationEntries,
-      passthroughUnknown: Object.keys(passthroughNestedFields).length ? passthroughNestedFields : null,
-    };
-  }
-
-  if (Object.prototype.hasOwnProperty.call(COMPLETE_TASK_USAGE_DETAIL_ALIASES, rawField)) {
-    const detailAliases = COMPLETE_TASK_USAGE_DETAIL_ALIASES[rawField];
-    if (rawValue === null) {
-      return {
-        normalizedEntries: detailAliases.map((detailAlias) => ({ canonicalField: detailAlias.canonicalField, value: null })),
-        passthroughUnknown: null,
-      };
-    }
-    if (!rawValue || typeof rawValue !== 'object' || Array.isArray(rawValue)) {
-      throw new Error(`complete-task usage field "${rawField}" must be an object`);
-    }
-    const normalizedEntries = [];
-    const detailAliasFields = new Set(detailAliases.map((detailAlias) => detailAlias.detailField));
-    const passthroughNestedFields = {};
-    for (const [detailField, detailValue] of Object.entries(rawValue)) {
-      if (!detailAliasFields.has(detailField)) {
-        passthroughNestedFields[detailField] = detailValue;
-      }
-    }
-    for (const detailAlias of detailAliases) {
-      if (!Object.prototype.hasOwnProperty.call(rawValue, detailAlias.detailField)) {
-        continue;
-      }
-      normalizedEntries.push({
-        canonicalField: detailAlias.canonicalField,
-        value: rawValue[detailAlias.detailField],
-      });
-    }
-    return {
-      normalizedEntries,
-      passthroughUnknown: Object.keys(passthroughNestedFields).length ? passthroughNestedFields : null,
-    };
-  }
-  return {
-    normalizedEntries: [{ canonicalField: COMPLETE_TASK_USAGE_ALIASES[rawField] || rawField, value: rawValue }],
-    passthroughUnknown: null,
-  };
-}
 
 function completionStatusLabel(completion) {
   const total = Number(completion && completion.total) || 0;
@@ -248,7 +120,7 @@ function send(target, command, args) {
     const settle = (fn, val) => { if (!settled) { settled = true; fn(val); } };
 
     const onConnect = () => {
-      conn.write(JSON.stringify({ command, args }) + '\n');
+      conn.end(JSON.stringify({ command, args }) + '\n');
     };
     // Connect via TCP ({host, port}) or Unix socket/named pipe (string)
     const conn = typeof target === 'object'
@@ -265,7 +137,7 @@ function send(target, command, args) {
         } catch (e) {
           settle(reject, new Error('Invalid response from coordinator'));
         }
-        conn.end();
+        if (!conn.destroyed) conn.end();
       }
     });
     conn.on('error', (e) => {
@@ -698,62 +570,11 @@ function parseCompleteTaskUsage(rawUsage) {
     throw new Error('complete-task usage must be a JSON object');
   }
 
-  const aliasNormalized = {};
-  const unknownUsageFields = {};
-  for (const [rawField, value] of Object.entries(parsed)) {
-    const { normalizedEntries, passthroughUnknown } = normalizeCompleteTaskUsageEntries(rawField, value);
-    if (passthroughUnknown && Object.keys(passthroughUnknown).length) {
-      unknownUsageFields[rawField] = passthroughUnknown;
-    }
-    for (const normalizedEntry of normalizedEntries) {
-      const { canonicalField, value: canonicalValue } = normalizedEntry;
-      if (!Object.prototype.hasOwnProperty.call(COMPLETE_TASK_USAGE_FIELDS, canonicalField)) {
-        unknownUsageFields[canonicalField] = canonicalValue;
-        continue;
-      }
-      if (
-        Object.prototype.hasOwnProperty.call(aliasNormalized, canonicalField)
-        && aliasNormalized[canonicalField] !== canonicalValue
-      ) {
-        throw new Error(`complete-task usage contains conflicting values for "${canonicalField}"`);
-      }
-      aliasNormalized[canonicalField] = canonicalValue;
-    }
-  }
-
-  const normalized = {};
-  for (const [field, expectedType] of Object.entries(COMPLETE_TASK_USAGE_FIELDS)) {
-    if (!Object.prototype.hasOwnProperty.call(aliasNormalized, field)) continue;
-    const value = aliasNormalized[field];
-    if (value === null) {
-      normalized[field] = null;
-      continue;
-    }
-    if (typeof value !== expectedType) {
-      throw new Error(`complete-task usage field "${field}" must be ${expectedType}`);
-    }
-    if (expectedType === 'string') {
-      const trimmed = value.trim();
-      if (!trimmed) throw new Error('complete-task usage field "model" cannot be empty');
-      normalized[field] = trimmed;
-      continue;
-    }
-    if (field !== 'cost_usd') {
-      validateCompleteTaskUsageIntegerField(field, value);
-      normalized[field] = value;
-      continue;
-    }
-    if (!Number.isFinite(value)) {
-      throw new Error('complete-task usage field "cost_usd" must be a finite number');
-    }
-    if (value < 0) {
-      throw new Error('complete-task usage field "cost_usd" must be >= 0');
-    }
-    normalized[field] = value;
-  }
-
-  if (!Object.keys(unknownUsageFields).length) return normalized;
-  return { ...normalized, ...unknownUsageFields };
+  return providerOutput.normalizeUsagePayload(parsed, {
+    projectDir: process.cwd(),
+    provider: process.env.MAC10_AGENT_PROVIDER,
+    errorStyle: 'cli',
+  });
 }
 
 function parseCompleteTaskArgs(optionalArgs, rawWorkerId, projectCwd = process.cwd()) {
@@ -1021,6 +842,13 @@ async function main() {
         else { console.error(result.error); process.exit(1); }
         break;
 
+      case 'health':
+      case 'health-check':
+        result = await send(socketPath, 'health-check', {});
+        if (result.ok) console.log(JSON.stringify(result, null, 2));
+        else { console.error(result.error); process.exit(1); }
+        break;
+
       case 'clarify':
         if (argv.length < 3) { console.error('Usage: mac10 clarify <request_id> <message>'); process.exit(1); }
         result = await send(socketPath, 'clarify', {
@@ -1149,6 +977,14 @@ async function main() {
           console.error(formatWorkerProbeError(result.error));
           process.exit(1);
         }
+        break;
+
+      case 'task-context':
+      case 'context-bundle':
+        if (!argv[1]) { console.error(`Usage: mac10 ${cmd} <task_id>`); process.exit(1); }
+        result = await send(socketPath, 'task-context', { task_id: parseInt(argv[1], 10) });
+        if (result.ok) console.log(JSON.stringify(result.bundle, null, 2));
+        else { console.error(result.error); process.exit(1); }
         break;
 
       case 'start-task':
@@ -1705,10 +1541,6 @@ async function main() {
         else { console.error(result.error); process.exit(1); }
         break;
 
-      case 'gui':
-        console.log('Dashboard: http://localhost:3100');
-        break;
-
       case 'ping':
         result = await send(socketPath, 'ping', {});
         if (result.ok) console.log(`pong (${Date.now() - result.ts}ms)`);
@@ -2149,12 +1981,104 @@ async function main() {
         break;
       }
 
+      // TASK SANDBOX LIFECYCLE
+      case 'task-sandbox-create': {
+        if (!argv[1]) {
+          console.error('Usage: mac10 task-sandbox-create <task_id> [backend]');
+          process.exit(1);
+        }
+        result = await send(socketPath, 'task-sandbox-create', {
+          task_id: parseInt(argv[1], 10),
+          backend: argv[2] || undefined,
+        });
+        if (result.ok) console.log(JSON.stringify(result, null, 2));
+        else { console.error(result.error); process.exit(1); }
+        break;
+      }
+
+      case 'task-sandbox-status': {
+        result = await send(socketPath, 'task-sandbox-status', {
+          task_id: argv[1] ? parseInt(argv[1], 10) : undefined,
+        });
+        if (result.ok) console.log(JSON.stringify(result, null, 2));
+        else { console.error(result.error); process.exit(1); }
+        break;
+      }
+
+      case 'task-sandbox-ready':
+      case 'task-sandbox-start':
+      case 'task-sandbox-clean': {
+        if (!argv[1]) {
+          console.error(`Usage: mac10 ${cmd} <sandbox_id>`);
+          process.exit(1);
+        }
+        result = await send(socketPath, cmd, { id: parseInt(argv[1], 10) });
+        if (result.ok) console.log(JSON.stringify(result, null, 2));
+        else { console.error(result.error); process.exit(1); }
+        break;
+      }
+
+      case 'task-sandbox-stop': {
+        if (!argv[1]) {
+          console.error('Usage: mac10 task-sandbox-stop <sandbox_id> [error]');
+          process.exit(1);
+        }
+        result = await send(socketPath, 'task-sandbox-stop', {
+          id: parseInt(argv[1], 10),
+          error: argv.slice(2).join(' ') || undefined,
+        });
+        if (result.ok) console.log(JSON.stringify(result, null, 2));
+        else { console.error(result.error); process.exit(1); }
+        break;
+      }
+
+      case 'task-sandbox-fail': {
+        if (argv.length < 3) {
+          console.error('Usage: mac10 task-sandbox-fail <sandbox_id> <error>');
+          process.exit(1);
+        }
+        result = await send(socketPath, 'task-sandbox-fail', {
+          id: parseInt(argv[1], 10),
+          error: argv.slice(2).join(' '),
+        });
+        if (result.ok) console.log(JSON.stringify(result, null, 2));
+        else { console.error(result.error); process.exit(1); }
+        break;
+      }
+
+      case 'task-sandbox-cleanup': {
+        const cleanupArgs = {
+          max_age_minutes: argv[1] ? parseInt(argv[1], 10) : undefined,
+          dry_run: argv.includes('--dry-run'),
+        };
+        result = await send(socketPath, 'task-sandbox-cleanup', cleanupArgs);
+        if (result.ok) console.log(JSON.stringify(result, null, 2));
+        else { console.error(result.error); process.exit(1); }
+        break;
+      }
+
       // SANDBOX
       case 'sandbox-status':
         result = await send(socketPath, 'sandbox-status', {});
         if (result.ok) console.log(JSON.stringify(result, null, 2));
         else { console.error(result.error); process.exit(1); }
         break;
+
+      case 'sandbox-provider-smoke': {
+        const smokeArgs = {
+          provider: undefined,
+          run_actual: argv.includes('--run'),
+          build: !argv.includes('--no-build'),
+        };
+        for (const rawArg of argv.slice(1)) {
+          if (rawArg === '--run' || rawArg === '--no-build') continue;
+          if (!smokeArgs.provider) smokeArgs.provider = rawArg;
+        }
+        result = await send(socketPath, 'sandbox-provider-smoke', smokeArgs);
+        if (result.ok) console.log(JSON.stringify(result, null, 2));
+        else { console.error(result.error); if (result.output) console.error(result.output); process.exit(1); }
+        break;
+      }
 
       case 'sandbox-build':
         console.log('Building sandbox Docker image (this may take a few minutes)...');
@@ -2372,6 +2296,8 @@ ALLOCATOR:
 
 WORKER:
   my-task <worker_id>            Get current assigned task
+  task-context <task_id>         Get coordinator-served task context bundle
+  context-bundle <task_id>       Alias for task-context
   start-task <worker_id> <task_id>
   heartbeat <worker_id>
   reset-worker <worker_id>       Reset worker to idle state
@@ -2416,7 +2342,19 @@ CHANGES:
   list-changes [domain]          List all changes (optionally filter by domain)
 
 SANDBOX (Docker):
+  task-sandbox-create <task_id> [backend]
+                                 Allocate lifecycle state for a disposable task sandbox
+  task-sandbox-status [task_id]  List task sandbox lifecycle records
+  task-sandbox-ready <id>        Mark task sandbox ready
+  task-sandbox-start <id>        Mark task sandbox running
+  task-sandbox-stop <id> [err]   Mark task sandbox stopped
+  task-sandbox-fail <id> <err>   Mark task sandbox failed
+  task-sandbox-clean <id>        Mark task sandbox cleaned
+  task-sandbox-cleanup [min] [--dry-run]
+                                 Clean stopped/failed task sandboxes older than min
   sandbox-status                 Show Docker availability and containers
+  sandbox-provider-smoke [provider] [--run] [--no-build]
+                                 Verify provider CLI/auth and noninteractive launch inside worker image
   sandbox-build                  Build (or rebuild) the sandbox Docker image
   sandbox-cleanup                Stop all Docker sandbox containers
   sandbox-toggle                 Toggle auto-isolation on/off (affects both Docker and msb)
@@ -2433,7 +2371,7 @@ SYSTEM:
   purge-tasks                    Remove all failed tasks and their merge queue entries
   add-worker                     Create a new worker worktree (up to max_workers)
   merge-status [request_id]      Show merge queue entries
-  gui                            Show dashboard URL
+  health-check                   Show structured coordinator/runtime health
   ping                           Check coordinator health
 
 FLAGS:

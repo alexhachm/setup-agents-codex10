@@ -516,7 +516,7 @@ describe('Loop heartbeat recovery', () => {
 
   it('does not emit stale events for loops actively heartbeating during long exec runs', () => {
     // Regression test: background heartbeat ticker keeps last_heartbeat fresh during a long
-    // codex/agent exec. Watchdog must NOT fire loop_heartbeat_stale while heartbeats arrive.
+    // Agent exec. Watchdog must NOT fire loop_heartbeat_stale while heartbeats arrive.
     const loopId = db.createLoop('Long-running loop with active background ticker');
     // Heartbeat was updated 15s ago — simulating the 30s background ticker just fired.
     const recentHeartbeat = new Date(Date.now() - 15 * 1000).toISOString();

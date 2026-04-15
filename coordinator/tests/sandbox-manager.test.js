@@ -157,6 +157,86 @@ describe('sandbox-manager', () => {
     });
   });
 
+  describe('providerSmoke', () => {
+    it('runs provider contract checks inside the worker image', () => {
+      tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'mac10-sandbox-'));
+      db.init(tmpDir);
+      const calls = [];
+      execFileSyncMock = mock.method(childProcess, 'execFileSync', (cmd, args, options) => {
+        calls.push({ cmd, args, options });
+        if (cmd === 'docker' && args[0] === 'info') return '';
+        if (cmd === 'docker' && args[0] === 'images') return 'mac10-worker:latest\n';
+        if (cmd === 'docker' && args[0] === 'run') {
+          return [
+            'provider=claude',
+            'cli=claude',
+            'cli_available=true',
+            'auth_check=pass',
+            'provider=claude cli=claude mode=exec model=sonnet prompt=/workspace/.claude/commands/worker-loop.md cwd=/workspace args=6',
+            'noninteractive_launch=dry_run_pass',
+            'noninteractive_exec=skipped',
+            'provider_smoke=pass',
+          ].join('\n');
+        }
+        return '';
+      });
+
+      sandboxManager = require('../src/sandbox-manager');
+      const result = sandboxManager.providerSmoke(tmpDir, {
+        provider: 'claude',
+        build: false,
+      });
+
+      assert.strictEqual(result.ok, true);
+      assert.strictEqual(result.provider, 'claude');
+      assert.strictEqual(result.parsed.cli_available, 'true');
+      assert.strictEqual(result.parsed.provider_smoke, 'pass');
+
+      const runCall = calls.find(call => call.cmd === 'docker' && call.args[0] === 'run');
+      assert.ok(runCall, 'expected docker run to be invoked');
+      assert.ok(runCall.args.includes('--rm'));
+      assert.ok(runCall.args.includes('--entrypoint'));
+      assert.ok(runCall.args.includes(`${path.resolve(tmpDir)}:/workspace`));
+      assert.ok(runCall.args.includes('MAC10_AGENT_PROVIDER=claude'));
+      assert.ok(runCall.args.includes('MAC10_PROVIDER_SMOKE_EXEC=0'));
+      const script = runCall.args[runCall.args.length - 1];
+      assert.match(script, /mac10_provider_auth_check/);
+      assert.match(script, /mac10_run_noninteractive_prompt/);
+    });
+
+    it('can request an actual noninteractive provider execution smoke', () => {
+      tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'mac10-sandbox-'));
+      db.init(tmpDir);
+      const calls = [];
+      execFileSyncMock = mock.method(childProcess, 'execFileSync', (cmd, args) => {
+        calls.push({ cmd, args });
+        if (cmd === 'docker' && args[0] === 'info') return '';
+        if (cmd === 'docker' && args[0] === 'images') return 'mac10-worker:latest\n';
+        if (cmd === 'docker' && args[0] === 'run') {
+          return [
+            'provider=claude',
+            'noninteractive_exec=pass',
+            'provider_smoke=pass',
+          ].join('\n');
+        }
+        return '';
+      });
+
+      sandboxManager = require('../src/sandbox-manager');
+      const result = sandboxManager.providerSmoke(tmpDir, {
+        provider: 'claude',
+        build: false,
+        runActual: true,
+      });
+
+      assert.strictEqual(result.ok, true);
+      assert.strictEqual(result.run_actual, true);
+      assert.strictEqual(result.parsed.noninteractive_exec, 'pass');
+      const runCall = calls.find(call => call.cmd === 'docker' && call.args[0] === 'run');
+      assert.ok(runCall.args.includes('MAC10_PROVIDER_SMOKE_EXEC=1'));
+    });
+  });
+
   describe('getStatus', () => {
     it('returns full status when Docker is unavailable', () => {
       tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'mac10-sandbox-'));

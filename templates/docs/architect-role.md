@@ -100,5 +100,5 @@ Domain knowledge files can be updated directly (no observation threshold).
 | Tier | Validation Level |
 |------|-----------------|
 | 1 | Inline build check (architect runs build directly) |
-| 2 | build-validator subagent (Economy) |
-| 3 | build-validator (Economy) + verify-app (Fast) |
+| 2 | Smallest relevant repo build/test/lint command from the task validation field |
+| 3 | Tier 2 validation plus focused integration or live verification when the task actually touches that surface |

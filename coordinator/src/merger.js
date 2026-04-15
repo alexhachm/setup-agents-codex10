@@ -232,6 +232,7 @@ function safeShellExec(command, cwd) {
 let processing = false;
 let processingStartedAt = 0;
 const PROCESSING_TIMEOUT_MS = 300000; // 5 minutes — reset flag if stuck
+const MAX_MERGE_CONFLICT_RETRIES = 3;
 let mergerIntervalId = null;
 const assignmentPriorityDeferralsByMergeId = new Map();
 const ASSIGNMENT_PRIORITY_DEFAULT_MAX_CONSECUTIVE_DEFERRALS = 3;
@@ -415,14 +416,14 @@ function onTaskCompleted(taskId) {
   if (!task) return;
 
   const allTasks = db.listTasks({ request_id: task.request_id });
-  const incomplete = allTasks.filter(t => t.status !== 'completed' && t.status !== 'failed');
+  const incomplete = allTasks.filter(t => !db.isTerminalTaskStatus(t.status));
   const failedTasks = allTasks.filter(t => t.status === 'failed');
 
   if (incomplete.length === 0) {
     // Check for recoverable merges that should be retried — fix tasks may have resolved them.
     // Include legacy timeout rows that were previously marked as failed.
     const recoverableMerges = db.getDb().prepare(
-      `SELECT id
+      `SELECT id, retry_count, request_id, task_id, branch, error
          FROM merge_queue
         WHERE request_id = ?
           AND (
@@ -432,16 +433,20 @@ function onTaskCompleted(taskId) {
           )`
     ).all(task.request_id);
 
-    if (recoverableMerges.length > 0) {
-      // Reset recoverable merges to pending so the merger retries them
-      for (const m of recoverableMerges) {
-        db.updateMerge(m.id, { status: 'pending', error: null });
-      }
+    const { retryable: retryableMerges, exhausted: exhaustedMerges } = partitionMergesByConflictRetryCap(
+      recoverableMerges
+    );
+
+    if (retryableMerges.length > 0 || exhaustedMerges.length > 0) {
+      for (const m of retryableMerges) markMergeForConflictRetry(m);
+      for (const m of exhaustedMerges) exhaustMergeConflictRetries(m);
       db.updateRequest(task.request_id, { status: 'integrating' });
-      db.log('coordinator', 'recoverable_merges_retried', {
-        request_id: task.request_id,
-        merge_ids: recoverableMerges.map(m => m.id),
-      });
+      if (retryableMerges.length > 0) {
+        db.log('coordinator', 'recoverable_merges_retried', {
+          request_id: task.request_id,
+          merge_ids: retryableMerges.map(m => m.id),
+        });
+      }
       return; // Let merger retry — don't complete yet
     }
 
@@ -488,7 +493,7 @@ function processQueue(projectDir, mergeExecutor = attemptMerge) {
   try {
     // Recovery sweep: reset stale conflict/functional_conflict entries on integrating requests older than 5 min
     const staleConflictRecovery = db.getDb().prepare(`
-      SELECT mq.id
+      SELECT mq.id, mq.retry_count, mq.request_id, mq.task_id, mq.branch, mq.error
         FROM merge_queue mq
         JOIN requests r ON r.id = mq.request_id
        WHERE (mq.status = 'conflict' OR (mq.status = 'failed' AND mq.error LIKE 'functional_conflict:%'))
@@ -496,12 +501,18 @@ function processQueue(projectDir, mergeExecutor = attemptMerge) {
          AND mq.updated_at <= datetime('now', '-5 minutes')
     `).all();
     if (staleConflictRecovery.length > 0) {
-      for (const m of staleConflictRecovery) {
-        db.updateMerge(m.id, { status: 'pending', error: null });
+      const { retryable, exhausted } = partitionMergesByConflictRetryCap(staleConflictRecovery);
+      for (const m of retryable) {
+        markMergeForConflictRetry(m);
       }
-      db.log('coordinator', 'stale_conflict_recovery_sweep', {
-        merge_ids: staleConflictRecovery.map((m) => m.id),
-      });
+      for (const m of exhausted) {
+        exhaustMergeConflictRetries(m);
+      }
+      if (retryable.length > 0) {
+        db.log('coordinator', 'stale_conflict_recovery_sweep', {
+          merge_ids: retryable.map((m) => m.id),
+        });
+      }
     }
 
     // Purge stale terminal entries (failed/conflict) older than 600 minutes
@@ -536,6 +547,28 @@ function processQueue(projectDir, mergeExecutor = attemptMerge) {
         task_id: entry.task_id,
         branch: entry.branch,
       });
+      db.appendTaskMergeHistory(entry.task_id, {
+        event: 'merge_success',
+        merge_id: entry.id,
+        branch: entry.branch,
+      });
+
+      const retryCount = Number.parseInt(String(entry.retry_count || 0), 10);
+      if (retryCount > 0) {
+        insightIngestion.ingestConflictResolutionLesson({
+          merge_id: entry.id,
+          request_id: entry.request_id,
+          task_id: entry.task_id,
+          branch: entry.branch,
+          retry_count: retryCount,
+          prior_error: entry.error,
+        });
+        db.log('coordinator', 'conflict_resolution_lesson_written', {
+          merge_id: entry.id,
+          branch: entry.branch,
+          retry_count: retryCount,
+        });
+      }
 
       // Check if entire request is now complete
       checkRequestCompletion(entry.request_id);
@@ -552,6 +585,12 @@ function processQueue(projectDir, mergeExecutor = attemptMerge) {
         task_id: entry.task_id,
         branch: entry.branch,
         error: result.error,
+      });
+      db.appendTaskMergeHistory(entry.task_id, {
+        event: 'functional_conflict',
+        merge_id: entry.id,
+        branch: entry.branch,
+        error: String(result.error).slice(0, 500),
       });
     } else {
       db.updateMerge(entry.id, {
@@ -572,10 +611,123 @@ function processQueue(projectDir, mergeExecutor = attemptMerge) {
         error: result.error,
         tier: result.tier,
       });
+      db.appendTaskMergeHistory(entry.task_id, {
+        event: result.conflict ? 'merge_conflict' : 'merge_failed',
+        merge_id: entry.id,
+        branch: entry.branch,
+        error: String(result.error).slice(0, 500),
+        tier: result.tier,
+      });
     }
   } finally {
     processing = false;
   }
+}
+
+function getConflictRetryCount(mergeEntry) {
+  const retryCount = Number.parseInt(String(mergeEntry.retry_count || 0), 10);
+  return Number.isInteger(retryCount) && retryCount > 0 ? retryCount : 0;
+}
+
+function partitionMergesByConflictRetryCap(mergeEntries) {
+  const retryable = [];
+  const exhausted = [];
+  for (const mergeEntry of mergeEntries) {
+    if (getConflictRetryCount(mergeEntry) >= MAX_MERGE_CONFLICT_RETRIES) {
+      exhausted.push(mergeEntry);
+    } else {
+      retryable.push(mergeEntry);
+    }
+  }
+  return { retryable, exhausted };
+}
+
+function markMergeForConflictRetry(mergeEntry) {
+  db.updateMerge(mergeEntry.id, {
+    status: 'pending',
+    error: null,
+    retry_count: getConflictRetryCount(mergeEntry) + 1,
+  });
+}
+
+function exhaustMergeConflictRetries(mergeEntry) {
+  const retryCount = getConflictRetryCount(mergeEntry);
+  const followUpTaskId = createMergeConflictFollowUpTask({ ...mergeEntry, retry_count: retryCount });
+  db.updateMerge(mergeEntry.id, {
+    status: 'failed',
+    error: `conflict_retries_exhausted: ${mergeEntry.error || 'merge conflict'}`,
+  });
+  db.sendMail('master-2', 'merge_conflict_exhausted', {
+    merge_id: mergeEntry.id,
+    request_id: mergeEntry.request_id,
+    task_id: mergeEntry.task_id,
+    follow_up_task_id: followUpTaskId,
+    branch: mergeEntry.branch,
+    retry_count: retryCount,
+    last_error: mergeEntry.error,
+  });
+  db.log('coordinator', 'merge_conflict_retries_exhausted', {
+    merge_id: mergeEntry.id,
+    request_id: mergeEntry.request_id,
+    follow_up_task_id: followUpTaskId,
+    retry_count: retryCount,
+  });
+  db.appendTaskMergeHistory(mergeEntry.task_id, {
+    event: 'conflict_retries_exhausted',
+    merge_id: mergeEntry.id,
+    branch: mergeEntry.branch,
+    retry_count: retryCount,
+    follow_up_task_id: followUpTaskId,
+    last_error: String(mergeEntry.error || 'merge conflict').slice(0, 500),
+  });
+}
+
+function parseJsonArray(value) {
+  if (!value) return null;
+  if (Array.isArray(value)) return value;
+  if (typeof value !== 'string') return null;
+  try {
+    const parsed = JSON.parse(value);
+    return Array.isArray(parsed) ? parsed : null;
+  } catch {
+    return null;
+  }
+}
+
+function parseJsonValue(value) {
+  if (!value) return null;
+  if (typeof value !== 'string') return value;
+  try {
+    return JSON.parse(value);
+  } catch {
+    return value;
+  }
+}
+
+function createMergeConflictFollowUpTask(mergeEntry) {
+  const sourceTask = mergeEntry.task_id ? db.getTask(mergeEntry.task_id) : null;
+  const sourceFiles = sourceTask ? parseJsonArray(sourceTask.files) : null;
+  const subject = `Resolve exhausted merge conflict for merge ${mergeEntry.id}`;
+  const description = [
+    `Automatic merge recovery exhausted after ${mergeEntry.retry_count || 0} retries.`,
+    `Request: ${mergeEntry.request_id}`,
+    `Merge queue entry: ${mergeEntry.id}`,
+    `Source task: ${mergeEntry.task_id || 'unknown'}`,
+    `Branch: ${mergeEntry.branch}`,
+    `Last error: ${mergeEntry.error || 'merge conflict'}`,
+    'Resolve the conflict or redo the implementation, run validation, and report completion through the normal task flow.',
+  ].join('\n');
+
+  return db.createTask({
+    request_id: mergeEntry.request_id,
+    subject,
+    description,
+    domain: sourceTask && sourceTask.domain ? sourceTask.domain : 'merge',
+    files: sourceFiles,
+    priority: 'urgent',
+    tier: 2,
+    validation: sourceTask && sourceTask.validation ? parseJsonValue(sourceTask.validation) : null,
+  });
 }
 
 function attemptMerge(entry, projectDir) {
@@ -987,7 +1139,8 @@ function checkRequestCompletion(requestId) {
   const allMerged = allMerges.every(m => m.status === 'merged');
   if (allMerged && allMerges.length > 0) {
     const taskCompletion = db.checkRequestCompletion(requestId);
-    const allTasksDone = taskCompletion.all_done === true && taskCompletion.failed === 0;
+    const hardFailures = Number(taskCompletion.hard_failures) || 0;
+    const allTasksDone = taskCompletion.all_terminal === true && hardFailures === 0;
     if (!allTasksDone) {
       const request = db.getRequest(requestId);
       if (request && request.status !== 'integrating' && request.status !== 'in_progress') {
@@ -1006,4 +1159,4 @@ function stop() {
   if (mergerIntervalId) { clearInterval(mergerIntervalId); mergerIntervalId = null; }
 }
 
-module.exports = { start, stop, onTaskCompleted, processQueue, attemptMerge, tryRebase };
+module.exports = { start, stop, onTaskCompleted, processQueue, attemptMerge, tryRebase, MAX_MERGE_CONFLICT_RETRIES };

@@ -6,6 +6,7 @@ const crypto = require('crypto');
 // Relevance score lookup by event type
 const EVENT_RELEVANCE_SCORES = {
   merge_success: 600,
+  conflict_resolution_lesson: 800,
   merge_failed: 750,
   functional_conflict: 850,
   request_completed: 700,
@@ -179,6 +180,31 @@ function ingestMergeEvent(eventType, data) {
   });
 }
 
+function ingestConflictResolutionLesson(data) {
+  const { merge_id, request_id, task_id, branch, retry_count, prior_error } = data || {};
+  const semanticKey = `merge_id:${merge_id}:conflict_resolved`;
+
+  const payload = {
+    event_type: 'conflict_resolution_lesson',
+    merge_id,
+    request_id,
+    task_id,
+    branch,
+    retry_count,
+    ...(prior_error != null ? { prior_error: String(prior_error).slice(0, 500) } : {}),
+    resolved_at: new Date().toISOString(),
+  };
+
+  return ingestInsight({
+    project_context_key: 'coordinator:merge_conflict_lessons',
+    event_type: 'conflict_resolution_lesson',
+    payload,
+    semantic_key: semanticKey,
+    request_id: request_id || null,
+    task_id: task_id || null,
+  });
+}
+
 // ---------------------------------------------------------------------------
 // Watchdog lifecycle events
 // ---------------------------------------------------------------------------
@@ -272,6 +298,7 @@ function ingestAllocatorEvent(eventType, data) {
 module.exports = {
   ingestInsight,
   ingestMergeEvent,
+  ingestConflictResolutionLesson,
   ingestWatchdogEvent,
   ingestAllocatorEvent,
   // Exported for testing

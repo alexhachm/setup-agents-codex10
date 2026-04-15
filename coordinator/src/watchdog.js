@@ -703,7 +703,7 @@ function recoverOrphanTasks(source = 'watchdog_tick') {
 
 function hasActiveRemediationTasks(requestId) {
   const activeTasks = db.listTasks({ request_id: requestId }).filter(
-    t => !['completed', 'failed'].includes(t.status)
+    t => !db.isTerminalTaskStatus(t.status)
   );
   return activeTasks.length > 0;
 }
@@ -754,6 +754,70 @@ function isWithinRemediationGraceWindow(now, requestId, merges, failureStatus, a
       return ageSec > oldest ? ageSec : oldest;
     }, 0);
   return oldestFailureAgeSec < MERGE_CONFLICT_GRACE_SEC;
+}
+
+function releaseMergedRequestSiblingTasks(requestId) {
+  const nonCompletedTasks = db.getDb().prepare(`
+    SELECT id, status, assigned_to
+    FROM tasks
+    WHERE request_id = ?
+      AND status NOT IN ('completed', 'superseded')
+  `).all(requestId);
+  if (!nonCompletedTasks.length) {
+    return { non_terminal_task_ids: [], failed_task_ids: [] };
+  }
+
+  const nonTerminalTaskIds = nonCompletedTasks
+    .filter(task => !db.isTerminalTaskStatus(task.status))
+    .map(task => Number(task.id))
+    .filter(Number.isInteger);
+  const failedTaskIds = nonCompletedTasks
+    .filter(task => db.isTerminalTaskStatus(task.status) && task.status !== 'completed')
+    .map(task => Number(task.id))
+    .filter(Number.isInteger);
+
+  if (!nonTerminalTaskIds.length) {
+    return { non_terminal_task_ids: [], failed_task_ids: failedTaskIds };
+  }
+
+  const completedAt = new Date().toISOString();
+  const taskPlaceholders = nonTerminalTaskIds.map(() => '?').join(', ');
+  const tx = db.getDb().transaction(() => {
+    db.getDb().prepare(`
+      UPDATE tasks
+      SET
+        status = 'superseded',
+        assigned_to = NULL,
+        result = 'Superseded by merged request recovery',
+        completed_at = COALESCE(completed_at, ?),
+        updated_at = datetime('now')
+      WHERE id IN (${taskPlaceholders})
+    `).run(completedAt, ...nonTerminalTaskIds);
+
+    for (const taskId of nonTerminalTaskIds) {
+      db.getDb().prepare(`
+        UPDATE workers
+        SET
+          status = 'idle',
+          current_task_id = NULL,
+          claimed_by = NULL,
+          claimed_at = NULL,
+          pid = NULL
+        WHERE current_task_id = ?
+          AND status IN ('assigned', 'running', 'busy', 'completed_task')
+      `).run(taskId);
+    }
+  });
+  tx();
+
+  db.log('coordinator', 'stale_integration_nonblocking_tasks_released', {
+    request_id: requestId,
+    non_terminal_task_ids: nonTerminalTaskIds,
+    failed_task_ids: failedTaskIds,
+    reason: 'merged_work_completed_request',
+  });
+
+  return { non_terminal_task_ids: nonTerminalTaskIds, failed_task_ids: failedTaskIds };
 }
 
 function recoverStaleIntegrations(now, options = {}) {
@@ -869,18 +933,22 @@ function recoverStaleIntegrations(now, options = {}) {
     const allMerged = freshMerges.every(m => m.status === 'merged');
 
     if (allMerged) {
-      // Case 2: All merges succeeded — guard against non-terminal or failed sibling tasks
+      // Case 2: All merges succeeded. Stale integration recovery only requires
+      // evidence that at least one task produced completed, merged work. Any
+      // remaining sibling task is non-blocking for this request and must not
+      // keep the request wedged in integrating forever.
       const taskCompletion = db.checkRequestCompletion(req.id);
-      if (taskCompletion.total > 0 && (!taskCompletion.all_done || taskCompletion.completed === 0)) {
+      if (taskCompletion.total > 0 && taskCompletion.completed === 0) {
         db.log('coordinator', 'stale_integration_gated', {
           request_id: req.id,
-          reason: !taskCompletion.all_done ? 'non_terminal_tasks' : 'failed_tasks',
+          reason: 'no_completed_tasks',
           total: taskCompletion.total,
           completed: taskCompletion.completed,
           failed: taskCompletion.failed,
         });
         continue;
       }
+      const releasedTasks = releaseMergedRequestSiblingTasks(req.id);
       const result = `All ${freshMerges.length} PR(s) merged successfully`;
       db.updateRequest(req.id, {
         status: 'completed',
@@ -891,6 +959,8 @@ function recoverStaleIntegrations(now, options = {}) {
       db.log('coordinator', 'stale_integration_recovered', {
         request_id: req.id,
         reason: 'all_merged',
+        released_non_terminal_task_ids: releasedTasks.non_terminal_task_ids,
+        failed_task_ids: releasedTasks.failed_task_ids,
       });
       insightIngestion.ingestWatchdogEvent('stale_integration_recovered', {
         request_id: req.id,

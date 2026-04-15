@@ -1,9 +1,13 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-if ! ./.claude/scripts/codex10 ping >/dev/null 2>&1; then
-  echo "ERROR: coordinator unreachable" >&2
-  exit 1
+# Pre-flight ping: verify coordinator is reachable before launching workers.
+# Skip for --help so usage text is always available.
+if [ "${1:-}" != "-h" ] && [ "${1:-}" != "--help" ]; then
+  if ! ./.claude/scripts/mac10 ping >/dev/null 2>&1; then
+    echo "ERROR: coordinator unreachable" >&2
+    exit 1
+  fi
 fi
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"

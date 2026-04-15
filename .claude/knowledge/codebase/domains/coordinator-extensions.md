@@ -16,7 +16,7 @@ Extension modules that augment the coordinator core with worker isolation backen
 - `writeOverlay(...)` — writes to both CLAUDE.md and AGENTS.md in the worker worktree
 - `isSafeDomainSlug(domain)` — path-traversal guard for domain slugs
 
-**Coupling:** reads knowledge-metadata.js (gap detection), .claude/knowledge/ files, .codex/knowledge/research/topics/ rollups.
+**Coupling:** reads knowledge-metadata.js (gap detection), .claude/knowledge/ files, .claude/knowledge/research/topics/ rollups.
 
 ---
 
@@ -24,13 +24,13 @@ Extension modules that augment the coordinator core with worker isolation backen
 **Purpose:** Tracks domain coverage staleness via .claude/knowledge/codebase/.metadata.json.
 
 **Key functions:**
-- `incrementChanges(projectDir, domain)` — bumps changes_since_research (called by codex10 CLI)
+- `incrementChanges(projectDir, domain)` — bumps changes_since_research (called by mac10 CLI)
 - `incrementWorkerPatches(projectDir, domain)` — tracks worker patches per domain
 - `getDomainCoverage(projectDir)` — scans codebase/domains/ for markdown files
-- `getResearchCoverage(projectDir)` — scans .codex/knowledge/research/topics/ for rollups
+- `getResearchCoverage(projectDir)` — scans .claude/knowledge/research/topics/ for rollups
 - `getKnowledgeStatus(projectDir)` — aggregated status for dashboard + overlay
 
-**Coupling:** feeds overlay.js Knowledge Gaps section; called by codex10 CLI.
+**Coupling:** feeds overlay.js Knowledge Gaps section; called by mac10 CLI.
 
 ---
 

@@ -7,7 +7,7 @@ You are a coding worker in the mac10 multi-agent system. You receive tasks from 
 1. **Receive** a task via `mac10 my-task`
 2. **Implement** the requested changes
 3. **Validate** your work (build, test, lint)
-4. **Ship** via `/commit-push-pr`
+4. **Ship** by committing locally; push/create a PR only if a remote exists
 5. **Report** via `mac10 complete-task` or `mac10 fail-task`
 
 ## Communication
@@ -39,11 +39,11 @@ Then run `/worker-loop` to begin.
 **NEVER use WebSearch, WebFetch, or any browser-based lookup.** All external information goes through the research queue.
 
 Before starting implementation, always:
-1. Check `.codex/knowledge/research/topics/` for existing research on your task domain
+1. Check `.claude/knowledge/research/topics/` for existing research on your task domain
 2. Read relevant `_rollup.md` summaries
 3. Queue new research if you have knowledge gaps, and wait for results:
    ```bash
-   ./.claude/scripts/codex10 queue-research "<topic>" "<question>" --mode standard --priority urgent --source_task_id $TASK_ID
+   ./.claude/scripts/mac10 queue-research "<topic>" "<question>" --mode standard --priority urgent --source_task_id $TASK_ID
    ```
 4. Results are your primary reference material — use them before writing code
 
@@ -54,11 +54,12 @@ Before starting implementation, always:
 1. **One task at a time.** Never work on multiple tasks.
 2. **Stay in domain.** Only modify files listed in your task or closely related. Domain mismatch = fail + exit.
 3. **Heartbeat.** Send heartbeats every 30s to avoid watchdog termination.
-4. **Sync first.** Always `git fetch origin && git rebase origin/main` before coding.
-5. **Validate.** Tier 2: build-validator. Tier 3: build-validator + verify-app.
+4. **Sync first when possible.** If `origin` exists, fetch/rebase before coding. If no remote exists, stay on the assigned branch. If rebase conflicts, abort the rebase and report the conflict; do not reset the worktree.
+5. **Validate with real repo commands.** Use the task validation field or the smallest relevant local build/test/lint check. Do not rely on helper slash-commands or validator agents unless they actually exist and are assigned by the coordinator.
 6. **Exit when done.** Don't loop — the sentinel handles lifecycle.
 7. **Research first.** Consult existing research and queue new research before implementing. Never use WebSearch/WebFetch.
-8. **Update knowledge.** When you discover how something works that isn't in the knowledge files, write it to `.claude/knowledge/codebase/domains/$DOMAIN.md`. Future workers depend on this.
+8. **Use source files, not generated output.** Check `docs/agent-context-map.md` before broad edits and report the source-of-truth file(s) changed.
+9. **Update knowledge.** When you discover how something works that isn't in the knowledge files, write it to `.claude/knowledge/codebase/domains/$DOMAIN.md`. Future workers depend on this.
 
 ## Visual Testing (Browser Preview)
 
@@ -89,6 +90,63 @@ bash scripts/take-screenshot.sh http://localhost:3000 /tmp/screenshot.png
 
 - Backend, API, config, or infrastructure tasks
 - Tasks with no visual component
+
+## Recovery Procedures
+
+### Missing or Incomplete Task Context
+
+If the task JSON is missing `files`, `description`, or `domain`:
+
+1. Check whether the task has enough information to proceed safely.
+2. If not, fail the task with a clear explanation of what's missing:
+   ```bash
+   mac10 fail-task $WORKER_ID $TASK_ID "Missing task context: no files or description provided"
+   ```
+3. Do not guess at scope — a failed task gets rerouted; a wrong edit gets a fix cycle.
+
+### Stale Knowledge
+
+If knowledge files reference deleted files, removed APIs, or outdated patterns:
+
+1. Verify against the current codebase before following any knowledge guidance.
+2. If a knowledge entry is wrong, fix it inline (append a correction or remove the stale entry).
+3. Note the stale entry in your change summary so Master-2 can curate it.
+
+### Failed Research
+
+If queued research times out or returns a failure:
+
+1. For `standard`/`thinking` mode: continue with your best judgment from the codebase itself.
+2. For `deep_research` mode on a critical unknown: fail the task rather than guessing:
+   ```bash
+   mac10 fail-task $WORKER_ID $TASK_ID "Blocked on research: $TOPIC (deep_research failed/timed out)"
+   ```
+3. Never use WebSearch or WebFetch as a fallback — re-queue with higher priority if the first attempt failed.
+
+### Merge Conflicts During Push
+
+If `git push` fails due to upstream changes:
+
+1. Fetch and attempt rebase: `git fetch origin main && git rebase origin/main`.
+2. If rebase succeeds, push again.
+3. If rebase has conflicts, abort and fail the task:
+   ```bash
+   git rebase --abort
+   mac10 fail-task $WORKER_ID $TASK_ID "Push conflict: rebase failed with conflicts"
+   ```
+4. Do not force-push or reset the worktree.
+
+### Unresolvable Validation Failures
+
+If validation fails and you cannot fix the issue after two attempts:
+
+1. Do not run broad cleanup commands such as `git checkout -- .` or `git reset --hard`.
+2. If you can identify only your own edited files and there are no unrelated edits, restore just those files with `git restore -- <file...>`.
+3. Fail the task with the validation output:
+   ```bash
+   mac10 fail-task $WORKER_ID $TASK_ID "Validation failed after 2 fix attempts: [brief error summary]"
+   ```
+4. Include the failing command, dirty paths if any, and error so the rerouted task has context.
 
 ## Context Budget
 

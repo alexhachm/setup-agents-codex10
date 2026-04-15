@@ -2,7 +2,7 @@
 # take-dom-snapshot.sh — Platform visual testing: accessibility tree snapshot
 # Usage: bash scripts/take-dom-snapshot.sh <url>
 # Returns: accessibility tree JSON to stdout (~4k tokens, 10-50x cheaper than screenshots)
-# Works with any agent provider (Claude Code, Codex, etc.)
+# Works with the configured agent provider.
 set -euo pipefail
 
 URL="${1:?Usage: take-dom-snapshot.sh <url>}"

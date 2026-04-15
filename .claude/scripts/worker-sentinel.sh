@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # mac10 worker sentinel — runs in a tmux window.
-# Waits for tasks via mac10 inbox, syncs git, launches codex, resets on exit.
+# Waits for tasks via mac10 inbox, syncs git, launches the worker agent, resets on exit.
 set -euo pipefail
 export PATH="$HOME/bin:$HOME/.local/bin:$PATH"
 
@@ -32,37 +32,45 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # shellcheck disable=SC1091
 . "$SCRIPT_DIR/provider-utils.sh"
 
-# Ensure coordinator CLI is on PATH
+# Ensure coordinator CLI is on PATH.
+# Create namespace-aware shims that call the coordinator binary directly,
+# bypassing wrapper scripts in .claude/scripts/ that may hardcode a different
+# MAC10_NAMESPACE. The coordinator sets MAC10_NAMESPACE in the environment
+# when spawning this sentinel; the shims preserve it.
 export PATH="$PROJECT_DIR/.claude/scripts:$PATH"
-if [ "${MAC10_NAMESPACE:-}" = "codex10" ]; then
-  SHIM_DIR="$PROJECT_DIR/.claude/scripts/.codex10-shims"
-  mkdir -p "$SHIM_DIR"
-  cat > "$SHIM_DIR/mac10" << 'SHIM'
-#!/usr/bin/env bash
-set -euo pipefail
-PROJECT_SCRIPTS="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-if [ -x "$PROJECT_SCRIPTS/codex10" ]; then
-  exec "$PROJECT_SCRIPTS/codex10" "$@"
+
+# Resolve the coordinator binary path from an existing wrapper script
+MAC10_BIN=""
+if [ -f "$PROJECT_DIR/coordinator/bin/mac10" ]; then
+  MAC10_BIN="$PROJECT_DIR/coordinator/bin/mac10"
 fi
-if [ -x "$PROJECT_SCRIPTS/mac10-codex10" ]; then
-  exec "$PROJECT_SCRIPTS/mac10-codex10" "$@"
-fi
-echo "ERROR: codex10 wrapper missing in $PROJECT_SCRIPTS" >&2
-exit 1
-SHIM
-  chmod +x "$SHIM_DIR/mac10"
-  export PATH="$SHIM_DIR:$PATH"
-  if [ -x "$PROJECT_DIR/.claude/scripts/codex10" ]; then
-    MAC10_CMD="$PROJECT_DIR/.claude/scripts/codex10"
-  elif [ -x "$PROJECT_DIR/.claude/scripts/mac10-codex10" ]; then
-    MAC10_CMD="$PROJECT_DIR/.claude/scripts/mac10-codex10"
-  else
-    echo "[sentinel-$WORKER_ID] ERROR: Missing codex10 coordinator wrapper (.claude/scripts/codex10)" >&2
-    exit 1
+for _wrapper in "$PROJECT_DIR/.claude/scripts/mac10"; do
+  if [ -f "$_wrapper" ]; then
+    _candidate="$(grep -m1 '^MAC10_BIN=' "$_wrapper" 2>/dev/null | cut -d'"' -f2)"
+    if [ -n "$_candidate" ] && [ -f "$_candidate" ]; then
+      MAC10_BIN="$_candidate"
+      break
+    fi
   fi
-else
-  MAC10_CMD="mac10"
+done
+if [ -z "$MAC10_BIN" ]; then
+  # Fallback: derive from the harness repo structure
+  MAC10_BIN="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)/coordinator/bin/mac10"
 fi
+
+SHIM_DIR="$PROJECT_DIR/.claude/scripts/.ns-shims"
+mkdir -p "$SHIM_DIR"
+# Generate a shim that calls the coordinator binary directly with the correct namespace.
+for _shim_name in mac10; do
+  cat > "$SHIM_DIR/$_shim_name" << SHIM
+#!/usr/bin/env bash
+export MAC10_NAMESPACE="${MAC10_NAMESPACE}"
+exec node "${MAC10_BIN}" --project "${PROJECT_DIR}" "\$@"
+SHIM
+  chmod +x "$SHIM_DIR/$_shim_name"
+done
+export PATH="$SHIM_DIR:$PATH"
+MAC10_CMD="$SHIM_DIR/mac10"
 
 RESET_EXPECTED_TASK_ID=""
 RESET_EXPECTED_ASSIGNMENT_TOKEN=""
@@ -145,12 +153,21 @@ trap cleanup EXIT INT TERM
 echo "[sentinel-$WORKER_ID] Ready in $WORKTREE"
 
 launch_worker_agent() {
-  # Sync with latest main
-  git fetch origin 2>/dev/null || true
-  git rebase origin/main 2>/dev/null || {
-    git rebase --abort 2>/dev/null || true
-    echo "[sentinel-$WORKER_ID] skipping hard reset to preserve worktree state"
-  }
+  # Sync with latest main when possible. Preserve worker state on conflicts;
+  # worker-loop will report a task failure instead of the sentinel resetting it.
+  if git remote get-url origin >/dev/null 2>&1; then
+    git fetch origin 2>/dev/null || true
+    if git rev-parse --verify origin/main >/dev/null 2>&1; then
+      git rebase origin/main 2>/dev/null || {
+        git rebase --abort 2>/dev/null || true
+        echo "[sentinel-$WORKER_ID] sync failed; preserving worktree state"
+      }
+    else
+      echo "[sentinel-$WORKER_ID] origin/main unavailable; skipping sync"
+    fi
+  else
+    echo "[sentinel-$WORKER_ID] no origin remote; skipping sync"
+  fi
 
   # Reload provider config so provider/model changes in agent-launcher.env
   # take effect on next launch cycle without restarting the sentinel.
@@ -160,9 +177,6 @@ launch_worker_agent() {
 
   # Launch worker agent for one non-interactive worker-loop cycle.
   PROMPT_FILE="$WORKTREE/.claude/commands/worker-loop.md"
-  if [ -f "$PROJECT_DIR/.claude/commands-codex10/worker-loop.md" ]; then
-    PROMPT_FILE="$PROJECT_DIR/.claude/commands-codex10/worker-loop.md"
-  fi
   read_reset_context
   start_heartbeat_loop
   echo "[sentinel-$WORKER_ID] Launching ${AGENT_CLI} (provider=${MAC10_AGENT_PROVIDER} model=${WORKER_MODEL})..."

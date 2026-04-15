@@ -1,344 +1,51 @@
 'use strict';
 
-const { describe, it, beforeEach, afterEach } = require('node:test');
+const { describe, it, beforeEach, afterEach, mock } = require('node:test');
 const assert = require('node:assert');
 const path = require('path');
 const fs = require('fs');
-const os = require('os');
-const net = require('net');
-const http = require('http');
-const { execFile, execFileSync, spawn } = require('child_process');
 
 const db = require('../src/db');
 const cliServer = require('../src/cli-server');
-const webServer = require('../src/web-server');
+const knowledgeMeta = require('../src/knowledge-metadata');
+const { createCliTestHarness } = require('./helpers/cli-harness');
 
 let tmpDir;
 let server;
 let socketPath;
 let loopCreatedEvents;
-
-function waitForCliServerReady() {
-  return new Promise((resolve) => {
-    const check = () => {
-      const conn = net.createConnection(socketPath, () => {
-        conn.end();
-        resolve();
-      });
-      conn.on('error', () => setTimeout(check, 50));
-    };
-    setTimeout(check, 50);
-  });
-}
+const cliHarness = createCliTestHarness({ db, cliServer });
 
 beforeEach(async () => {
-  tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'mac10-cli-'));
-  fs.mkdirSync(path.join(tmpDir, '.claude', 'state'), { recursive: true });
-  db.init(tmpDir);
-  socketPath = cliServer.getSocketPath(tmpDir);
-  loopCreatedEvents = [];
-  server = cliServer.start(tmpDir, {
-    onTaskCompleted: () => {},
-    onLoopCreated: (loopId, prompt) => {
-      loopCreatedEvents.push({ loopId, prompt });
-    },
-  });
-  // Wait for server to be listening
-  await waitForCliServerReady();
+  const state = await cliHarness.start();
+  tmpDir = state.tmpDir;
+  server = state.server;
+  socketPath = state.socketPath;
+  loopCreatedEvents = state.loopCreatedEvents;
 });
 
 afterEach(() => {
-  cliServer.stop();
-  db.close();
-  fs.rmSync(tmpDir, { recursive: true, force: true });
+  cliHarness.stop();
 });
 
-function sendCommand(command, args) {
-  return new Promise((resolve, reject) => {
-    const conn = net.createConnection(socketPath, () => {
-      conn.write(JSON.stringify({ command, args }) + '\n');
-    });
-    let data = '';
-    conn.on('data', (chunk) => {
-      data += chunk.toString();
-      const idx = data.indexOf('\n');
-      if (idx >= 0) {
-        resolve(JSON.parse(data.slice(0, idx)));
-        conn.end();
-      }
-    });
-    conn.on('error', reject);
-    conn.setTimeout(5000, () => { conn.end(); reject(new Error('Timeout')); });
-  });
-}
-
-function listMailForRecipient(recipient) {
-  return db.getDb().prepare(`
-    SELECT id, type, payload, consumed
-    FROM mail
-    WHERE recipient = ?
-    ORDER BY id ASC
-  `).all(recipient).map((row) => {
-    let parsedPayload = null;
-    try {
-      parsedPayload = row.payload ? JSON.parse(row.payload) : null;
-    } catch {
-      parsedPayload = null;
-    }
-    return { ...row, payload: parsedPayload };
-  });
-}
-
-function getConsumedByMarker(recipient) {
-  return Object.fromEntries(
-    listMailForRecipient(recipient).map((row) => [row.payload && row.payload.marker, row.consumed])
-  );
-}
-
-function runMac10Command(args, cwd) {
-  return new Promise((resolve, reject) => {
-    execFile(
-      process.execPath,
-      [path.join(__dirname, '..', 'bin', 'mac10'), ...args],
-      {
-        cwd,
-        encoding: 'utf8',
-      },
-      (error, stdout, stderr) => {
-        if (error) {
-          error.stdout = stdout;
-          error.stderr = stderr;
-          reject(error);
-          return;
-        }
-        resolve({ stdout, stderr });
-      }
-    );
-  });
-}
-
-function requestWebJson(port, reqPath) {
-  return new Promise((resolve, reject) => {
-    const req = http.request({
-      host: '127.0.0.1',
-      port,
-      path: reqPath,
-      method: 'GET',
-    }, (res) => {
-      let data = '';
-      res.on('data', (chunk) => {
-        data += chunk.toString();
-      });
-      res.on('end', () => {
-        resolve({
-          status: res.statusCode,
-          body: data ? JSON.parse(data) : {},
-        });
-      });
-    });
-    req.on('error', reject);
-    req.end();
-  });
-}
-
-function runMac10Cli(args) {
-  const cliPath = path.join(__dirname, '..', 'bin', 'mac10');
-  return new Promise((resolve) => {
-    execFile(process.execPath, [cliPath, '--project', tmpDir, ...args], { encoding: 'utf8' }, (error, stdout, stderr) => {
-      resolve({
-        status: error ? (Number.isInteger(error.code) ? error.code : 1) : 0,
-        stdout,
-        stderr,
-      });
-    });
-  });
-}
-
-function runMac10CliWithStdin(args, stdinPayload) {
-  const cliPath = path.join(__dirname, '..', 'bin', 'mac10');
-  return new Promise((resolve) => {
-    const child = spawn(process.execPath, [cliPath, '--project', tmpDir, ...args], {
-      stdio: ['pipe', 'pipe', 'pipe'],
-    });
-    let stdout = '';
-    let stderr = '';
-    child.stdout.setEncoding('utf8');
-    child.stderr.setEncoding('utf8');
-    child.stdout.on('data', (chunk) => {
-      stdout += chunk;
-    });
-    child.stderr.on('data', (chunk) => {
-      stderr += chunk;
-    });
-    child.on('close', (code) => {
-      resolve({
-        status: Number.isInteger(code) ? code : 1,
-        stdout,
-        stderr,
-      });
-    });
-    child.stdin.end(stdinPayload);
-  });
-}
-
-function parseCliJsonOutput(rawOutput) {
-  const trimmed = String(rawOutput || '').trim();
-  if (!trimmed) return null;
-  return JSON.parse(trimmed);
-}
-
-function runGit(args, cwd = tmpDir) {
-  return execFileSync('git', args, {
-    cwd,
-    encoding: 'utf8',
-    stdio: ['ignore', 'pipe', 'pipe'],
-  }).trim();
-}
-
-function initStatusGitRepo({ divergeFromOriginMain = false, makeDirty = false } = {}) {
-  runGit(['init', '--initial-branch=main']);
-  runGit(['config', 'user.email', 'status-tests@example.com']);
-  runGit(['config', 'user.name', 'Status Tests']);
-
-  fs.writeFileSync(path.join(tmpDir, '.gitignore'), '.claude/\norigin.git/\n');
-  const trackedFile = path.join(tmpDir, 'status-telemetry.txt');
-  fs.writeFileSync(trackedFile, 'baseline\n');
-  runGit(['add', '.gitignore', 'status-telemetry.txt']);
-  runGit(['commit', '-m', 'initial status telemetry commit']);
-
-  const remotePath = path.join(tmpDir, 'origin.git');
-  runGit(['init', '--bare', remotePath]);
-  runGit(['remote', 'add', 'origin', remotePath]);
-  runGit(['push', '-u', 'origin', 'main']);
-
-  if (divergeFromOriginMain) {
-    fs.appendFileSync(trackedFile, 'local drift\n');
-    runGit(['add', 'status-telemetry.txt']);
-    runGit(['commit', '-m', 'local drift']);
-  }
-
-  if (makeDirty) {
-    fs.writeFileSync(path.join(tmpDir, 'dirty-status-file.txt'), 'dirty worktree\n');
-  }
-}
-
-async function setConfigValue(key, value) {
-  const result = await sendCommand('set-config', { key, value: String(value) });
-  assert.strictEqual(result.ok, true, `set-config should succeed for ${key}`);
-}
-
-function createReadyTask({
-  subject,
-  description,
-  priority = 'normal',
-  tier = 2,
-  domain = null,
-  files = null,
-  validation = null,
-}) {
-  const requestId = db.createRequest(`Req: ${subject}`);
-  const taskId = db.createTask({
-    request_id: requestId,
-    subject,
-    description,
-    domain,
-    files,
-    priority,
-    tier,
-    validation,
-  });
-  db.checkAndPromoteTasks();
-  return taskId;
-}
-
-function getAllocatorAssignmentDetails(taskId) {
-  const entries = db.getLog(200, 'allocator');
-  for (const entry of entries) {
-    if (entry.action !== 'task_assigned') continue;
-    let details = null;
-    try {
-      details = JSON.parse(entry.details);
-    } catch {
-      continue;
-    }
-    if (details && details.task_id === taskId) return details;
-  }
-  return null;
-}
-
-function getCoordinatorRequestQueuedEvents(requestId) {
-  const entries = db.getLog(500, 'coordinator');
-  return entries.filter((entry) => {
-    if (entry.action !== 'request_queued') return false;
-    try {
-      const details = JSON.parse(entry.details);
-      return details && details.request_id === requestId;
-    } catch {
-      return false;
-    }
-  });
-}
-
-function getWorkerTaskStartedEvents(workerId, taskId) {
-  const entries = db.getLog(200, `worker-${workerId}`);
-  const normalizedTaskId = taskId === undefined || taskId === null ? null : String(taskId);
-  return entries.filter((entry) => {
-    if (entry.action !== 'task_started') return false;
-    try {
-      const details = JSON.parse(entry.details);
-      if (!normalizedTaskId) return true;
-      return details && String(details.task_id) === normalizedTaskId;
-    } catch {
-      return false;
-    }
-  });
-}
-
-function getCoordinatorOwnershipMismatchEvents(command, workerId, taskId) {
-  const entries = db.getLog(500, 'coordinator');
-  const normalizedWorkerId = workerId === undefined || workerId === null ? null : String(workerId);
-  const normalizedTaskId = taskId === undefined || taskId === null ? null : String(taskId);
-  return entries.filter((entry) => {
-    if (entry.action !== 'ownership_mismatch') return false;
-    try {
-      const details = JSON.parse(entry.details);
-      if (!details || details.command !== command) return false;
-      if (normalizedWorkerId && String(details.worker_id) !== normalizedWorkerId) return false;
-      if (normalizedTaskId && String(details.task_id) !== normalizedTaskId) return false;
-      return true;
-    } catch {
-      return false;
-    }
-  });
-}
-
-function getWorkerResetEvents(workerId, action) {
-  const entries = db.getLog(500, `worker-${workerId}`);
-  return entries.filter((entry) => {
-    if (entry.action !== action) return false;
-    try {
-      JSON.parse(entry.details);
-      return true;
-    } catch {
-      return false;
-    }
-  });
-}
-
-function getCoordinatorRemediationRecoveryEvents(requestId, trigger = null) {
-  const entries = db.getLog(500, 'coordinator');
-  return entries
-    .filter((entry) => entry.action === 'request_reopened_for_active_remediation')
-    .map((entry) => {
-      try {
-        return { entry, details: JSON.parse(entry.details) };
-      } catch {
-        return null;
-      }
-    })
-    .filter((item) => item && item.details && item.details.request_id === requestId)
-    .filter((item) => !trigger || item.details.trigger === trigger);
-}
+const sendCommand = (...args) => cliHarness.sendCommand(...args);
+const waitForCliServerReady = (...args) => cliHarness.waitForCliServerReady(...args);
+const listMailForRecipient = (...args) => cliHarness.listMailForRecipient(...args);
+const getConsumedByMarker = (...args) => cliHarness.getConsumedByMarker(...args);
+const runMac10Command = (...args) => cliHarness.runMac10Command(...args);
+const runMac10Cli = (...args) => cliHarness.runMac10Cli(...args);
+const runMac10CliWithStdin = (...args) => cliHarness.runMac10CliWithStdin(...args);
+const parseCliJsonOutput = (...args) => cliHarness.parseCliJsonOutput(...args);
+const runGit = (...args) => cliHarness.runGit(...args);
+const initStatusGitRepo = (...args) => cliHarness.initStatusGitRepo(...args);
+const setConfigValue = (...args) => cliHarness.setConfigValue(...args);
+const createReadyTask = (...args) => cliHarness.createReadyTask(...args);
+const getAllocatorAssignmentDetails = (...args) => cliHarness.getAllocatorAssignmentDetails(...args);
+const getCoordinatorRequestQueuedEvents = (...args) => cliHarness.getCoordinatorRequestQueuedEvents(...args);
+const getWorkerTaskStartedEvents = (...args) => cliHarness.getWorkerTaskStartedEvents(...args);
+const getCoordinatorOwnershipMismatchEvents = (...args) => cliHarness.getCoordinatorOwnershipMismatchEvents(...args);
+const getWorkerResetEvents = (...args) => cliHarness.getWorkerResetEvents(...args);
+const getCoordinatorRemediationRecoveryEvents = (...args) => cliHarness.getCoordinatorRemediationRecoveryEvents(...args);
 
 describe('CLI Server', () => {
   it('should respond to ping', async () => {
@@ -355,6 +62,106 @@ describe('CLI Server', () => {
     assert.ok(typeof result.worker_count === 'number', 'worker_count should be a number');
     assert.ok(typeof result.idle_workers === 'number', 'idle_workers should be a number');
     assert.ok(typeof result.active_tasks === 'number', 'active_tasks should be a number');
+    assert.strictEqual(result.project_dir, tmpDir);
+    assert.ok(result.workers && typeof result.workers.total === 'number', 'workers summary should be present');
+    assert.ok(result.tasks && typeof result.tasks.active === 'number', 'tasks summary should be present');
+    assert.ok(result.isolation && Array.isArray(result.isolation.priority), 'isolation summary should be present');
+    assert.ok(result.runtime && result.runtime.research, 'runtime research summary should be present');
+  });
+
+  it('should serve bounded task context bundles', async () => {
+    const knowledgeDir = path.join(tmpDir, '.claude', 'knowledge');
+    fs.mkdirSync(path.join(knowledgeDir, 'codebase', 'domains'), { recursive: true });
+    fs.mkdirSync(path.join(knowledgeDir, 'research', 'topics', 'coordinator-core'), { recursive: true });
+    fs.writeFileSync(
+      path.join(knowledgeDir, 'codebase', 'domains', 'coordinator-core.md'),
+      '# Coordinator Core\n\nCoordinator core context from canonical knowledge.\n',
+      'utf8'
+    );
+    fs.writeFileSync(
+      path.join(knowledgeDir, 'mistakes.md'),
+      '# Known Pitfalls\n\nAvoid repeating coordinator startup failures.\n',
+      'utf8'
+    );
+    fs.writeFileSync(
+      path.join(knowledgeDir, 'research', 'topics', 'coordinator-core', '_rollup.md'),
+      '## Current Recommended Approach\n\nUse coordinator-owned state instead of direct file state.\n',
+      'utf8'
+    );
+
+    db.registerWorker(1, path.join(tmpDir, '.worktrees', 'wt-1'), 'agent-1');
+    const reqId = db.createRequest('Need a context bundle');
+    const taskId = db.createTask({
+      request_id: reqId,
+      subject: 'Build context bundle',
+      description: 'Return task context from coordinator state',
+      domain: 'coordinator-core',
+      files: ['coordinator/src/cli-server.js', 'coordinator/src/context-bundle.js'],
+      priority: 'high',
+      tier: 2,
+      validation: { test_cmd: 'node --test coordinator/tests/cli.test.js' },
+    });
+    db.updateTask(taskId, {
+      status: 'assigned',
+      assigned_to: 1,
+      overlap_with: JSON.stringify([99]),
+      routing_class: 'mid',
+      routed_model: 'sonnet',
+      model_source: 'test-router',
+    });
+    db.updateWorker(1, {
+      status: 'assigned',
+      current_task_id: taskId,
+      domain: 'coordinator-core',
+      launched_at: '2026-04-13T12:00:00.000Z',
+    });
+    const sandbox = db.createTaskSandbox({ task_id: taskId, worker_id: 1, backend: 'tmux' });
+    const failedTaskId = db.createTask({
+      request_id: reqId,
+      subject: 'Earlier failure',
+      description: 'Previous related failure',
+      domain: 'coordinator-core',
+      tier: 2,
+    });
+    db.updateTask(failedTaskId, {
+      status: 'failed',
+      result: 'Previous context bundle failure',
+    });
+    const mergeRow = db.enqueueMerge({
+      request_id: reqId,
+      task_id: failedTaskId,
+      pr_url: 'https://github.com/org/repo/pull/10',
+      branch: 'agent-1',
+    });
+    db.updateMerge(mergeRow.lastInsertRowid, { status: 'failed', error: 'merge failed' });
+
+    const result = await sendCommand('task-context', { task_id: taskId });
+    assert.strictEqual(result.ok, true);
+    const bundle = result.bundle;
+    assert.strictEqual(bundle.task.id, taskId);
+    assert.strictEqual(bundle.assignment.request.id, reqId);
+    assert.strictEqual(bundle.assignment.worker.id, 1);
+    assert.strictEqual(bundle.assignment.task_sandbox.id, sandbox.id);
+    assert.deepStrictEqual(bundle.safe_edit_files.explicit, [
+      'coordinator/src/cli-server.js',
+      'coordinator/src/context-bundle.js',
+    ]);
+    assert.deepStrictEqual(bundle.safe_edit_files.overlap_task_ids, [99]);
+    assert.deepStrictEqual(bundle.validation.explicit_commands, [
+      { label: 'test', command: 'node --test coordinator/tests/cli.test.js' },
+    ]);
+    assert.match(bundle.knowledge.domain.content, /Coordinator core context/);
+    assert.match(bundle.knowledge.research[0].content, /coordinator-owned state/);
+    assert.match(bundle.knowledge.known_pitfalls.content, /coordinator startup failures/);
+    assert.ok(bundle.recent_related_failures.tasks.some((task) => task.id === failedTaskId));
+    assert.ok(bundle.recent_related_failures.merges.some((merge) => merge.error === 'merge failed'));
+    assert.ok(bundle.runtime_health && bundle.runtime_health.runtime);
+
+    const cliResult = await runMac10Cli(['context-bundle', String(taskId)]);
+    assert.strictEqual(cliResult.status, 0, cliResult.stderr);
+    const cliBundle = parseCliJsonOutput(cliResult.stdout);
+    assert.strictEqual(cliBundle.task.id, taskId);
+    assert.strictEqual(cliBundle.assignment.task_sandbox.id, sandbox.id);
   });
 
   it('should default npm_config_if_present to true when unset', async () => {
@@ -426,13 +233,13 @@ describe('CLI Server', () => {
       '```',
       '',
       '## Step 1: Startup',
-      './.claude/scripts/codex10 inbox architect',
+      './.claude/scripts/mac10 inbox architect',
       '',
       '## Phase: Follow-Up Check',
       'sleep 15',
       '',
       '## Phase: Budget/Reset Exit',
-      './.claude/scripts/codex10 distill 2 "orchestration" "Full distillation"',
+      './.claude/scripts/mac10 distill 2 "orchestration" "Full distillation"',
     ].join('\n');
 
     const result = await sendCommand('request', { description: autonomousPromptPayload });
@@ -771,6 +578,190 @@ describe('CLI Server', () => {
     assert.strictEqual(completedTask.usage_cost_usd, null);
     assert.strictEqual(completedTask.usage_payload_json, null);
     assert.strictEqual(db.getWorker(1).status, 'completed_task');
+  });
+
+  it('should expose task sandbox lifecycle commands', async () => {
+    db.registerWorker(1, '/wt-1', 'agent-1');
+    const reqId = db.createRequest('Sandbox lifecycle command test');
+    const taskId = db.createTask({ request_id: reqId, subject: 'Sandboxed task', description: 'Track task sandbox state' });
+    db.updateTask(taskId, { status: 'assigned', assigned_to: 1, branch: 'agent-1-task-1' });
+
+    const created = await sendCommand('task-sandbox-create', {
+      task_id: taskId,
+      backend: 'docker',
+      metadata: { source: 'test' },
+    });
+    assert.strictEqual(created.ok, true);
+    assert.strictEqual(created.sandbox.task_id, taskId);
+    assert.strictEqual(created.sandbox.request_id, reqId);
+    assert.strictEqual(created.sandbox.worker_id, 1);
+    assert.strictEqual(created.sandbox.status, 'allocated');
+    assert.strictEqual(created.sandbox.backend, 'docker');
+    const sandboxId = created.sandbox.id;
+
+    const duplicate = await sendCommand('task-sandbox-create', {
+      task_id: taskId,
+      backend: 'docker',
+    });
+    assert.strictEqual(duplicate.ok, undefined);
+    assert.match(duplicate.error, /active_task_sandbox_exists/);
+
+    const ready = await sendCommand('task-sandbox-ready', {
+      id: sandboxId,
+      sandbox_path: '/tmp/task-sandbox',
+    });
+    assert.strictEqual(ready.ok, true);
+    assert.strictEqual(ready.sandbox.status, 'ready');
+    assert.strictEqual(ready.sandbox.sandbox_path, '/tmp/task-sandbox');
+
+    const running = await sendCommand('task-sandbox-start', { id: sandboxId });
+    assert.strictEqual(running.ok, true);
+    assert.strictEqual(running.sandbox.status, 'running');
+    assert.ok(running.sandbox.started_at);
+
+    const stopped = await sendCommand('task-sandbox-stop', { id: sandboxId, error: 'normal exit' });
+    assert.strictEqual(stopped.ok, true);
+    assert.strictEqual(stopped.sandbox.status, 'stopped');
+    assert.strictEqual(stopped.sandbox.error, 'normal exit');
+
+    const status = await sendCommand('task-sandbox-status', { task_id: taskId });
+    assert.strictEqual(status.ok, true);
+    assert.strictEqual(status.count, 1);
+    assert.strictEqual(status.sandboxes[0].id, sandboxId);
+
+    const cleaned = await sendCommand('task-sandbox-clean', { id: sandboxId });
+    assert.strictEqual(cleaned.ok, true);
+    assert.strictEqual(cleaned.sandbox.status, 'cleaned');
+    assert.ok(cleaned.sandbox.cleaned_at);
+  });
+
+  it('should expose dry-run capable task sandbox cleanup', async () => {
+    const reqId = db.createRequest('Sandbox cleanup command test');
+    const taskId = db.createTask({ request_id: reqId, subject: 'Sandbox cleanup', description: 'Clean stale sandbox' });
+    const sandbox = db.createTaskSandbox({ task_id: taskId });
+    db.transitionTaskSandbox(sandbox.id, 'running');
+    db.transitionTaskSandbox(sandbox.id, 'stopped');
+
+    const oldTs = '2026-01-01T00:00:00.000Z';
+    db.getDb().prepare(`
+      UPDATE task_sandboxes
+      SET stopped_at = ?, updated_at = ?
+      WHERE id = ?
+    `).run(oldTs, oldTs, sandbox.id);
+
+    const dryRun = await sendCommand('task-sandbox-cleanup', {
+      max_age_minutes: 60,
+      dry_run: true,
+    });
+    assert.strictEqual(dryRun.ok, true);
+    assert.strictEqual(dryRun.dry_run, true);
+    assert.strictEqual(dryRun.cleaned_count, 0);
+    assert.deepStrictEqual(dryRun.ids, [sandbox.id]);
+    assert.strictEqual(db.getTaskSandbox(sandbox.id).status, 'stopped');
+
+    const cleanup = await sendCommand('task-sandbox-cleanup', {
+      max_age_minutes: 60,
+    });
+    assert.strictEqual(cleanup.ok, true);
+    assert.strictEqual(cleanup.cleaned_count, 1);
+    assert.deepStrictEqual(cleanup.ids, [sandbox.id]);
+    assert.strictEqual(db.getTaskSandbox(sandbox.id).status, 'cleaned');
+  });
+
+  it('should expose Docker provider smoke through RPC', async () => {
+    const childProcess = require('child_process');
+    delete require.cache[require.resolve('../src/sandbox-manager')];
+    const execMock = mock.method(childProcess, 'execFileSync', (cmd, args) => {
+      if (cmd === 'docker' && args[0] === 'info') return '';
+      if (cmd === 'docker' && args[0] === 'images') return 'mac10-worker:latest\n';
+      if (cmd === 'docker' && args[0] === 'run') {
+        return [
+          'provider=claude',
+          'cli=claude',
+          'cli_available=true',
+          'auth_check=pass',
+          'noninteractive_launch=dry_run_pass',
+          'noninteractive_exec=skipped',
+          'provider_smoke=pass',
+        ].join('\n');
+      }
+      return '';
+    });
+
+    try {
+      const result = await sendCommand('sandbox-provider-smoke', {
+        provider: 'claude',
+        build: false,
+      });
+      assert.strictEqual(result.ok, true);
+      assert.strictEqual(result.provider, 'claude');
+      assert.strictEqual(result.parsed.auth_check, 'pass');
+      assert.strictEqual(result.parsed.noninteractive_launch, 'dry_run_pass');
+    } finally {
+      execMock.mock.restore();
+      delete require.cache[require.resolve('../src/sandbox-manager')];
+    }
+  });
+
+  it('should create worker worktree without copying runtime provider state', async () => {
+    runGit(['init', '--initial-branch=main']);
+    runGit(['config', 'user.email', 'add-worker@example.com']);
+    runGit(['config', 'user.name', 'Add Worker Test']);
+    fs.writeFileSync(
+      path.join(tmpDir, '.gitignore'),
+      '.worktrees/\n.claude/state/\n.claude/logs/\n.claude/signals/\n'
+    );
+    fs.writeFileSync(path.join(tmpDir, 'README.md'), 'baseline\n');
+    runGit(['add', '.gitignore', 'README.md']);
+    runGit(['commit', '-m', 'initial commit']);
+
+    const sourceFiles = {
+      '.claude/commands/worker-loop.md': '# Worker Loop\n',
+      '.claude/knowledge/mistakes.md': '# Mistakes\n',
+      '.claude/knowledge/domain/coordinator.md': '# Coordinator\n',
+      '.claude/scripts/mac10': '#!/usr/bin/env bash\n',
+      '.claude/agents/worker.md': '# Worker Agent\n',
+      '.claude/hooks/pre-tool.sh': '#!/usr/bin/env bash\n',
+      '.claude/settings.json': '{ "hooks": {} }\n',
+      '.claude/worker-claude.md': '# Worker Claude\n',
+      '.claude/worker-agents.md': '# Worker Agents\n',
+    };
+    for (const [relativePath, content] of Object.entries(sourceFiles)) {
+      const filePath = path.join(tmpDir, relativePath);
+      fs.mkdirSync(path.dirname(filePath), { recursive: true });
+      fs.writeFileSync(filePath, content);
+    }
+
+    const runtimeFiles = [
+      '.claude/state/agent-launcher.env',
+      '.claude/logs/research-driver.log',
+      '.claude/signals/.mac10.restart-signal',
+    ];
+    for (const relativePath of runtimeFiles) {
+      const filePath = path.join(tmpDir, relativePath);
+      fs.mkdirSync(path.dirname(filePath), { recursive: true });
+      fs.writeFileSync(filePath, 'runtime\n');
+    }
+
+    db.setConfig('project_dir', tmpDir);
+    db.setConfig('primary_branch', 'main');
+
+    const result = await sendCommand('add-worker', {});
+    assert.strictEqual(result.ok, true, result.error);
+    assert.strictEqual(result.worker_id, 1);
+
+    const worktreePath = result.worktree_path;
+    assert.ok(fs.existsSync(path.join(worktreePath, '.claude', 'commands', 'worker-loop.md')));
+    assert.ok(fs.existsSync(path.join(worktreePath, '.claude', 'knowledge', 'mistakes.md')));
+    assert.ok(fs.existsSync(path.join(worktreePath, '.claude', 'knowledge', 'domain', 'coordinator.md')));
+    assert.ok(fs.existsSync(path.join(worktreePath, 'CLAUDE.md')));
+    assert.ok(fs.existsSync(path.join(worktreePath, 'AGENTS.md')));
+    assert.strictEqual(fs.readFileSync(path.join(worktreePath, 'AGENTS.md'), 'utf8'), '# Worker Agents\n');
+    assert.strictEqual(fs.readFileSync(path.join(worktreePath, 'CLAUDE.md'), 'utf8'), '# Worker Agents\n');
+    assert.strictEqual(fs.existsSync(path.join(worktreePath, '.claude', 'state')), false);
+    assert.strictEqual(fs.existsSync(path.join(worktreePath, '.claude', 'logs')), false);
+    assert.strictEqual(fs.existsSync(path.join(worktreePath, '.claude', 'signals')), false);
+    assert.strictEqual(db.getWorker(1).worktree_path, worktreePath);
   });
 
   it('should orchestrate browser research lifecycle with idempotent command replays', async () => {
@@ -1193,7 +1184,7 @@ describe('CLI Server', () => {
     db.updateWorker(1, { status: 'assigned', current_task_id: taskId });
 
     const usage = {
-      model: '  gpt-5-codex  ',
+      model: '  claude-sonnet  ',
       input_tokens: 1200,
       output_tokens: 345,
       input_audio_tokens: 45,
@@ -1219,7 +1210,7 @@ describe('CLI Server', () => {
 
     const completedTask = db.getTask(taskId);
     assert.strictEqual(completedTask.status, 'completed');
-    assert.strictEqual(completedTask.usage_model, 'gpt-5-codex');
+    assert.strictEqual(completedTask.usage_model, 'claude-sonnet');
     assert.strictEqual(completedTask.usage_input_tokens, usage.input_tokens);
     assert.strictEqual(completedTask.usage_output_tokens, usage.output_tokens);
     assert.strictEqual(completedTask.usage_input_audio_tokens, usage.input_audio_tokens);
@@ -1232,7 +1223,7 @@ describe('CLI Server', () => {
     assert.strictEqual(completedTask.usage_total_tokens, usage.total_tokens);
     assert.strictEqual(completedTask.usage_cost_usd, usage.cost_usd);
     assert.deepStrictEqual(JSON.parse(completedTask.usage_payload_json), {
-      model: 'gpt-5-codex',
+      model: 'claude-sonnet',
       input_tokens: usage.input_tokens,
       output_tokens: usage.output_tokens,
       input_audio_tokens: usage.input_audio_tokens,
@@ -1329,6 +1320,68 @@ describe('CLI Server', () => {
     assert.strictEqual(getCoordinatorOwnershipMismatchEvents('complete-task', 1, taskId).length, 0);
   });
 
+  it('should not recover or enqueue a merge from branch when complete-task has no PR URL', async () => {
+    db.registerWorker(1, '/wt-1', 'agent-1');
+    const reqId = db.createRequest('No PR branch fallback guard');
+    const taskId = db.createTask({ request_id: reqId, subject: 'No PR', description: 'Complete without a PR' });
+    db.updateTask(taskId, { status: 'in_progress', assigned_to: 1, branch: null, pr_url: null });
+    db.updateWorker(1, { status: 'busy', current_task_id: taskId, tasks_completed: 0 });
+
+    const result = await sendCommand('complete-task', {
+      worker_id: '1',
+      task_id: String(taskId),
+      branch: 'agent-1',
+      result: 'No PR was opened',
+    });
+    assert.strictEqual(result.ok, true);
+
+    const task = db.getTask(taskId);
+    assert.strictEqual(task.status, 'completed');
+    assert.strictEqual(task.pr_url, null);
+    assert.strictEqual(task.branch, 'agent-1');
+    assert.strictEqual(db.getWorker(1).tasks_completed, 1);
+
+    const mergeRows = db.getDb().prepare('SELECT * FROM merge_queue WHERE task_id = ?').all(taskId);
+    assert.strictEqual(mergeRows.length, 0);
+    const skipEvents = db.getLog(100, 'coordinator').filter((entry) => entry.action === 'complete_task_merge_skipped_no_pr');
+    assert.strictEqual(skipEvents.length, 1);
+  });
+
+  it('should skip duplicate complete-task calls after a task is already terminal', async () => {
+    db.registerWorker(1, '/wt-1', 'agent-1');
+    const reqId = db.createRequest('Duplicate completion guard');
+    const taskId = db.createTask({ request_id: reqId, subject: 'Idempotent completion', description: 'Complete once only' });
+    db.updateTask(taskId, { status: 'in_progress', assigned_to: 1 });
+    db.updateWorker(1, { status: 'busy', current_task_id: taskId, tasks_completed: 0 });
+
+    const first = await sendCommand('complete-task', {
+      worker_id: '1',
+      task_id: String(taskId),
+      result: 'First completion',
+    });
+    assert.strictEqual(first.ok, true);
+    const completedAt = db.getTask(taskId).completed_at;
+    assert.ok(completedAt);
+    assert.strictEqual(db.getWorker(1).tasks_completed, 1);
+    assert.strictEqual(listMailForRecipient('allocator').filter((mail) => mail.type === 'task_completed').length, 1);
+
+    const second = await sendCommand('complete-task', {
+      worker_id: '1',
+      task_id: String(taskId),
+      result: 'Late duplicate completion',
+    });
+    assert.strictEqual(second.ok, true);
+    assert.strictEqual(second.skipped, true);
+    assert.strictEqual(second.reason, 'duplicate_terminal_completion');
+
+    const task = db.getTask(taskId);
+    assert.strictEqual(task.status, 'completed');
+    assert.strictEqual(task.result, 'First completion');
+    assert.strictEqual(task.completed_at, completedAt);
+    assert.strictEqual(db.getWorker(1).tasks_completed, 1);
+    assert.strictEqual(listMailForRecipient('allocator').filter((mail) => mail.type === 'task_completed').length, 1);
+  });
+
   it('should reject fail-task when task is assigned to another worker and preserve ownership state', async () => {
     db.registerWorker(1, '/wt-1', 'agent-1');
     db.registerWorker(2, '/wt-2', 'agent-2');
@@ -1411,6 +1464,53 @@ describe('CLI Server', () => {
     assert.strictEqual(failedTaskAfter.result, null);
   });
 
+  it('should reroute blocking tasks on failure by creating a fix task', async () => {
+    db.registerWorker(1, '/wt-1', 'agent-1');
+    const reqId = db.createRequest('Blocking reroute test');
+    const taskId = db.createTask({ request_id: reqId, subject: 'Critical feature', description: 'Must complete', domain: 'core' });
+    db.updateTask(taskId, { status: 'in_progress', assigned_to: 1 });
+    db.updateWorker(1, { status: 'busy', current_task_id: taskId });
+
+    const result = await sendCommand('fail-task', {
+      worker_id: '1',
+      task_id: String(taskId),
+      error: 'Build failed due to missing dependency',
+    });
+    assert.strictEqual(result.ok, true);
+    assert.ok(result.reroute_task_id, 'should return reroute task id');
+
+    const failedTask = db.getTask(taskId);
+    assert.strictEqual(failedTask.status, 'failed_needs_reroute', 'blocking task should be failed_needs_reroute');
+
+    const fixTask = db.getTask(result.reroute_task_id);
+    assert.ok(fixTask, 'fix task should exist');
+    assert.strictEqual(fixTask.request_id, reqId);
+    assert.strictEqual(fixTask.status, 'ready');
+    assert.strictEqual(fixTask.domain, 'core');
+    assert.strictEqual(fixTask.priority, 'urgent');
+    assert.ok(fixTask.subject.startsWith('[fix]'));
+    assert.ok(fixTask.description.includes('Build failed due to missing dependency'));
+  });
+
+  it('should not reroute non-blocking tasks on failure', async () => {
+    db.registerWorker(1, '/wt-1', 'agent-1');
+    const reqId = db.createRequest('Non-blocking fail test');
+    const taskId = db.createTask({ request_id: reqId, subject: 'Optional cleanup', description: 'Nice to have' });
+    db.updateTask(taskId, { status: 'in_progress', assigned_to: 1, blocking: 0 });
+    db.updateWorker(1, { status: 'busy', current_task_id: taskId });
+
+    const result = await sendCommand('fail-task', {
+      worker_id: '1',
+      task_id: String(taskId),
+      error: 'Could not clean up',
+    });
+    assert.strictEqual(result.ok, true);
+    assert.strictEqual(result.reroute_task_id, null, 'non-blocking should not reroute');
+
+    const failedTask = db.getTask(taskId);
+    assert.strictEqual(failedTask.status, 'failed', 'non-blocking task stays plain failed');
+  });
+
   it('should persist and propagate identical usage values for canonical, Anthropic alias, and OpenAI alias fail-task payloads', async () => {
     db.registerWorker(1, '/wt-1', 'agent-1');
     db.registerWorker(2, '/wt-2', 'agent-2');
@@ -1419,15 +1519,15 @@ describe('CLI Server', () => {
     const canonicalTaskId = db.createTask({ request_id: reqId, subject: 'Canonical fail', description: 'Canonical fail-task usage payload' });
     const anthropicAliasTaskId = db.createTask({ request_id: reqId, subject: 'Anthropic alias fail', description: 'Anthropic fail-task usage payload' });
     const openAiAliasTaskId = db.createTask({ request_id: reqId, subject: 'OpenAI alias fail', description: 'OpenAI fail-task usage payload' });
-    db.updateTask(canonicalTaskId, { status: 'assigned', assigned_to: 1 });
-    db.updateTask(anthropicAliasTaskId, { status: 'assigned', assigned_to: 2 });
-    db.updateTask(openAiAliasTaskId, { status: 'assigned', assigned_to: 3 });
+    db.updateTask(canonicalTaskId, { status: 'assigned', assigned_to: 1, blocking: 0 });
+    db.updateTask(anthropicAliasTaskId, { status: 'assigned', assigned_to: 2, blocking: 0 });
+    db.updateTask(openAiAliasTaskId, { status: 'assigned', assigned_to: 3, blocking: 0 });
     db.updateWorker(1, { status: 'assigned', current_task_id: canonicalTaskId });
     db.updateWorker(2, { status: 'assigned', current_task_id: anthropicAliasTaskId });
     db.updateWorker(3, { status: 'assigned', current_task_id: openAiAliasTaskId });
 
     const canonicalUsage = {
-      model: '  gpt-5-codex  ',
+      model: '  claude-sonnet  ',
       input_tokens: 1200,
       output_tokens: 345,
       input_audio_tokens: 45,
@@ -1441,7 +1541,7 @@ describe('CLI Server', () => {
       cost_usd: 0.0456,
     };
     const anthropicAliasUsage = {
-      model: 'gpt-5-codex',
+      model: 'claude-sonnet',
       input_tokens: 1200,
       output_tokens: 345,
       input_audio_tokens: 45,
@@ -1455,7 +1555,7 @@ describe('CLI Server', () => {
       cost_usd: 0.0456,
     };
     const openAiAliasUsage = {
-      model: 'gpt-5-codex',
+      model: 'claude-sonnet',
       prompt_tokens: 1200,
       completion_tokens: 345,
       input_tokens_details: { cached_tokens: 67, audio_tokens: 45 },
@@ -1529,7 +1629,7 @@ describe('CLI Server', () => {
     }
 
     const expectedUsage = {
-      model: 'gpt-5-codex',
+      model: 'claude-sonnet',
       input_tokens: 1200,
       output_tokens: 345,
       input_audio_tokens: 45,
@@ -1580,11 +1680,11 @@ describe('CLI Server', () => {
     db.registerWorker(1, '/wt-1', 'agent-1');
     const reqId = db.createRequest('Fail-task usage forward compatibility');
     const taskId = db.createTask({ request_id: reqId, subject: 'Fail unknown key', description: 'Should accept unknown fail-task usage keys' });
-    db.updateTask(taskId, { status: 'assigned', assigned_to: 1 });
+    db.updateTask(taskId, { status: 'assigned', assigned_to: 1, blocking: 0 });
     db.updateWorker(1, { status: 'assigned', current_task_id: taskId });
 
     const usage = {
-      model: 'gpt-5-codex',
+      model: 'claude-sonnet',
       input_tokens: 123,
       output_tokens: 45,
       cache_creation_input_tokens: 11,
@@ -1724,7 +1824,7 @@ describe('CLI Server', () => {
     db.updateWorker(3, { status: 'assigned', current_task_id: openAiAliasTaskId });
 
     const canonicalUsage = {
-      model: 'gpt-5-codex',
+      model: 'claude-sonnet',
       input_tokens: 1200,
       output_tokens: 345,
       input_audio_tokens: 45,
@@ -1738,7 +1838,7 @@ describe('CLI Server', () => {
       cost_usd: 0.0456,
     };
     const anthropicAliasUsage = {
-      model: 'gpt-5-codex',
+      model: 'claude-sonnet',
       input_tokens: 1200,
       output_tokens: 345,
       input_audio_tokens: 45,
@@ -1752,7 +1852,7 @@ describe('CLI Server', () => {
       cost_usd: 0.0456,
     };
     const openAiAliasUsage = {
-      model: 'gpt-5-codex',
+      model: 'claude-sonnet',
       prompt_tokens: 1200,
       completion_tokens: 345,
       input_tokens_details: { cached_tokens: 67, audio_tokens: 45 },
@@ -1830,19 +1930,19 @@ describe('CLI Server', () => {
     const completeTaskId = db.createTask({ request_id: reqId, subject: 'Complete cache object', description: 'Complete-task usage cache object alias payload' });
     const failTaskId = db.createTask({ request_id: reqId, subject: 'Fail cache object', description: 'Fail-task usage cache object alias payload' });
     db.updateTask(completeTaskId, { status: 'assigned', assigned_to: 1 });
-    db.updateTask(failTaskId, { status: 'assigned', assigned_to: 2 });
+    db.updateTask(failTaskId, { status: 'assigned', assigned_to: 2, blocking: 0 });
     db.updateWorker(1, { status: 'assigned', current_task_id: completeTaskId });
     db.updateWorker(2, { status: 'assigned', current_task_id: failTaskId });
 
     const completeUsage = {
-      model: 'gpt-5-codex',
+      model: 'claude-sonnet',
       cache_creation: {
         ephemeral_5m_input_tokens: 12,
         ephemeral_1h_input_tokens: 33,
       },
     };
     const failUsage = {
-      model: 'gpt-5-codex',
+      model: 'claude-sonnet',
       cache_creation: {
         ephemeral_5m_input_tokens: 9,
       },
@@ -1883,13 +1983,13 @@ describe('CLI Server', () => {
     const expectedTaskIds = new Set([completeTaskId, failTaskId].map((taskId) => String(taskId)));
     const expectedUsageByTaskId = new Map([
       [String(completeTaskId), {
-        model: 'gpt-5-codex',
+        model: 'claude-sonnet',
         ephemeral_5m_input_tokens: 12,
         ephemeral_1h_input_tokens: 33,
         cache_creation_tokens: 45,
       }],
       [String(failTaskId), {
-        model: 'gpt-5-codex',
+        model: 'claude-sonnet',
         ephemeral_5m_input_tokens: 9,
         cache_creation_tokens: 9,
       }],
@@ -1912,12 +2012,12 @@ describe('CLI Server', () => {
     const completeTaskId = db.createTask({ request_id: reqId, subject: 'Complete nested usage details', description: 'Preserve unknown nested usage detail keys on complete-task' });
     const failTaskId = db.createTask({ request_id: reqId, subject: 'Fail nested usage details', description: 'Preserve unknown nested usage detail keys on fail-task' });
     db.updateTask(completeTaskId, { status: 'assigned', assigned_to: 1 });
-    db.updateTask(failTaskId, { status: 'assigned', assigned_to: 2 });
+    db.updateTask(failTaskId, { status: 'assigned', assigned_to: 2, blocking: 0 });
     db.updateWorker(1, { status: 'assigned', current_task_id: completeTaskId });
     db.updateWorker(2, { status: 'assigned', current_task_id: failTaskId });
 
     const completeUsage = {
-      model: 'gpt-5-codex',
+      model: 'claude-sonnet',
       prompt_tokens: 120,
       completion_tokens: 30,
       input_tokens_details: { cached_tokens: 50, audio_tokens: 11, provider_cached_bonus_tokens: 7 },
@@ -1939,7 +2039,7 @@ describe('CLI Server', () => {
       cost_usd: 0.015,
     };
     const failUsage = {
-      model: 'gpt-5-codex',
+      model: 'claude-sonnet',
       prompt_tokens: 95,
       completion_tokens: 22,
       input_tokens_details: { cached_tokens: 33, audio_tokens: 10, input_detail_extra_tokens: 4 },
@@ -2095,7 +2195,7 @@ describe('CLI Server', () => {
     db.updateWorker(1, { status: 'assigned', current_task_id: taskId });
 
     const usage = {
-      model: 'gpt-5-codex',
+      model: 'claude-sonnet',
       prompt_tokens: 144,
       completion_tokens: 55,
       cache_creation_input_tokens: 13,
@@ -2403,6 +2503,8 @@ describe('CLI Server', () => {
     assert.strictEqual(completion.total, 2);
     assert.strictEqual(completion.completed, 1);
     assert.strictEqual(completion.failed, 1);
+    assert.strictEqual(completion.hard_failures, 1);
+    assert.strictEqual(completion.all_terminal, true);
     assert.strictEqual(completion.all_completed, false);
     assert.strictEqual(completion.all_done, false);
 
@@ -2412,6 +2514,8 @@ describe('CLI Server', () => {
     assert.strictEqual(integrate.total, 2);
     assert.strictEqual(integrate.completed, 1);
     assert.strictEqual(integrate.failed, 1);
+    assert.strictEqual(integrate.hard_failures, 1);
+    assert.strictEqual(integrate.all_terminal, true);
     assert.strictEqual(integrate.all_completed, false);
     assert.strictEqual(integrate.all_done, false);
 
@@ -2821,11 +2925,14 @@ describe('CLI Server', () => {
     assert.strictEqual(promptResult.status, 'paused');
     assert.strictEqual(promptResult.iteration_count, 4);
     assert.strictEqual(promptResult.last_checkpoint, 'checkpoint-before-update');
+    assert.strictEqual(promptResult.loop_sync_with_origin, true);
   });
 
   it('should refresh active loop prompt and return refreshed prompt via loop-prompt', async () => {
     const created = await sendCommand('loop', { prompt: 'Refresh prompt baseline' });
     assert.strictEqual(created.ok, true);
+    const syncConfig = await sendCommand('set-config', { key: 'loop_sync_with_origin', value: 'false' });
+    assert.strictEqual(syncConfig.ok, true);
 
     db.updateLoop(created.loop_id, {
       status: 'active',
@@ -2844,6 +2951,7 @@ describe('CLI Server', () => {
     assert.strictEqual(refreshed.status, 'active');
     assert.strictEqual(refreshed.iteration_count, 6);
     assert.strictEqual(refreshed.last_checkpoint, 'checkpoint-before-refresh');
+    assert.strictEqual(refreshed.loop_sync_with_origin, false);
   });
 
   it('should reject loop-refresh-prompt for missing loop and invalid loop_id input', async () => {
@@ -3035,6 +3143,7 @@ describe('CLI Server', () => {
 
   it('should allow loop request quality and rate config keys via set-config', async () => {
     const updates = [
+      ['loop_sync_with_origin', 'FALSE', 'false'],
       ['loop_request_quality_gate', 'FALSE', 'false'],
       ['loop_request_min_description_chars', ' 220 ', '220'],
       ['loop_request_min_interval_sec', '900', '900'],
@@ -3053,6 +3162,7 @@ describe('CLI Server', () => {
 
   it('should reject out-of-range loop request config values in set-config', async () => {
     const baseline = [
+      ['loop_sync_with_origin', 'true'],
       ['loop_request_quality_gate', 'true'],
       ['loop_request_min_description_chars', '220'],
       ['loop_request_min_interval_sec', '600'],
@@ -3066,6 +3176,7 @@ describe('CLI Server', () => {
     }
 
     const invalidUpdates = [
+      ['loop_sync_with_origin', 'sometimes', /expected true or false/],
       ['loop_request_quality_gate', 'sometimes', /expected true or false/],
       ['loop_request_min_description_chars', '79', /between 80 and 5000/],
       ['loop_request_min_interval_sec', '86401', /between 0 and 86400/],
@@ -3079,6 +3190,7 @@ describe('CLI Server', () => {
       assert.match(result.error, expectedError);
     }
 
+    assert.strictEqual(db.getConfig('loop_sync_with_origin'), 'true');
     assert.strictEqual(db.getConfig('loop_request_quality_gate'), 'true');
     assert.strictEqual(db.getConfig('loop_request_min_description_chars'), '220');
     assert.strictEqual(db.getConfig('loop_request_min_interval_sec'), '600');
@@ -3314,6 +3426,40 @@ describe('CLI Server', () => {
     assert.ok(withMergeRecoveryEvents[0].details.merge_queue_entries >= 1);
   });
 
+  it('should allocate a task sandbox during assign-task and pass it to the spawn handler', async () => {
+    db.registerWorker(1, '/wt-1', 'agent-1');
+    const taskId = createReadyTask({
+      subject: 'Sandbox assignment lifecycle',
+      description: 'Assign with lifecycle state',
+      tier: 2,
+    });
+    let handlerSandbox = null;
+
+    cliServer.stop();
+    server = cliServer.start(tmpDir, {
+      onTaskCompleted: () => {},
+      onLoopCreated: (loopId, prompt) => {
+        loopCreatedEvents.push({ loopId, prompt });
+      },
+      onAssignTask: (_task, _worker, _routingDecision, taskSandbox) => {
+        handlerSandbox = taskSandbox;
+        db.transitionTaskSandbox(taskSandbox.id, 'running', { backend: 'tmux' });
+      },
+    });
+    await waitForCliServerReady();
+
+    const assignment = await sendCommand('assign-task', { task_id: taskId, worker_id: 1 });
+    assert.strictEqual(assignment.ok, true);
+    assert.ok(assignment.task_sandbox_id);
+    assert.strictEqual(handlerSandbox.id, assignment.task_sandbox_id);
+
+    const sandbox = db.getTaskSandbox(assignment.task_sandbox_id);
+    assert.strictEqual(sandbox.task_id, taskId);
+    assert.strictEqual(sandbox.worker_id, 1);
+    assert.strictEqual(sandbox.backend, 'tmux');
+    assert.strictEqual(sandbox.status, 'running');
+  });
+
   it('should default npm_config_if_present during server start when unset', async () => {
     const env = process.env;
     const hadKey = Object.prototype.hasOwnProperty.call(env, 'npm_config_if_present');
@@ -3412,6 +3558,11 @@ describe('CLI Server', () => {
     assert.ok(worker);
     assert.strictEqual(worker.status, 'idle');
     assert.strictEqual(worker.current_task_id, null);
+
+    const sandboxes = db.listTaskSandboxes({ task_id: taskId });
+    assert.strictEqual(sandboxes.length, 1);
+    assert.strictEqual(sandboxes[0].status, 'failed');
+    assert.match(sandboxes[0].error, /spawn failed for rollback regression/);
   });
 
   it('should preserve claim metadata and return worker_claimed on assign-task rollback path', async () => {
@@ -3501,11 +3652,10 @@ describe('CLI Server', () => {
     assert.strictEqual(sparkAssignmentLog.model_source, 'config-fallback');
   });
 
-  it('should prefer model_codex_spark for spark routing when both spark aliases are set', async () => {
+  it('should use model_spark for spark routing', async () => {
     db.registerWorker(1, '/wt-1', 'agent-1');
 
-    db.setConfig('model_spark', 'spark-legacy-model');
-    db.setConfig('model_codex_spark', 'spark-codex-model');
+    db.setConfig('model_spark', 'spark-model');
 
     const sparkTaskId = createReadyTask({
       subject: 'Minor cleanup',
@@ -3516,20 +3666,19 @@ describe('CLI Server', () => {
 
     const sparkAssignment = await sendCommand('assign-task', { task_id: sparkTaskId, worker_id: 1 });
     assert.strictEqual(sparkAssignment.ok, true);
-    assert.strictEqual(sparkAssignment.routing.model, 'spark-codex-model');
+    assert.strictEqual(sparkAssignment.routing.model, 'spark-model');
     assert.strictEqual(sparkAssignment.routing.model_source, 'config-fallback');
 
     const sparkAssignmentLog = getAllocatorAssignmentDetails(sparkTaskId);
     assert.ok(sparkAssignmentLog);
-    assert.strictEqual(sparkAssignmentLog.model, 'spark-codex-model');
+    assert.strictEqual(sparkAssignmentLog.model, 'spark-model');
     assert.strictEqual(sparkAssignmentLog.model_source, 'config-fallback');
   });
 
-  it('should remain compatible with model_spark when model_codex_spark is unset', async () => {
+  it('should fall back to the default spark model when model_spark is unset', async () => {
     db.registerWorker(1, '/wt-1', 'agent-1');
 
-    db.setConfig('model_codex_spark', '');
-    db.setConfig('model_spark', 'spark-legacy-model');
+    db.setConfig('model_spark', '');
 
     const sparkTaskId = createReadyTask({
       subject: 'Minor cleanup',
@@ -3540,48 +3689,31 @@ describe('CLI Server', () => {
 
     const sparkAssignment = await sendCommand('assign-task', { task_id: sparkTaskId, worker_id: 1 });
     assert.strictEqual(sparkAssignment.ok, true);
-    assert.strictEqual(sparkAssignment.routing.model, 'spark-legacy-model');
-    assert.strictEqual(sparkAssignment.routing.model_source, 'config-fallback');
+    assert.strictEqual(sparkAssignment.routing.model, 'haiku');
+    assert.strictEqual(sparkAssignment.routing.model_source, 'fallback-default');
 
     const sparkAssignmentLog = getAllocatorAssignmentDetails(sparkTaskId);
     assert.ok(sparkAssignmentLog);
-    assert.strictEqual(sparkAssignmentLog.model, 'spark-legacy-model');
-    assert.strictEqual(sparkAssignmentLog.model_source, 'config-fallback');
+    assert.strictEqual(sparkAssignmentLog.model, 'haiku');
+    assert.strictEqual(sparkAssignmentLog.model_source, 'fallback-default');
   });
 
-  it('should mirror spark model alias writes for set-config and route using either spark key', async () => {
+  it('should route using model_spark set through set-config', async () => {
     db.registerWorker(1, '/wt-1', 'agent-1');
-    db.registerWorker(2, '/wt-2', 'agent-2');
 
-    await setConfigValue('model_codex_spark', 'spark-model-via-codex-key');
-    assert.strictEqual(db.getConfig('model_codex_spark'), 'spark-model-via-codex-key');
-    assert.strictEqual(db.getConfig('model_spark'), 'spark-model-via-codex-key');
+    await setConfigValue('model_spark', 'spark-model-via-config');
+    assert.strictEqual(db.getConfig('model_spark'), 'spark-model-via-config');
 
-    const sparkTaskViaCodexKey = createReadyTask({
+    const sparkTaskId = createReadyTask({
       subject: 'Minor cleanup',
       description: 'Small log update',
       priority: 'low',
       tier: 1,
     });
-    const sparkAssignmentViaCodexKey = await sendCommand('assign-task', { task_id: sparkTaskViaCodexKey, worker_id: 1 });
-    assert.strictEqual(sparkAssignmentViaCodexKey.ok, true);
-    assert.strictEqual(sparkAssignmentViaCodexKey.routing.model, 'spark-model-via-codex-key');
-    assert.strictEqual(sparkAssignmentViaCodexKey.routing.model_source, 'config-fallback');
-
-    await setConfigValue('model_spark', 'spark-model-via-spark-key');
-    assert.strictEqual(db.getConfig('model_spark'), 'spark-model-via-spark-key');
-    assert.strictEqual(db.getConfig('model_codex_spark'), 'spark-model-via-spark-key');
-
-    const sparkTaskViaSparkKey = createReadyTask({
-      subject: 'Minor cleanup 2',
-      description: 'Small log update 2',
-      priority: 'low',
-      tier: 1,
-    });
-    const sparkAssignmentViaSparkKey = await sendCommand('assign-task', { task_id: sparkTaskViaSparkKey, worker_id: 2 });
-    assert.strictEqual(sparkAssignmentViaSparkKey.ok, true);
-    assert.strictEqual(sparkAssignmentViaSparkKey.routing.model, 'spark-model-via-spark-key');
-    assert.strictEqual(sparkAssignmentViaSparkKey.routing.model_source, 'config-fallback');
+    const sparkAssignment = await sendCommand('assign-task', { task_id: sparkTaskId, worker_id: 1 });
+    assert.strictEqual(sparkAssignment.ok, true);
+    assert.strictEqual(sparkAssignment.routing.model, 'spark-model-via-config');
+    assert.strictEqual(sparkAssignment.routing.model_source, 'config-fallback');
   });
 
   it('should downscale high and mid routing when flagship budget is constrained', async () => {
@@ -3624,7 +3756,7 @@ describe('CLI Server', () => {
     assert.strictEqual(midAssignment.ok, true);
     assert.strictEqual(midAssignment.routing.class, 'mid');
     assert.strictEqual(midAssignment.routing.model, 'spark-model');
-    assert.strictEqual(midAssignment.routing.model_source, 'budget-downgrade:model_codex_spark');
+    assert.strictEqual(midAssignment.routing.model_source, 'budget-downgrade:model_spark');
     assert.strictEqual(midAssignment.routing.reasoning_effort, 'spark-effort');
     assert.strictEqual(midAssignment.routing.routing_reason, 'fallback-budget-downgrade:mid->spark');
     assert.strictEqual(midAssignment.routing.reason, 'fallback-budget-downgrade:mid->spark');
@@ -3643,52 +3775,34 @@ describe('CLI Server', () => {
     assert.strictEqual(highAssignmentLog.reasoning_effort, 'mini-effort');
   });
 
-  it('should attribute constrained mid-to-spark downgrades to the selected spark alias key', async () => {
+  it('should attribute constrained mid-to-spark downgrades to model_spark', async () => {
     db.registerWorker(1, '/wt-1', 'agent-1');
-    db.registerWorker(2, '/wt-2', 'agent-2');
 
     await setConfigValue('reasoning_spark', 'spark-effort');
     await setConfigValue('routing_budget_state', JSON.stringify({
       flagship: { remaining: 5, threshold: 10 },
     }));
 
-    db.setConfig('model_codex_spark', '');
-    db.setConfig('model_spark', 'spark-legacy-model');
+    db.setConfig('model_spark', 'spark-model');
 
-    const legacyAliasTaskId = createReadyTask({
+    const taskId = createReadyTask({
       subject: 'Resolve merge backlog',
       description: 'Routine helper cleanup',
       tier: 2,
     });
-    const legacyAliasAssignment = await sendCommand('assign-task', { task_id: legacyAliasTaskId, worker_id: 1 });
-    assert.strictEqual(legacyAliasAssignment.ok, true);
-    assert.strictEqual(legacyAliasAssignment.routing.class, 'mid');
-    assert.strictEqual(legacyAliasAssignment.routing.model, 'spark-legacy-model');
-    assert.strictEqual(legacyAliasAssignment.routing.model_source, 'budget-downgrade:model_spark');
-    assert.strictEqual(legacyAliasAssignment.routing.reasoning_effort, 'spark-effort');
-    assert.strictEqual(legacyAliasAssignment.routing.routing_reason, 'fallback-budget-downgrade:mid->spark');
+    const assignment = await sendCommand('assign-task', { task_id: taskId, worker_id: 1 });
+    assert.strictEqual(assignment.ok, true);
+    assert.strictEqual(assignment.routing.class, 'mid');
+    assert.strictEqual(assignment.routing.model, 'spark-model');
+    assert.strictEqual(assignment.routing.model_source, 'budget-downgrade:model_spark');
+    assert.strictEqual(assignment.routing.reasoning_effort, 'spark-effort');
+    assert.strictEqual(assignment.routing.routing_reason, 'fallback-budget-downgrade:mid->spark');
 
-    db.setConfig('model_codex_spark', 'spark-codex-model');
-    db.setConfig('model_spark', 'spark-legacy-model-2');
-
-    const codexAliasTaskId = createReadyTask({
-      subject: 'Resolve conflict backlog',
-      description: 'Routine helper cleanup',
-      tier: 2,
-    });
-    const codexAliasAssignment = await sendCommand('assign-task', { task_id: codexAliasTaskId, worker_id: 2 });
-    assert.strictEqual(codexAliasAssignment.ok, true);
-    assert.strictEqual(codexAliasAssignment.routing.class, 'mid');
-    assert.strictEqual(codexAliasAssignment.routing.model, 'spark-codex-model');
-    assert.strictEqual(codexAliasAssignment.routing.model_source, 'budget-downgrade:model_codex_spark');
-    assert.strictEqual(codexAliasAssignment.routing.reasoning_effort, 'spark-effort');
-    assert.strictEqual(codexAliasAssignment.routing.routing_reason, 'fallback-budget-downgrade:mid->spark');
-
-    const codexAliasLog = getAllocatorAssignmentDetails(codexAliasTaskId);
-    assert.ok(codexAliasLog);
-    assert.strictEqual(codexAliasLog.model, 'spark-codex-model');
-    assert.strictEqual(codexAliasLog.model_source, 'budget-downgrade:model_codex_spark');
-    assert.strictEqual(codexAliasLog.routing_reason, 'fallback-budget-downgrade:mid->spark');
+    const assignmentLog = getAllocatorAssignmentDetails(taskId);
+    assert.ok(assignmentLog);
+    assert.strictEqual(assignmentLog.model, 'spark-model');
+    assert.strictEqual(assignmentLog.model_source, 'budget-downgrade:model_spark');
+    assert.strictEqual(assignmentLog.routing_reason, 'fallback-budget-downgrade:mid->spark');
   });
 
   it('should restore normal routing after flagship budget recovers above threshold', async () => {
@@ -3832,7 +3946,7 @@ describe('CLI Server', () => {
     assert.strictEqual(descriptionConflictAssignment.routing.reasoning_effort, subjectConflictAssignment.routing.reasoning_effort);
     assert.strictEqual(descriptionConflictAssignment.routing.routing_reason, subjectConflictAssignment.routing.routing_reason);
     assert.strictEqual(descriptionConflictAssignment.routing.model, 'spark-model');
-    assert.strictEqual(descriptionConflictAssignment.routing.model_source, 'budget-downgrade:model_codex_spark');
+    assert.strictEqual(descriptionConflictAssignment.routing.model_source, 'budget-downgrade:model_spark');
     assert.strictEqual(descriptionConflictAssignment.routing.reasoning_effort, 'spark-effort');
     assert.strictEqual(descriptionConflictAssignment.routing.routing_reason, 'fallback-budget-downgrade:mid->spark');
   });
@@ -4051,7 +4165,7 @@ describe('CLI Server', () => {
     assert.strictEqual(midAssignment.ok, true);
     assert.strictEqual(midAssignment.routing.class, 'mid');
     assert.strictEqual(midAssignment.routing.model, 'spark-model');
-    assert.strictEqual(midAssignment.routing.model_source, 'budget-downgrade:model_codex_spark');
+    assert.strictEqual(midAssignment.routing.model_source, 'budget-downgrade:model_spark');
     assert.strictEqual(midAssignment.routing.reasoning_effort, 'spark-effort');
     assert.strictEqual(midAssignment.routing.routing_reason, 'fallback-budget-downgrade:mid->spark');
 
@@ -4093,7 +4207,7 @@ describe('CLI Server', () => {
     db.registerWorker(1, '/wt-1', 'agent-1');
 
     await setConfigValue('model_mid', 'mid-model');
-    await setConfigValue('model_codex_spark', 'spark-model');
+    await setConfigValue('model_spark', 'spark-model');
     await setConfigValue('reasoning_spark', 'spark-effort');
 
     db.setConfig('routing_budget_state', JSON.stringify({
@@ -4112,7 +4226,7 @@ describe('CLI Server', () => {
     assert.strictEqual(assignment.ok, true);
     assert.strictEqual(assignment.routing.class, 'mid');
     assert.strictEqual(assignment.routing.model, 'spark-model');
-    assert.strictEqual(assignment.routing.model_source, 'budget-downgrade:model_codex_spark');
+    assert.strictEqual(assignment.routing.model_source, 'budget-downgrade:model_spark');
     assert.strictEqual(assignment.routing.reasoning_effort, 'spark-effort');
     assert.strictEqual(assignment.routing.routing_reason, 'fallback-budget-downgrade:mid->spark');
   });
@@ -4150,194 +4264,6 @@ describe('CLI Server', () => {
     assert.strictEqual(assignmentLog.model_source, 'budget-upgrade:model_xhigh');
     assert.strictEqual(assignmentLog.routing_reason, 'fallback-budget-upgrade:high->xhigh');
     assert.strictEqual(assignmentLog.reasoning_effort, 'xhigh-effort');
-  });
-
-  it('should expose legacy scalar fallback budget snapshot in /api/status when routing scalar values are blank', async () => {
-    const reqId = db.createRequest('Legacy scalar snapshot parity request');
-    const taskId = db.createTask({
-      request_id: reqId,
-      subject: 'Task with allocator telemetry',
-      description: 'Used to verify task hydration alongside budget snapshot fallback',
-      domain: 'coordinator-surface',
-      tier: 2,
-    });
-
-    db.log('allocator', 'task_assigned', {
-      task_id: taskId,
-      routing_class: 'mini',
-      model: 'gpt-5.3-mini',
-      model_source: 'fallback-default',
-      reasoning_effort: 'low',
-      budget_state: { flagship: { remaining: 3, threshold: 10 } },
-      budget_source: 'activity_log:allocator.task_assigned',
-    });
-
-    db.setConfig('routing_budget_flagship_remaining', '   ');
-    db.setConfig('routing_budget_flagship_threshold', '\t');
-    db.setConfig('flagship_budget_remaining', ' 35 ');
-    db.setConfig('flagship_budget_threshold', '20');
-
-    const web = await webServer.start(tmpDir, 0);
-    const webPort = web.address().port;
-
-    try {
-      const statusResult = await requestWebJson(webPort, '/api/status');
-      assert.strictEqual(statusResult.status, 200);
-      assert.strictEqual(statusResult.body.routing_budget_source, 'config:budget_thresholds');
-      assert.deepStrictEqual(statusResult.body.routing_budget_state, {
-        source: 'config:budget_thresholds',
-        parsed: { flagship: { remaining: 35, threshold: 20 } },
-        remaining: 35,
-        threshold: 20,
-      });
-
-      const task = statusResult.body.tasks.find((entry) => entry.id === taskId);
-      assert.ok(task);
-      assert.strictEqual(task.routing_class, 'mini');
-      assert.strictEqual(task.routed_model, 'gpt-5.3-mini');
-      assert.strictEqual(task.model_source, 'fallback-default');
-      assert.strictEqual(task.reasoning_effort, 'low');
-    } finally {
-      webServer.stop();
-    }
-  });
-
-  it('should expose scalar fallback budget snapshot in /api/status when routing_budget_state JSON has invalid array shape', async () => {
-    db.setConfig('routing_budget_state', '[]');
-    db.setConfig('routing_budget_flagship_remaining', '8');
-    db.setConfig('routing_budget_flagship_threshold', '10');
-
-    const web = await webServer.start(tmpDir, 0);
-    const webPort = web.address().port;
-
-    try {
-      const statusResult = await requestWebJson(webPort, '/api/status');
-      assert.strictEqual(statusResult.status, 200);
-      assert.strictEqual(statusResult.body.routing_budget_source, 'config:budget_thresholds');
-      assert.deepStrictEqual(statusResult.body.routing_budget_state, {
-        source: 'config:budget_thresholds',
-        parsed: { flagship: { remaining: 8, threshold: 10 } },
-        remaining: 8,
-        threshold: 10,
-      });
-    } finally {
-      webServer.stop();
-    }
-  });
-
-  it('should merge scalar fallback into partial routing_budget_state snapshot in /api/status', async () => {
-    db.setConfig('routing_budget_state', JSON.stringify({
-      flagship: { remaining: 7 },
-    }));
-    db.setConfig('routing_budget_flagship_remaining', '50');
-    db.setConfig('routing_budget_flagship_threshold', '10');
-
-    const web = await webServer.start(tmpDir, 0);
-    const webPort = web.address().port;
-
-    try {
-      const statusResult = await requestWebJson(webPort, '/api/status');
-      assert.strictEqual(statusResult.status, 200);
-      assert.strictEqual(statusResult.body.routing_budget_source, 'config:routing_budget_state');
-      assert.deepStrictEqual(statusResult.body.routing_budget_state, {
-        source: 'config:routing_budget_state',
-        parsed: { flagship: { remaining: 7, threshold: 10 } },
-        remaining: 7,
-        threshold: 10,
-      });
-    } finally {
-      webServer.stop();
-    }
-  });
-
-  it('should expose non-zero usage burn-rate telemetry in /api/status via db helper', async () => {
-    const requestOne = db.createRequest('Usage burn-rate request one');
-    const requestTwo = db.createRequest('Usage burn-rate request two');
-    const requestTotals = {
-      [requestOne]: 3.5,
-      [requestTwo]: 1.25,
-    };
-    const burnSnapshot = {
-      usd_15m: 1.5,
-      usd_60m: 2.75,
-      usd_24h: 4.75,
-      request_id: null,
-      request_total_usd: 0,
-    };
-
-    const hadBurnRateHelper = Object.prototype.hasOwnProperty.call(db, 'getUsageCostBurnRate');
-    const originalBurnRateHelper = db.getUsageCostBurnRate;
-    db.getUsageCostBurnRate = (requestId = null) => {
-      if (requestId === null || requestId === undefined) return { ...burnSnapshot };
-      const normalizedRequestId = String(requestId).trim();
-      return {
-        ...burnSnapshot,
-        request_id: normalizedRequestId || null,
-        request_total_usd: requestTotals[normalizedRequestId] || 0,
-      };
-    };
-
-    const web = await webServer.start(tmpDir, 0);
-    const webPort = web.address().port;
-
-    try {
-      const statusResult = await requestWebJson(webPort, '/api/status');
-      assert.strictEqual(statusResult.status, 200);
-      assert.deepStrictEqual(statusResult.body.usage_cost_burn_rate, burnSnapshot);
-      assert.strictEqual(statusResult.body.usage_cost_usd_15m, burnSnapshot.usd_15m);
-      assert.strictEqual(statusResult.body.usage_cost_usd_60m, burnSnapshot.usd_60m);
-      assert.strictEqual(statusResult.body.usage_cost_usd_24h, burnSnapshot.usd_24h);
-      assert.strictEqual(statusResult.body.usage_cost_request_id, null);
-      assert.strictEqual(statusResult.body.usage_cost_request_total_usd, 0);
-      assert.deepStrictEqual(statusResult.body.usage_cost_request_totals_usd, {
-        [requestOne]: 3.5,
-        [requestTwo]: 1.25,
-      });
-    } finally {
-      webServer.stop();
-      if (hadBurnRateHelper) {
-        db.getUsageCostBurnRate = originalBurnRateHelper;
-      } else {
-        delete db.getUsageCostBurnRate;
-      }
-    }
-  });
-
-  it('should expose safe-zero usage burn-rate telemetry defaults in /api/status', async () => {
-    const requestId = db.createRequest('Zero usage burn-rate request');
-    const hadBurnRateHelper = Object.prototype.hasOwnProperty.call(db, 'getUsageCostBurnRate');
-    const originalBurnRateHelper = db.getUsageCostBurnRate;
-    delete db.getUsageCostBurnRate;
-
-    const web = await webServer.start(tmpDir, 0);
-    const webPort = web.address().port;
-
-    try {
-      const statusResult = await requestWebJson(webPort, '/api/status');
-      assert.strictEqual(statusResult.status, 200);
-      assert.deepStrictEqual(statusResult.body.usage_cost_burn_rate, {
-        usd_15m: 0,
-        usd_60m: 0,
-        usd_24h: 0,
-        request_id: null,
-        request_total_usd: 0,
-      });
-      assert.strictEqual(statusResult.body.usage_cost_usd_15m, 0);
-      assert.strictEqual(statusResult.body.usage_cost_usd_60m, 0);
-      assert.strictEqual(statusResult.body.usage_cost_usd_24h, 0);
-      assert.strictEqual(statusResult.body.usage_cost_request_id, null);
-      assert.strictEqual(statusResult.body.usage_cost_request_total_usd, 0);
-      assert.deepStrictEqual(statusResult.body.usage_cost_request_totals_usd, {
-        [requestId]: 0,
-      });
-    } finally {
-      webServer.stop();
-      if (hadBurnRateHelper) {
-        db.getUsageCostBurnRate = originalBurnRateHelper;
-      } else {
-        delete db.getUsageCostBurnRate;
-      }
-    }
   });
 
   it('should keep routing_budget_state JSON precedence over scalar fallback keys', async () => {
@@ -4651,6 +4577,319 @@ describe('CLI Server', () => {
   });
 });
 
+describe('changes CLI commands', () => {
+  it('logs changes and filters them by domain', async () => {
+    const created = await sendCommand('log-change', {
+      description: 'Refactor command handling',
+      domain: 'coordinator',
+      file_path: 'coordinator/src/cli-server.js',
+      function_name: 'handleCommand',
+      tooltip: 'Move one command group at a time',
+    });
+
+    assert.strictEqual(created.ok, true);
+    assert.ok(Number.isInteger(created.change_id));
+
+    const listed = await sendCommand('list-changes', { domain: 'coordinator' });
+    assert.strictEqual(listed.ok, true);
+    assert.strictEqual(listed.changes.length, 1);
+    assert.strictEqual(listed.changes[0].id, created.change_id);
+    assert.strictEqual(listed.changes[0].description, 'Refactor command handling');
+  });
+
+  it('updates only mutable change fields', async () => {
+    const created = await sendCommand('log-change', {
+      description: 'Original description',
+      domain: 'coordinator',
+      file_path: 'coordinator/src/cli-server.js',
+      tooltip: 'Original tooltip',
+    });
+
+    const updated = await sendCommand('update-change', {
+      id: created.change_id,
+      description: 'Updated description',
+      tooltip: 'Updated tooltip',
+      status: 'pending_user_action',
+      file_path: 'coordinator/src/commands/changes.js',
+      domain: 'ignored-domain',
+    });
+
+    assert.strictEqual(updated.ok, true);
+    const change = db.getChange(created.change_id);
+    assert.strictEqual(change.description, 'Updated description');
+    assert.strictEqual(change.tooltip, 'Updated tooltip');
+    assert.strictEqual(change.status, 'pending_user_action');
+    assert.strictEqual(change.file_path, 'coordinator/src/cli-server.js');
+    assert.strictEqual(change.domain, 'coordinator');
+  });
+});
+
+describe('merge observability CLI commands', () => {
+  it('returns merge metrics rows', async () => {
+    db.incrementMetric('self_heal_attempts');
+
+    const result = await sendCommand('merge-metrics', {});
+    assert.strictEqual(result.ok, true);
+    assert.ok(Array.isArray(result.metrics));
+    assert.ok(result.metrics.some((row) => (
+      row.metric_name === 'self_heal_attempts' && row.metric_value === 1
+    )));
+  });
+
+  it('summarizes merge queue status counts', async () => {
+    const requestId = db.createRequest('merge health CLI test request');
+    const taskOne = db.createTask({ request_id: requestId, subject: 'Pending merge', description: 'pending' });
+    const taskTwo = db.createTask({ request_id: requestId, subject: 'Merged merge', description: 'merged' });
+    const taskThree = db.createTask({ request_id: requestId, subject: 'Failed merge', description: 'failed' });
+
+    db.enqueueMerge({ request_id: requestId, task_id: taskOne, pr_url: 'https://example.invalid/pr/1', branch: 'agent-1' });
+    const merged = db.enqueueMerge({ request_id: requestId, task_id: taskTwo, pr_url: 'https://example.invalid/pr/2', branch: 'agent-2' });
+    const failed = db.enqueueMerge({ request_id: requestId, task_id: taskThree, pr_url: 'https://example.invalid/pr/3', branch: 'agent-3' });
+    db.updateMerge(merged.lastInsertRowid, { status: 'merged' });
+    db.updateMerge(failed.lastInsertRowid, { status: 'failed' });
+
+    const result = await sendCommand('merge-health', {});
+    assert.strictEqual(result.ok, true);
+    assert.strictEqual(result.health.pending, 1);
+    assert.strictEqual(result.health.merged, 1);
+    assert.strictEqual(result.health.failed, 1);
+    assert.strictEqual(result.health.ready, 0);
+    assert.strictEqual(result.health.conflict, 0);
+  });
+});
+
+describe('microvm CLI commands', () => {
+  function resetMicrovmModule() {
+    delete require.cache[require.resolve('../src/microvm-manager')];
+  }
+
+  function msbStatusTable(...rows) {
+    const header = 'SANDBOX         STATUS     PIDS            CPU          MEMORY       DISK';
+    const sep = '-'.repeat(80);
+    const dataLines = rows.map(([name, status]) => `${name.padEnd(16)}${status.padEnd(11)}-               -            -            -`);
+    return [header, sep, ...dataLines].join('\n');
+  }
+
+  it('exposes msb status through RPC', async () => {
+    const childProcess = require('child_process');
+    resetMicrovmModule();
+    const execMock = mock.method(childProcess, 'execFileSync', (cmd, args) => {
+      if (cmd === 'msb' && args[0] === '--version') return 'msb 0.3.4\n';
+      if (cmd === 'msb' && args[0] === 'server' && args[1] === 'status') return 'running\n';
+      if (cmd === 'msb' && args[0] === 'status') {
+        return msbStatusTable(['worker-1', 'RUNNING'], ['loop-1', 'RUNNING']);
+      }
+      return '';
+    });
+
+    try {
+      const status = await sendCommand('msb-status', {});
+      assert.strictEqual(status.ok, true);
+      assert.strictEqual(status.msb_installed, true);
+      assert.strictEqual(status.server_running, true);
+      assert.strictEqual(status.total_sandboxes, 2);
+      assert.strictEqual(status.sandboxes.length, 1);
+      assert.strictEqual(status.sandboxes[0].name, 'worker-1');
+    } finally {
+      execMock.mock.restore();
+      resetMicrovmModule();
+    }
+  });
+
+  it('reports missing msb setup dependency without starting setup', async () => {
+    const childProcess = require('child_process');
+    resetMicrovmModule();
+    const execMock = mock.method(childProcess, 'execFileSync', (cmd, args) => {
+      if (cmd === 'msb' && args[0] === '--version') throw new Error('not found');
+      return '';
+    });
+
+    try {
+      const result = await sendCommand('msb-setup', {});
+      assert.match(result.error, /msb CLI is not installed/);
+    } finally {
+      execMock.mock.restore();
+      resetMicrovmModule();
+    }
+  });
+});
+
+describe('knowledge CLI commands', () => {
+  it('reports knowledge status and health from the project directory', async () => {
+    fs.mkdirSync(path.join(tmpDir, '.claude', 'knowledge', 'codebase', 'domains'), { recursive: true });
+    fs.mkdirSync(path.join(tmpDir, '.claude', 'knowledge', 'research', 'topics'), { recursive: true });
+    fs.writeFileSync(path.join(tmpDir, '.claude', 'knowledge', 'codebase', 'domains', 'coordinator.md'), 'Coordinator notes\n');
+
+    const status = await sendCommand('knowledge-status', {});
+    assert.strictEqual(status.ok, true);
+    assert.strictEqual(status.pending_reviews_count, 0);
+    assert.strictEqual(status.domain_coverage.coordinator.exists, true);
+
+    const health = await sendCommand('knowledge-health', {});
+    assert.strictEqual(health.ok, false);
+    assert.ok(health.present.includes(path.join('.claude', 'knowledge', 'codebase', 'domains')));
+    assert.ok(health.missing.includes(path.join('.claude', 'knowledge', 'mistakes.md')));
+  });
+
+  it('increments knowledge metadata and resets the index timestamp', async () => {
+    const increment = await sendCommand('knowledge-increment', {
+      domain: 'coordinator',
+      worker_patch: true,
+    });
+    assert.strictEqual(increment.ok, true);
+    assert.strictEqual(increment.domain, 'coordinator');
+    assert.strictEqual(increment.changes_since_index, 1);
+
+    const metadataAfterIncrement = knowledgeMeta.getMetadata(tmpDir);
+    assert.strictEqual(metadataAfterIncrement.domains.coordinator.changes_since_research, 1);
+    assert.strictEqual(metadataAfterIncrement.domains.coordinator.worker_patches, 1);
+
+    const updated = await sendCommand('knowledge-update-index-timestamp', {});
+    assert.strictEqual(updated.ok, true);
+    assert.strictEqual(updated.changes_since_index, 0);
+    assert.ok(updated.last_indexed);
+  });
+});
+
+describe('domain analysis CLI commands', () => {
+  it('creates, submits, lists, and approves domain analyses', async () => {
+    fs.writeFileSync(
+      path.join(tmpDir, '.claude', 'state', 'codebase-map.json'),
+      JSON.stringify({ domains: { coordinator: { files: ['coordinator/src/cli-server.js'] } } })
+    );
+
+    const created = await sendCommand('analyze-domain', { domain: 'coordinator' });
+    assert.strictEqual(created.ok, true);
+    assert.strictEqual(created.domain, 'coordinator');
+
+    const requestedMail = listMailForRecipient('architect')
+      .filter((mail) => mail.type === 'domain_analysis_requested');
+    assert.strictEqual(requestedMail.length, 1);
+    assert.strictEqual(requestedMail[0].payload.analysis_id, created.id);
+
+    const fetched = await sendCommand('domain-analysis', { id: created.id });
+    assert.strictEqual(fetched.ok, true);
+    assert.match(fetched.analysis.source_map_hash, /^[a-f0-9]{16}$/);
+
+    const submitted = await sendCommand('submit-domain-draft', {
+      id: created.id,
+      review_sheet: 'Review coordinator domain',
+      draft_payload: '## Coordinator\n\nCommand handling notes.',
+      analyzed_files: '["coordinator/src/cli-server.js"]',
+    });
+    assert.strictEqual(submitted.ok, true);
+    assert.strictEqual(submitted.analysis.status, 'review_pending');
+
+    const listed = await sendCommand('domain-analyses', { domain: 'coordinator', status: 'review_pending' });
+    assert.strictEqual(listed.ok, true);
+    assert.strictEqual(listed.count, 1);
+
+    const approved = await sendCommand('approve-domain', {
+      id: created.id,
+      feedback: 'Keep command boundaries focused.',
+    });
+    assert.strictEqual(approved.ok, true);
+
+    const domainDoc = fs.readFileSync(
+      path.join(tmpDir, '.claude', 'knowledge', 'codebase', 'domains', 'coordinator.md'),
+      'utf8'
+    );
+    assert.match(domainDoc, /Command handling notes/);
+    assert.match(domainDoc, /Human-Confirmed Context/);
+    assert.match(domainDoc, /Keep command boundaries focused/);
+
+    const completedMail = listMailForRecipient('master-1')
+      .filter((mail) => mail.type === 'domain_review_completed');
+    assert.ok(completedMail.some((mail) => mail.payload.status === 'approved'));
+  });
+
+  it('rejects domain analyses only from review_pending state', async () => {
+    const created = await sendCommand('analyze-domain', { domain: 'routing' });
+    const earlyReject = await sendCommand('reject-domain', { id: created.id, feedback: 'Too early' });
+    assert.strictEqual(earlyReject.ok, false);
+
+    await sendCommand('submit-domain-draft', {
+      id: created.id,
+      review_sheet: 'Review routing domain',
+      draft_payload: 'Routing draft',
+      analyzed_files: '[]',
+    });
+    const rejected = await sendCommand('reject-domain', { id: created.id, feedback: 'Needs more detail' });
+    assert.strictEqual(rejected.ok, true);
+
+    const fetched = await sendCommand('domain-analysis', { id: created.id });
+    assert.strictEqual(fetched.analysis.status, 'rejected');
+    assert.strictEqual(fetched.analysis.human_feedback, 'Needs more detail');
+  });
+});
+
+describe('extended research CLI commands', () => {
+  it('creates, lists, reviews, and exposes pending research topics', async () => {
+    const created = await sendCommand('create-research-topic', {
+      title: 'Study routing allocator',
+      description: 'Find allocator routing follow-up work',
+      category: 'pattern',
+      discovery_source: 'cli-test',
+      tags: '["routing","allocator"]',
+    });
+    assert.strictEqual(created.ok, true);
+    assert.strictEqual(created.topic.review_status, 'discovered');
+
+    const discoveredMail = listMailForRecipient('master-1')
+      .filter((mail) => mail.type === 'research_topic_discovered');
+    assert.ok(discoveredMail.some((mail) => mail.payload.topic_id === created.id));
+
+    const fetched = await sendCommand('research-topic', { id: created.id });
+    assert.strictEqual(fetched.ok, true);
+    assert.strictEqual(fetched.topic.title, 'Study routing allocator');
+
+    const pending = await sendCommand('pending-reviews', { limit: 10 });
+    assert.strictEqual(pending.ok, true);
+    assert.ok(pending.items.some((item) => item.item_type === 'research_topic' && item.id === created.id));
+
+    const listed = await sendCommand('research-topics', { review_status: 'discovered', category: 'pattern' });
+    assert.strictEqual(listed.ok, true);
+    assert.strictEqual(listed.count, 1);
+
+    const reviewed = await sendCommand('review-research-topic', {
+      id: created.id,
+      review_status: 'approved',
+      notes: 'Proceed after cli-server extraction',
+    });
+    assert.strictEqual(reviewed.ok, true);
+
+    const afterReview = await sendCommand('research-topic', { id: created.id });
+    assert.strictEqual(afterReview.topic.review_status, 'approved');
+    assert.strictEqual(afterReview.topic.human_notes, 'Proceed after cli-server extraction');
+  });
+
+  it('fill-knowledge queues research for stale uncovered domains and signals rescan', async () => {
+    knowledgeMeta.writeMetadata(tmpDir, {
+      last_indexed: null,
+      changes_since_index: 6,
+      domains: {
+        routing: { changes_since_research: 3, worker_patches: 0 },
+      },
+      last_external_research: null,
+      external_research_stale_topics: [],
+    });
+
+    const result = await sendCommand('fill-knowledge', {});
+    assert.strictEqual(result.ok, true);
+    assert.ok(result.actions.some((action) => (
+      action.type === 'research_queued' && action.domain === 'routing'
+    )));
+    assert.ok(result.actions.some((action) => action.type === 'rescan_signaled'));
+    assert.deepStrictEqual(result.status_summary.domains_with_gaps, ['routing']);
+    assert.deepStrictEqual(result.status_summary.stale_domains, ['routing']);
+    assert.strictEqual(result.status_summary.changes_since_index, 6);
+
+    const architectMail = listMailForRecipient('architect')
+      .filter((mail) => mail.type === 'rescan_requested');
+    assert.strictEqual(architectMail.length, 1);
+  });
+});
+
 describe('memory-retrieval CLI commands', () => {
   it('memory-snapshots returns ok with empty list when no snapshots', async () => {
     const result = await sendCommand('memory-snapshots', {});
@@ -4959,176 +5198,85 @@ describe('research-queue COMMAND_SCHEMAS validation', () => {
     const res = await sendCommand('research-start', { id: 'abc' });
     assert.strictEqual(res.error, 'Field "id" must be of type number');
   });
-});
 
-describe('PID lock semantics', () => {
-  const { makeLock, isPidAlive } = require('../src/pid-lock');
+  it('runs research queue status, next, gaps, fail, and retry lifecycle', async () => {
+    const queued = await sendCommand('queue-research', {
+      topic: 'routing',
+      question: 'How should routing be tested?',
+      priority: 'urgent',
+    });
+    assert.strictEqual(queued.ok, true);
 
-  it('acquire creates pid file with current pid', () => {
-    const lockDir = fs.mkdtempSync(path.join(os.tmpdir(), 'pid-lock-test-'));
-    try {
-      const lock = makeLock(lockDir, 'mac10');
-      const acquired = lock.acquire();
-      assert.strictEqual(acquired, true);
-      const written = parseInt(fs.readFileSync(lock.pidFile, 'utf8').trim(), 10);
-      assert.strictEqual(written, process.pid);
-      lock.release();
-    } finally {
-      fs.rmSync(lockDir, { recursive: true, force: true });
-    }
+    const status = await sendCommand('research-status', { topic: 'routing' });
+    assert.strictEqual(status.ok, true);
+    assert.strictEqual(status.count, 1);
+    assert.strictEqual(status.items[0].topic, 'routing');
+
+    const next = await sendCommand('research-next', {});
+    assert.strictEqual(next.ok, true);
+    assert.strictEqual(next.item.id, queued.id);
+
+    const gaps = await sendCommand('research-gaps', {});
+    assert.strictEqual(gaps.ok, true);
+    assert.strictEqual(gaps.queued_count, 1);
+    assert.deepStrictEqual(gaps.topics, ['routing']);
+
+    const started = await sendCommand('research-start', { id: queued.id });
+    assert.strictEqual(started.ok, true);
+    const failed = await sendCommand('research-fail', { intent_id: queued.id, error: 'network unavailable' });
+    assert.strictEqual(failed.ok, true);
+
+    const retry = await sendCommand('research-retry-failed', { topic: 'routing' });
+    assert.strictEqual(retry.ok, true);
+    assert.strictEqual(retry.requeued_count, 1);
+    assert.deepStrictEqual(retry.ids, [queued.id]);
   });
 
-  it('release removes pid file', () => {
-    const lockDir = fs.mkdtempSync(path.join(os.tmpdir(), 'pid-lock-test-'));
-    try {
-      const lock = makeLock(lockDir, 'mac10');
-      lock.acquire();
-      lock.release();
-      assert.strictEqual(fs.existsSync(lock.pidFile), false);
-    } finally {
-      fs.rmSync(lockDir, { recursive: true, force: true });
-    }
+  it('requeues stale running research', async () => {
+    const queued = await sendCommand('queue-research', {
+      topic: 'stale-research',
+      question: 'What timed out?',
+    });
+    assert.strictEqual(queued.ok, true);
+    const started = await sendCommand('research-start', { id: queued.id });
+    assert.strictEqual(started.ok, true);
+    db.getDb().prepare("UPDATE research_intents SET updated_at = datetime('now', '-90 minutes') WHERE id = ?")
+      .run(queued.id);
+
+    const requeued = await sendCommand('research-requeue-stale', { max_age_minutes: 60 });
+    assert.strictEqual(requeued.ok, true);
+    assert.strictEqual(requeued.requeued_count, 1);
+    assert.deepStrictEqual(requeued.ids, [queued.id]);
+
+    const status = await sendCommand('research-status', { topic: 'stale-research', status: 'queued' });
+    assert.strictEqual(status.count, 1);
   });
 
-  it('acquire returns false when live process holds the lock', () => {
-    const lockDir = fs.mkdtempSync(path.join(os.tmpdir(), 'pid-lock-test-'));
-    try {
-      // Write current process's own PID — it is guaranteed alive
-      fs.mkdirSync(lockDir, { recursive: true });
-      const pidFilePath = path.join(lockDir, 'mac10.pid');
-      fs.writeFileSync(pidFilePath, String(process.pid));
+  it('research-complete resets staleness for the completed topic', async () => {
+    knowledgeMeta.writeMetadata(tmpDir, {
+      domains: {
+        status: {
+          changes_since_research: 4,
+          worker_patches: 0,
+          last_changed: '2026-01-02T00:00:00.000Z',
+        },
+      },
+    });
 
-      // A second lock object trying to acquire the same file should fail
-      const lock2 = makeLock(lockDir, 'mac10');
-      const acquired = lock2.acquire();
-      assert.strictEqual(acquired, false);
-      // PID file still contains the original pid
-      const written = parseInt(fs.readFileSync(pidFilePath, 'utf8').trim(), 10);
-      assert.strictEqual(written, process.pid);
-    } finally {
-      fs.rmSync(lockDir, { recursive: true, force: true });
-    }
-  });
+    const queued = await sendCommand('queue-research', {
+      topic: 'status',
+      question: 'What is the status domain architecture?',
+    });
+    assert.strictEqual(queued.ok, true);
 
-  it('acquire clears stale pid file and succeeds', () => {
-    const lockDir = fs.mkdtempSync(path.join(os.tmpdir(), 'pid-lock-test-'));
-    try {
-      // Write a PID that is guaranteed to not be alive (PID 0 is never a real process)
-      fs.mkdirSync(lockDir, { recursive: true });
-      const pidFilePath = path.join(lockDir, 'mac10.pid');
-      fs.writeFileSync(pidFilePath, '0');
+    const started = await sendCommand('research-start', { id: queued.id });
+    assert.strictEqual(started.ok, true);
 
-      const lock = makeLock(lockDir, 'mac10');
-      const acquired = lock.acquire();
-      assert.strictEqual(acquired, true);
-      const written = parseInt(fs.readFileSync(lock.pidFile, 'utf8').trim(), 10);
-      assert.strictEqual(written, process.pid);
-      lock.release();
-    } finally {
-      fs.rmSync(lockDir, { recursive: true, force: true });
-    }
-  });
+    const completed = await sendCommand('research-complete', { intent_id: queued.id });
+    assert.strictEqual(completed.ok, true);
 
-  it('isPidAlive returns false for invalid pids', () => {
-    assert.strictEqual(isPidAlive(0), false);
-    assert.strictEqual(isPidAlive(-1), false);
-    assert.strictEqual(isPidAlive(NaN), false);
-    assert.strictEqual(isPidAlive(null), false);
-  });
-
-  it('isPidAlive returns true for current process', () => {
-    assert.strictEqual(isPidAlive(process.pid), true);
-  });
-});
-
-describe('mac10 CLI start/stop orchestration', () => {
-  // Use MAC10_NAMESPACE='mac10' so the CLI looks for 'mac10.pid' regardless of
-  // the ambient namespace set in the test runner's environment.
-  const CLI_ENV = { ...process.env, MAC10_NAMESPACE: 'mac10' };
-
-  it('mac10 stop exits 0 when no coordinator is running and no pid file exists', async () => {
-    const projectDir2 = fs.mkdtempSync(path.join(os.tmpdir(), 'mac10-stop-test-'));
-    fs.mkdirSync(path.join(projectDir2, '.claude', 'state'), { recursive: true });
-    try {
-      const cliPath = path.join(__dirname, '..', 'bin', 'mac10');
-      const result = await new Promise((resolve) => {
-        execFile(
-          process.execPath,
-          [cliPath, '--project', projectDir2, 'stop'],
-          { encoding: 'utf8', env: CLI_ENV },
-          (error, stdout, stderr) => {
-            resolve({
-              status: error ? (Number.isInteger(error.code) ? error.code : 1) : 0,
-              stdout,
-              stderr,
-            });
-          }
-        );
-      });
-      assert.strictEqual(result.status, 0);
-      assert.match(result.stdout, /Coordinator stopped/);
-    } finally {
-      fs.rmSync(projectDir2, { recursive: true, force: true });
-    }
-  });
-
-  it('mac10 stop cleans up a stale pid file and exits 0', async () => {
-    const projectDir2 = fs.mkdtempSync(path.join(os.tmpdir(), 'mac10-stop-test-'));
-    const stateDir2 = path.join(projectDir2, '.claude', 'state');
-    fs.mkdirSync(stateDir2, { recursive: true });
-    // Write a stale PID (pid 0 is never alive) using the 'mac10' namespace filename
-    fs.writeFileSync(path.join(stateDir2, 'mac10.pid'), '0');
-    try {
-      const cliPath = path.join(__dirname, '..', 'bin', 'mac10');
-      const result = await new Promise((resolve) => {
-        execFile(
-          process.execPath,
-          [cliPath, '--project', projectDir2, 'stop'],
-          { encoding: 'utf8', env: CLI_ENV },
-          (error, stdout, stderr) => {
-            resolve({
-              status: error ? (Number.isInteger(error.code) ? error.code : 1) : 0,
-              stdout,
-              stderr,
-            });
-          }
-        );
-      });
-      assert.strictEqual(result.status, 0);
-      // Stale pid file should be removed
-      assert.strictEqual(fs.existsSync(path.join(stateDir2, 'mac10.pid')), false);
-      assert.match(result.stdout, /Coordinator stopped/);
-    } finally {
-      fs.rmSync(projectDir2, { recursive: true, force: true });
-    }
-  });
-
-  it('mac10 start detects existing running coordinator and exits 0 without spawning duplicate', async () => {
-    const projectDir2 = fs.mkdtempSync(path.join(os.tmpdir(), 'mac10-start-test-'));
-    const stateDir2 = path.join(projectDir2, '.claude', 'state');
-    fs.mkdirSync(stateDir2, { recursive: true });
-    // Simulate a live coordinator by writing the current process's PID to 'mac10.pid'
-    fs.writeFileSync(path.join(stateDir2, 'mac10.pid'), String(process.pid));
-    try {
-      const cliPath = path.join(__dirname, '..', 'bin', 'mac10');
-      const result = await new Promise((resolve) => {
-        execFile(
-          process.execPath,
-          [cliPath, 'start', projectDir2],
-          { encoding: 'utf8', env: CLI_ENV },
-          (error, stdout, stderr) => {
-            resolve({
-              status: error ? (Number.isInteger(error.code) ? error.code : 1) : 0,
-              stdout,
-              stderr,
-            });
-          }
-        );
-      });
-      assert.strictEqual(result.status, 0);
-      assert.match(result.stdout, /already running/i);
-    } finally {
-      fs.rmSync(projectDir2, { recursive: true, force: true });
-    }
+    const meta = knowledgeMeta.getMetadata(tmpDir);
+    assert.strictEqual(meta.domains.status.changes_since_research, 0);
+    assert.ok(meta.domains.status.last_researched);
   });
 });

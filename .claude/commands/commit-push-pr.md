@@ -1,4 +1,4 @@
-# Commit, Push, and Create PR
+# Commit Locally, Push When Remote Exists
 
 Follow these steps exactly. Do NOT skip the secret check.
 
@@ -16,7 +16,7 @@ Run `git diff --cached` and scan for:
 - `.env` file contents
 - Private keys or certificates
 
-If ANY secrets are found: `git reset HEAD` and ABORT. Report the issue.
+If ANY secrets are found: unstage the affected files and ABORT. Report the issue.
 
 ## Step 3: Commit
 
@@ -28,11 +28,15 @@ git commit -m "type(scope): concise description"
 
 Types: `feat`, `fix`, `refactor`, `test`, `docs`, `chore`
 
-## Step 4: Rebase on Latest Main
+## Step 4: Rebase on Latest Main When Possible
 
 ```bash
-git fetch origin main
-git rebase origin/main
+if git remote get-url origin >/dev/null 2>&1; then
+  git fetch origin main
+  git rebase origin/main
+else
+  echo "No origin remote; keeping local commit on current branch."
+fi
 ```
 
 If conflicts occur and are resolvable, resolve them. Otherwise:
@@ -43,28 +47,28 @@ git rebase --abort
 
 And report the conflict.
 
-## Step 5: Push
+## Step 5: Push When Remote Exists
 
 ```bash
-git push origin HEAD
+if git remote get-url origin >/dev/null 2>&1; then
+  git push origin HEAD
+else
+  echo "No origin remote; local commit is the deliverable."
+fi
 ```
 
-If rejected (branch behind), pull and retry:
+If rejected because the branch is behind, fetch/rebase and retry once:
 
 ```bash
-git pull --rebase origin HEAD && git push origin HEAD
-```
-
-If still rejected:
-
-```bash
-git push --force-with-lease origin HEAD
+git fetch origin main && git rebase origin/main && git push origin HEAD
 ```
 
 ## Step 6: Create PR
 
 ```bash
-gh pr create --base main --fill
+if git remote get-url origin >/dev/null 2>&1; then
+  gh pr create --base main --fill
+fi
 ```
 
 If a PR already exists:

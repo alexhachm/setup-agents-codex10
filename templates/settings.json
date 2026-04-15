@@ -7,7 +7,6 @@
       "Bash(npm *)",
       "Bash(npx *)",
       "Bash(node *)",
-      "Bash(codex *)",
       "Bash(echo *)",
       "Bash(cat *)",
       "Bash(ls *)",
@@ -66,7 +65,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "bash -c 'bash \"$CODEX_PROJECT_DIR/.claude/hooks/pre-tool-secret-guard.sh\"'"
+            "command": "bash -c 'bash \"$CLAUDE_PROJECT_DIR/.claude/hooks/pre-tool-secret-guard.sh\"'"
           }
         ]
       }

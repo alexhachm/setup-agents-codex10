@@ -7,23 +7,20 @@ const cliServer = require('./cli-server');
 const allocator = require('./allocator');
 const watchdog = require('./watchdog');
 const merger = require('./merger');
-const autoSync = require('./auto-sync');
-// const webServer = require('./web-server');  // GUI disabled — outdated
 const tmux = require('./tmux');
 const backend = require('./worker-backend');
 const sandboxManager = require('./sandbox-manager');
 const microvmManager = require('./microvm-manager');
 const overlay = require('./overlay');
-// const instanceRegistry = require('./instance-registry');  // GUI disabled — outdated
-
-const pidLock = require('./pid-lock');
 
 const projectDir = process.argv[2] || process.cwd();
 const scriptDir = process.env.MAC10_SCRIPT_DIR || path.resolve(__dirname, '..', '..');
 const namespace = process.env.MAC10_NAMESPACE || 'mac10';
 const stateDir = path.join(projectDir, '.claude', 'state');
-const _lock = pidLock.makeLock(stateDir, namespace);
-// let _registeredPort = null;  // GUI disabled
+const projectPidFile = path.join(stateDir, 'coordinator.pid');
+const pidFile = path.join(stateDir, namespace === 'mac10' ? 'mac10.pid' : `${namespace}.pid`);
+let ownsProjectPidLock = false;
+let ownsPidLock = false;
 
 function rebuildProjectMemorySnapshotIndexOnStartup() {
   try {
@@ -39,12 +36,77 @@ function rebuildProjectMemorySnapshotIndexOnStartup() {
   }
 }
 
-if (!_lock.acquire()) {
-  console.log(`Coordinator already running for namespace "${namespace}", exiting duplicate start.`);
+function isPidAlive(pid) {
+  if (!Number.isInteger(pid) || pid <= 0) return false;
+  try {
+    process.kill(pid, 0);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+function acquireSinglePidFile(file, label) {
+  fs.mkdirSync(stateDir, { recursive: true });
+  for (let i = 0; i < 2; i++) {
+    try {
+      fs.writeFileSync(file, String(process.pid), { flag: 'wx' });
+      return true;
+    } catch (err) {
+      if (!err || err.code !== 'EEXIST') throw err;
+      let existingPid = NaN;
+      try {
+        existingPid = parseInt(fs.readFileSync(file, 'utf8').trim(), 10);
+      } catch {}
+      if (isPidAlive(existingPid)) {
+        console.log(`Coordinator already running for ${label} (PID ${existingPid}), exiting duplicate start.`);
+        return false;
+      }
+      try { fs.unlinkSync(file); } catch {}
+    }
+  }
+  console.error(`Failed to acquire coordinator pid lock: ${file}`);
+  return false;
+}
+
+function acquirePidLock() {
+  if (!acquireSinglePidFile(projectPidFile, `project "${projectDir}"`)) {
+    return false;
+  }
+  ownsProjectPidLock = true;
+  if (!acquireSinglePidFile(pidFile, `namespace "${namespace}"`)) {
+    releaseProjectPidLock();
+    return false;
+  }
+  ownsPidLock = true;
+  return true;
+}
+
+function releaseProjectPidLock() {
+  if (!ownsProjectPidLock) return;
+  try {
+    const current = parseInt(fs.readFileSync(projectPidFile, 'utf8').trim(), 10);
+    if (current === process.pid) fs.unlinkSync(projectPidFile);
+  } catch {}
+  ownsProjectPidLock = false;
+}
+
+function releasePidLock() {
+  if (ownsPidLock) {
+    try {
+      const current = parseInt(fs.readFileSync(pidFile, 'utf8').trim(), 10);
+      if (current === process.pid) fs.unlinkSync(pidFile);
+    } catch {}
+    ownsPidLock = false;
+  }
+  releaseProjectPidLock();
+}
+
+if (!acquirePidLock()) {
   process.exit(0);
 }
 
-process.on('exit', () => _lock.release());
+process.on('exit', releasePidLock);
 
 console.log(`mac10 coordinator starting for: ${projectDir}`);
 
@@ -95,25 +157,63 @@ function shouldUseSandbox() {
   return true;
 }
 
+function markTaskSandboxRunning(taskSandbox, backendName, fields = {}) {
+  if (!taskSandbox || !taskSandbox.id) return;
+  try {
+    db.transitionTaskSandbox(taskSandbox.id, 'running', {
+      backend: backendName,
+      ...fields,
+    });
+  } catch (e) {
+    db.log('coordinator', 'task_sandbox_running_mark_error', {
+      sandbox_id: taskSandbox.id,
+      backend: backendName,
+      error: e.message,
+    });
+  }
+}
+
+function markTaskSandboxFailed(taskSandbox, error) {
+  if (!taskSandbox || !taskSandbox.id) return;
+  try {
+    db.transitionTaskSandbox(taskSandbox.id, 'failed', {
+      error: error && error.message ? error.message : String(error || 'worker spawn failed'),
+    });
+  } catch (e) {
+    db.log('coordinator', 'task_sandbox_failed_mark_error', {
+      sandbox_id: taskSandbox.id,
+      error: e.message,
+    });
+  }
+}
+
 // Tmux/default backend fallback — used when both msb and Docker are unavailable or fail.
-function spawnTmuxFallback(worker, windowName, cmd, worktreePath) {
-  if (!backend.isAvailable()) return;
+function spawnTmuxFallback(worker, windowName, cmd, worktreePath, taskSandbox = null) {
+  if (!backend.isAvailable()) return false;
   try {
     backend.killWorker(windowName);
     backend.createWorker(windowName, cmd, worktreePath, { MAC10_NAMESPACE: namespace });
   } catch (e) {
     db.log('coordinator', 'backend_spawn_error', { worker_id: worker.id, backend: backend.name, error: e.message });
+    markTaskSandboxFailed(taskSandbox, e);
+    return false;
   }
   db.updateWorker(worker.id, { backend: backend.name });
   if (backend.name === 'tmux') {
     db.updateWorker(worker.id, { tmux_session: tmux.SESSION, tmux_window: windowName });
   }
+  markTaskSandboxRunning(taskSandbox, backend.name, {
+    sandbox_name: windowName,
+    worktree_path: worktreePath,
+    branch: worker.branch || null,
+  });
+  return true;
 }
 
 // Start CLI server (Unix socket for mac10 commands)
 const handlers = {
   onTaskCompleted: (taskId) => merger.onTaskCompleted(taskId),
-  onAssignTask: (task, worker) => {
+  onAssignTask: (task, worker, _routingDecision, taskSandbox = null) => {
     const worktreePath = worker.worktree_path || path.join(projectDir, '.worktrees', `wt-${worker.id}`);
 
     // Symlink knowledge files from main project into worktree (no stale copies)
@@ -182,6 +282,11 @@ const handlers = {
         msbBackend.killWorker(windowName);
         msbBackend.createWorker(windowName, cmd, worktreePath, { MAC10_NAMESPACE: namespace });
         db.updateWorker(worker.id, { backend: 'sandbox' });
+        markTaskSandboxRunning(taskSandbox, 'sandbox', {
+          sandbox_name: windowName,
+          worktree_path: worktreePath,
+          branch: worker.branch || task.branch || null,
+        });
         db.log('coordinator', 'worker_spawned_msb', { worker_id: worker.id, task_id: task.id });
       } catch (e) {
         // msb failed — try Docker, then tmux
@@ -193,13 +298,18 @@ const handlers = {
             dockerBackend.killWorker(windowName);
             dockerBackend.createWorker(windowName, cmd, worktreePath, { MAC10_NAMESPACE: namespace });
             db.updateWorker(worker.id, { backend: 'docker' });
+            markTaskSandboxRunning(taskSandbox, 'docker', {
+              sandbox_name: windowName,
+              worktree_path: worktreePath,
+              branch: worker.branch || task.branch || null,
+            });
             db.log('coordinator', 'worker_spawned_docker_fallback', { worker_id: worker.id, task_id: task.id });
           } catch (e2) {
             db.log('coordinator', 'docker_spawn_failed_fallback', { worker_id: worker.id, error: e2.message });
-            spawnTmuxFallback(worker, windowName, cmd, worktreePath);
+            spawnTmuxFallback(worker, windowName, cmd, worktreePath, taskSandbox);
           }
         } else {
-          spawnTmuxFallback(worker, windowName, cmd, worktreePath);
+          spawnTmuxFallback(worker, windowName, cmd, worktreePath, taskSandbox);
         }
       }
     } else if (useDocker) {
@@ -209,13 +319,18 @@ const handlers = {
         dockerBackend.killWorker(windowName);
         dockerBackend.createWorker(windowName, cmd, worktreePath, { MAC10_NAMESPACE: namespace });
         db.updateWorker(worker.id, { backend: 'docker' });
+        markTaskSandboxRunning(taskSandbox, 'docker', {
+          sandbox_name: windowName,
+          worktree_path: worktreePath,
+          branch: worker.branch || task.branch || null,
+        });
         db.log('coordinator', 'worker_spawned_docker', { worker_id: worker.id, task_id: task.id });
       } catch (e) {
         db.log('coordinator', 'docker_spawn_failed_fallback', { worker_id: worker.id, error: e.message });
-        spawnTmuxFallback(worker, windowName, cmd, worktreePath);
+        spawnTmuxFallback(worker, windowName, cmd, worktreePath, taskSandbox);
       }
     } else if (backend.isAvailable()) {
-      spawnTmuxFallback(worker, windowName, cmd, worktreePath);
+      spawnTmuxFallback(worker, windowName, cmd, worktreePath, taskSandbox);
     } else {
       // Native Windows: spawn via launch-worker.sh (opens Windows Terminal tab)
       const launchScript = path.join(projectDir, '.claude', 'scripts', 'launch-worker.sh');
@@ -224,7 +339,15 @@ const handlers = {
         cwd: projectDir,
         env: { ...process.env, MAC10_NAMESPACE: namespace },
       }, (err) => {
-        if (err) db.log('coordinator', 'launch_worker_error', { worker_id: worker.id, error: err.message });
+        if (err) {
+          db.log('coordinator', 'launch_worker_error', { worker_id: worker.id, error: err.message });
+          markTaskSandboxFailed(taskSandbox, err);
+        }
+      });
+      markTaskSandboxRunning(taskSandbox, 'none', {
+        sandbox_name: windowName,
+        worktree_path: worktreePath,
+        branch: worker.branch || task.branch || null,
       });
     }
     db.log('coordinator', 'worker_spawned', { worker_id: worker.id, window: windowName });
@@ -283,20 +406,11 @@ console.log('Watchdog running.');
 merger.start(projectDir);
 console.log('Merger running.');
 
-// Start auto-sync (periodic fetch + conditional rebase of root workspace)
-autoSync.start(projectDir);
-console.log('Auto-sync running.');
-
-// --- GUI disabled (outdated) ---
-// Web dashboard and instance registry startup removed.
-// To re-enable, restore webServer.start() and instanceRegistry usage.
-
 function shutdown() {
   console.log('Shutting down...');
   allocator.stop();
   watchdog.stop();
   merger.stop();
-  autoSync.stop();
   cliServer.stop();
   db.log('coordinator', 'stopped');
   db.close();

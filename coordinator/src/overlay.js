@@ -175,11 +175,11 @@ function buildTaskOverlay(task, worker, projectDir) {
   }
 
   // Domain-aware visual testing hint for UI tasks
-  const uiDomains = ['frontend', 'ui', 'web', 'dashboard', 'gui', 'css', 'layout', 'design'];
+  const uiDomains = ['frontend', 'ui', 'web', 'css', 'layout', 'design'];
   const taskDomain = (task.domain || '').toLowerCase();
   const hasUiDomain = uiDomains.some(d => taskDomain.includes(d));
   const descLower = (task.description || '').toLowerCase();
-  const hasUiKeywords = /\b(ui|frontend|visual|layout|css|component|page|screen|dashboard|render|display)\b/.test(descLower);
+  const hasUiKeywords = /\b(ui|frontend|visual|layout|css|component|page|screen|render|display)\b/.test(descLower);
 
   if (hasUiDomain || hasUiKeywords) {
     lines.push('## Visual Testing');
@@ -191,43 +191,40 @@ function buildTaskOverlay(task, worker, projectDir) {
     lines.push('');
   }
 
-  // Add knowledge context if available
+  // Domain knowledge — canonical path is codebase/domains/<domain>.md,
+  // with legacy fallbacks to domains/<domain>/README.md and domain/<domain>.md.
   const knowledgeDir = path.join(projectDir, '.claude', 'knowledge');
-  let domainKnowledgePath = resolveDomainKnowledgePath(task.domain, knowledgeDir);
-  if (!domainKnowledgePath || !fs.existsSync(domainKnowledgePath)) {
-    domainKnowledgePath = resolveLegacyDomainKnowledgePath(task.domain, knowledgeDir);
-  }
-  if (domainKnowledgePath && fs.existsSync(domainKnowledgePath)) {
-    try {
-      const domainKnowledge = fs.readFileSync(domainKnowledgePath, 'utf8');
-      if (domainKnowledge.trim()) {
-        lines.push('## Domain Knowledge');
-        lines.push('');
-        lines.push(domainKnowledge.trim());
-        lines.push('');
-      }
-    } catch {}
-  }
-
-  // Codebase Context — from new knowledge layer
-  const codebaseDomainPath = path.join(projectDir, '.claude', 'knowledge', 'codebase', 'domains',
+  let domainKnowledgeContent = null;
+  const codebaseDomainPath = path.join(knowledgeDir, 'codebase', 'domains',
     isSafeDomainSlug(task.domain) ? `${task.domain}.md` : '__invalid__');
   try {
     if (isSafeDomainSlug(task.domain) && fs.existsSync(codebaseDomainPath)) {
-      const codebaseContent = fs.readFileSync(codebaseDomainPath, 'utf8').trim();
-      if (codebaseContent) {
-        const trimmedLines = codebaseContent.split('\n').slice(0, 10).join('\n');
-        lines.push('## Codebase Context');
-        lines.push('');
-        lines.push(trimmedLines);
-        lines.push('');
-      }
+      const content = fs.readFileSync(codebaseDomainPath, 'utf8').trim();
+      if (content) domainKnowledgeContent = content;
     }
   } catch {}
+  if (!domainKnowledgeContent) {
+    let domainKnowledgePath = resolveDomainKnowledgePath(task.domain, knowledgeDir);
+    if (!domainKnowledgePath || !fs.existsSync(domainKnowledgePath)) {
+      domainKnowledgePath = resolveLegacyDomainKnowledgePath(task.domain, knowledgeDir);
+    }
+    if (domainKnowledgePath && fs.existsSync(domainKnowledgePath)) {
+      try {
+        const content = fs.readFileSync(domainKnowledgePath, 'utf8').trim();
+        if (content) domainKnowledgeContent = content;
+      } catch {}
+    }
+  }
+  if (domainKnowledgeContent) {
+    lines.push('## Domain Knowledge');
+    lines.push('');
+    lines.push(domainKnowledgeContent);
+    lines.push('');
+  }
 
   // Relevant Research — from research rollups
   try {
-    const researchDir = path.join(projectDir, '.codex', 'knowledge', 'research', 'topics');
+    const researchDir = path.join(projectDir, '.claude', 'knowledge', 'research', 'topics');
     if (isSafeDomainSlug(task.domain) && fs.existsSync(researchDir)) {
       const domainLower = (task.domain || '').toLowerCase();
       for (const topic of fs.readdirSync(researchDir)) {
@@ -330,7 +327,7 @@ function writeOverlay(task, worker, projectDir) {
   const agentsPath = path.join(worktreeDir, 'AGENTS.md');
 
   fs.mkdirSync(path.dirname(claudePath), { recursive: true });
-  // Keep legacy CLAUDE.md while also writing AGENTS.md for Codex compatibility.
+  // Keep legacy CLAUDE.md while also writing AGENTS.md for worker compatibility.
   fs.writeFileSync(claudePath, content, 'utf8');
   fs.writeFileSync(agentsPath, content, 'utf8');
 

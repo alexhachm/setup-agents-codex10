@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # mac10 loop sentinel — runs in a tmux window.
-# Continuously relaunches codex for a persistent autonomous loop.
-# Pre-checks active requests to avoid wasting Codex spawns.
+# Continuously relaunches the configured agent for a persistent autonomous loop.
+# Pre-checks active requests to avoid wasting agent launches.
 # Adaptive backoff: short runs → exponential backoff, long runs → reset.
 set -euo pipefail
 export PATH="$HOME/bin:$HOME/.local/bin:$PATH"
@@ -18,39 +18,40 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # Ensure coordinator CLI is on PATH
 export PATH="$PROJECT_DIR/.claude/scripts:$PATH"
 export MAC10_LOOP_ID="$LOOP_ID"
-if [ "${MAC10_NAMESPACE:-}" = "codex10" ]; then
-  SHIM_DIR="$PROJECT_DIR/.claude/scripts/.codex10-shims"
-  mkdir -p "$SHIM_DIR"
-  cat > "$SHIM_DIR/mac10" << 'SHIM'
-#!/usr/bin/env bash
-set -euo pipefail
-PROJECT_SCRIPTS="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-if [ -x "$PROJECT_SCRIPTS/codex10" ]; then
-  exec "$PROJECT_SCRIPTS/codex10" "$@"
-fi
-if [ -x "$PROJECT_SCRIPTS/mac10-codex10" ]; then
-  exec "$PROJECT_SCRIPTS/mac10-codex10" "$@"
-fi
-echo "ERROR: codex10 wrapper missing in $PROJECT_SCRIPTS" >&2
-exit 1
-SHIM
-  chmod +x "$SHIM_DIR/mac10"
-  export PATH="$SHIM_DIR:$PATH"
-  if [ -x "$PROJECT_DIR/.claude/scripts/codex10" ]; then
-    MAC10_CMD="$PROJECT_DIR/.claude/scripts/codex10"
-  elif [ -x "$PROJECT_DIR/.claude/scripts/mac10-codex10" ]; then
-    MAC10_CMD="$PROJECT_DIR/.claude/scripts/mac10-codex10"
-  else
-    echo "[loop-sentinel-$LOOP_ID] ERROR: Missing codex10 coordinator wrapper (.claude/scripts/codex10)" >&2
-    exit 1
+
+# Resolve the coordinator binary path
+MAC10_BIN=""
+for _wrapper in "$PROJECT_DIR/.claude/scripts/mac10"; do
+  if [ -f "$_wrapper" ]; then
+    _candidate="$(grep -m1 '^MAC10_BIN=' "$_wrapper" 2>/dev/null | cut -d'"' -f2)"
+    if [ -n "$_candidate" ] && [ -f "$_candidate" ]; then
+      MAC10_BIN="$_candidate"
+      break
+    fi
   fi
-else
-  MAC10_CMD="mac10"
+done
+if [ -z "$MAC10_BIN" ]; then
+  MAC10_BIN="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)/coordinator/bin/mac10"
 fi
+
+# Create namespace-aware shims that call the coordinator binary directly,
+# bypassing wrapper scripts that may hardcode a different MAC10_NAMESPACE.
+SHIM_DIR="$PROJECT_DIR/.claude/scripts/.ns-shims"
+mkdir -p "$SHIM_DIR"
+for _shim_name in mac10; do
+  cat > "$SHIM_DIR/$_shim_name" << SHIM
+#!/usr/bin/env bash
+export MAC10_NAMESPACE="${MAC10_NAMESPACE}"
+exec node "${MAC10_BIN}" --project "${PROJECT_DIR}" "\$@"
+SHIM
+  chmod +x "$SHIM_DIR/$_shim_name"
+done
+export PATH="$SHIM_DIR:$PATH"
+MAC10_CMD="$SHIM_DIR/mac10"
 
 BACKOFF=5
 PRECHECK_BACKOFF=10
-RESTART_SIGNAL="$PROJECT_DIR/.codex/signals/.codex10.restart-signal"
+RESTART_SIGNAL="$PROJECT_DIR/.claude/signals/.mac10.restart-signal"
 LAST_RESTART_TS=0
 RESTART_COOLDOWN_SEC=120
 HEARTBEAT_INTERVAL=30
@@ -112,6 +113,45 @@ sleep_with_loop_heartbeats() {
   done
 }
 
+loop_sync_with_origin_enabled() {
+  local prompt_json="${1:-}"
+  local env_override="${MAC10_LOOP_SYNC_WITH_ORIGIN:-${MAC10_LOOP_SYNC:-}}"
+  local sync_value
+
+  sync_value=$(
+    printf '%s' "$prompt_json" | node -e '
+      const fs = require("fs");
+      const raw = fs.readFileSync(0, "utf8");
+      try {
+        const payload = JSON.parse(raw);
+        if (!payload || !Object.prototype.hasOwnProperty.call(payload, "loop_sync_with_origin")) {
+          process.exit(0);
+        }
+        const value = payload.loop_sync_with_origin;
+        if (value === false) {
+          process.stdout.write("false");
+        } else if (typeof value === "string" && /^(false|0|no|off)$/i.test(value.trim())) {
+          process.stdout.write("false");
+        } else {
+          process.stdout.write("true");
+        }
+      } catch (_) {}
+    ' 2>/dev/null || true
+  )
+
+  if [ -z "$sync_value" ] && [ -n "$env_override" ]; then
+    sync_value="$env_override"
+  fi
+  if [ -z "$sync_value" ]; then
+    sync_value="true"
+  fi
+
+  case "$(printf '%s' "$sync_value" | tr '[:upper:]' '[:lower:]')" in
+    false|0|no|off) return 1 ;;
+    *) return 0 ;;
+  esac
+}
+
 while true; do
   # Check for restart signal before prompt preflight
   if [ -f "$RESTART_SIGNAL" ]; then
@@ -151,7 +191,7 @@ while true; do
     exit 0
   fi
 
-  # Pre-check: skip Codex spawn if requests are still in-flight (fail-closed)
+  # Pre-check: skip agent launch if requests are still in-flight (fail-closed)
   LOOP_REQUESTS_STATUS=0
   LOOP_REQUESTS_JSON=$("$MAC10_CMD" loop-requests "$LOOP_ID" --json 2>/dev/null) || LOOP_REQUESTS_STATUS=$?
   if [ "$LOOP_REQUESTS_STATUS" -ne 0 ]; then
@@ -211,7 +251,7 @@ while true; do
     continue
   fi
   if [ "$ACTIVE_COUNT" -gt 0 ]; then
-    echo "[loop-sentinel-$LOOP_ID] $ACTIVE_COUNT request(s) still active, skipping spawn (backoff=${PRECHECK_BACKOFF}s)"
+    echo "[loop-sentinel-$LOOP_ID] $ACTIVE_COUNT request(s) still active, skipping launch (backoff=${PRECHECK_BACKOFF}s)"
     sleep_with_loop_heartbeats "$PRECHECK_BACKOFF"
     PRECHECK_BACKOFF=$((PRECHECK_BACKOFF * 2))
     [ "$PRECHECK_BACKOFF" -gt 600 ] && PRECHECK_BACKOFF=600
@@ -221,14 +261,32 @@ while true; do
   # Requests cleared — reset pre-check backoff for next cycle
   PRECHECK_BACKOFF=10
 
-  # Sync with latest main (only if not on main branch — avoid nuking main worktree)
-  CURRENT_BRANCH=$(git branch --show-current 2>/dev/null || echo "main")
-  if [ "$CURRENT_BRANCH" != "main" ]; then
-    git fetch origin 2>/dev/null || true
-    git rebase origin/main 2>/dev/null || {
-      git rebase --abort 2>/dev/null || true
-      git reset --hard origin/main 2>/dev/null || true
-    }
+  if loop_sync_with_origin_enabled "$PROMPT_JSON"; then
+    # Sync with latest main when possible. Preserve local worktree state on
+    # conflicts; the coordinator should surface the blocked sync instead of
+    # destructively resetting this branch.
+    CURRENT_BRANCH=$(git branch --show-current 2>/dev/null || echo "main")
+    if [ "$CURRENT_BRANCH" != "main" ]; then
+      if git remote get-url origin >/dev/null 2>&1; then
+        git fetch origin 2>/dev/null || true
+        if git rev-parse --verify origin/main >/dev/null 2>&1; then
+          if ! git rebase origin/main 2>/dev/null; then
+            git rebase --abort 2>/dev/null || true
+            echo "[loop-sentinel-$LOOP_ID] Sync with origin/main failed; preserving worktree state and backing off (${BACKOFF}s)."
+            sleep_with_loop_heartbeats "$BACKOFF"
+            BACKOFF=$((BACKOFF * 2))
+            [ "$BACKOFF" -gt 60 ] && BACKOFF=60
+            continue
+          fi
+        else
+          echo "[loop-sentinel-$LOOP_ID] origin/main unavailable; skipping sync."
+        fi
+      else
+        echo "[loop-sentinel-$LOOP_ID] No origin remote; skipping sync."
+      fi
+    fi
+  else
+    echo "[loop-sentinel-$LOOP_ID] Origin sync disabled for this loop; preserving current branch."
   fi
 
   # Reload provider config so provider/model changes in agent-launcher.env
@@ -237,18 +295,7 @@ while true; do
   AGENT_CLI="$(mac10_provider_cli)"
   LOOP_MODEL="$(mac10_resolve_role_model loop)"
 
-  # Launch agent for one iteration
-  # Namespace-aware prompt file selection:
-  # codex10 namespace → prefer .codex/commands-codex10/loop-agent.md, fallback to .codex/commands/loop-agent.md
-  # mac10 namespace   → use .claude/commands/loop-agent.md (uses mac10 commands)
   PROMPT_FILE="$PROJECT_DIR/.claude/commands/loop-agent.md"
-  if [ "${MAC10_NAMESPACE:-}" = "codex10" ]; then
-    if [ -f "$PROJECT_DIR/.codex/commands-codex10/loop-agent.md" ]; then
-      PROMPT_FILE="$PROJECT_DIR/.codex/commands-codex10/loop-agent.md"
-    elif [ -f "$PROJECT_DIR/.codex/commands/loop-agent.md" ]; then
-      PROMPT_FILE="$PROJECT_DIR/.codex/commands/loop-agent.md"
-    fi
-  fi
   echo "[loop-sentinel-$LOOP_ID] Launching ${AGENT_CLI} (provider=${MAC10_AGENT_PROVIDER} model=${LOOP_MODEL} backoff=${BACKOFF}s)..."
   START_TIME=$(date +%s)
   (

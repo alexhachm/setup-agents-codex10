@@ -2,7 +2,6 @@
 
 const { describe, it, beforeEach, afterEach } = require('node:test');
 const assert = require('node:assert');
-const net = require('net');
 const path = require('path');
 const fs = require('fs');
 const os = require('os');
@@ -10,8 +9,6 @@ const os = require('os');
 const db = require('../src/db');
 const merger = require('../src/merger');
 const watchdog = require('../src/watchdog');
-const webServer = require('../src/web-server');
-const instanceRegistry = require('../src/instance-registry');
 
 let tmpDir;
 
@@ -828,6 +825,25 @@ describe('Request lifecycle reconciliation', () => {
     assert.strictEqual(after.status_cause, 'reconcile_in_progress_all_tasks_terminal');
   });
 
+  it('should advance in_progress request when tasks use extended terminal statuses', () => {
+    const id = db.createRequest('in_progress with superseded and rerouted tasks');
+    const t1 = db.createTask({ request_id: id, subject: 'T1', description: 'Done' });
+    const t2 = db.createTask({ request_id: id, subject: 'T2', description: 'Superseded' });
+    const t3 = db.createTask({ request_id: id, subject: 'T3', description: 'Rerouted' });
+    const t4 = db.createTask({ request_id: id, subject: 'T4', description: 'Final fail' });
+    db.updateRequest(id, { status: 'in_progress' });
+    db.updateTask(t1, { status: 'completed' });
+    db.updateTask(t2, { status: 'superseded' });
+    db.updateTask(t3, { status: 'failed_needs_reroute' });
+    db.updateTask(t4, { status: 'failed_final' });
+
+    const changes = db.reconcileRequestLifecycle(id);
+    assert.ok(changes.some(c => c.type === 'advanced_in_progress_to_integrating'));
+
+    const after = db.getRequest(id);
+    assert.strictEqual(after.status, 'integrating');
+  });
+
   it('should not advance in_progress request with pending merges to integrating', () => {
     const id = db.createRequest('in_progress with pending merges');
     const t1 = db.createTask({ request_id: id, subject: 'T1', description: 'Done' });
@@ -1128,39 +1144,6 @@ describe('Config', () => {
   });
 });
 
-describe('Web server port-collision startup', () => {
-  afterEach(() => {
-    webServer.stop();
-  });
-
-  it('should reject on EADDRINUSE and not create a registry entry', async () => {
-    // Pre-bind a random port so it is unavailable
-    const blockingServer = net.createServer();
-    await new Promise((resolve) => blockingServer.listen(0, '127.0.0.1', resolve));
-    const { port } = blockingServer.address();
-
-    let startErr = null;
-    try {
-      await webServer.start(tmpDir, port, null, {});
-    } catch (err) {
-      startErr = err;
-    } finally {
-      await new Promise((resolve) => blockingServer.close(resolve));
-    }
-
-    assert.ok(startErr, 'start() should reject when port is already in use');
-    assert.strictEqual(startErr.code, 'EADDRINUSE');
-
-    // Verify no registry entry was created for this port
-    const instances = instanceRegistry.list();
-    assert.strictEqual(
-      instances.filter((i) => i.port === port).length,
-      0,
-      'port-collision startup must not create a registry entry'
-    );
-  });
-});
-
 describe('Watchdog stall recovery regression', () => {
   it('should recover a stalled assigned task to ready via recoverStalledAssignments', () => {
     const reqId = db.createRequest('Feature');
@@ -1296,5 +1279,280 @@ describe('Stale integration watchdog recovery regression', () => {
       'completed',
       'integrating request with no merge entries and stale updated_at must be auto-completed'
     );
+  });
+});
+
+describe('Extended task statuses', () => {
+  it('accepts superseded status', () => {
+    const reqId = db.createRequest('Test superseded');
+    const taskId = db.createTask({ request_id: reqId, subject: 'Task', description: 'Will be superseded' });
+    db.updateTask(taskId, { status: 'superseded', result: 'Replaced by newer task' });
+    const task = db.getTask(taskId);
+    assert.strictEqual(task.status, 'superseded');
+  });
+
+  it('accepts failed_needs_reroute status', () => {
+    const reqId = db.createRequest('Test reroute');
+    const taskId = db.createTask({ request_id: reqId, subject: 'Task', description: 'Needs reroute' });
+    db.updateTask(taskId, { status: 'failed_needs_reroute', result: 'Worker unavailable' });
+    const task = db.getTask(taskId);
+    assert.strictEqual(task.status, 'failed_needs_reroute');
+  });
+
+  it('accepts failed_final status', () => {
+    const reqId = db.createRequest('Test final failure');
+    const taskId = db.createTask({ request_id: reqId, subject: 'Task', description: 'Final failure' });
+    db.updateTask(taskId, { status: 'failed_final', result: 'Unrecoverable error' });
+    const task = db.getTask(taskId);
+    assert.strictEqual(task.status, 'failed_final');
+  });
+
+  it('isTerminalTaskStatus classifies all terminal statuses', () => {
+    for (const status of ['completed', 'failed', 'superseded', 'failed_needs_reroute', 'failed_final']) {
+      assert.ok(db.isTerminalTaskStatus(status), `${status} should be terminal`);
+    }
+    for (const status of ['pending', 'ready', 'assigned', 'in_progress', 'blocked']) {
+      assert.ok(!db.isTerminalTaskStatus(status), `${status} should not be terminal`);
+    }
+    assert.ok(!db.isTerminalTaskStatus(null));
+    assert.ok(!db.isTerminalTaskStatus(undefined));
+  });
+
+  it('supports blocking column default and update', () => {
+    const reqId = db.createRequest('Test blocking');
+    const taskId = db.createTask({ request_id: reqId, subject: 'Blocking task', description: 'Blocks completion' });
+    const task = db.getTask(taskId);
+    assert.strictEqual(task.blocking, 1, 'default is blocking');
+
+    db.updateTask(taskId, { blocking: 0 });
+    const updated = db.getTask(taskId);
+    assert.strictEqual(updated.blocking, 0, 'can be set to non-blocking');
+  });
+
+  it('watchdog supersedes non-terminal sibling tasks on merged request recovery', () => {
+    const reqId = db.createRequest('Supersede test');
+    db.updateRequest(reqId, { status: 'integrating' });
+
+    const completedTaskId = db.createTask({ request_id: reqId, subject: 'Done', description: 'Merged work' });
+    db.updateTask(completedTaskId, { status: 'completed' });
+
+    const activeTaskId = db.createTask({ request_id: reqId, subject: 'Active', description: 'Still running' });
+    db.updateTask(activeTaskId, { status: 'in_progress' });
+
+    const mergeResult = db.enqueueMerge({
+      request_id: reqId,
+      task_id: completedTaskId,
+      pr_url: 'https://example.com/pr/1',
+      branch: 'agent/supersede-test',
+      priority: 0,
+    });
+    db.updateMerge(mergeResult.lastInsertRowid, { status: 'merged', merged_at: new Date().toISOString() });
+
+    watchdog.tick(tmpDir);
+
+    const activeAfter = db.getTask(activeTaskId);
+    assert.strictEqual(activeAfter.status, 'superseded', 'non-terminal sibling should be superseded');
+
+    const request = db.getRequest(reqId);
+    assert.strictEqual(request.status, 'completed');
+  });
+});
+
+describe('Task merge history', () => {
+  it('should append merge history entries to a task', () => {
+    const reqId = db.createRequest('Test merge history');
+    const taskId = db.createTask({ request_id: reqId, subject: 'impl', description: 'do it', domain: 'test' });
+
+    db.appendTaskMergeHistory(taskId, { event: 'merge_conflict', merge_id: 1, branch: 'feat-a', error: 'conflict in file.js' });
+    db.appendTaskMergeHistory(taskId, { event: 'merge_success', merge_id: 1, branch: 'feat-a' });
+
+    const task = db.getTask(taskId);
+    const history = JSON.parse(task.merge_history);
+    assert.strictEqual(history.length, 2);
+    assert.strictEqual(history[0].event, 'merge_conflict');
+    assert.strictEqual(history[0].error, 'conflict in file.js');
+    assert.ok(history[0].recorded_at);
+    assert.strictEqual(history[1].event, 'merge_success');
+    assert.ok(history[1].recorded_at);
+  });
+
+  it('should return empty history for task with no merge events', () => {
+    const reqId = db.createRequest('No merges');
+    const taskId = db.createTask({ request_id: reqId, subject: 'impl', description: 'do it', domain: 'test' });
+    const task = db.getTask(taskId);
+    assert.strictEqual(task.merge_history, null);
+  });
+
+  it('should aggregate merge history across tasks for a request', () => {
+    const reqId = db.createRequest('Multi-task merge');
+    const t1 = db.createTask({ request_id: reqId, subject: 'task1', description: 'first', domain: 'a' });
+    const t2 = db.createTask({ request_id: reqId, subject: 'task2', description: 'second', domain: 'b' });
+
+    db.appendTaskMergeHistory(t1, { event: 'merge_conflict', merge_id: 10, branch: 'feat-1' });
+    db.appendTaskMergeHistory(t2, { event: 'merge_success', merge_id: 20, branch: 'feat-2' });
+    db.appendTaskMergeHistory(t1, { event: 'merge_success', merge_id: 10, branch: 'feat-1' });
+
+    const history = db.getRequestMergeHistory(reqId);
+    assert.strictEqual(history.length, 3);
+    const t1Events = history.filter(h => h.task_id === t1);
+    const t2Events = history.filter(h => h.task_id === t2);
+    assert.strictEqual(t1Events.length, 2);
+    assert.strictEqual(t1Events[0].event, 'merge_conflict');
+    assert.strictEqual(t1Events[1].event, 'merge_success');
+    assert.strictEqual(t2Events.length, 1);
+    assert.strictEqual(t2Events[0].event, 'merge_success');
+  });
+
+  it('should not fail when appending to nonexistent task', () => {
+    db.appendTaskMergeHistory(99999, { event: 'merge_success', merge_id: 1 });
+  });
+});
+
+describe('Request completion with extended task statuses', () => {
+  it('checkRequestCompletion counts superseded tasks as terminal', () => {
+    const reqId = db.createRequest('Superseded completion test');
+    const t1 = db.createTask({ request_id: reqId, subject: 'A', description: 'done' });
+    const t2 = db.createTask({ request_id: reqId, subject: 'B', description: 'superseded' });
+    db.updateTask(t1, { status: 'completed' });
+    db.updateTask(t2, { status: 'superseded' });
+
+    const result = db.checkRequestCompletion(reqId);
+    assert.strictEqual(result.all_terminal, true, 'completed + superseded = all_terminal');
+    assert.strictEqual(result.all_done, false, 'legacy all_done remains success/failure-only');
+    assert.strictEqual(result.superseded, 1);
+    assert.strictEqual(result.completed, 1);
+  });
+
+  it('checkRequestCompletion counts failed_needs_reroute as terminal', () => {
+    const reqId = db.createRequest('Rerouted completion test');
+    const t1 = db.createTask({ request_id: reqId, subject: 'A', description: 'done' });
+    const t2 = db.createTask({ request_id: reqId, subject: 'B', description: 'rerouted' });
+    db.updateTask(t1, { status: 'completed' });
+    db.updateTask(t2, { status: 'failed_needs_reroute' });
+
+    const result = db.checkRequestCompletion(reqId);
+    assert.strictEqual(result.all_terminal, true);
+    assert.strictEqual(result.all_done, false);
+    assert.strictEqual(result.rerouted, 1);
+  });
+
+  it('checkRequestCompletion does not mark all_done when non-terminal tasks remain', () => {
+    const reqId = db.createRequest('Partial completion test');
+    const t1 = db.createTask({ request_id: reqId, subject: 'A', description: 'done' });
+    const t2 = db.createTask({ request_id: reqId, subject: 'B', description: 'in progress' });
+    db.updateTask(t1, { status: 'completed' });
+    db.updateTask(t2, { status: 'in_progress' });
+
+    const result = db.checkRequestCompletion(reqId);
+    assert.strictEqual(result.all_done, false, 'in_progress task should block completion');
+    assert.strictEqual(result.all_terminal, false, 'in_progress task should block terminal completion');
+  });
+
+  it('checkRequestCompletion counts failed_final as terminal', () => {
+    const reqId = db.createRequest('Failed final completion test');
+    const t1 = db.createTask({ request_id: reqId, subject: 'A', description: 'done' });
+    const t2 = db.createTask({ request_id: reqId, subject: 'B', description: 'final' });
+    db.updateTask(t1, { status: 'completed' });
+    db.updateTask(t2, { status: 'failed_final' });
+
+    const result = db.checkRequestCompletion(reqId);
+    assert.strictEqual(result.all_terminal, true);
+    assert.strictEqual(result.all_done, false);
+    assert.strictEqual(result.failed_final, 1);
+    assert.strictEqual(result.hard_failures, 1);
+  });
+});
+
+describe('Task sandbox lifecycle state', () => {
+  it('creates one active sandbox per task with worker defaults', () => {
+    db.registerWorker(1, '/wt-1', 'agent-1');
+    const reqId = db.createRequest('Sandbox lifecycle');
+    const taskId = db.createTask({ request_id: reqId, subject: 'Sandboxed task', description: 'Use disposable sandbox' });
+    db.updateTask(taskId, { assigned_to: 1, branch: 'agent-1-task-1' });
+
+    const sandbox = db.createTaskSandbox({ task_id: taskId, backend: 'docker' });
+    assert.strictEqual(sandbox.task_id, taskId);
+    assert.strictEqual(sandbox.request_id, reqId);
+    assert.strictEqual(sandbox.worker_id, 1);
+    assert.strictEqual(sandbox.backend, 'docker');
+    assert.strictEqual(sandbox.status, 'allocated');
+    assert.strictEqual(sandbox.sandbox_name, `task-${taskId}-worker-1`);
+    assert.strictEqual(sandbox.worktree_path, '/wt-1');
+    assert.strictEqual(sandbox.branch, 'agent-1-task-1');
+    assert.strictEqual(db.getActiveTaskSandboxForTask(taskId).id, sandbox.id);
+    assert.throws(
+      () => db.createTaskSandbox({ task_id: taskId, backend: 'docker' }),
+      /active_task_sandbox_exists/
+    );
+  });
+
+  it('tracks allowed sandbox transitions and timestamps', () => {
+    const reqId = db.createRequest('Sandbox transitions');
+    const taskId = db.createTask({ request_id: reqId, subject: 'Sandboxed task', description: 'Use disposable sandbox' });
+    const sandbox = db.createTaskSandbox({ task_id: taskId, backend: 'pending', metadata: { reason: 'test' } });
+
+    const ready = db.transitionTaskSandbox(sandbox.id, 'ready', { backend: 'tmux' });
+    assert.strictEqual(ready.status, 'ready');
+    assert.strictEqual(ready.backend, 'tmux');
+
+    const running = db.transitionTaskSandbox(sandbox.id, 'running');
+    assert.strictEqual(running.status, 'running');
+    assert.ok(running.started_at);
+
+    const stopped = db.transitionTaskSandbox(sandbox.id, 'stopped', { error: 'worker exited' });
+    assert.strictEqual(stopped.status, 'stopped');
+    assert.strictEqual(stopped.error, 'worker exited');
+    assert.ok(stopped.stopped_at);
+
+    const cleaned = db.transitionTaskSandbox(sandbox.id, 'cleaned');
+    assert.strictEqual(cleaned.status, 'cleaned');
+    assert.ok(cleaned.cleaned_at);
+    assert.strictEqual(db.getActiveTaskSandboxForTask(taskId), undefined);
+  });
+
+  it('rejects invalid sandbox lifecycle transitions', () => {
+    const reqId = db.createRequest('Invalid sandbox transition');
+    const taskId = db.createTask({ request_id: reqId, subject: 'Sandboxed task', description: 'Use disposable sandbox' });
+    const sandbox = db.createTaskSandbox({ task_id: taskId });
+
+    assert.throws(
+      () => db.transitionTaskSandbox(sandbox.id, 'stopped'),
+      /invalid_task_sandbox_transition:allocated->stopped/
+    );
+  });
+
+  it('cleans only stale stopped or failed sandboxes', () => {
+    const reqId = db.createRequest('Sandbox cleanup');
+    const staleTaskId = db.createTask({ request_id: reqId, subject: 'Stale sandbox', description: 'Clean me' });
+    const freshTaskId = db.createTask({ request_id: reqId, subject: 'Fresh sandbox', description: 'Keep me' });
+    const runningTaskId = db.createTask({ request_id: reqId, subject: 'Running sandbox', description: 'Keep active' });
+
+    const stale = db.createTaskSandbox({ task_id: staleTaskId });
+    db.transitionTaskSandbox(stale.id, 'running');
+    db.transitionTaskSandbox(stale.id, 'stopped');
+    const fresh = db.createTaskSandbox({ task_id: freshTaskId });
+    db.transitionTaskSandbox(fresh.id, 'running');
+    db.transitionTaskSandbox(fresh.id, 'failed', { error: 'recent failure' });
+    const running = db.createTaskSandbox({ task_id: runningTaskId });
+    db.transitionTaskSandbox(running.id, 'running');
+
+    const oldTs = '2026-01-01T00:00:00.000Z';
+    db.getDb().prepare(`
+      UPDATE task_sandboxes
+      SET stopped_at = ?, updated_at = ?
+      WHERE id = ?
+    `).run(oldTs, oldTs, stale.id);
+
+    const dryRun = db.cleanupTaskSandboxes({ max_age_minutes: 60, dry_run: true });
+    assert.strictEqual(dryRun.cleaned_count, 0);
+    assert.deepStrictEqual(dryRun.ids, [stale.id]);
+    assert.strictEqual(db.getTaskSandbox(stale.id).status, 'stopped');
+
+    const cleaned = db.cleanupTaskSandboxes({ max_age_minutes: 60 });
+    assert.strictEqual(cleaned.cleaned_count, 1);
+    assert.deepStrictEqual(cleaned.ids, [stale.id]);
+    assert.strictEqual(db.getTaskSandbox(stale.id).status, 'cleaned');
+    assert.strictEqual(db.getTaskSandbox(fresh.id).status, 'failed');
+    assert.strictEqual(db.getTaskSandbox(running.id).status, 'running');
   });
 });

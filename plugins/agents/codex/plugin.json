@@ -1,0 +1,43 @@
+{
+  "schema_version": 1,
+  "id": "codex",
+  "display_name": "OpenAI Codex CLI (disabled provider stub)",
+  "enabled": false,
+  "enablement": {
+    "status": "disabled_scaffold",
+    "reason": "Codex must return only through the provider plugin interface. Enable this manifest only after local CLI, auth, launch, and output-schema smokes pass."
+  },
+  "cli": {
+    "command": "codex",
+    "auth_check": {
+      "command": "codex",
+      "args": ["--version"]
+    }
+  },
+  "models": {
+    "fast": "default",
+    "deep": "default",
+    "economy": "default",
+    "worker": "default",
+    "loop": "default"
+  },
+  "environment": {
+    "set": {},
+    "unset": []
+  },
+  "launch": {
+    "interactive": {
+      "args": ["$PROMPT_TEXT"]
+    },
+    "noninteractive": {
+      "args": ["$PROMPT_TEXT"]
+    }
+  },
+  "output": {
+    "usage_payloads": ["canonical"],
+    "task_completion": {
+      "success_command": "mac10 complete-task",
+      "failure_command": "mac10 fail-task"
+    }
+  }
+}
