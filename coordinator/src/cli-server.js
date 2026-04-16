@@ -285,6 +285,16 @@ function fallbackModelRouter() {
 
 if (!modelRouter) {
   modelRouter = fallbackModelRouter();
+} else {
+  // Ensure routeTask and getBudgetState exist even when model-router.js loads
+  // but doesn't export them (it may only export resolve/resolveWithFallback)
+  const fallback = fallbackModelRouter();
+  if (typeof modelRouter.routeTask !== 'function') {
+    modelRouter.routeTask = fallback.routeTask.bind(fallback);
+  }
+  if (typeof modelRouter.getBudgetState !== 'function') {
+    modelRouter.getBudgetState = fallback.getBudgetState.bind(fallback);
+  }
 }
 
 let server = null;
