@@ -2,9 +2,37 @@
 
 /**
  * Batch Browse — execute multiple browser operations in parallel.
+ * Rate limiting semaphore: max 5 concurrent operations.
  */
 
 const browserEngine = require('./browser-engine');
+
+const MAX_CONCURRENT = 5;
+
+// Semaphore for rate limiting
+class Semaphore {
+  constructor(max) {
+    this.max = max;
+    this.current = 0;
+    this.queue = [];
+  }
+  async acquire() {
+    if (this.current < this.max) {
+      this.current++;
+      return;
+    }
+    return new Promise(resolve => this.queue.push(resolve));
+  }
+  release() {
+    this.current--;
+    if (this.queue.length > 0) {
+      this.current++;
+      this.queue.shift()();
+    }
+  }
+}
+
+const _semaphore = new Semaphore(MAX_CONCURRENT);
 
 /**
  * Browse multiple URLs and extract content.
@@ -13,7 +41,7 @@ const browserEngine = require('./browser-engine');
  * @returns {Promise<Array>} - Results for each URL
  */
 async function batchBrowse(urls, opts = {}) {
-  const concurrency = opts.concurrency || 3;
+  const concurrency = Math.min(opts.concurrency || 3, MAX_CONCURRENT);
   const results = [];
   const queue = [...urls];
 
@@ -57,4 +85,4 @@ async function batchBrowse(urls, opts = {}) {
   };
 }
 
-module.exports = { batchBrowse };
+module.exports = { batchBrowse, MAX_CONCURRENT, Semaphore };

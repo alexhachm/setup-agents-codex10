@@ -227,10 +227,32 @@ class ConnectorFramework {
     rawDb.prepare('DELETE FROM connector_configs WHERE connector_name = ?').run(this.name);
   }
 
+  /**
+   * Authenticate via simple API key (alternative to OAuth).
+   * @param {string} apiKey - The API key
+   * @param {Object} opts - { headerName, prefix }
+   */
+  authenticateWithApiKey(apiKey, opts = {}) {
+    this.storeCredentials({
+      access_token: apiKey,
+      token_type: opts.prefix || 'Bearer',
+    });
+    this.setConfig('auth_method', 'api_key');
+    this.setConfig('auth_header', opts.headerName || 'Authorization');
+  }
+
+  /**
+   * Get auth method (oauth or api_key).
+   */
+  getAuthMethod() {
+    return this.getConfig('auth_method') || 'oauth';
+  }
+
   getStatus() {
     return {
       name: this.name,
       authenticated: this.isAuthenticated(),
+      auth_method: this.getAuthMethod(),
       scopes: this.scopes,
     };
   }

@@ -2,10 +2,13 @@
 
 /**
  * Batch Research — execute multiple research queries in parallel.
+ * Rate limiting semaphore: max 5 concurrent operations.
  */
 
 const deepResearch = require('./deep-research');
 const searchEngine = require('./search/engine');
+
+const MAX_CONCURRENT = 5;
 
 /**
  * Execute batch search queries.
@@ -14,7 +17,7 @@ const searchEngine = require('./search/engine');
  * @returns {Promise<Object>} - { results, total }
  */
 async function batchSearch(queries, opts = {}) {
-  const concurrency = opts.concurrency || 3;
+  const concurrency = Math.min(opts.concurrency || 3, MAX_CONCURRENT);
   const results = [];
 
   for (let i = 0; i < queries.length; i += concurrency) {
@@ -65,4 +68,4 @@ async function batchDeepResearch(topics, opts = {}) {
   };
 }
 
-module.exports = { batchSearch, batchDeepResearch };
+module.exports = { batchSearch, batchDeepResearch, MAX_CONCURRENT };
