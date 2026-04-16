@@ -141,14 +141,50 @@ function hasPermission(userId, permission) {
   if (perms.includes('*')) return true;
   if (perms.includes(permission)) return true;
   // Check wildcard: "workers:*" matches "workers:read"
-  const [resource] = permission.split(':');
-  return perms.includes(`${resource}:*`);
+  const [resource, action] = permission.split(':');
+  if (perms.includes(`${resource}:*`)) return true;
+  // Check action-level: permission "tasks:write:assign" matches role perm "tasks:write"
+  if (action && perms.includes(`${resource}:${action}`)) return true;
+  return false;
+}
+
+/**
+ * Check action-level permission with resource, action, and optional sub-action.
+ * Supports "resource:action:sub_action" granularity.
+ * @example hasActionPermission('user1', 'tasks', 'write', 'assign')
+ */
+function hasActionPermission(userId, resource, action, subAction) {
+  const perms = getUserPermissions(userId);
+  if (perms.includes('*')) return true;
+
+  // Check exact match: "tasks:write:assign"
+  if (subAction && perms.includes(`${resource}:${action}:${subAction}`)) return true;
+  // Check action level: "tasks:write"
+  if (perms.includes(`${resource}:${action}`)) return true;
+  // Check resource wildcard: "tasks:*"
+  if (perms.includes(`${resource}:*`)) return true;
+
+  return false;
 }
 
 function checkPermission(userId, permission) {
   if (!hasPermission(userId, permission)) {
     throw new Error(`Access denied: ${userId} lacks permission ${permission}`);
   }
+}
+
+/**
+ * Parse a permission string into components.
+ * @param {string} perm - "resource:action:sub_action"
+ * @returns {{ resource, action, subAction }}
+ */
+function parsePermission(perm) {
+  const parts = perm.split(':');
+  return {
+    resource: parts[0] || '*',
+    action: parts[1] || '*',
+    subAction: parts[2] || null,
+  };
 }
 
 module.exports = {
@@ -164,5 +200,7 @@ module.exports = {
   getUserRoles,
   getUserPermissions,
   hasPermission,
+  hasActionPermission,
   checkPermission,
+  parsePermission,
 };

@@ -247,11 +247,56 @@ function getServer() {
   return _server;
 }
 
+// --- Real-time task progress events ---
+
+function emitTaskProgress(taskId, event) {
+  broadcast({
+    type: 'task_progress',
+    task_id: taskId,
+    event,
+    timestamp: new Date().toISOString(),
+  });
+}
+
+function emitTaskStatusChange(taskId, oldStatus, newStatus, metadata) {
+  broadcast({
+    type: 'task_status_change',
+    task_id: taskId,
+    old_status: oldStatus,
+    new_status: newStatus,
+    metadata: metadata || {},
+    timestamp: new Date().toISOString(),
+  });
+}
+
+function emitRequestStatusChange(requestId, oldStatus, newStatus) {
+  broadcast({
+    type: 'request_status_change',
+    request_id: requestId,
+    old_status: oldStatus,
+    new_status: newStatus,
+    timestamp: new Date().toISOString(),
+  });
+}
+
+function emitWorkerEvent(workerId, event) {
+  broadcast({
+    type: 'worker_event',
+    worker_id: workerId,
+    event,
+    timestamp: new Date().toISOString(),
+  });
+}
+
 module.exports = {
   start,
   stop,
   getServer,
   broadcast,
+  emitTaskProgress,
+  emitTaskStatusChange,
+  emitRequestStatusChange,
+  emitWorkerEvent,
   routes,
   matchRoute,
   handleRequest,
