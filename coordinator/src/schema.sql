@@ -546,6 +546,143 @@ CREATE INDEX IF NOT EXISTS idx_changes_domain ON changes(domain);
 CREATE INDEX IF NOT EXISTS idx_changes_status ON changes(status);
 CREATE INDEX IF NOT EXISTS idx_loops_status ON loops(status);
 
+-- Model routing rules (Sprint 0: multi-provider routing)
+CREATE TABLE IF NOT EXISTS model_routing_rules (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  routing_class TEXT NOT NULL CHECK (routing_class IN ('fast','deep','economy','code','research','browser')),
+  provider TEXT NOT NULL,
+  model TEXT NOT NULL,
+  priority INTEGER NOT NULL DEFAULT 0,
+  enabled INTEGER NOT NULL DEFAULT 1,
+  metadata TEXT,
+  created_at TEXT NOT NULL DEFAULT (datetime('now')),
+  updated_at TEXT NOT NULL DEFAULT (datetime('now'))
+);
+
+CREATE INDEX IF NOT EXISTS idx_model_routing_rules_class
+  ON model_routing_rules(routing_class, priority DESC);
+
+-- Confirmations (Sprint 2: safety gate)
+CREATE TABLE IF NOT EXISTS confirmations (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  action_type TEXT NOT NULL,
+  action_description TEXT NOT NULL,
+  action_payload TEXT,
+  requester TEXT NOT NULL,
+  status TEXT NOT NULL DEFAULT 'pending'
+    CHECK (status IN ('pending','approved','denied','expired','auto_approved')),
+  reviewer TEXT,
+  review_reason TEXT,
+  task_id INTEGER REFERENCES tasks(id),
+  request_id TEXT REFERENCES requests(id),
+  expires_at TEXT,
+  created_at TEXT NOT NULL DEFAULT (datetime('now')),
+  reviewed_at TEXT
+);
+
+CREATE INDEX IF NOT EXISTS idx_confirmations_status
+  ON confirmations(status, created_at ASC);
+CREATE INDEX IF NOT EXISTS idx_confirmations_requester
+  ON confirmations(requester, status);
+
+-- Scheduled tasks (Sprint 3: cron scheduler)
+CREATE TABLE IF NOT EXISTS scheduled_tasks (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  name TEXT NOT NULL,
+  cron_expression TEXT NOT NULL,
+  command TEXT NOT NULL,
+  command_args TEXT,
+  enabled INTEGER NOT NULL DEFAULT 1,
+  last_run_at TEXT,
+  next_run_at TEXT,
+  run_count INTEGER NOT NULL DEFAULT 0,
+  last_result TEXT,
+  last_error TEXT,
+  metadata TEXT,
+  created_at TEXT NOT NULL DEFAULT (datetime('now')),
+  updated_at TEXT NOT NULL DEFAULT (datetime('now'))
+);
+
+CREATE INDEX IF NOT EXISTS idx_scheduled_tasks_enabled
+  ON scheduled_tasks(enabled, next_run_at ASC);
+
+-- OAuth credentials (Sprint 4: connectors)
+CREATE TABLE IF NOT EXISTS oauth_credentials (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  connector_name TEXT NOT NULL,
+  provider TEXT NOT NULL,
+  access_token TEXT,
+  refresh_token TEXT,
+  token_type TEXT DEFAULT 'Bearer',
+  expires_at TEXT,
+  scope TEXT,
+  metadata TEXT,
+  created_at TEXT NOT NULL DEFAULT (datetime('now')),
+  updated_at TEXT NOT NULL DEFAULT (datetime('now')),
+  UNIQUE(connector_name)
+);
+
+CREATE TABLE IF NOT EXISTS connector_configs (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  connector_name TEXT NOT NULL,
+  config_key TEXT NOT NULL,
+  config_value TEXT,
+  created_at TEXT NOT NULL DEFAULT (datetime('now')),
+  updated_at TEXT NOT NULL DEFAULT (datetime('now')),
+  UNIQUE(connector_name, config_key)
+);
+
+CREATE INDEX IF NOT EXISTS idx_oauth_credentials_connector
+  ON oauth_credentials(connector_name);
+CREATE INDEX IF NOT EXISTS idx_connector_configs_connector
+  ON connector_configs(connector_name);
+
+-- Notification channels (Sprint 5: notifications)
+CREATE TABLE IF NOT EXISTS notification_channels (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  name TEXT NOT NULL UNIQUE,
+  channel_type TEXT NOT NULL CHECK (channel_type IN ('webhook','email','slack','desktop')),
+  config TEXT NOT NULL DEFAULT '{}',
+  enabled INTEGER NOT NULL DEFAULT 1,
+  last_sent_at TEXT,
+  error_count INTEGER NOT NULL DEFAULT 0,
+  created_at TEXT NOT NULL DEFAULT (datetime('now'))
+);
+
+CREATE INDEX IF NOT EXISTS idx_notification_channels_type
+  ON notification_channels(channel_type, enabled);
+
+-- Audit log export tracking (Sprint 7)
+CREATE TABLE IF NOT EXISTS audit_exports (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  export_format TEXT NOT NULL CHECK (export_format IN ('json','csv')),
+  file_path TEXT,
+  record_count INTEGER NOT NULL DEFAULT 0,
+  from_date TEXT,
+  to_date TEXT,
+  created_at TEXT NOT NULL DEFAULT (datetime('now'))
+);
+
+-- RBAC (Sprint 7: role-based access)
+CREATE TABLE IF NOT EXISTS rbac_roles (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  name TEXT NOT NULL UNIQUE,
+  description TEXT,
+  permissions TEXT NOT NULL DEFAULT '[]',
+  created_at TEXT NOT NULL DEFAULT (datetime('now'))
+);
+
+CREATE TABLE IF NOT EXISTS rbac_user_roles (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  user_id TEXT NOT NULL,
+  role_id INTEGER NOT NULL REFERENCES rbac_roles(id),
+  created_at TEXT NOT NULL DEFAULT (datetime('now')),
+  UNIQUE(user_id, role_id)
+);
+
+CREATE INDEX IF NOT EXISTS idx_rbac_user_roles_user
+  ON rbac_user_roles(user_id);
+
 -- Default config
 INSERT OR IGNORE INTO config (key, value) VALUES
   ('max_workers', '8'),
