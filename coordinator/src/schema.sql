@@ -554,6 +554,8 @@ CREATE TABLE IF NOT EXISTS model_routing_rules (
   model TEXT NOT NULL,
   priority INTEGER NOT NULL DEFAULT 0,
   enabled INTEGER NOT NULL DEFAULT 1,
+  cost_per_1k_input REAL,
+  cost_per_1k_output REAL,
   metadata TEXT,
   created_at TEXT NOT NULL DEFAULT (datetime('now')),
   updated_at TEXT NOT NULL DEFAULT (datetime('now'))
