@@ -166,6 +166,69 @@ function stop() {
   }
 }
 
+/**
+ * Parse natural language time expressions into cron expressions.
+ * Handles common patterns like "every Tuesday at 9am", "daily at 3pm", "every 5 minutes".
+ * Uses regex-based parsing (no external dependency required).
+ */
+function parseNaturalLanguage(text) {
+  if (!text || typeof text !== 'string') return null;
+  const t = text.toLowerCase().trim();
+
+  // "every N minutes"
+  const everyMinMatch = t.match(/every\s+(\d+)\s+min(?:ute)?s?/);
+  if (everyMinMatch) {
+    return { cron: `*/${everyMinMatch[1]} * * * *`, description: `Every ${everyMinMatch[1]} minutes` };
+  }
+
+  // "every N hours"
+  const everyHourMatch = t.match(/every\s+(\d+)\s+hours?/);
+  if (everyHourMatch) {
+    return { cron: `0 */${everyHourMatch[1]} * * *`, description: `Every ${everyHourMatch[1]} hours` };
+  }
+
+  // "every hour"
+  if (/every\s+hour\b/.test(t)) {
+    return { cron: '0 * * * *', description: 'Every hour' };
+  }
+
+  // Day names
+  const dayMap = { sunday: 0, monday: 1, tuesday: 2, wednesday: 3, thursday: 4, friday: 5, saturday: 6 };
+
+  // "every <day> at <time>"
+  const dayTimeMatch = t.match(/every\s+(sunday|monday|tuesday|wednesday|thursday|friday|saturday)\s+at\s+(\d{1,2})(?::(\d{2}))?\s*(am|pm)?/);
+  if (dayTimeMatch) {
+    let hour = parseInt(dayTimeMatch[2], 10);
+    const minute = dayTimeMatch[3] ? parseInt(dayTimeMatch[3], 10) : 0;
+    if (dayTimeMatch[4] === 'pm' && hour < 12) hour += 12;
+    if (dayTimeMatch[4] === 'am' && hour === 12) hour = 0;
+    const dow = dayMap[dayTimeMatch[1]];
+    return { cron: `${minute} ${hour} * * ${dow}`, description: `Every ${dayTimeMatch[1]} at ${hour}:${String(minute).padStart(2, '0')}` };
+  }
+
+  // "daily at <time>"
+  const dailyMatch = t.match(/daily\s+at\s+(\d{1,2})(?::(\d{2}))?\s*(am|pm)?/);
+  if (dailyMatch) {
+    let hour = parseInt(dailyMatch[1], 10);
+    const minute = dailyMatch[2] ? parseInt(dailyMatch[2], 10) : 0;
+    if (dailyMatch[3] === 'pm' && hour < 12) hour += 12;
+    if (dailyMatch[3] === 'am' && hour === 12) hour = 0;
+    return { cron: `${minute} ${hour} * * *`, description: `Daily at ${hour}:${String(minute).padStart(2, '0')}` };
+  }
+
+  // "weekdays at <time>"
+  const weekdaysMatch = t.match(/weekdays?\s+at\s+(\d{1,2})(?::(\d{2}))?\s*(am|pm)?/);
+  if (weekdaysMatch) {
+    let hour = parseInt(weekdaysMatch[1], 10);
+    const minute = weekdaysMatch[2] ? parseInt(weekdaysMatch[2], 10) : 0;
+    if (weekdaysMatch[3] === 'pm' && hour < 12) hour += 12;
+    if (weekdaysMatch[3] === 'am' && hour === 12) hour = 0;
+    return { cron: `${minute} ${hour} * * 1-5`, description: `Weekdays at ${hour}:${String(minute).padStart(2, '0')}` };
+  }
+
+  return null;
+}
+
 module.exports = {
   matchesCron,
   matchesField,
@@ -175,6 +238,7 @@ module.exports = {
   updateScheduledTask,
   deleteScheduledTask,
   getNextRunTime,
+  parseNaturalLanguage,
   tick,
   start,
   stop,
