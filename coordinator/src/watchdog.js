@@ -18,6 +18,8 @@ const lastEscalationLevel = new Map();
 const lastOutputHash = new Map();
 
 // Default escalation thresholds (seconds since last heartbeat).
+// Ref: coordinator-core rollup — 4-tier escalation: warn → nudge → triage → terminate.
+// Configurable via DB config keys: watchdog_warn_sec, etc.
 const THRESHOLDS = Object.freeze({
   warn: 60,
   nudge: 90,

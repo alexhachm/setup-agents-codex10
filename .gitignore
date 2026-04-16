@@ -8,3 +8,26 @@ node_modules/
 *.log
 .worktrees/
 sandbox/.menv/
+
+# Settings files that may contain API keys or secrets
+.env
+.env.*
+*.env.local
+.claude/settings.local.json
+.codex/config.local.toml
+*.secret
+*.secrets
+credentials.json
+api-keys.json
+
+# Runtime artifacts (ref: git-generated-noise-policy rollup)
+.codex/state/
+.codex/scripts/__pycache__/
+scripts/__pycache__/
+coordinator/.codex/
+*.pid
+*.lock
+
+# OS artifacts
+.DS_Store
+Thumbs.db

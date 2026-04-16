@@ -1,0 +1,55 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!--
+  mac10 Research Driver — launchd service file (macOS)
+  Install: cp services/com.mac10.research.plist ~/Library/LaunchAgents/
+  Load:    launchctl load ~/Library/LaunchAgents/com.mac10.research.plist
+
+  Research source: coordinator-extensions rollup — research pipeline daemon mode
+-->
+<plist version="1.0">
+<dict>
+    <key>Label</key>
+    <string>com.mac10.research</string>
+
+    <key>ProgramArguments</key>
+    <array>
+        <string>/usr/bin/python3</string>
+        <string>scripts/chatgpt-driver.py</string>
+        <string>--project-dir</string>
+        <string>.</string>
+    </array>
+
+    <key>WorkingDirectory</key>
+    <!-- Update this to your project root -->
+    <string>/Users/YOU/project</string>
+
+    <key>EnvironmentVariables</key>
+    <dict>
+        <key>MAC10_NAMESPACE</key>
+        <string>mac10</string>
+        <key>PATH</key>
+        <string>/usr/local/bin:/usr/bin:/bin</string>
+    </dict>
+
+    <key>RunAtLoad</key>
+    <true/>
+
+    <key>KeepAlive</key>
+    <dict>
+        <key>SuccessfulExit</key>
+        <false/>
+    </dict>
+
+    <key>ThrottleInterval</key>
+    <integer>10</integer>
+
+    <key>StandardOutPath</key>
+    <string>/tmp/mac10-research.log</string>
+    <key>StandardErrorPath</key>
+    <string>/tmp/mac10-research.err</string>
+
+    <key>ProcessType</key>
+    <string>Background</string>
+</dict>
+</plist>

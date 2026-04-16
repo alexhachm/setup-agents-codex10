@@ -226,6 +226,8 @@ function buildTaskOverlay(task, worker, projectDir) {
   } catch {}
 
   // Relevant Research — from research rollups
+  // Ref: coordinator-extensions rollup — research context injection into task overlays.
+  // GAP-E2: No TTL/refresh policy for stale research. Tracked for 10.3.
   try {
     const researchDir = path.join(projectDir, '.codex', 'knowledge', 'research', 'topics');
     if (isSafeDomainSlug(task.domain) && fs.existsSync(researchDir)) {
@@ -266,6 +268,7 @@ function buildTaskOverlay(task, worker, projectDir) {
   } catch {}
 
   // Knowledge Gaps — warn workers about missing coverage
+  // Ref: coordinator-extensions rollup — staleness detection for domain research.
   try {
     const knowledgeMeta = require('./knowledge-metadata');
     const gaps = [];

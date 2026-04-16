@@ -172,6 +172,8 @@ const handlers = {
 
     // Isolation priority: msb (microVM) → Docker (container) → tmux (process)
     // Each level falls through to the next on failure or unavailability.
+    // GAP-I1: Backend liveness semantics differ across backends.
+    // Ref: infra rollup — planned WorkerBackend abstraction with unified interface.
     const isolationEnabled = shouldUseSandbox();
     const useMsb = isolationEnabled && microvmManager.isAvailable();
     const useDocker = isolationEnabled && !useMsb && sandboxManager.isDockerAvailable();
@@ -272,6 +274,8 @@ cliServer.start(projectDir, handlers);
 console.log('CLI server listening.');
 
 // Start allocator loop (every 2s) — deterministic assignment with handler-based spawning
+// GAP-O2: No fallback if allocator agent crashes. Planned: deterministic fallback assigner.
+// Ref: coordinator-routing rollup — priority + dependency + affinity fallback scheduler.
 allocator.start(projectDir, { onAssignTask: handlers.onAssignTask });
 console.log('Allocator running.');
 
@@ -290,6 +294,8 @@ console.log('Auto-sync running.');
 // --- GUI disabled (outdated) ---
 // Web dashboard and instance registry startup removed.
 // To re-enable, restore webServer.start() and instanceRegistry usage.
+// GAP-D1: README updated in 10.2 to reflect this disabled state.
+// Ref: coordinator rollup — docs advertised dashboard/GUI that's not active.
 
 function shutdown() {
   console.log('Shutting down...');

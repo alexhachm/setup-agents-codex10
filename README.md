@@ -62,8 +62,8 @@ codex exec --dangerously-bypass-approvals-and-sandbox -m gpt-5.3-codex -C "$(pwd
 # Check status
 mac10 status
 
-# View dashboard
-open http://localhost:3100
+# Check status (CLI — preferred)
+mac10 status
 ```
 
 ## First Run Walkthrough
@@ -84,7 +84,7 @@ bash setup.sh . 4        # sets up coordinator + 4 workers in current repo
 
 ```bash
 mac10 ping                # should return "pong"
-open http://localhost:3100  # web dashboard
+mac10 status               # CLI status check
 ```
 
 If `ping` fails, check [Coordinator won't start](#coordinator-wont-start) below.
@@ -159,10 +159,16 @@ Runtime path is:
 
 ### Diagnostics API
 
-The coordinator exposes operator-facing health counters at:
+> **Note:** The web dashboard at `http://localhost:3100` is currently disabled (legacy).
+> Use `mac10 diagnostics` for health counters. The diagnostics API endpoint
+> will be restored when the web UI is rebuilt.
+
+The coordinator exposes operator-facing health counters:
 
 ```bash
-curl http://localhost:3100/api/diagnostics
+mac10 diagnostics
+# Or via HTTP (when web-server.js is re-enabled):
+# curl http://localhost:3100/api/diagnostics
 ```
 
 Response shape (rolling 24-hour window):
@@ -377,6 +383,34 @@ All state transitions are recorded in `.codex/knowledge/patches.json` (audit tra
 | `supersedes` | Replaces an older snapshot or artifact. |
 | `validated_by` | Validated by the referenced request or run. |
 | `consumed_by` | The insight was consumed (e.g. applied) in this request/run. |
+
+## Version 10.2 Changes
+
+### New Features
+
+- **Daemon Mode**: systemd (Linux) and launchd (macOS) service files for running the coordinator and research driver as persistent daemons. See `services/README.md`.
+- **Built-In Skills**: Pre-packaged Claude Code skills for common operations — coordinator-status, merge-troubleshooting, research-queue, worker-lifecycle, knowledge-management. Located in `templates/skills/`.
+- **Document Templates**: Report and presentation templates for asset generation tasks. Located in `templates/documents/`.
+- **Architecture Documentation**: Comprehensive system architecture doc at `docs/current-architecture.md`.
+
+### Improvements
+
+- **Settings Security**: `.gitignore` updated to protect settings files containing API keys (`.env`, `credentials.json`, `settings.local.json`, etc.)
+- **Runtime Artifact Cleanup**: `.gitignore` now covers runtime artifacts (`__pycache__/`, `.pid`, `.lock`, `.codex/state/`) per git-generated-noise-policy research.
+- **Research Citations**: Inline code comments in coordinator source link to research rollup findings.
+- **Gap Tracking**: Full gap analysis with 18 identified gaps tracked in `docs/10.2-perplexity-computer-parity.md`.
+
+### Known Gaps (planned for 10.3)
+
+- `db.js` and `cli-server.js` service extraction (architectural refactor)
+- Recursive `setTimeout` refactor for async loops (allocator, watchdog, merger)
+- Deterministic fallback scheduler when allocator agent is down
+- Formal extension registry and plugin system
+- Centralized state machine with transition maps
+
+See `docs/10.2-perplexity-computer-parity.md` for the full gap analysis.
+
+---
 
 ## Troubleshooting
 

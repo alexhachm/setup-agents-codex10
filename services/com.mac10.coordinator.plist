@@ -1,0 +1,63 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!--
+  mac10 Coordinator — launchd service file (macOS)
+  Install: cp services/com.mac10.coordinator.plist ~/Library/LaunchAgents/
+  Load:    launchctl load ~/Library/LaunchAgents/com.mac10.coordinator.plist
+  Unload:  launchctl unload ~/Library/LaunchAgents/com.mac10.coordinator.plist
+  Logs:    tail -f /tmp/mac10-coordinator.log
+
+  Research source: infra rollup — daemon mode for persistent coordinator operation
+-->
+<plist version="1.0">
+<dict>
+    <key>Label</key>
+    <string>com.mac10.coordinator</string>
+
+    <key>ProgramArguments</key>
+    <array>
+        <string>/usr/local/bin/node</string>
+        <string>coordinator/src/index.js</string>
+    </array>
+
+    <key>WorkingDirectory</key>
+    <!-- Update this to your project root -->
+    <string>/Users/YOU/project</string>
+
+    <key>EnvironmentVariables</key>
+    <dict>
+        <key>MAC10_NAMESPACE</key>
+        <string>mac10</string>
+        <key>NODE_ENV</key>
+        <string>production</string>
+        <key>PATH</key>
+        <string>/usr/local/bin:/usr/bin:/bin</string>
+    </dict>
+
+    <key>RunAtLoad</key>
+    <true/>
+
+    <key>KeepAlive</key>
+    <dict>
+        <key>SuccessfulExit</key>
+        <false/>
+    </dict>
+
+    <key>ThrottleInterval</key>
+    <integer>5</integer>
+
+    <key>StandardOutPath</key>
+    <string>/tmp/mac10-coordinator.log</string>
+    <key>StandardErrorPath</key>
+    <string>/tmp/mac10-coordinator.err</string>
+
+    <key>ProcessType</key>
+    <string>Background</string>
+
+    <key>SoftResourceLimits</key>
+    <dict>
+        <key>NumberOfFiles</key>
+        <integer>4096</integer>
+    </dict>
+</dict>
+</plist>

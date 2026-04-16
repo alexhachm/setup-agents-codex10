@@ -1,0 +1,43 @@
+# mac10 Research Driver — systemd service file
+# Runs the ChatGPT research driver alongside the coordinator.
+# Install: sudo cp services/mac10-research.service /etc/systemd/system/
+# Enable:  sudo systemctl enable --now mac10-research
+#
+# Research source: coordinator-extensions rollup — research pipeline daemon mode
+
+[Unit]
+Description=mac10 Research Driver — ChatGPT Research Pipeline
+Documentation=https://github.com/alexhachm/setup-agents-codex10
+After=mac10-coordinator.service
+Requires=mac10-coordinator.service
+
+[Service]
+Type=simple
+User=%i
+Environment=MAC10_PROJECT_DIR=%h/project
+Environment=MAC10_NAMESPACE=mac10
+
+ExecStart=/usr/bin/env python3 %h/project/scripts/chatgpt-driver.py --project-dir %h/project
+
+KillSignal=SIGTERM
+TimeoutStopSec=15
+
+Restart=on-failure
+RestartSec=10
+StartLimitIntervalSec=300
+StartLimitBurst=3
+
+MemoryMax=1G
+TasksMax=64
+
+NoNewPrivileges=true
+ProtectSystem=strict
+ProtectHome=read-only
+ReadWritePaths=%h/project/.codex/knowledge %h/project/.codex/state
+
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=mac10-research
+
+[Install]
+WantedBy=multi-user.target

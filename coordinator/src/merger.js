@@ -8,6 +8,7 @@ const insightIngestion = require('./insight-ingestion');
 
 const BRANCH_RE = /^[a-zA-Z0-9._\/-]+$/;
 const PR_URL_RE = /^https:\/\/github\.com\/[a-zA-Z0-9._-]+\/[a-zA-Z0-9._-]+\/pull\/\d+$/;
+// Ref: coordinator rollup — 4-tier merge strategy: clean → rebase → AI-resolve → redo.
 const MERGE_TIMEOUT_ERROR_PREFIX = 'Merge timed out after';
 const WINDOWS_EXECUTABLE_EXTENSIONS = new Set(['.exe', '.cmd', '.bat', '.com']);
 

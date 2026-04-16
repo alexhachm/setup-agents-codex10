@@ -1,0 +1,51 @@
+# mac10 Coordinator — systemd service file
+# Install: sudo cp services/mac10-coordinator.service /etc/systemd/system/
+# Enable:  sudo systemctl enable --now mac10-coordinator
+# Logs:    journalctl -u mac10-coordinator -f
+#
+# Research source: infra rollup — daemon mode for persistent coordinator operation
+
+[Unit]
+Description=mac10 Coordinator — Multi-Agent Coding Orchestrator
+Documentation=https://github.com/alexhachm/setup-agents-codex10
+After=network.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=%i
+# Set MAC10_PROJECT_DIR to the project root (override in override.conf)
+Environment=MAC10_PROJECT_DIR=%h/project
+Environment=MAC10_NAMESPACE=mac10
+Environment=NODE_ENV=production
+
+ExecStartPre=/usr/bin/env node --version
+ExecStart=/usr/bin/env node %h/project/coordinator/src/index.js %h/project
+
+# Graceful shutdown via SIGTERM (coordinator handles this)
+KillSignal=SIGTERM
+TimeoutStopSec=30
+
+# Restart policy: restart on failure, but not on clean exit
+Restart=on-failure
+RestartSec=5
+StartLimitIntervalSec=300
+StartLimitBurst=5
+
+# Resource limits (prevent runaway processes)
+MemoryMax=2G
+TasksMax=256
+
+# Security hardening
+NoNewPrivileges=true
+ProtectSystem=strict
+ProtectHome=read-only
+ReadWritePaths=%h/project/.claude/state %h/project/.worktrees %h/project/.codex/state
+
+# Logging
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=mac10
+
+[Install]
+WantedBy=multi-user.target

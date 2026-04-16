@@ -1,5 +1,7 @@
 /**
  * Detects gaps (missing integers) in a sorted sequence of numbers.
+ * Used to identify missing task IDs, worker IDs, or sequential state gaps.
+ * Ref: coordinator-core rollup — gap detection for merge conflict/stall patterns.
  * @param {number[]} sequence - Array of integers (need not be sorted)
  * @returns {number[]} Array of missing integers between min and max of sequence
  */

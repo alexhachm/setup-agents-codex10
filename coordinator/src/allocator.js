@@ -10,6 +10,10 @@ let lastResearchNotifyTs = 0;
 const NOTIFY_DEDUP_MS = 10000; // Only notify allocator agent once per 10s
 const RESEARCH_NOTIFY_DEDUP_MS = 30000; // Notify research-batch planner at most once per 30s
 
+// GAP-O1: setInterval used here risks tick overlap with async operations.
+// Ref: final-live rollup — recursive setTimeout prevents queue buildup.
+// Planned refactor for 10.3. See docs/10.2-perplexity-computer-parity.md
+
 function start(projectDir) {
   const intervalMs = parseInt(db.getConfig('allocator_interval_ms')) || 2000;
 
