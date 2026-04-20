@@ -88,6 +88,8 @@ if [ -f "$AGENT_LAUNCHER_CONFIG" ]; then
 fi
 
 DEFAULT_PROVIDER="${MAC10_AGENT_PROVIDER:-codex}"
+# MAC10_FORCE_PROVIDER overrides the default provider; normalised to lowercase with
+# whitespace stripped so values like "Claude" or " codex " are accepted.
 FORCED_PROVIDER="$(printf '%s' "${MAC10_FORCE_PROVIDER:-}" | tr '[:upper:]' '[:lower:]' | tr -d '[:space:]')"
 if [ -n "$FORCED_PROVIDER" ]; then
   case "$FORCED_PROVIDER" in
