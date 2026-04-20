@@ -1,4 +1,5 @@
 #!/usr/bin/env bash
+# Generated: 2026-04-08T20:53:04Z
 # start.sh — One-command startup for the entire mac10 system.
 #
 # Launches:
